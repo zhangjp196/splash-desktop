@@ -5,6 +5,7 @@ import Foundation
 struct LiveStatus: Equatable {
     var updated = false
     var ready = false
+    var modelID: String?
     var contextTokens: Int?
     var decodeTokensPerSecond: Double?
     var prefillTokensPerSecond: Double?
@@ -31,11 +32,28 @@ struct LiveStatus: Equatable {
     var metalFailures = 0
 }
 
-/// Fetches `/status` in the background and returns the decoded JSON, so the
-/// live panel never blocks the main thread with a fetch or a JSON parse.
+/// One `/status` fetch and the model id `/v1/models` reports, both decoded in
+/// the background so the live panel never blocks the main thread.
+struct LiveSnapshot {
+    let status: [String: Any]
+    let modelID: String?
+}
+
+/// Fetches the engine's `/status` and the served model id in the background.
 actor LiveStatusFetcher {
-    func fetch(port: Int) async -> [String: Any]? {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/status") else { return nil }
+    func fetch(port: Int) async -> LiveSnapshot? {
+        guard let status = await json(at: "/status", port: port) else { return nil }
+        var modelID: String?
+        if let models = await json(at: "/v1/models", port: port),
+           let data = models["data"] as? [[String: Any]],
+           let first = data.first {
+            modelID = first["id"] as? String
+        }
+        return LiveSnapshot(status: status, modelID: modelID)
+    }
+
+    private func json(at path: String, port: Int) async -> [String: Any]? {
+        guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
         do {
@@ -92,12 +110,40 @@ final class AppModel: ObservableObject {
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
 
+    /// The interface language follows the system unless the user fixes it.
+    enum InterfaceLanguage: String, CaseIterable, Identifiable {
+        case followSystem, chinese, english
+        var id: String { rawValue }
+    }
+
+    @Published var language: InterfaceLanguage = .followSystem
+
+    private static let languageKey = "splash.interface-language"
+
     private var process: Process?
     private var poll: Task<Void, Never>?
     private var stopping = false
     private let statusFetcher = LiveStatusFetcher()
 
     let catalogIDs = Runtime.catalog
+
+    init() {
+        if let raw = UserDefaults.standard.string(forKey: Self.languageKey),
+           let stored = InterfaceLanguage(rawValue: raw) {
+            language = stored
+        }
+        applyLanguage()
+    }
+
+    /// Keep the chosen interface language in effect and remembered.
+    func applyLanguage() {
+        switch language {
+        case .followSystem: L10n.languageOverride = nil
+        case .chinese: L10n.languageOverride = "zh-Hans"
+        case .english: L10n.languageOverride = "en"
+        }
+        UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey)
+    }
 
     // MARK: Derived state
 
@@ -270,12 +316,14 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshStatus() async {
-        guard let object = await statusFetcher.fetch(port: port) else { return }
-        applyStatus(object)
+        guard let snapshot = await statusFetcher.fetch(port: port) else { return }
+        applyStatus(snapshot)
     }
 
-    private func applyStatus(_ object: [String: Any]) {
+    private func applyStatus(_ snapshot: LiveSnapshot) {
+        let object = snapshot.status
         var status = LiveStatus()
+        status.modelID = snapshot.modelID
         status.ready = (object["ready"] as? Bool) ?? false
         if let tokens = object["maximum_context_tokens"] as? Int {
             status.contextTokens = tokens

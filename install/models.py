@@ -149,14 +149,14 @@ def parse_model_dir(value: str) -> str:
 
 
 def derived_model_id(directory) -> str:
-    """The API model ID a local target directory serves as: its folder name
-    under the `local` owner, reduced to the characters a repository ID may
-    hold. A name that reduces to nothing becomes `local/model`."""
+    """The API model ID a local target directory serves as: its folder name,
+    reduced to the characters a repository ID may hold. A name that reduces
+    to nothing becomes `model`."""
     name = re.sub(r"[^A-Za-z0-9._-]", "-", Path(directory).name)
     name = re.sub(r"\.{2,}", ".", re.sub(r"-{2,}", "-", name))
     # 96 is the repository-ID bound the server's validation enforces.
     name = name[:96].strip("-.") or "model"
-    return f"local/{name}"
+    return name
 
 
 def hash_file(path: Path, digest) -> str:

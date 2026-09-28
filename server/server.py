@@ -1872,17 +1872,25 @@ def _parse_request_size(value):
 
 def _parse_model_id(value):
     repo_id, separator, variant = value.partition(":")
-    if repo_id.count("/") != 1:
+    if "/" in repo_id:
+        if repo_id.count("/") != 1:
+            raise argparse.ArgumentTypeError(
+                "use a full Hugging Face repository ID: owner/repo[:variant]"
+            )
+        try:
+            validate_repo_id(repo_id)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(str(error)) from None
+        if separator and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", variant):
+            raise argparse.ArgumentTypeError(
+                "model variant must be a short name such as UD-Q4_K_M"
+            )
+        return value
+    # A bare model name: the default id of a local model directory (its
+    # folder's name), which the launcher passes through to the server.
+    if not value or any(character in value for character in " \t\n\\%?#") or separator:
         raise argparse.ArgumentTypeError(
-            "use a full Hugging Face repository ID: owner/repo[:variant]"
-        )
-    try:
-        validate_repo_id(repo_id)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from None
-    if separator and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", variant):
-        raise argparse.ArgumentTypeError(
-            "model variant must be a short name such as UD-Q4_K_M"
+            "model must be a repository ID (owner/repo[:variant]) or a bare name"
         )
     return value
 

@@ -56,6 +56,7 @@
 "live.requests" = "请求";
 "live.memory" = "内存";
 "live.caches" = "缓存";
+"live.model" = "模型";
 "live.state" = "状态";
 "live.ready" = "就绪";
 "live.starting" = "启动中…";
@@ -83,3 +84,5 @@
 "live.hit_rate" = "缓存命中率";
 "live.kv_disk_hit" = "KV 磁盘命中";
 "live.state_hit" = "状态命中";
+"language.follow" = "跟随系统";
+"settings.language" = "界面语言";

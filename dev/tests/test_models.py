@@ -724,7 +724,7 @@ class ModelArtifactTest(unittest.TestCase):
             language_only=True,
             draft_model=str(draft.resolve()),
         )
-        self.assertEqual(chosen.model, "local/My-Model-27B")
+        self.assertEqual(chosen.model, "My-Model-27B")
         self.assertIsNone(chosen.repo_id)
         self.assertIsNone(chosen.variant)
         self.assertEqual(chosen.directory, target.resolve())

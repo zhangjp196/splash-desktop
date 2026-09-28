@@ -1122,7 +1122,7 @@ class UpstreamTest(unittest.TestCase):
         chosen = local_selection(self.root, target, draft_model=str(draft.resolve()))
         output, _ = self.prepare_local(chosen)
         self.assertIn("Installing", output)
-        self.assertEqual(chosen.model, "local/Qwen3.8-27B-4bit")
+        self.assertEqual(chosen.model, "Qwen3.8-27B-4bit")
         record = assembly.verify(chosen.link)
         self.assertEqual(
             record["sources"]["target"],

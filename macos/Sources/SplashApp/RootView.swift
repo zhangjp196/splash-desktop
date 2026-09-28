@@ -64,6 +64,26 @@ private struct Header: View {
             statusPill
             Spacer()
 
+            Menu {
+                ForEach(AppModel.InterfaceLanguage.allCases) { language in
+                    Button {
+                        model.language = language
+                        model.applyLanguage()
+                    } label: {
+                        if model.language == language {
+                            Label(languageLabel(language), systemImage: "checkmark")
+                        } else {
+                            Text(languageLabel(language))
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "globe")
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 26)
+            .help(L10n.string("settings.language"))
+
             Button {
                 model.openInBrowser()
             } label: {
@@ -116,6 +136,14 @@ private struct Header: View {
         case .starting, .stopping: return .orange
         case .failed: return .red
         case .idle: return .secondary
+        }
+    }
+
+    private func languageLabel(_ language: AppModel.InterfaceLanguage) -> String {
+        switch language {
+        case .followSystem: return L10n.string("language.follow")
+        case .chinese: return "中文"
+        case .english: return "English"
         }
     }
 }

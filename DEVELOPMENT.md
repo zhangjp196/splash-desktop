@@ -314,7 +314,7 @@ as a repository, whose default branch is followed like an upstream draft
 ([Drafts](#drafts)). `--revision` is rejected, and `--language-only` applies
 as it does to an upstream model; a Splash package always serves its vision and
 rejects the source options alongside it. The API model ID is derived from the
-directory name as `local/<name>`, reduced to the characters a repository ID
+directory name, reduced to the characters a repository ID
 allows; `--served-model-name` adds aliases as usual. A Hugging Face cache is
 not involved: the files are read where they are. A Splash package is served
 from the directory it names, which the selection link points to.

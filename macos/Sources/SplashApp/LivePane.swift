@@ -52,6 +52,10 @@ struct LivePane: View {
         let restarts = live.restarts > 0 ? L10n.format("live.restarts", live.restarts) : ""
         return [
             MetricCard(
+                title: L10n.string("live.model"), value: live.modelID ?? "—",
+                systemImage: "cube", tint: .indigo
+            ),
+            MetricCard(
                 title: L10n.string("live.state"), value: state, caption: restarts,
                 systemImage: "power", tint: ready ? .green : .orange
             ),

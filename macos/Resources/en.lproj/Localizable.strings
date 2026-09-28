@@ -56,6 +56,7 @@
 "live.requests" = "Requests";
 "live.memory" = "Memory";
 "live.caches" = "Caches";
+"live.model" = "Model";
 "live.state" = "State";
 "live.ready" = "Ready";
 "live.starting" = "Starting…";
@@ -83,3 +84,5 @@
 "live.hit_rate" = "Cache hit rate";
 "live.kv_disk_hit" = "KV disk hits";
 "live.state_hit" = "State hits";
+"language.follow" = "Follow system";
+"settings.language" = "Interface language";
