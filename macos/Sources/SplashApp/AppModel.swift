@@ -72,12 +72,133 @@ final class AppModel: ObservableObject {
     @Published var maxCacheDisk = ""
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
+    @Published var modelName = ""
+    @Published var library: [StoredModel] = []
+    @Published var selectedModelID: Int64?
 
     private var process: Process?
     private var poll: Task<Void, Never>?
     private var stopping = false
+    private let store = ModelStore()
 
     let catalogIDs = Runtime.catalog
+
+    init() {
+        reloadLibrary()
+        if let first = library.first {
+            applySelection(first.id)
+        }
+    }
+
+    // MARK: Model library
+
+    func reloadLibrary() {
+        library = store.models()
+        if let saved = selectedModelID, !library.contains(where: { $0.id == saved }) {
+            selectedModelID = nil
+        }
+    }
+
+    /// Start a blank entry in the editor; Save turns it into a new row.
+    func newModel() {
+        selectedModelID = nil
+        resetFields()
+    }
+
+    /// Load a saved entry's fields into the editor, or clear it for none.
+    func applySelection(_ id: Int64?) {
+        guard let id, let entry = library.first(where: { $0.id == id }) else {
+            selectedModelID = nil
+            resetFields()
+            return
+        }
+        selectedModelID = id
+        modelName = entry.name
+        modelMode = AppModel.ModelMode(rawValue: entry.mode) ?? .upstream
+        modelID = entry.modelID
+        modelDirectory = entry.modelDirectory
+        draftDirectory = entry.draftDirectory
+        port = entry.port
+        languageOnly = entry.languageOnly
+        kvFormat = entry.kvFormat
+        maxMemory = entry.maxMemory
+        maxContext = entry.maxContext
+        maxCacheDisk = entry.maxCacheDisk
+        maxRequestSize = entry.maxRequestSize
+        apiKey = entry.apiKey
+        servedNames = entry.servedNames
+        reasoningEffort = entry.reasoningEffort
+    }
+
+    /// Save the editor as a new or updated SQLite row, one model at a time.
+    func saveModel() {
+        let trimmedName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        var entry = StoredModel(
+            id: selectedModelID,
+            name: trimmedName.isEmpty ? defaultModelName() : trimmedName,
+            mode: modelMode.rawValue,
+            modelID: modelID,
+            modelDirectory: modelDirectory,
+            draftDirectory: draftDirectory,
+            port: port,
+            languageOnly: languageOnly,
+            kvFormat: kvFormat,
+            maxMemory: maxMemory,
+            maxContext: maxContext,
+            maxCacheDisk: maxCacheDisk,
+            maxRequestSize: maxRequestSize,
+            apiKey: apiKey,
+            servedNames: servedNames,
+            reasoningEffort: reasoningEffort
+        )
+        let now = Date()
+        entry.createdAt = library.first(where: { $0.id == entry.id })?.createdAt ?? now
+        entry.updatedAt = now
+        if let id = store.upsert(entry) {
+            selectedModelID = id
+            reloadLibrary()
+        }
+    }
+
+    func deleteSelectedModel() {
+        guard let id = selectedModelID else { return }
+        store.delete(id: id)
+        selectedModelID = nil
+        reloadLibrary()
+        if let first = library.first {
+            applySelection(first.id)
+        } else {
+            resetFields()
+        }
+    }
+
+    private func defaultModelName() -> String {
+        if !modelID.trimmingCharacters(in: .whitespaces).isEmpty {
+            return modelID
+        }
+        if !modelDirectory.isEmpty, let last = modelDirectory.split(separator: "/").last {
+            return String(last)
+        }
+        return L10n.string("models.untitled")
+    }
+
+    private func resetFields() {
+        modelName = ""
+        modelMode = .upstream
+        modelID = "mlx-community/Qwen3.8-27B-4bit"
+        modelDirectory = ""
+        draftDirectory = ""
+        port = 8000
+        languageOnly = false
+        kvFormat = "int8"
+        maxMemory = ""
+        maxContext = ""
+        maxCacheDisk = ""
+        maxRequestSize = ""
+        apiKey = ""
+        servedNames = ""
+        reasoningEffort = ""
+    }
 
     // MARK: Derived state
 

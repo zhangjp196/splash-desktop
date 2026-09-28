@@ -83,3 +83,15 @@
 "live.hit_rate" = "Cache hit rate";
 "live.kv_disk_hit" = "KV disk hits";
 "live.state_hit" = "State hits";
+"models.title" = "Model Library";
+"models.add" = "Add a model";
+"models.empty" = "No saved models yet. Click ＋ to add one.";
+"models.name" = "Name";
+"models.untitled" = "Untitled model";
+"side.draft" = "draft";
+"save" = "Save";
+"delete" = "Delete";
+"delete.title" = "Delete this model?";
+"delete.confirm" = "Delete";
+"delete.message" = "Its configuration is removed from the library.";
+"cancel" = "Cancel";

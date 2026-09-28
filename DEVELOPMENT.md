@@ -1207,7 +1207,10 @@ upstream MLX or GGUF model (the installer pairs its draft), or a local
 directory per [local model directories](#local-model-directories) — and the
 server section exposes port, memory, context, KV format, text-only, an API
 key, model aliases, an SSD cache quota, request-size and default reasoning
-effort. The bundle is built with Xcode's Swift toolchain, the placeholder icon
+effort. Models are saved one at a time into a model library held in a local
+SQLite database (`~/Library/Application Support/ai.inco.splash/models.db`);
+the main pane lists them and edits the selected entry. The bundle is built
+with Xcode's Swift toolchain, the placeholder icon
 is generated at package time, and neither the app nor the DMG is code-signed:
 it is for local installation, and distributing it requires signing and
 notarization. `make package-app` builds just `dist/Splash.app` (no DMG), and

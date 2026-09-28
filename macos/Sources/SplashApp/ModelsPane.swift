@@ -1,14 +1,118 @@
 import AppKit
 import SwiftUI
 
-/// Model source and server settings. A Splash package carries its own DFlash2
-/// draft and vision, an upstream MLX/GGUF model's draft is selected by the
-/// installer, and a local directory names one unless it is a Splash package.
-struct ControlPanelView: View {
+/// The model library: a sidebar of the saved entries (SQLite) and a detail
+/// editor for the selected one. Adding saves one entry at a time; Start runs
+/// whatever the detail currently shows.
+struct ModelsPane: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
+        HSplitView {
+            ModelSidebar()
+            ModelDetailForm()
+        }
+    }
+}
+
+private struct ModelSidebar: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Label(L10n.string("models.title"), systemImage: "building.2.crop.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button {
+                    model.newModel()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .help(L10n.string("models.add"))
+                .disabled(model.isRunning)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            Divider()
+            if model.library.isEmpty {
+                empty
+            } else {
+                List(selection: $model.selectedModelID) {
+                    ForEach(model.library) { entry in
+                        ModelRow(entry: entry).tag(entry.id)
+                    }
+                }
+                .listStyle(.sidebar)
+                .onChange(of: model.selectedModelID) { _, newValue in
+                    model.applySelection(newValue)
+                }
+            }
+        }
+        .frame(minWidth: 230, idealWidth: 260)
+    }
+
+    private var empty: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "cube.box")
+                .font(.system(size: 32))
+                .foregroundStyle(.tertiary)
+            Text(L10n.string("models.empty"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+private struct ModelRow: View {
+    let entry: StoredModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(entry.name).lineLimit(1)
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var subtitle: String {
+        switch entry.mode {
+        case "splash":
+            return entry.modelID.isEmpty ? L10n.string("mode.splash") : entry.modelID
+        case "upstream":
+            return entry.modelID.isEmpty ? L10n.string("mode.upstream") : entry.modelID
+        default:
+            let directory = entry.modelDirectory.isEmpty
+                ? L10n.string("mode.local")
+                : entry.modelDirectory
+            return entry.draftDirectory.isEmpty
+                ? directory
+                : "\(directory) · \(L10n.string("side.draft"))"
+        }
+    }
+}
+
+private struct ModelDetailForm: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var confirmDelete = false
+
+    var body: some View {
         Form {
+            Section {
+                TextField(L10n.string("models.name"), text: $model.modelName)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(model.isRunning)
+            } header: {
+                Label(L10n.string("models.name"), systemImage: "tag")
+            }
+
             Section {
                 Picker(L10n.string("model.picker"), selection: $model.modelMode) {
                     ForEach(AppModel.ModelMode.allCases) { mode in
@@ -95,9 +199,30 @@ struct ControlPanelView: View {
             } header: {
                 Label(L10n.string("section.advanced"), systemImage: "gearshape.2")
             }
+
+            Section {
+                HStack {
+                    Button(L10n.string("start"), action: model.start)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!model.canStart)
+                    Spacer()
+                    Button(L10n.string("save")) { model.saveModel() }
+                        .disabled(model.isRunning)
+                    Button(L10n.string("delete"), role: .destructive) { confirmDelete = true }
+                        .disabled(model.selectedModelID == nil || model.isRunning)
+                }
+            }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+        .alert(L10n.string("delete.title"), isPresented: $confirmDelete) {
+            Button(L10n.string("delete.confirm"), role: .destructive) {
+                model.deleteSelectedModel()
+            }
+            Button(L10n.string("cancel"), role: .cancel) {}
+        } message: {
+            Text(verbatim: L10n.string("delete.message"))
+        }
     }
 
     private func label(_ mode: AppModel.ModelMode) -> String {
