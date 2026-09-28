@@ -1925,6 +1925,13 @@ def parse_args(argv=None):
         help="target KV cache storage (default: int8); bf16 uses more memory",
     )
     parser.add_argument(
+        "--idle-offload-seconds",
+        type=int,
+        default=0,
+        help="offload cached KV and states to the SSD tier after this many "
+        "idle seconds (0 disables; requires --max-cache-disk)",
+    )
+    parser.add_argument(
         "--max-request-size",
         type=_parse_request_size,
         default=DEFAULT_MAX_REQUEST_BYTES,
@@ -1973,6 +1980,8 @@ def parse_args(argv=None):
         parser.error("--queue-size must be positive")
     if not 0 <= args.port <= 65535:
         parser.error("--port must be in [0, 65535]")
+    if not 0 <= args.idle_offload_seconds <= 86400:
+        parser.error("--idle-offload-seconds must be between 0 and 86400")
     return args
 
 
@@ -1989,6 +1998,8 @@ def _native_command(args):
         command.append(str(args.max_cache_disk))
     if args.kv_format != "int8":
         command.extend(("--kv-format", args.kv_format))
+    if args.idle_offload_seconds:
+        command.extend(("--idle-offload-seconds", str(args.idle_offload_seconds)))
     return command
 
 

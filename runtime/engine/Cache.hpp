@@ -215,6 +215,9 @@ public:
   // Empty backing, older publications and state-free KV are still reclaimed.
   [[nodiscard]] uint64_t reclaimCache(uint64_t targetBytes, bool evictAll,
                                       bool keepResumePoint = false);
+  // Whether the disk tier can take demotions right now; idle offload runs
+  // only in that case, so it never drops cache it intended to offload.
+  [[nodiscard]] bool diskTierWritable() const noexcept { return kvTierWritable(); }
   // reclaimCache's stop rule: releasedBytes and the pages whose copies are
   // being written meet targetBytes. A pass with evictAll has no target.
   [[nodiscard]] bool reclaimMet(uint64_t releasedBytes, uint64_t targetBytes,

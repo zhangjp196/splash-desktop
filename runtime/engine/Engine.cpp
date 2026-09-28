@@ -168,6 +168,7 @@ bool Engine::tick(double now) {
   model_.checkHealth();
   nextHealthCheckMilliseconds_ = now + kHealthCheckIntervalMilliseconds;
   bool progressed = scheduler_.expireDeadlines(now);
+  progressed = checkIdleOffload(now) || progressed;
   if (now >= drainEndMilliseconds_)
     drainEndMilliseconds_ = 0.0;
   if (cache_.pollTransfers()) {
@@ -298,6 +299,14 @@ std::optional<double> Engine::nextWakeupMilliseconds() const {
                               : 0.0;
     if (!result || wakeup < *result)
       result = wakeup;
+  }
+  // Wake in time for the idle offload, so a quiet server demotes to the disk
+  // tier instead of sleeping past its deadline.
+  if (config_.idleOffloadSeconds && idleSinceMilliseconds_ && idle()) {
+    const double deadline =
+        *idleSinceMilliseconds_ + double(config_.idleOffloadSeconds) * 1000.0;
+    if (!result || deadline < *result)
+      result = deadline;
   }
   return result;
 }
@@ -1141,6 +1150,45 @@ CacheReclaimResult Engine::reclaimForGrowth(CacheReclaimMode mode) {
 bool Engine::reclaimIdleState() noexcept {
   if (!model_.reclaimIdleState())
     return false;
+  signalResourceProgress();
+  return true;
+}
+
+// After `idleOffloadSeconds` of true idleness with a writable disk tier,
+// demote everything reclaimable to disk and release its Metal backing. The
+// next request restores the prefixes it needs through the ordinary tier
+// restore path, so offloading never loses cache that fits the quota.
+bool Engine::checkIdleOffload(double now) {
+  if (!config_.idleOffloadSeconds || !cache_.diskTierWritable()) {
+    idleSinceMilliseconds_.reset();
+    return false;
+  }
+  if (!idle()) {
+    idleSinceMilliseconds_.reset();
+    return false;
+  }
+  if (!idleSinceMilliseconds_)
+    idleSinceMilliseconds_ = now;
+  const double deadline =
+      *idleSinceMilliseconds_ + double(config_.idleOffloadSeconds) * 1000.0;
+  if (now < deadline)
+    return false;
+  // A full quota would otherwise make the pass write nothing while still
+  // waking every tick; at most one pass a second.
+  if (now - lastIdleOffloadMilliseconds_ < 1000.0)
+    return false;
+  idleSinceMilliseconds_.reset();
+  uint64_t released = 0;
+  while (const uint64_t bytes = model_.reclaimIdleState())
+    released += bytes;
+  released += cache_.reclaimCache(~uint64_t{0}, true, false);
+  while (const uint64_t bytes = model_.reclaimIdleState())
+    released += bytes;
+  if (!released)
+    return false;
+  lastIdleOffloadMilliseconds_ = now;
+  ++counters_.idleOffloadPasses;
+  counters_.idleOffloadBytes += released;
   signalResourceProgress();
   return true;
 }

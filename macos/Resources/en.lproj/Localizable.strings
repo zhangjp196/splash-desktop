@@ -18,6 +18,7 @@
 "field.max_memory" = "Max memory (e.g. 28G)";
 "field.max_context" = "Max context (e.g. 100K)";
 "field.max_cache_disk" = "Disk cache quota (e.g. 16G)";
+"field.idle_offload" = "Idle offload to disk (seconds, e.g. 10; needs a current engine)";
 "field.api_key" = "API key";
 "field.served_names" = "Model aliases (comma-separated)";
 "field.max_request_size" = "Max request size (e.g. 128M)";
@@ -82,6 +83,7 @@
 "live.current_memory" = "Current Metal";
 "live.peak_memory" = "Peak Metal";
 "live.disk_cache" = "Disk cache";
+"live.caption.idle_offload" = "%d idle offloads · %@";
 "live.hit_rate" = "Cache hit rate";
 "live.kv_disk_hit" = "KV disk hits";
 "live.state_hit" = "State hits";

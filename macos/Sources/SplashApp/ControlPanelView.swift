@@ -73,6 +73,8 @@ struct ControlPanelView: View {
                     .disabled(model.isRunning)
                 TextField(L10n.string("field.max_cache_disk"), text: $model.maxCacheDisk)
                     .disabled(model.isRunning)
+                TextField(L10n.string("field.idle_offload"), text: $model.idleOffloadSeconds)
+                    .disabled(model.isRunning)
             } header: {
                 Label(L10n.string("section.limits"), systemImage: "slider.horizontal.3")
             }

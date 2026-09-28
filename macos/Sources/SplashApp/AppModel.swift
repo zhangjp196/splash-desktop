@@ -28,6 +28,8 @@ struct LiveStatus: Equatable {
     var suspended = 0
     var diskUsedBytes: UInt64?
     var diskCapacityBytes: UInt64?
+    var idleOffloadPasses = 0
+    var idleOffloadBytes: UInt64?
     var restarts = 0
     var capacityFailures = 0
     var metalFailures = 0
@@ -112,6 +114,7 @@ final class AppModel: ObservableObject {
     @Published var apiKey = ""
     @Published var servedNames = ""
     @Published var maxCacheDisk = ""
+    @Published var idleOffloadSeconds = ""
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
 
@@ -231,6 +234,9 @@ final class AppModel: ObservableObject {
             if !trimmed.isEmpty { arguments += ["--served-model-name", trimmed] }
         }
         if !maxCacheDisk.isEmpty { arguments += ["--max-cache-disk", maxCacheDisk] }
+        if let seconds = Int(idleOffloadSeconds), seconds > 0, seconds <= 86_400 {
+            arguments += ["--idle-offload-seconds", String(seconds)]
+        }
         if !maxRequestSize.isEmpty { arguments += ["--max-request-size", maxRequestSize] }
         if !reasoningEffort.isEmpty {
             arguments += ["--default-reasoning-effort", reasoningEffort]
@@ -466,6 +472,10 @@ final class AppModel: ObservableObject {
         if let disk = object["disk"] as? [String: Any] {
             status.diskUsedBytes = disk["used_bytes"] as? UInt64
             status.diskCapacityBytes = disk["capacity_bytes"] as? UInt64
+        }
+        if let offload = object["idle_offload"] as? [String: Any] {
+            status.idleOffloadPasses = offload["passes"] as? Int ?? 0
+            status.idleOffloadBytes = offload["bytes"] as? UInt64
         }
         status.updated = true
         live = status

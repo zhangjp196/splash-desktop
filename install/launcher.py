@@ -242,6 +242,8 @@ def serve(args):
         ]
         if args.kv_format != "int8":
             command.extend(("--kv-format", args.kv_format))
+        if args.idle_offload_seconds:
+            command.extend(["--idle-offload-seconds", str(args.idle_offload_seconds)])
         for name in args.served_model_name:
             command.append(f"--served-model-name={name}")
         if args.default_reasoning_effort is not None:
@@ -395,6 +397,18 @@ def _parse_max_context(value):
     return result
 
 
+def _parse_idle_offload(value):
+    try:
+        seconds = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "use a whole number of seconds such as 10"
+        ) from None
+    if not 0 <= seconds <= 86400:
+        raise argparse.ArgumentTypeError("must be between 0 and 86400 seconds")
+    return seconds
+
+
 def _version():
     if not paths.PACKAGED:
         return "Splash (source checkout)"
@@ -526,6 +540,13 @@ def parse_args(argv=None):
         choices=("int8", "bf16"),
         default="int8",
         help="target KV cache storage (default: int8); bf16 uses more memory",
+    )
+    server.add_argument(
+        "--idle-offload-seconds",
+        type=_parse_idle_offload,
+        default=0,
+        help="offload cached KV and states to the SSD tier after this many "
+        "idle seconds (0 disables; requires --max-cache-disk)",
     )
     server.add_argument(
         "--max-memory",

@@ -115,6 +115,7 @@ struct LivePane: View {
                        systemImage: "chart.bar", tint: .indigo),
             MetricCard(title: L10n.string("live.disk_cache"),
                        value: disk(live.diskUsedBytes, live.diskCapacityBytes),
+                       caption: idleOffloadCaption(live),
                        systemImage: "internaldrive", tint: .teal),
         ]
     }
@@ -157,6 +158,14 @@ struct LivePane: View {
             let percentValue = capacity.map { 100.0 * Double(used!) / Double($0) } ?? 0
             return String(format: "%@ · %.0f%%", bytes(used), percentValue)
         }
+    }
+
+    private func idleOffloadCaption(_ live: LiveStatus) -> String {
+        guard live.idleOffloadPasses > 0 || live.idleOffloadBytes != nil else { return "" }
+        let offloadBytes = live.idleOffloadBytes.map {
+            ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory)
+        } ?? "—"
+        return L10n.format("live.caption.idle_offload", live.idleOffloadPasses, offloadBytes)
     }
 }
 

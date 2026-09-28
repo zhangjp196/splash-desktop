@@ -18,6 +18,7 @@
 "field.max_memory" = "最大内存（如 28G）";
 "field.max_context" = "最大上下文（如 100K）";
 "field.max_cache_disk" = "磁盘缓存配额（如 16G）";
+"field.idle_offload" = "空闲落盘秒数（如 10，需新版引擎）";
 "field.api_key" = "API 密钥";
 "field.served_names" = "模型别名（逗号分隔）";
 "field.max_request_size" = "最大请求大小（如 128M）";
@@ -82,6 +83,7 @@
 "live.current_memory" = "当前 Metal 内存";
 "live.peak_memory" = "Metal 内存峰值";
 "live.disk_cache" = "磁盘缓存";
+"live.caption.idle_offload" = "%d 次空闲落盘 · %@";
 "live.hit_rate" = "缓存命中率";
 "live.kv_disk_hit" = "KV 磁盘命中";
 "live.state_hit" = "状态命中";

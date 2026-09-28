@@ -226,6 +226,8 @@ std::string runtimeStatusJson(
       << ",\"resource_suspensions\":" << core.resourceSuspensions
       << ",\"resource_resumptions\":" << core.resourceResumptions
       << ",\"resource_replay_tokens\":" << core.resourceReplayTokens << "}"
+      << ",\"idle_offload\":{\"passes\":" << core.idleOffloadPasses
+      << ",\"bytes\":" << core.idleOffloadBytes << "}"
       << ",\"draft_context\":{\"target_prefill_rows\":"
       << executorTelemetry.targetPrefillRows
       << ",\"prompt_end_rows\":" << executorTelemetry.draftContextRowsActive

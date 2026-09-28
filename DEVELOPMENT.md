@@ -97,6 +97,7 @@ loopback, so use a listener that includes loopback when launching agents locally
 | --- | --- | --- |
 | `--revision` | Default branch | Select an upstream target branch, tag, or commit. See [revisions](#revisions). |
 | `--model-dir` | None | Serve a local directory: a Splash package (no draft) or an MLX/GGUF target with `--draft-model`. See [local model directories](#local-model-directories). |
+| `--idle-offload-seconds` | `0` | After this many idle seconds, demote cached KV pages and states to the SSD tier and release their Metal memory; the next request restores them. See [disk cache](#disk-cache). |
 | `--draft-model` | Matching DFlash2 checkpoint | Override the draft with a compatible repository or local directory. See [drafts](#drafts). |
 | `--language-only` | Off | Skip vision loading; image and PDF input is rejected. See [vision](#vision). |
 | `--host` | `127.0.0.1` | HTTP bind address. |
@@ -878,6 +879,16 @@ counters include:
   transfers count once, including those completed before cancellation or a
   resource retry.
 - `lost_state_misses`: lookups that matched KV where a reusable state used to be.
+
+`--idle-offload-seconds N` demotes the cached KV pages and states to the tier
+after `N` idle seconds and releases their Metal backing, so a quiet server
+hands the memory back to the host; the next request restores what it needs
+through the ordinary tier restore path, so the cache is offloaded, not lost.
+It runs only while the tier is writable and no command is in flight, at most
+once a second, and does not change the context limit. `/status` reports
+`idle_offload.passes` and `idle_offload.bytes`. This is a native-engine
+capability: the 1.1.0 reference engine does not accept the argument, so builds
+serving it must not pass the flag.
 
 ### Judgment contracts
 

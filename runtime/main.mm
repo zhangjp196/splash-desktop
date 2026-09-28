@@ -51,6 +51,7 @@ struct NativeArguments final {
   uint32_t maxContext = 0;
   uint64_t maxMemoryBytes = 0;
   uint64_t maxCacheDiskBytes = 0;
+  uint32_t idleOffloadSeconds = 0;
   kv::Format kvFormat = kv::Format::Int8;
 };
 
@@ -192,12 +193,27 @@ NativeArguments parseArguments(int argc, char **argv) {
       throw UsageError("MAX_CACHE_DISK_BYTES must be a nonnegative integer");
   }
   if (next < argc) {
-    if (argc - next != 2 || std::string_view(argv[next]) != "--kv-format")
-      throw UsageError("expected --kv-format int8 or bf16");
-    const std::string_view format(argv[next + 1]);
-    if (format != "int8" && format != "bf16")
-      throw UsageError("--kv-format requires int8 or bf16");
-    result.kvFormat = format == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+    if (std::string_view(argv[next]) == "--kv-format") {
+      if (argc - next != 2)
+        throw UsageError("expected --kv-format int8 or bf16");
+      const std::string_view format(argv[next + 1]);
+      if (format != "int8" && format != "bf16")
+        throw UsageError("--kv-format requires int8 or bf16");
+      result.kvFormat = format == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+      next += 2;
+    }
+    if (next < argc) {
+      if (argc - next != 2 ||
+          std::string_view(argv[next]) != "--idle-offload-seconds")
+        throw UsageError("expected --idle-offload-seconds SECONDS");
+      const std::string_view seconds(argv[next + 1]);
+      if (seconds != "0") {
+        uint64_t parsed = 0;
+        if (!parsePositive(seconds, parsed) || parsed > 86400)
+          throw UsageError("--idle-offload-seconds must be from 0 to 86400");
+        result.idleOffloadSeconds = uint32_t(parsed);
+      }
+    }
   }
   result.modelRoot = requireModelRoot(argv[2], argv[3]);
   result.model = model::inspectModelPackage(result.modelRoot);
@@ -246,6 +262,7 @@ bootstrapConfig(const NativeArguments &arguments) {
   config.resources.maximumMemoryBytes = arguments.maxMemoryBytes;
   config.resources.maximumCacheDiskBytes = arguments.maxCacheDiskBytes;
   config.resources.kvFormat = arguments.kvFormat;
+  config.nativeLoop.engine.idleOffloadSeconds = arguments.idleOffloadSeconds;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engineInstanceId = engineInstanceId();
   config.nativeLoop.maskWordsPerToken = maskWordsPerToken;
