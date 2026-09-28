@@ -1,19 +1,19 @@
 import SwiftUI
 
 /// The window: a header that always shows the state and the actions, and the
-/// three views the app has. Live leads, because the running numbers are what
-/// the window is opened for; Control comes before the log, which is the last
-/// thing anyone reads.
+/// views the app has. Live leads because the running numbers are what the
+/// window is opened for, then the built-in chat, then control, then the log.
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @State private var tab = Tab.live
 
     enum Tab: Hashable, CaseIterable {
-        case live, control, log
+        case live, chat, control, log
 
         var title: String {
             switch self {
             case .live: return L10n.string("view.live")
+            case .chat: return L10n.string("view.chat")
             case .control: return L10n.string("view.control")
             case .log: return L10n.string("view.log")
             }
@@ -22,6 +22,7 @@ struct RootView: View {
         var systemImage: String {
             switch self {
             case .live: return "chart.line.uptrend.xyaxis"
+            case .chat: return "bubble.left.and.bubble.right.fill"
             case .control: return "slider.horizontal.3"
             case .log: return "terminal"
             }
@@ -36,6 +37,7 @@ struct RootView: View {
             Divider()
             switch tab {
             case .live: LivePane()
+            case .chat: ChatView()
             case .control: ControlPanelView()
             case .log: LogPane()
             }
@@ -111,16 +113,6 @@ private struct Header: View {
             .menuStyle(.borderlessButton)
             .frame(width: 26)
             .help(L10n.string("settings.language"))
-
-            Button {
-                model.openInBrowser()
-            } label: {
-                Label(L10n.string("open.chat"), systemImage: "bubble.left.and.bubble.right.fill")
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(model.phase != .ready)
-            .help(L10n.string("open.in.browser"))
 
             if model.isRunning {
                 Button(L10n.string("stop"), role: .destructive) { model.stop() }

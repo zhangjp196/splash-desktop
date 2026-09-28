@@ -160,7 +160,6 @@ struct LivePane: View {
                        systemImage: "arrow.triangle.2.circlepath", tint: .blue),
         ]
     }
-
     /// A used-of-total pair as a fraction and a caption, either of which is nil
     /// when the total is unknown so nothing renders a misleading bar.
     private func share(
@@ -209,6 +208,17 @@ struct LivePane: View {
     }
 }
 
+/// The tile rows are deliberately uniform: a metrics board is read by
+/// comparing neighbours, so every rectangle in a row is the same size rather
+/// than sized to its own text. The heights hold the tallest content a tile can
+/// have (a value, a bar and one line of caption), and captions are kept to one
+/// line so nothing grows past them.
+private enum TileMetrics {
+    static let heroHeight: CGFloat = 104
+    static let cardHeight: CGFloat = 84
+    static let corner: CGFloat = 12
+}
+
 private struct MetricSection: View {
     let title: String
     let systemImage: String
@@ -247,7 +257,7 @@ private struct MetricCard: View, Identifiable {
                 .frame(width: 28, height: 28)
                 .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.caption).foregroundStyle(.secondary)
+                Text(title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Text(value)
                     .font(.title3.weight(.semibold).monospacedDigit())
                     .lineLimit(1)
@@ -256,19 +266,20 @@ private struct MetricCard: View, Identifiable {
                     Meter(fraction: progress, tint: tint)
                         .padding(.top, 3)
                 }
-                if !caption.isEmpty {
-                    Text(caption).font(.caption2).foregroundStyle(.tertiary)
-                }
-                if let progressCaption {
-                    Text(progressCaption).font(.caption2).foregroundStyle(.tertiary)
+                // One caption line, preferring the live share when there is one
+                // so no card is a line taller than its neighbours.
+                if let note = progressCaption ?? (caption.isEmpty ? nil : caption) {
+                    Text(note).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
         }
         .padding(10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity, minHeight: TileMetrics.cardHeight,
+               maxHeight: TileMetrics.cardHeight, alignment: .topLeading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: TileMetrics.corner))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: TileMetrics.corner)
                 .strokeBorder(.separator.opacity(0.5))
         )
     }
@@ -313,6 +324,7 @@ private struct HeroCard: View {
                 Text(title)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(value)
@@ -324,13 +336,15 @@ private struct HeroCard: View {
                 Text(unit)
                     .font(.caption)
                     .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
             if let progress {
                 Meter(fraction: progress, tint: tint)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
+        .frame(maxWidth: .infinity, minHeight: TileMetrics.heroHeight,
+               maxHeight: TileMetrics.heroHeight, alignment: .topLeading)
         .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
