@@ -115,6 +115,7 @@ final class AppModel: ObservableObject {
     @Published var servedNames = ""
     @Published var maxCacheDisk = ""
     @Published var idleOffloadSeconds = "10"
+    @Published var autoStopMinutes = ""
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
 
@@ -136,6 +137,9 @@ final class AppModel: ObservableObject {
     var foreignPID: pid_t?
     private var offlineCount = 0
     private let statusFetcher = LiveStatusFetcher()
+    // For the idle auto-stop: when a request last made the engine work.
+    private var lastRequestActivity = Date()
+    private var previousSubmitted = 0
 
     let catalogIDs = Runtime.catalog
 
@@ -214,6 +218,8 @@ final class AppModel: ObservableObject {
         contextTokens = nil
         live = LiveStatus()
         stopping = false
+        lastRequestActivity = Date()
+        previousSubmitted = 0
         var arguments = [launcher.path, "serve"]
         switch modelMode {
         case .splash, .upstream:
@@ -329,6 +335,8 @@ final class AppModel: ObservableObject {
             contextTokens = tokens
         }
         append(L10n.format("log.attached", foreignPID ?? 0) + "\n")
+        lastRequestActivity = Date()
+        previousSubmitted = 0
         phase = .ready
         pollStatus()
     }
@@ -404,9 +412,21 @@ final class AppModel: ObservableObject {
         poll = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 await self?.refreshStatus()
+                await self?.autoStopIfIdle()
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
+    }
+
+    /// LM Studio-style engine unload: after the configured idle minutes with
+    /// no request activity, stop the server so its memory returns to the host.
+    private func autoStopIfIdle() async {
+        guard phase == .ready,
+              let minutes = Int(autoStopMinutes), minutes > 0,
+              Date().timeIntervalSince(lastRequestActivity) >= Double(minutes) * 60
+        else { return }
+        append(L10n.format("log.auto_stopped", minutes) + "\n")
+        stop()
     }
 
     private func refreshStatus() async {
@@ -478,6 +498,12 @@ final class AppModel: ObservableObject {
             status.idleOffloadBytes = offload["bytes"] as? UInt64
         }
         status.updated = true
+        if status.submitted != previousSubmitted
+            || (status.decodeTokensPerSecond ?? 0) > 0
+            || (status.prefillTokensPerSecond ?? 0) > 0 {
+            lastRequestActivity = Date()
+            previousSubmitted = status.submitted
+        }
         live = status
     }
 }

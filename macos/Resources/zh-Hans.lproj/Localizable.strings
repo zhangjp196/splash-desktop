@@ -19,6 +19,7 @@
 "field.max_context" = "最大上下文（如 100K）";
 "field.max_cache_disk" = "磁盘缓存配额（如 16G）";
 "field.idle_offload" = "空闲落盘秒数（如 10，需开磁盘配额）";
+"field.auto_stop" = "空闲自动停止分钟数（留空关闭）";
 "field.api_key" = "API 密钥";
 "field.served_names" = "模型别名（逗号分隔）";
 "field.max_request_size" = "最大请求大小（如 128M）";
@@ -38,6 +39,7 @@
 "status.stopping" = "正在停止…";
 "status.failed" = "失败：%@";
 "log.attached" = "已连接到正在运行的服务器（PID %d）。";
+"log.auto_stopped" = "已 %d 分钟无请求，自动停止引擎以释放内存。";
 "open.in.browser" = "在浏览器中打开";
 "stop" = "停止";
 "start" = "启动";
