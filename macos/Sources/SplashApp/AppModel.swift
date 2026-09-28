@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 /// What the live panel shows, taken from `/status` on a one-second loop.
@@ -74,6 +75,10 @@ actor LiveStatusFetcher {
 /// opens the conversation in the web browser.
 @MainActor
 final class AppModel: ObservableObject {
+    /// One instance for the window, the menu bar and the app delegate, so a
+    /// server attached on launch is the one the delegate stops on quit.
+    @MainActor static let shared = AppModel()
+
     enum Phase: Equatable {
         case idle
         case starting
@@ -123,6 +128,10 @@ final class AppModel: ObservableObject {
     private var process: Process?
     private var poll: Task<Void, Never>?
     private var stopping = false
+    // A server the app found already running on the configured port (its PID
+    // from the launcher's serve-<port>.lock), shown and stoppable like its own.
+    var foreignPID: pid_t?
+    private var offlineCount = 0
     private let statusFetcher = LiveStatusFetcher()
 
     let catalogIDs = Runtime.catalog
@@ -133,6 +142,11 @@ final class AppModel: ObservableObject {
             language = stored
         }
         applyLanguage()
+        // A server left over from a previous session is detected and taken
+        // over asynchronously.
+        Task { @MainActor in
+            await detectRunningServer()
+        }
     }
 
     /// Keep the chosen interface language in effect and remembered.
@@ -147,12 +161,16 @@ final class AppModel: ObservableObject {
 
     // MARK: Derived state
 
-    var isRunning: Bool { process?.isRunning ?? false }
+    var isRunning: Bool {
+        (process?.isRunning ?? false) || foreignPID != nil || phase == .ready
+    }
     var isBusy: Bool { phase == .starting || phase == .stopping }
     var chatURL: URL? { URL(string: "http://127.0.0.1:\(port)/") }
 
     var canStart: Bool {
-        guard !isBusy, Runtime.python != nil, Runtime.launcher != nil else { return false }
+        guard !isBusy, !isRunning, Runtime.python != nil, Runtime.launcher != nil else {
+            return false
+        }
         switch modelMode {
         case .splash, .upstream:
             return !modelID.trimmingCharacters(in: .whitespaces).isEmpty
@@ -250,22 +268,37 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
-        guard let process, process.isRunning else {
-            phase = .idle
-            return
-        }
-        phase = .stopping
-        stopping = true
-        // The launcher execs into the server, so one SIGINT shuts it down.
-        process.interrupt()
-        poll?.cancel()
-        poll = nil
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
-            if process.isRunning {
-                self.append(L10n.string("error.server_did_not_stop") + "\n")
-                process.terminate()
+        if let process, process.isRunning {
+            phase = .stopping
+            stopping = true
+            // The launcher execs into the server, so one SIGINT shuts it down.
+            process.interrupt()
+            poll?.cancel()
+            poll = nil
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                if process.isRunning {
+                    self.append(L10n.string("error.server_did_not_stop") + "\n")
+                    process.terminate()
+                }
             }
+        } else if let pid = foreignPID ?? servePID(port: port) {
+            foreignPID = pid
+            phase = .stopping
+            stopping = true
+            kill(pid, SIGINT)
+            // The polling loop watches for /status going silent and idles;
+            // a hard kill guards a server that ignores SIGINT.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                if let current = self.foreignPID, current == pid, kill(pid, 0) == 0 {
+                    self.append(L10n.string("error.server_did_not_stop") + "\n")
+                    kill(pid, SIGKILL)
+                }
+            }
+        } else {
+            phase = .idle
+            foreignPID = nil
         }
     }
 
@@ -276,6 +309,61 @@ final class AppModel: ObservableObject {
 
     func clearLog() {
         log = ""
+    }
+
+    // MARK: Attach and quit
+
+    /// A server a previous session left running is taken over on launch: the
+    /// header shows it ready with a working Stop, and the live panel reads it.
+    func detectRunningServer() async {
+        guard let snapshot = await statusFetcher.fetch(port: port),
+              snapshot.status["maximum_context_tokens"] is Int else { return }
+        foreignPID = servePID(port: port)
+        if let tokens = snapshot.status["maximum_context_tokens"] as? Int {
+            contextTokens = tokens
+        }
+        append(L10n.format("log.attached", foreignPID ?? 0) + "\n")
+        phase = .ready
+        pollStatus()
+    }
+
+    /// The PID the launcher records in `serve-<port>.lock`, or nil.
+    private func servePID(port: Int) -> pid_t? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let lock = home.appendingPathComponent(
+            "Library/Application Support/Splash/runtime/serve-\(port).lock"
+        )
+        guard let data = try? Data(contentsOf: lock),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pid = object["pid"] as? Int, pid > 0
+        else { return nil }
+        return pid_t(pid)
+    }
+
+    /// Stop every tracked server before the app leaves, without waiting on a
+    /// second sleep: the app delegate calls this synchronously on quit.
+    func stopOnQuit() {
+        poll?.cancel()
+        poll = nil
+        stopping = true
+        if let process, process.isRunning {
+            process.interrupt()
+            let deadline = Date().addingTimeInterval(6)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning { process.terminate() }
+            self.process = nil
+        }
+        if let pid = foreignPID {
+            kill(pid, SIGINT)
+            let deadline = Date().addingTimeInterval(6)
+            while kill(pid, 0) == 0 && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+            foreignPID = nil
+        }
     }
 
     // MARK: Internals
@@ -316,7 +404,19 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshStatus() async {
-        guard let snapshot = await statusFetcher.fetch(port: port) else { return }
+        guard let snapshot = await statusFetcher.fetch(port: port) else {
+            offlineCount += 1
+            // A foreign server we asked to stop has gone silent: done.
+            if offlineCount >= 3, phase == .stopping {
+                phase = .idle
+                stopping = false
+                foreignPID = nil
+                poll?.cancel()
+                poll = nil
+            }
+            return
+        }
+        offlineCount = 0
         applyStatus(snapshot)
     }
 

@@ -24,8 +24,23 @@ struct MenuBarView: View {
     }
 }
 
+/// Stops the tracked server when the app quits: a window, the menu bar item
+/// and this delegate all share AppModel.shared.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        if Thread.isMainThread {
+            AppModel.shared.stopOnQuit()
+        } else {
+            DispatchQueue.main.sync {
+                AppModel.shared.stopOnQuit()
+            }
+        }
+    }
+}
+
 struct SplashApp: App {
-    @StateObject private var model = AppModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var model = AppModel.shared
 
     var body: some Scene {
         WindowGroup("Splash") {

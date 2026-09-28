@@ -36,6 +36,7 @@
 "status.ready" = "Ready on port %d";
 "status.stopping" = "Stopping…";
 "status.failed" = "Failed: %@";
+"log.attached" = "Attached to the running server (PID %d).";
 "open.in.browser" = "Open in Browser";
 "stop" = "Stop";
 "start" = "Start";

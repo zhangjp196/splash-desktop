@@ -36,6 +36,7 @@
 "status.ready" = "端口 %d 已就绪";
 "status.stopping" = "正在停止…";
 "status.failed" = "失败：%@";
+"log.attached" = "已连接到正在运行的服务器（PID %d）。";
 "open.in.browser" = "在浏览器中打开";
 "stop" = "停止";
 "start" = "启动";
