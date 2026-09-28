@@ -14,7 +14,7 @@ struct RootView: View {
             Header()
             Divider()
             switch tab {
-            case .control: ModelsPane()
+            case .control: ControlPanelView()
             case .live: LivePane()
             case .log: LogPane()
             }

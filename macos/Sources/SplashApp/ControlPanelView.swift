@@ -1,139 +1,14 @@
 import AppKit
 import SwiftUI
 
-/// The model library: a sidebar of the saved entries (SQLite) and a detail
-/// editor for the selected one. Adding saves one entry at a time; Start runs
-/// whatever the detail currently shows.
-struct ModelsPane: View {
+/// Model source and server settings. A Splash package carries its own DFlash2
+/// draft and vision, an upstream MLX/GGUF model's draft is selected by the
+/// installer, and a local directory names one unless it is a Splash package.
+struct ControlPanelView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        HSplitView {
-            ModelSidebar()
-            ModelDetailForm()
-        }
-    }
-}
-
-private struct ModelSidebar: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Label(L10n.string("models.title"), systemImage: "building.2.crop.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Button {
-                    model.newModel()
-                } label: {
-                    Label(L10n.string("models.add"), systemImage: "plus")
-                }
-                .labelStyle(.titleAndIcon)
-                .disabled(model.isRunning)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            Divider()
-            if model.library.isEmpty {
-                empty
-            } else {
-                List(selection: $model.selectedModelID) {
-                    ForEach(model.library) { entry in
-                        ModelRow(entry: entry).tag(entry.id)
-                    }
-                }
-                .listStyle(.sidebar)
-                .onChange(of: model.selectedModelID) { _, newValue in
-                    model.applySelection(newValue)
-                }
-            }
-        }
-        .frame(minWidth: 230, idealWidth: 260)
-    }
-
-    private var empty: some View {
-        Button {
-            model.newModel()
-        } label: {
-            VStack(spacing: 10) {
-                Image(systemName: "cube.box")
-                    .font(.system(size: 32))
-                    .foregroundStyle(.tertiary)
-                Text(L10n.string("models.empty"))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 18)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding()
-    }
-}
-
-private struct ModelRow: View {
-    let entry: StoredModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(entry.name).lineLimit(1)
-            Text(subtitle)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .padding(.vertical, 2)
-    }
-
-    private var subtitle: String {
-        switch entry.mode {
-        case "splash":
-            return entry.modelID.isEmpty ? L10n.string("mode.splash") : entry.modelID
-        case "upstream":
-            return entry.modelID.isEmpty ? L10n.string("mode.upstream") : entry.modelID
-        default:
-            let directory = entry.modelDirectory.isEmpty
-                ? L10n.string("mode.local")
-                : entry.modelDirectory
-            return entry.draftDirectory.isEmpty
-                ? directory
-                : "\(directory) · \(L10n.string("side.draft"))"
-        }
-    }
-}
-
-private struct ModelDetailForm: View {
-    @EnvironmentObject private var model: AppModel
-    @State private var confirmDelete = false
-    @FocusState private var nameFocused: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if model.selectedModelID == nil {
-                HStack(spacing: 8) {
-                    Image(systemName: "plus.circle.fill").foregroundStyle(.blue)
-                    Text(verbatim: L10n.string("models.unsaved"))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.blue.opacity(0.06))
-            }
-            Form {
-                Section {
-                    TextField(L10n.string("models.name"), text: $model.modelName)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($nameFocused)
-                        .disabled(model.isRunning)
-                } header: {
-                    Label(L10n.string("models.name"), systemImage: "tag")
-                }
-
+        Form {
             Section {
                 Picker(L10n.string("model.picker"), selection: $model.modelMode) {
                     ForEach(AppModel.ModelMode.allCases) { mode in
@@ -225,45 +100,14 @@ private struct ModelDetailForm: View {
                 HStack {
                     Button(L10n.string("start"), action: model.start)
                         .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
                         .disabled(!model.canStart)
                     Spacer()
-                    Button(L10n.string("save")) { model.saveModel() }
-                        .disabled(model.isRunning)
-                    Button(L10n.string("delete"), role: .destructive) { confirmDelete = true }
-                        .disabled(model.selectedModelID == nil || model.isRunning)
                 }
             }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        }
-        .alert(L10n.string("delete.title"), isPresented: $confirmDelete) {
-            Button(L10n.string("delete.confirm"), role: .destructive) {
-                model.deleteSelectedModel()
-            }
-            Button(L10n.string("cancel"), role: .cancel) {}
-        } message: {
-            Text(verbatim: L10n.string("delete.message"))
-        }
-        .alert(
-            L10n.string("error.library.title"),
-            isPresented: saveErrorBinding,
-            presenting: model.modelStoreError
-        ) { _ in
-            Button(L10n.string("ok"), role: .cancel) {}
-        } message: { error in
-            Text(verbatim: error)
-        }
-        .onChange(of: model.selectedModelID) { _, newValue in
-            if newValue == nil { nameFocused = true }
-        }
-    }
-
-    private var saveErrorBinding: Binding<Bool> {
-        Binding(
-            get: { model.modelStoreError != nil },
-            set: { if !$0 { model.modelStoreError = nil } }
-        )
     }
 
     private func label(_ mode: AppModel.ModelMode) -> String {
