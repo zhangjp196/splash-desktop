@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <mutex>
 
+#include <sys/mman.h>
+
 namespace splash::metal {
 
 // Holds the buffers of one residency set wired between the commands of a
@@ -56,7 +58,10 @@ public:
   Residency(const Residency &) = delete;
   Residency &operator=(const Residency &) = delete;
 
-  // Wires the buffer before returning and restarts the keep-alive.
+  // Wires the buffer before returning and restarts the keep-alive. The set
+  // holds only the weight-file base buffers, which are host-visible no-copy
+  // mappings of read-only files; each is recorded so a lapsed residency can
+  // ask the kernel to drop the clean file pages it left in the page cache.
   void add(id<MTLBuffer> buffer) {
     dispatch_sync(queue_, ^{
       [set_ addAllocation:buffer];
@@ -66,6 +71,10 @@ public:
     {
       std::lock_guard lock(mutex_);
       bytes_ += buffer.allocatedSize;
+      if (buffer.storageMode == MTLStorageModeShared) {
+        void *address = buffer.contents;
+        if (address) mapped_.push_back({address, buffer.allocatedSize});
+      }
     }
     use();
   }
@@ -77,6 +86,12 @@ public:
     });
     std::lock_guard lock(mutex_);
     bytes_ -= buffer.allocatedSize;
+    if (buffer.storageMode == MTLStorageModeShared && !mapped_.empty()) {
+      void *address = buffer.contents;
+      std::erase_if(mapped_, [address](const auto &range) {
+        return range.first == address;
+      });
+    }
   }
 
   // Marks a command. A lapsed set is requested again at once, off the
@@ -126,6 +141,20 @@ private:
     [blit fillBuffer:releaseTarget_ range:NSMakeRange(0, 1) value:0];
     [blit endEncoding];
     [command commit];
+
+    // The weight files stay mapped for the life of the model, so ending the
+    // residency set leaves their pages in the system's clean file cache: a
+    // resource monitor still shows the whole file as used, and the pages only
+    // return under memory pressure. Drop them now — they are clean and
+    // file-backed, so the kernel evicts them and re-faults them from disk on
+    // the next command. Runs on the residency queue, after endResidency, so
+    // Metal has no claim to the pages.
+    if (bytes_) {
+      std::lock_guard lock(mutex_);
+      for (auto &[address, length] : mapped_) {
+        if (address && length) ::madvise(address, length, MADV_DONTNEED);
+      }
+    }
   }
 
   __strong id<MTLCommandQueue> commands_ = nil;
@@ -139,6 +168,8 @@ private:
   std::chrono::steady_clock::time_point lastUse_;
   bool held_ = false;
   uint64_t bytes_ = 0;
+  // Host-visible (file-backed) mappings added to the set, as (address, bytes).
+  std::vector<std::pair<void *, uint64_t>> mapped_;
 };
 
 } // namespace splash::metal
