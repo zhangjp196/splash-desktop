@@ -75,6 +75,7 @@ final class AppModel: ObservableObject {
     @Published var modelName = ""
     @Published var library: [StoredModel] = []
     @Published var selectedModelID: Int64?
+    @Published var modelStoreError: String?
 
     private var process: Process?
     private var poll: Task<Void, Never>?
@@ -102,6 +103,7 @@ final class AppModel: ObservableObject {
     /// Start a blank entry in the editor; Save turns it into a new row.
     func newModel() {
         selectedModelID = nil
+        modelStoreError = nil
         resetFields()
     }
 
@@ -157,6 +159,9 @@ final class AppModel: ObservableObject {
         if let id = store.upsert(entry) {
             selectedModelID = id
             reloadLibrary()
+            modelStoreError = nil
+        } else {
+            modelStoreError = L10n.string("error.library.save")
         }
     }
 

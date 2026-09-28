@@ -88,6 +88,10 @@
 "models.empty" = "No saved models yet. Click ＋ to add one.";
 "models.name" = "Name";
 "models.untitled" = "Untitled model";
+"models.unsaved" = "New model — save it to add it to the library.";
+"error.library.save" = "Could not save the model to the local database.";
+"error.library.title" = "Save failed";
+"ok" = "OK";
 "side.draft" = "draft";
 "save" = "Save";
 "delete" = "Delete";

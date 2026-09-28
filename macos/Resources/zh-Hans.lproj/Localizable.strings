@@ -88,6 +88,10 @@
 "models.empty" = "还没有保存的模型，点 ＋ 添加一个。";
 "models.name" = "名称";
 "models.untitled" = "未命名模型";
+"models.unsaved" = "新模型 — 保存后加入模型库。";
+"error.library.save" = "无法把模型保存到本地数据库。";
+"error.library.title" = "保存失败";
+"ok" = "好";
 "side.draft" = "draft";
 "save" = "保存";
 "delete" = "删除";
