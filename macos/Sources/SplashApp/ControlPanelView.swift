@@ -75,7 +75,9 @@ struct ControlPanelView: View {
                     .disabled(model.isRunning)
                 TextField(L10n.string("field.idle_offload"), text: $model.idleOffloadSeconds)
                     .disabled(model.isRunning)
-                TextField(L10n.string("field.auto_stop"), text: $model.autoStopMinutes)
+                TextField(L10n.string("field.auto_stop"), text: $model.autoStopSeconds)
+                    .disabled(model.isRunning)
+                TextField(L10n.string("field.residency"), text: $model.residencySeconds)
                     .disabled(model.isRunning)
             } header: {
                 Label(L10n.string("section.limits"), systemImage: "slider.horizontal.3")

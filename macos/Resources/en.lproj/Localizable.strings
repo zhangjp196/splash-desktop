@@ -19,7 +19,8 @@
 "field.max_context" = "Max context (e.g. 100K)";
 "field.max_cache_disk" = "Disk cache quota (e.g. 16G)";
 "field.idle_offload" = "Idle offload to disk (seconds, e.g. 10; needs --max-cache-disk)";
-"field.auto_stop" = "Auto stop after idle minutes (empty = off)";
+"field.auto_stop" = "Stop the engine after idle seconds, e.g. 10 (empty = keep warm)";
+"field.residency" = "Release weights after idle seconds (e.g. 10, LM Studio style)";
 "field.api_key" = "API key";
 "field.served_names" = "Model aliases (comma-separated)";
 "field.max_request_size" = "Max request size (e.g. 128M)";
@@ -39,7 +40,7 @@
 "status.stopping" = "Stopping…";
 "status.failed" = "Failed: %@";
 "log.attached" = "Attached to the running server (PID %d).";
-"log.auto_stopped" = "No requests for %d minutes; stopped the engine to free memory.";
+"log.auto_stopped" = "No requests for %d seconds; stopped the engine to free memory.";
 "open.in.browser" = "Open in Browser";
 "stop" = "Stop";
 "start" = "Start";
@@ -82,7 +83,10 @@
 "live.suspended" = "Suspended";
 "live.capacity_failures" = "Capacity failures";
 "live.metal_failures" = "Metal failures";
-"live.current_memory" = "Current Metal";
+"live.current_memory" = "Metal allocated";
+"live.current_memory_caption" = "Address space; the host reclaims weight pages";
+"live.physical_memory" = "Physical memory";
+"live.physical_memory_caption" = "Really held by the engine right now";
 "live.peak_memory" = "Peak Metal";
 "live.disk_cache" = "Disk cache";
 "live.caption.idle_offload" = "%d idle offloads · %@";

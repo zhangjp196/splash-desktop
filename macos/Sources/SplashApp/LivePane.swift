@@ -109,7 +109,12 @@ struct LivePane: View {
 
     private func memory(_ live: LiveStatus) -> [MetricCard] {
         return [
+            MetricCard(title: L10n.string("live.physical_memory"),
+                       value: bytes(live.physicalBytes),
+                       caption: L10n.string("live.physical_memory_caption"),
+                       systemImage: "cpu", tint: .green),
             MetricCard(title: L10n.string("live.current_memory"), value: bytes(live.currentBytes),
+                       caption: L10n.string("live.current_memory_caption"),
                        systemImage: "memorychip", tint: .blue),
             MetricCard(title: L10n.string("live.peak_memory"), value: bytes(live.peakBytes),
                        systemImage: "chart.bar", tint: .indigo),

@@ -19,6 +19,10 @@ struct LiveStatus: Equatable {
     var pendingLimit = 0
     var currentBytes: UInt64?
     var peakBytes: UInt64?
+    /// Host memory the engine actually occupies; the allocated bytes above
+    /// are address space whose weight pages the host reclaims when idle.
+    var physicalBytes: UInt64?
+    var peakPhysicalBytes: UInt64?
     var cacheHitRate: Double?
     var kvDiskHitTokens: Int?
     var stateHitTokens: Int?
@@ -115,7 +119,8 @@ final class AppModel: ObservableObject {
     @Published var servedNames = ""
     @Published var maxCacheDisk = ""
     @Published var idleOffloadSeconds = "10"
-    @Published var autoStopMinutes = ""
+    @Published var autoStopSeconds = ""
+    @Published var residencySeconds = "10"
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
 
@@ -242,6 +247,9 @@ final class AppModel: ObservableObject {
         if !maxCacheDisk.isEmpty { arguments += ["--max-cache-disk", maxCacheDisk] }
         if let seconds = Int(idleOffloadSeconds), seconds > 0, seconds <= 86_400 {
             arguments += ["--idle-offload-seconds", String(seconds)]
+        }
+        if let seconds = Int(residencySeconds), seconds >= 1, seconds <= 86_400 {
+            arguments += ["--residency-seconds", String(seconds)]
         }
         if !maxRequestSize.isEmpty { arguments += ["--max-request-size", maxRequestSize] }
         if !reasoningEffort.isEmpty {
@@ -422,10 +430,10 @@ final class AppModel: ObservableObject {
     /// no request activity, stop the server so its memory returns to the host.
     private func autoStopIfIdle() async {
         guard phase == .ready,
-              let minutes = Int(autoStopMinutes), minutes > 0,
-              Date().timeIntervalSince(lastRequestActivity) >= Double(minutes) * 60
+              let seconds = Int(autoStopSeconds), seconds > 0,
+              Date().timeIntervalSince(lastRequestActivity) >= Double(seconds)
         else { return }
-        append(L10n.format("log.auto_stopped", minutes) + "\n")
+        append(L10n.format("log.auto_stopped", seconds) + "\n")
         stop()
     }
 
@@ -477,6 +485,8 @@ final class AppModel: ObservableObject {
         if let memory = object["memory_actual"] as? [String: Any] {
             status.currentBytes = memory["current_bytes"] as? UInt64
             status.peakBytes = memory["peak_bytes"] as? UInt64
+            status.physicalBytes = memory["physical_bytes"] as? UInt64
+            status.peakPhysicalBytes = memory["peak_physical_bytes"] as? UInt64
         }
         if let cache = object["cache"] as? [String: Any] {
             status.cacheHitRate = cache["hit_rate"] as? Double

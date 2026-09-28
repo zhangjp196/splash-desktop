@@ -52,6 +52,7 @@ struct NativeArguments final {
   uint64_t maxMemoryBytes = 0;
   uint64_t maxCacheDiskBytes = 0;
   uint32_t idleOffloadSeconds = 0;
+  double residencySeconds = 600.0;
   kv::Format kvFormat = kv::Format::Int8;
 };
 
@@ -123,7 +124,8 @@ void printUsage(std::string_view executable) {
   std::cerr << "usage: " << executable
             << " serve-native TARGET_DIRECTORY DRAFT_DIRECTORY"
                " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto [MAX_CACHE_DISK_BYTES]"
-               " [--kv-format int8|bf16]\n";
+               " [--kv-format int8|bf16] [--idle-offload-seconds N]"
+               " [--residency-seconds N]\n";
 }
 
 template <typename T>
@@ -187,33 +189,48 @@ NativeArguments parseArguments(int argc, char **argv) {
   }
   NativeArguments result;
   int next = 6;
-  if (next < argc && std::string_view(argv[next]) != "--kv-format") {
+  // Trailing switches, in any order: the disk quota is the only positional
+  // one, and it comes first when present.
+  auto isSwitch = [](std::string_view argument) {
+    return argument == "--kv-format" ||
+           argument == "--idle-offload-seconds" ||
+           argument == "--residency-seconds";
+  };
+  if (next < argc && !isSwitch(argv[next])) {
     const std::string_view quota(argv[next++]);
     if (quota != "0" && !parsePositive(quota, result.maxCacheDiskBytes))
       throw UsageError("MAX_CACHE_DISK_BYTES must be a nonnegative integer");
   }
-  if (next < argc) {
-    if (std::string_view(argv[next]) == "--kv-format") {
-      if (argc - next != 2)
+  while (next < argc) {
+    const std::string_view flag(argv[next]);
+    const bool hasValue = next + 1 < argc;
+    const std::string_view value = hasValue ? argv[next + 1] : "";
+    if (flag == "--kv-format") {
+      if (!hasValue)
         throw UsageError("expected --kv-format int8 or bf16");
-      const std::string_view format(argv[next + 1]);
-      if (format != "int8" && format != "bf16")
+      if (value != "int8" && value != "bf16")
         throw UsageError("--kv-format requires int8 or bf16");
-      result.kvFormat = format == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
-      next += 2;
-    }
-    if (next < argc) {
-      if (argc - next != 2 ||
-          std::string_view(argv[next]) != "--idle-offload-seconds")
+      result.kvFormat = value == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+    } else if (flag == "--idle-offload-seconds") {
+      if (!hasValue)
         throw UsageError("expected --idle-offload-seconds SECONDS");
-      const std::string_view seconds(argv[next + 1]);
-      if (seconds != "0") {
-        uint64_t parsed = 0;
-        if (!parsePositive(seconds, parsed) || parsed > 86400)
+      uint64_t parsed = 0;
+      if (value != "0") {
+        if (!parsePositive(value, parsed) || parsed > 86400)
           throw UsageError("--idle-offload-seconds must be from 0 to 86400");
         result.idleOffloadSeconds = uint32_t(parsed);
       }
+    } else if (flag == "--residency-seconds") {
+      if (!hasValue)
+        throw UsageError("expected --residency-seconds SECONDS");
+      uint64_t parsed = 0;
+      if (!parsePositive(value, parsed) || parsed < 1 || parsed > 86400)
+        throw UsageError("--residency-seconds must be from 1 to 86400");
+      result.residencySeconds = double(parsed);
+    } else {
+      throw UsageError(std::string("unexpected argument: ") + std::string(flag));
     }
+    next += 2;
   }
   result.modelRoot = requireModelRoot(argv[2], argv[3]);
   result.model = model::inspectModelPackage(result.modelRoot);
@@ -263,6 +280,7 @@ bootstrapConfig(const NativeArguments &arguments) {
   config.resources.maximumCacheDiskBytes = arguments.maxCacheDiskBytes;
   config.resources.kvFormat = arguments.kvFormat;
   config.nativeLoop.engine.idleOffloadSeconds = arguments.idleOffloadSeconds;
+  config.resources.residencyKeepAliveSeconds = arguments.residencySeconds;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engineInstanceId = engineInstanceId();
   config.nativeLoop.maskWordsPerToken = maskWordsPerToken;

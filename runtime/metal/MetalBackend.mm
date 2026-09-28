@@ -25,9 +25,24 @@
 #include <utility>
 
 #include <unistd.h>
+#include <mach/mach.h>
 
 namespace splash::metal {
 namespace {
+
+// The physical footprint this process actually occupies on the host, counting
+// compressed and swapped pages. Allocated Metal buffers reserve address space
+// the kernel is free to reclaim, so this is the only counter that answers
+// "how much memory does the idle engine still hold".
+uint64_t hostPhysicalFootprintBytes() noexcept {
+    task_vm_info_data_t info = {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    const kern_return_t result = task_info(
+        mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info),
+        &count);
+    if (result != KERN_SUCCESS) return 0;
+    return static_cast<uint64_t>(info.phys_footprint);
+}
 
 // The accelerator entry that backs a Metal device publishes gpu-core-count.
 // The device's registry ID names that entry or a child of it; the first
@@ -269,6 +284,8 @@ struct BackendAsyncState {
     __strong id<MTLDevice> device = nil;
     mutable std::atomic<uint64_t> deviceCurrentAllocatedBytes{0};
     mutable std::atomic<uint64_t> devicePeakAllocatedBytes{0};
+    mutable std::atomic<uint64_t> hostPhysicalBytes{0};
+    mutable std::atomic<uint64_t> peakHostPhysicalBytes{0};
     std::atomic<bool> healthy{true};
     mutable std::mutex healthMutex;
     std::string healthReason;
@@ -291,6 +308,13 @@ struct BackendAsyncState {
         deviceCurrentAllocatedBytes.store(current, std::memory_order_relaxed);
         raisePeak(devicePeakAllocatedBytes, current);
         return current;
+    }
+    // The host footprint is a pure host-side query, so it rides along with the
+    // device sample instead of adding a control-plane syscall of its own.
+    void sampleHostPhysical() const noexcept {
+        const uint64_t physical = hostPhysicalFootprintBytes();
+        hostPhysicalBytes.store(physical, std::memory_order_relaxed);
+        raisePeak(peakHostPhysicalBytes, physical);
     }
 
     void ensureHealthy() const {
@@ -1567,11 +1591,17 @@ MetalMemoryStats MetalBackend::memoryStats() const noexcept {
             std::memory_order_relaxed);
     const uint64_t pendingUnmaps =
         impl_->pendingUnmapCount.load(std::memory_order_acquire);
+    // Status must not add a syscall of its own, but a host footprint read
+    // cannot block the GPU either, so it is safe to refresh here.
+    impl_->asyncState->sampleHostPhysical();
     return {
         impl_->accounting->allocatedBytes.load(std::memory_order_relaxed),
         impl_->accounting->peakAllocatedBytes.load(std::memory_order_relaxed),
         deviceCurrent,
         impl_->asyncState->devicePeakAllocatedBytes.load(
+            std::memory_order_relaxed),
+        impl_->asyncState->hostPhysicalBytes.load(std::memory_order_relaxed),
+        impl_->asyncState->peakHostPhysicalBytes.load(
             std::memory_order_relaxed),
         impl_->accounting->sparseVirtualBytes.load(
             std::memory_order_relaxed),

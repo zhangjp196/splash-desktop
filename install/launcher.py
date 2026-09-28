@@ -29,6 +29,9 @@ PROFILES_DIR = paths.PROFILES
 PORT = 8000
 # A copy: the launcher runs before .venv exists; server/chat_templates imports Jinja2.
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# Seconds weights stay wired after their last command, matching the engine's
+# own default so an unset option leaves the argument line unchanged.
+DEFAULT_RESIDENCY_SECONDS = 600
 
 
 class LauncherError(RuntimeError):
@@ -244,6 +247,8 @@ def serve(args):
             command.extend(("--kv-format", args.kv_format))
         if args.idle_offload_seconds:
             command.extend(["--idle-offload-seconds", str(args.idle_offload_seconds)])
+        if args.residency_seconds and args.residency_seconds != DEFAULT_RESIDENCY_SECONDS:
+            command.extend(["--residency-seconds", str(args.residency_seconds)])
         for name in args.served_model_name:
             command.append(f"--served-model-name={name}")
         if args.default_reasoning_effort is not None:
@@ -547,6 +552,13 @@ def parse_args(argv=None):
         default=0,
         help="offload cached KV and states to the SSD tier after this many "
         "idle seconds (0 disables; requires --max-cache-disk)",
+    )
+    server.add_argument(
+        "--residency-seconds",
+        type=int,
+        default=600,
+        help="seconds weights stay wired after their last command "
+        "(small values return weight memory quickly when idle; 1-86400)",
     )
     server.add_argument(
         "--max-memory",

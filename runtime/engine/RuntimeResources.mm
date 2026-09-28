@@ -242,8 +242,9 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
   }
   std::unique_ptr<metal::MetalBackend> backend;
   try {
-    backend =
-        std::make_unique<metal::MetalBackend>(config.metallibPath.string());
+    backend = std::make_unique<metal::MetalBackend>(
+        config.metallibPath.string(), 120.0, 30000u,
+        config.residencyKeepAliveSeconds);
   } catch (const metal::MetalAllocationError &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::BackendCreation,
                                 error.what(), {}, {},

@@ -127,7 +127,12 @@ std::string runtimeStatusJson(
       << ",\"sparse_virtual_bytes\":" << metalMemory.sparseVirtualBytes
       << ",\"sparse_resident_bytes\":" << metalMemory.sparseResidentBytes
       << ",\"current_bytes\":" << currentBytes
-      << ",\"peak_bytes\":" << peakBytes << "}"
+      << ",\"peak_bytes\":" << peakBytes
+      // What the host actually holds for this process, against the allocated
+      // bytes above; the pair is what an idle engine's release shows up in.
+      << ",\"physical_bytes\":" << metalMemory.hostPhysicalBytes
+      << ",\"peak_physical_bytes\":" << metalMemory.peakHostPhysicalBytes
+      << "}"
       << ",\"memory_governor\":{\"limit_bytes\":" << memoryGovernor.limitBytes
       << ",\"observed_resident_bytes\":" << memoryGovernor.observedResidentBytes
       << ",\"reserved_bytes\":" << memoryGovernor.reservedBytes

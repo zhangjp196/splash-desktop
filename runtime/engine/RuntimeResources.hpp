@@ -77,6 +77,10 @@ struct RuntimeResourcesConfig {
   uint64_t maximumMemoryBytes = 0;
   // Disk quota shared by cached KV pages and states; zero disables the tier.
   uint64_t maximumCacheDiskBytes = 0;
+  // Seconds a weight buffer stays wired after its last command; a small
+  // value returns weight memory to the host almost as soon as the engine
+  // goes idle (the LM Studio behavior), at the cost of refaulting on use.
+  double residencyKeepAliveSeconds = 600.0;
   // Patches per image the vision scratch covers. The engine admits images up
   // to it when the model loaded vision and none otherwise; the wire parser's
   // limit defaults to the same constant.

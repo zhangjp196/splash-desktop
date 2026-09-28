@@ -214,6 +214,13 @@ struct MetalMemoryStats {
   // and pipeline creation, before submission, and on host-side retirement.
   uint64_t devicePeakAllocatedBytes = 0;
 
+  // This process's physical footprint (phys_footprint, compressed pages
+  // included). Unlike the allocated counters above it is host memory the
+  // engine actually occupies, so it falls when weight pages are released
+  // back to the system on an idle engine.
+  uint64_t hostPhysicalBytes = 0;
+  uint64_t peakHostPhysicalBytes = 0;
+
   // Placement-sparse buffers reserve virtual GPU address space without
   // committing it. Resident bytes count live placement heaps, which are the
   // reclaimable physical unit.

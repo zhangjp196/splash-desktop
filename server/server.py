@@ -1932,6 +1932,13 @@ def parse_args(argv=None):
         "idle seconds (0 disables; requires --max-cache-disk)",
     )
     parser.add_argument(
+        "--residency-seconds",
+        type=int,
+        default=600,
+        help="seconds weights stay wired after their last command "
+        "(small values return weight memory quickly when idle; 1-86400)",
+    )
+    parser.add_argument(
         "--max-request-size",
         type=_parse_request_size,
         default=DEFAULT_MAX_REQUEST_BYTES,
@@ -1985,6 +1992,11 @@ def parse_args(argv=None):
     return args
 
 
+# Seconds weights stay wired after their last command, matching the engine's
+# own default so an unset option leaves the argument line unchanged.
+DEFAULT_RESIDENCY_SECONDS = 600
+
+
 def _native_command(args):
     command = [
         args.binary,
@@ -2000,6 +2012,10 @@ def _native_command(args):
         command.extend(("--kv-format", args.kv_format))
     if args.idle_offload_seconds:
         command.extend(("--idle-offload-seconds", str(args.idle_offload_seconds)))
+    # The engine's own default is DEFAULT_RESIDENCY_SECONDS; passing it again
+    # would only keep older engines, which reject the switch, from starting.
+    if args.residency_seconds and args.residency_seconds != DEFAULT_RESIDENCY_SECONDS:
+        command.extend(("--residency-seconds", str(args.residency_seconds)))
     return command
 
 
