@@ -1181,10 +1181,12 @@ bool Engine::checkIdleOffload(double now) {
   uint64_t released = 0;
   while (const uint64_t bytes = model_.reclaimIdleState())
     released += bytes;
-  released += cache_.reclaimCache(~uint64_t{0}, true, false);
+  // Offload the cached prefixes to the tier (writing a disk copy) rather
+  // than dropping them: the next request restores them from there.
+  const bool demoted = cache_.demoteIdleKv();
   while (const uint64_t bytes = model_.reclaimIdleState())
     released += bytes;
-  if (!released)
+  if (!released && !demoted)
     return false;
   lastIdleOffloadMilliseconds_ = now;
   ++counters_.idleOffloadPasses;

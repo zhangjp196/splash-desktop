@@ -227,6 +227,20 @@ def overlay_source(runtime: Path) -> None:
         )
 
 
+def overlay_engine(runtime: Path) -> None:
+    """Replace the runtime's engine binary and metallib with the locally built
+    ones (build/splash and build/splash.metallib), when the working tree's
+    native code differs from the published runtime's."""
+    engine = runtime / "engine"
+    for name in ("splash", "splash.metallib"):
+        built = ROOT / "build" / name
+        if built.is_file():
+            shutil.copy2(built, engine / name)
+            print(f"overlaid engine/{name} from the local build")
+        else:
+            raise SystemExit(f"missing {built}; build the engine first")
+
+
 def build_swift(package: Path) -> Path:
     run(["swift", "build", "--package-path", package, "-c", "release"])
     binary = package / ".build/release" / APP_NAME
@@ -302,6 +316,11 @@ def main(argv=None):
         action="store_true",
         help="use this checkout's install/ and server/ in the embedded runtime",
     )
+    parser.add_argument(
+        "--overlay-engine",
+        action="store_true",
+        help="use this checkout's build/splash and splash.metallib as the engine",
+    )
     args = parser.parse_args(argv)
     # A relative --dist (or the default ROOT/dist, already absolute) is
     # resolved so the archive default below matches the output directory.
@@ -312,6 +331,8 @@ def main(argv=None):
     try:
         if args.overlay_source:
             overlay_source(runtime)
+        if args.overlay_engine:
+            overlay_engine(runtime)
         binary = (
             MACOS_BUILD / ".build/release" / APP_NAME
             if args.no_build

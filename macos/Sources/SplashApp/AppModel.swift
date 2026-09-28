@@ -114,7 +114,7 @@ final class AppModel: ObservableObject {
     @Published var apiKey = ""
     @Published var servedNames = ""
     @Published var maxCacheDisk = ""
-    @Published var idleOffloadSeconds = ""
+    @Published var idleOffloadSeconds = "10"
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
 

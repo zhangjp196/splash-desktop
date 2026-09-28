@@ -18,7 +18,7 @@
 "field.max_memory" = "Max memory (e.g. 28G)";
 "field.max_context" = "Max context (e.g. 100K)";
 "field.max_cache_disk" = "Disk cache quota (e.g. 16G)";
-"field.idle_offload" = "Idle offload to disk (seconds, e.g. 10; needs a current engine)";
+"field.idle_offload" = "Idle offload to disk (seconds, e.g. 10; needs --max-cache-disk)";
 "field.api_key" = "API key";
 "field.served_names" = "Model aliases (comma-separated)";
 "field.max_request_size" = "Max request size (e.g. 128M)";

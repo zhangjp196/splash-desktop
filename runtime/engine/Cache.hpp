@@ -218,6 +218,10 @@ public:
   // Whether the disk tier can take demotions right now; idle offload runs
   // only in that case, so it never drops cache it intended to offload.
   [[nodiscard]] bool diskTierWritable() const noexcept { return kvTierWritable(); }
+  // Demote every idle resident KV leaf to the tier (writing a disk copy) so
+  // an idle offload keeps the prefix restorable; nothing that cannot be
+  // written is dropped. Returns whether any demotion started.
+  [[nodiscard]] bool demoteIdleKv();
   // reclaimCache's stop rule: releasedBytes and the pages whose copies are
   // being written meet targetBytes. A pass with evictAll has no target.
   [[nodiscard]] bool reclaimMet(uint64_t releasedBytes, uint64_t targetBytes,
@@ -314,6 +318,11 @@ private:
   // that subtree.
   [[nodiscard]] LeafReclaim reclaimKvLeaf(uint64_t block);
   [[nodiscard]] LeafReclaim demoteKv(uint64_t block);
+  [[nodiscard]] LeafReclaim demoteKvImpl(uint64_t block, bool requireState);
+  // demoteKv without the "needed by a state" gate: writes an ordinary cached
+  // prefix leaf to the tier so an idle pass can offload it and restore it
+  // later, instead of dropping it.
+  [[nodiscard]] LeafReclaim demoteKvForIdle(uint64_t block);
   // A failed write closes the tier; existing copies stay readable.
   [[nodiscard]] bool kvTierWritable() const noexcept { return tier_ && tier_->writable(); }
   // Only a state restores a disk-only chain, through its own block and every

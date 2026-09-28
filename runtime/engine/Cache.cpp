@@ -656,6 +656,18 @@ void Cache::promoteState(const CacheLookup &lookup, StateRestore &transfer) {
 }
 
 Cache::LeafReclaim Cache::demoteKv(uint64_t block) {
+  return demoteKvImpl(block, true);
+}
+
+Cache::LeafReclaim Cache::demoteKvForIdle(uint64_t block) {
+  return demoteKvImpl(block, false);
+}
+
+// Writes the leaf's page to the tier. With requireState, only a leaf a state
+// on it or below it needs is written (the memory-pressure rule); the idle
+// variant writes every idle resident leaf, so offloading never loses a prefix
+// that fits the quota.
+Cache::LeafReclaim Cache::demoteKvImpl(uint64_t block, bool requireState) {
   if (!kvTierWritable())
     return LeafReclaim::Impossible;
   // Do not discard a disk copy for a transfer that cannot start yet.
@@ -670,7 +682,7 @@ Cache::LeafReclaim Cache::demoteKv(uint64_t block) {
     return transfersInFlight() ? LeafReclaim::Pending : LeafReclaim::Impossible;
   // Making room may have taken the states the leaf was kept for; it then
   // goes like any leaf nothing needs.
-  if (!kvNeededByState(block))
+  if (requireState && !kvNeededByState(block))
     return LeafReclaim::Impossible;
   auto transfer = tier_->demote(kv_.page(block), slot, completionNotifier_);
   if (!transfer) {
@@ -681,6 +693,39 @@ Cache::LeafReclaim Cache::demoteKv(uint64_t block) {
   kv_.setTransferring(block, true);
   demotions_.push_back({block, std::move(transfer)});
   return LeafReclaim::Started;
+}
+
+bool Cache::demoteIdleKv() {
+  if (!kvTierWritable())
+    return false;
+  bool any = false;
+  // States first: their reusable end states ride the KV chains below them,
+  // so a written state lets the next request restore the whole prefix.
+  while (const auto candidate = states_.evictionCandidate(false)) {
+    const StateEviction eviction =
+        states_.reclaim(candidate->id, completionNotifier_, makeRoom_, true);
+    if (eviction.evicted) {
+      any = true;
+      continue;
+    }
+    break; // Pending (writing) or pinned; the next pass takes it.
+  }
+  uint64_t previous = 0;
+  while (auto candidate = kv_.evictionCandidate(previous)) {
+    previous = candidate->id;
+    if (kv_.slot(candidate->id))
+      continue; // A disk copy already protects the prefix.
+    switch (demoteKvForIdle(candidate->id)) {
+    case LeafReclaim::Started:
+      any = true;
+      break;
+    case LeafReclaim::Pending:
+      return any; // The ring or quota is busy; the next pass takes it.
+    case LeafReclaim::Impossible:
+      break;
+    }
+  }
+  return any;
 }
 
 std::shared_ptr<model::KvDiskSlot> Cache::acquireDiskSlot() {
