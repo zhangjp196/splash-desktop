@@ -46,18 +46,6 @@ struct LiveSnapshot {
     let modelID: String?
 }
 
-/// One message in the built-in chat panel.
-struct ChatMessage: Identifiable, Equatable {
-    enum Role: String {
-        case user
-        case assistant
-    }
-
-    let id = UUID()
-    let role: Role
-    var content: String
-}
-
 /// Fetches the engine's `/status` and the served model id in the background.
 actor LiveStatusFetcher {
     func fetch(port: Int) async -> LiveSnapshot? {
@@ -117,13 +105,6 @@ final class AppModel: ObservableObject {
     @Published var log = ""
     @Published var contextTokens: Int?
     @Published var live = LiveStatus()
-
-    // The built-in chat panel: messages are streamed from the server's
-    // OpenAI-compatible endpoint instead of opening the browser.
-    @Published var chatInput = ""
-    @Published var chatMessages: [ChatMessage] = []
-    @Published var chatSending = false
-    private var chatTask: Task<Void, Never>?
 
     // The first-launch values live in ServerSettings; the store replaces them
     // below before the window is shown.
@@ -285,131 +266,16 @@ final class AppModel: ObservableObject {
         (process?.isRunning ?? false) || foreignPID != nil || phase == .ready
     }
     var isBusy: Bool { phase == .starting || phase == .stopping }
-    // MARK: Chat
 
-    /// The name to send as `model` in a chat request: what the server reports
-    /// it is serving, falling back to the first alias, then the configured id.
-    var servedModelID: String {
-        if let id = live.modelID, !id.isEmpty { return id }
-        let alias = servedNames.split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty }
-        if let alias { return alias }
-        return modelID.trimmingCharacters(in: .whitespaces)
-    }
-
-    /// The HTTP surface the server publishes, for the copy actions.
-    var serviceBaseURL: String { "http://127.0.0.1:\(port)" }
-    var apiBaseURL: String { "\(serviceBaseURL)/v1" }
-    var chatURLString: String { "\(serviceBaseURL)/" }
-
-    func sendChat() {
-        let text = chatInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !chatSending, isRunning else { return }
-        chatInput = ""
-        chatMessages.append(ChatMessage(role: .user, content: text))
-        chatMessages.append(ChatMessage(role: .assistant, content: ""))
-        // The request is fixed at send time: an immediate cancel cannot then
-        // change which messages reach the server.
-        let history = chatMessages
-        let model = servedModelID
-        chatSending = true
-        chatTask = Task { @MainActor in
-            await streamChat(history: history, model: model)
-        }
-    }
-
-    func cancelChat() {
-        chatTask?.cancel()
-        chatTask = nil
-        if chatMessages.last?.role == .assistant, chatMessages.last?.content.isEmpty == true {
-            chatMessages.removeLast()
-        }
-        chatSending = false
-    }
-
-    func clearChat() {
-        cancelChat()
-        chatMessages = []
-    }
+    // The chat is the server's own web page, opened in the browser; the API
+    // address stays one keystroke away for tools that talk to it directly.
+    var chatURL: URL? { URL(string: "http://127.0.0.1:\(port)/") }
+    var apiBaseURL: String { "http://127.0.0.1:\(port)/v1" }
 
     func copyToClipboard(_ text: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-    }
-
-    private func streamChat(history: [ChatMessage], model: String) async {
-        defer {
-            chatSending = false
-            chatTask = nil
-        }
-        guard let url = URL(string: "\(apiBaseURL)/chat/completions") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        // No request timeout: a local generation can run for a long time, and
-        // the engine's own request timeout closes the stream when it gives up.
-        request.timeoutInterval = 0
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        let payload: [String: Any] = [
-            "model": model,
-            "messages": history.filter { $0.role == .assistant || !$0.content.isEmpty }
-                .map { ["role": $0.role.rawValue, "content": $0.content] },
-            "stream": true,
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-        do {
-            let (bytes, response) = try await URLSession.shared.bytes(for: request)
-            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                var detail = ""
-                for try await line in bytes.lines {
-                    detail += line
-                    if detail.count > 300 { break }
-                }
-                appendChatError("HTTP \(http.statusCode)" + (detail.isEmpty ? "" : " — \(detail)"))
-                return
-            }
-            for try await line in bytes.lines {
-                if Task.isCancelled { break }
-                guard line.hasPrefix("data:") else { continue }
-                let chunk = line.dropFirst("data:".count).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !chunk.isEmpty, chunk != "[DONE]" else { continue }
-                guard let json = try? JSONSerialization.jsonObject(with: Data(chunk.utf8)) as? [String: Any],
-                      let choices = json["choices"] as? [[String: Any]],
-                      let delta = choices.first?["delta"] as? [String: Any],
-                      let piece = delta["content"] as? String
-                else { continue }
-                appendChatPiece(piece)
-            }
-            // A stream that produced nothing leaves no empty bubble behind.
-            if chatMessages.last?.role == .assistant, chatMessages.last?.content.isEmpty == true {
-                chatMessages.removeLast()
-            }
-        } catch {
-            if isRunning {
-                appendChatError(error.localizedDescription)
-            } else {
-                cancelChat()
-            }
-        }
-    }
-
-    private func appendChatPiece(_ piece: String) {
-        guard !piece.isEmpty, var last = chatMessages.last, last.role == .assistant else { return }
-        last.content += piece
-        chatMessages[chatMessages.count - 1] = last
-    }
-
-    private func appendChatError(_ message: String) {
-        if let last = chatMessages.last, last.role == .assistant {
-            let text = last.content.isEmpty ? message : last.content + "\n\n" + message
-            chatMessages[chatMessages.count - 1] = ChatMessage(role: .assistant, content: text)
-        } else {
-            chatMessages.append(ChatMessage(role: .assistant, content: message))
-        }
     }
 
     var canStart: Bool {
@@ -555,6 +421,11 @@ final class AppModel: ObservableObject {
 
     func clearLog() {
         log = ""
+    }
+
+    func openInBrowser() {
+        guard let url = chatURL else { return }
+        NSWorkspace.shared.open(url)
     }
 
     // MARK: Attach and quit

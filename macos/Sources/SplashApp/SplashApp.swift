@@ -13,6 +13,7 @@ struct MenuBarView: View {
         Divider()
         if model.isRunning {
             Button(L10n.string("menu.stop")) { model.stop() }
+            Button(L10n.string("menu.open")) { model.openInBrowser() }
             Button(L10n.string("menu.copy_api")) { model.copyToClipboard(model.apiBaseURL) }
         } else {
             Button(L10n.string("menu.start")) { model.start() }
