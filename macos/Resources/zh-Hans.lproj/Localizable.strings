@@ -86,11 +86,11 @@
 "live.suspended" = "已挂起";
 "live.capacity_failures" = "容量失败";
 "live.metal_failures" = "Metal 失败";
-"live.current_memory" = "Metal 已分配";
-"live.current_memory_caption" = "地址空间，系统可回收";
+"live.current_memory" = "Metal 地址空间";
+"live.current_memory_caption" = "虚拟占位非实际占用，权重页可被系统回收";
 "live.physical_memory" = "物理内存占用";
 "live.physical_memory_caption" = "引擎当前占用";
-"live.peak_memory" = "Metal 内存峰值";
+"live.peak_memory" = "地址空间峰值";
 "live.disk_cache" = "磁盘缓存";
 "live.caption.idle_offload" = "%d 次空闲落盘 · %@";
 "live.hit_rate" = "缓存命中率";

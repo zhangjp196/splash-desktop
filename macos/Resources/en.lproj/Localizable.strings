@@ -86,11 +86,11 @@
 "live.suspended" = "Suspended";
 "live.capacity_failures" = "Capacity failures";
 "live.metal_failures" = "Metal failures";
-"live.current_memory" = "Metal allocated";
-"live.current_memory_caption" = "Host can reclaim pages";
+"live.current_memory" = "Metal address space";
+"live.current_memory_caption" = "Virtual, not physical; weight pages are reclaimable";
 "live.physical_memory" = "Physical memory";
 "live.physical_memory_caption" = "Held by the engine now";
-"live.peak_memory" = "Peak Metal";
+"live.peak_memory" = "Peak address space";
 "live.disk_cache" = "Disk cache";
 "live.caption.idle_offload" = "%d idle offloads · %@";
 "live.hit_rate" = "Cache hit rate";
