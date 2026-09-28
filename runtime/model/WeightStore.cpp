@@ -158,6 +158,8 @@ struct WeightFile::Impl {
     std::shared_ptr<MappedRegion> mapping;
     metal::MetalBuffer base;
     uint64_t bytes = 0;
+    // The absolute file path, for the idle unload to re-open the same file.
+    std::string path;
     WeightFileRecord record;
     uint64_t offset = kHeaderBytes;
     bool finished = false;
@@ -188,6 +190,7 @@ WeightFile::WeightFile(metal::MetalBackend &backend,
                        uint32_t expectedType, std::string contentIdentity)
     : impl_(std::make_unique<Impl>()) {
     impl_->backend = &backend;
+    impl_->path = std::filesystem::absolute(path).string();
     impl_->mapping = MappedRegion::openReadOnly(path, !contentIdentity.empty());
     impl_->bytes = impl_->mapping->bytes();
     checkWeightHeader(static_cast<const uint8_t *>(impl_->mapping->address()),
@@ -197,12 +200,24 @@ WeightFile::WeightFile(metal::MetalBackend &backend,
         std::move(relativePath), std::string(expectedMagic), expectedLayer, expectedType,
         impl_->bytes, std::move(contentIdentity),
     };
-    impl_->base = backend.wrapSharedMemory(
+    impl_->base = backend.wrapSharedMemoryOwned(
         impl_->mapping->address(), impl_->bytes, impl_->mapping,
         impl_->record.relativePath);
     // The weights outlive this loader: the base stays resident until its last
     // view is gone.
     backend.keepResident(impl_->base);
+    // True idle unload: when residency lapses the backend releases this file's
+    // mapping and buffer, returning its pages to the host, and the first
+    // command after re-opens the same file through this closure.
+    backend.registerIdleUnload(
+        impl_->base,
+        [path = impl_->path](uint64_t &bytesOut)
+            -> std::pair<void *, std::shared_ptr<void>> {
+            // The file was verified when it loaded; a re-open maps it as-is.
+            auto mapping = MappedRegion::openReadOnly(path, /*prepared=*/false);
+            bytesOut = mapping->bytes();
+            return {mapping->address(), mapping};
+        });
 }
 
 WeightFile::WeightFile(WeightFile &&) noexcept = default;

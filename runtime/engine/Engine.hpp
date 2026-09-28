@@ -31,6 +31,11 @@ struct EngineConfig final {
   // Metal backing; the next request restores them from the tier. Zero (the
   // default) disables it.
   uint32_t idleOffloadSeconds = 0;
+  // True idle unload: after this many idle seconds with no request in flight,
+  // the engine releases the weight files' mappings and Metal buffers back to
+  // the host; the next request rebuilds them, re-reading from disk. Zero (the
+  // default) disables it.
+  double idleUnloadSeconds = 0.0;
   // Host growth admission, supplied by the runtime governor. Queried only on
   // failed allocation and, after a suspension the pause caused, while
   // resident lanes drain; never on the ordinary decode path.
@@ -279,6 +284,13 @@ private:
   EngineEventSink &events_;
   Scheduler scheduler_;
   std::unordered_map<uint64_t, Request> requests_;
+  // Request-idle true unload: the last tick wall time the engine had work, in
+  // milliseconds, and whether the weights have already been released since.
+  std::optional<double> lastActivityAtMilliseconds_;
+  bool weightsUnloadedSinceActivity_ = false;
+  // Runs the request-idle true unload at a tick when nothing is in flight and
+  // the configured idle seconds have passed since the last activity.
+  void maybeUnloadIdleWeights(double nowMilliseconds);
   // Pressure preempted work, a resident lane still holds its state cell, and
   // memory is still short (growth is paused or allocationFailed_), up to the
   // drain's end.

@@ -61,6 +61,9 @@ public:
   [[nodiscard]] ModelMemoryActual
   actualRuntimeMemory() const override;
 
+  // Released by the engine's request-idle true unload.
+  void releaseIdleWeights() override;
+
   [[nodiscard]] ModelTelemetry
   telemetry() const noexcept override;
 

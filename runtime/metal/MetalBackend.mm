@@ -284,6 +284,10 @@ struct BackendAsyncState {
     __strong id<MTLDevice> device = nil;
     mutable std::atomic<uint64_t> deviceCurrentAllocatedBytes{0};
     mutable std::atomic<uint64_t> devicePeakAllocatedBytes{0};
+    // Bytes this process has released whose free the device counter has not
+    // yet reported, and the counter's own previous raw reading.
+    mutable std::atomic<uint64_t> staleReleasedBytes{0};
+    mutable std::atomic<uint64_t> lastRawDeviceBytes{0};
     mutable std::atomic<uint64_t> hostPhysicalBytes{0};
     mutable std::atomic<uint64_t> peakHostPhysicalBytes{0};
     std::atomic<bool> healthy{true};
@@ -304,10 +308,33 @@ struct BackendAsyncState {
 
     uint64_t sampleDeviceMemory() const noexcept {
         if (!device) return 0;
-        uint64_t current = static_cast<uint64_t>(device.currentAllocatedSize);
-        deviceCurrentAllocatedBytes.store(current, std::memory_order_relaxed);
-        raisePeak(devicePeakAllocatedBytes, current);
-        return current;
+        const uint64_t raw = static_cast<uint64_t>(device.currentAllocatedSize);
+        // A true idle unload releases weight buffers, but the driver keeps
+        // counting them until it actually frees them. Credit that lag back as
+        // the counter declines, so the engine budget never counts the same
+        // weights twice and refuses a request over pressure that is not there.
+        // An unrelated free is credited the same way, which only shrinks the
+        // discount and stays on the conservative side.
+        uint64_t stale = staleReleasedBytes.load(std::memory_order_relaxed);
+        const uint64_t previous = lastRawDeviceBytes.load(std::memory_order_relaxed);
+        if (raw < previous) {
+            const uint64_t declined = previous - raw;
+            stale = stale > declined ? stale - declined : 0;
+            staleReleasedBytes.store(stale, std::memory_order_relaxed);
+        }
+        lastRawDeviceBytes.store(raw, std::memory_order_relaxed);
+        const uint64_t reported = raw > stale ? raw - stale : 0;
+        deviceCurrentAllocatedBytes.store(reported, std::memory_order_relaxed);
+        raisePeak(devicePeakAllocatedBytes, reported);
+        return reported;
+    }
+
+    // Records a release whose pages and buffers are already gone from this
+    // process, so the device counter's lagging view of them is discounted
+    // until the driver's own counter confirms the free.
+    void noteReleasedBytes(uint64_t bytes) const noexcept {
+        if (!bytes) return;
+        staleReleasedBytes.fetch_add(bytes, std::memory_order_relaxed);
     }
     // The host footprint is a pure host-side query, so it rides along with the
     // device sample instead of adding a control-plane syscall of its own.
@@ -543,6 +570,16 @@ struct MetalBackend::Impl {
     std::atomic<double> lastUnmapSeconds{0.0};
     std::atomic<double> maxUnmapSeconds{0.0};
     std::atomic<double> pendingUnmapIssuedSeconds{0.0};
+
+    // Weight-file base buffers that true idle unload can release and rebuild.
+    mutable std::mutex unloadMutex;
+    struct IdleUnloadEntry {
+        MetalAllocation *allocation = nullptr;
+        IdleUnloadRebind rebindHost;
+        uint64_t fileBytes = 0;
+        bool unloaded = false;
+    };
+    std::vector<IdleUnloadEntry> idleUnload;
 
     ~Impl() {
         // Teardown must not wait for a stalled mapping queue. Keep its backing
@@ -1257,6 +1294,20 @@ void MetalBackend::drainSparseUnmaps() {
 MetalBuffer MetalBackend::wrapSharedMemory(
     void *address, uint64_t bytes, std::shared_ptr<void> lifetime,
     std::string_view label) {
+  return wrapSharedMemoryImpl(address, bytes, std::move(lifetime), label,
+                              /*retainDeallocator=*/true);
+}
+
+MetalBuffer MetalBackend::wrapSharedMemoryOwned(
+    void *address, uint64_t bytes, std::shared_ptr<void> lifetime,
+    std::string_view label) {
+  return wrapSharedMemoryImpl(address, bytes, std::move(lifetime), label,
+                              /*retainDeallocator=*/false);
+}
+
+MetalBuffer MetalBackend::wrapSharedMemoryImpl(
+    void *address, uint64_t bytes, std::shared_ptr<void> lifetime,
+    std::string_view label, bool retainDeallocator) {
     checkOperation();
     if (!address || !bytes) {
         throw MetalBackendError("shared memory address and size are required");
@@ -1277,16 +1328,29 @@ MetalBuffer MetalBackend::wrapSharedMemory(
             "shared memory address and size must be page-aligned");
     }
 
-    id<MTLBuffer> buffer = [impl_->device
-        newBufferWithBytesNoCopy:address
-        length:checkedNSUInteger(bytes, "shared memory size")
-        options:MTLResourceStorageModeShared
-        deallocator:^(void *, NSUInteger) {
+    id<MTLBuffer> buffer = nil;
+    if (retainDeallocator) {
+      id<MTLBuffer> retained = [impl_->device
+          newBufferWithBytesNoCopy:address
+          length:checkedNSUInteger(bytes, "shared memory size")
+          options:MTLResourceStorageModeShared
+          deallocator:^(void *, NSUInteger) {
             // Metal may retain the buffer beyond our last C++ view/ticket,
             // including while a completed command's handler is returning.
             // Keep its backing owner until Metal actually releases it.
             (void)lifetime;
-        }];
+          }];
+      buffer = retained;
+    } else {
+      // The weight-loading path owns the backing through the C++ views, so
+      // no deallocator retention stands between the mapping and a true idle
+      // unload.
+      buffer = [impl_->device
+          newBufferWithBytesNoCopy:address
+          length:checkedNSUInteger(bytes, "shared memory size")
+          options:MTLResourceStorageModeShared
+          deallocator:nil];
+    }
     if (!buffer) {
         throw MetalBackendError("zero-copy Metal buffer creation failed");
     }
@@ -1327,6 +1391,108 @@ void MetalBackend::keepResident(const MetalBuffer &buffer) {
     }
     impl_->residency->add(allocation.buffer);
     allocation.residency = impl_->residency;
+}
+
+void MetalBackend::registerIdleUnload(
+    const MetalBuffer &base, IdleUnloadRebind rebindHost) {
+    checkOperation();
+    MetalAllocation &allocation = impl_->allocationOf(base);
+    if (allocation.storage != BufferStorage::Shared || !allocation.buffer ||
+        !rebindHost) {
+        throw MetalBackendError(
+            "idle unload requires a registered shared weight buffer");
+    }
+    std::lock_guard lock(impl_->unloadMutex);
+    for (auto &entry : impl_->idleUnload) {
+        if (entry.allocation == &allocation) {
+            throw MetalBackendError(
+                "weight file is already registered for idle unload");
+        }
+    }
+    impl_->idleUnload.push_back(
+        {&allocation, std::move(rebindHost), allocation.bytes, false});
+}
+
+void MetalBackend::unloadIdleWeights() {
+    std::lock_guard lock(impl_->unloadMutex);
+    uint64_t releasedBytes = 0;
+    for (auto &entry : impl_->idleUnload) {
+        if (entry.unloaded || !entry.allocation->buffer) continue;
+        MetalAllocation &allocation = *entry.allocation;
+        // The residency set retains any buffer still inside it, so take the
+        // base out first; endResidency has already run.
+        if (auto kept = allocation.residency.lock()) {
+            kept->remove(allocation.buffer);
+        }
+        allocation.residency.reset();
+        // The engine budget keeps charging these bytes while they are
+        // unloaded: the next request needs them again, so the freed capacity
+        // must not be handed to anything else. Only the physical residency
+        // counter drops, which is what the status reports.
+        if (allocation.accounting && entry.fileBytes) {
+            allocation.accounting->residentBytes.fetch_sub(
+                entry.fileBytes, std::memory_order_relaxed);
+        }
+        // Dropping the buffer and its lifetime owner releases the weight
+        // file's mapping, so every page the GPU or the file cache held
+        // returns to the host. The file itself stays for the reload to map.
+        allocation.externalOwner.reset();
+        allocation.buffer = nil;
+        allocation.bytes = 0;
+        entry.unloaded = true;
+        releasedBytes += entry.fileBytes;
+    }
+    // The pages and buffers are gone; the driver still counts them for a
+    // while, so tell the counter model how much of it to discount.
+    impl_->asyncState->noteReleasedBytes(releasedBytes);
+    impl_->sampleDeviceMemory();
+}
+
+void MetalBackend::reloadUnloadedWeights() {
+    std::lock_guard lock(impl_->unloadMutex);
+    bool changed = false;
+    for (auto &entry : impl_->idleUnload) {
+        if (!entry.unloaded) continue;
+        MetalAllocation &allocation = *entry.allocation;
+        uint64_t bytes = 0;
+        std::pair<void *, std::shared_ptr<void>> remapped =
+            entry.rebindHost(bytes);
+        if (!remapped.first || !remapped.second || !bytes) {
+            std::ostringstream message;
+            message << "unable to re-map an unloaded weight file";
+            impl_->markUnhealthy(message.str());
+            throw MetalBackendError(message.str());
+        }
+        id<MTLBuffer> buffer = [impl_->device
+            newBufferWithBytesNoCopy:remapped.first
+            length:checkedNSUInteger(bytes, "weight file size")
+            options:MTLResourceStorageModeShared
+            // The rebuilt weight buffer owns nothing; the C++ allocation keeps
+            // the mapping, so the next idle unload can drop it immediately.
+            deallocator:nil];
+        if (!buffer) {
+            std::ostringstream message;
+            message << "unable to rebuild a weight buffer";
+            impl_->markUnhealthy(message.str());
+            throw MetalBackendError(message.str());
+        }
+        allocation.externalOwner = std::move(remapped.second);
+        allocation.buffer = buffer;
+        allocation.bytes = bytes;
+        // The budget was never released by the unload, so only the residency
+        // the unload dropped is restored here.
+        if (allocation.accounting && bytes) {
+            allocation.accounting->residentBytes.fetch_add(
+                bytes, std::memory_order_relaxed);
+        }
+        if (auto kept = impl_->residency) {
+            kept->add(buffer);
+            allocation.residency = impl_->residency;
+        }
+        entry.unloaded = false;
+        changed = true;
+    }
+    if (changed) impl_->sampleDeviceMemory();
 }
 
 uint64_t MetalBackend::lapsedResidentBytes() const noexcept {

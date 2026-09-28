@@ -280,6 +280,7 @@ bootstrapConfig(const NativeArguments &arguments) {
   config.resources.maximumCacheDiskBytes = arguments.maxCacheDiskBytes;
   config.resources.kvFormat = arguments.kvFormat;
   config.nativeLoop.engine.idleOffloadSeconds = arguments.idleOffloadSeconds;
+  config.nativeLoop.engine.idleUnloadSeconds = arguments.residencySeconds;
   config.resources.residencyKeepAliveSeconds = arguments.residencySeconds;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engineInstanceId = engineInstanceId();

@@ -1787,6 +1787,10 @@ Runtime::Runtime(RuntimeContext context)
 
 Runtime::~Runtime() = default;
 
+void Runtime::releaseIdleWeights() {
+  impl_->backend.unloadIdleWeights();
+}
+
 void Runtime::checkHealth() { impl_->backend.checkHealth(); }
 
 bool Runtime::needsHealthCheck() const noexcept {
@@ -2029,6 +2033,10 @@ std::unique_ptr<ModelBatchTicket>
 Runtime::prefillAsync(const BatchPlan &plan,
                       std::span<const ModelBatchItem> items,
                       std::function<void()> completion) {
+  // A true idle unload released the weight files. Only a model step reads
+  // their views, so this is where they come back: before graph building, and
+  // never for a command that merely moves cached state around.
+  impl_->backend.reloadUnloadedWeights();
   validatePlan(plan, items, WorkKind::Prefill);
   if (plan.decodeStage != DecodeStage::Regular) {
     throw std::invalid_argument("Qwen prefill cannot resume a mask plan");
@@ -2168,6 +2176,9 @@ std::unique_ptr<ModelBatchTicket>
 Runtime::decodeAsync(const BatchPlan &plan,
                      std::span<const ModelBatchItem> items,
                      std::function<void()> completion) {
+  // See prefillAsync: a decode step reads the weight views, a state transfer
+  // does not, so an idle unload is undone here and nowhere else.
+  impl_->backend.reloadUnloadedWeights();
   validatePlan(plan, items, WorkKind::Decode);
   const bool constrained = plan.cohort == BatchCohort::Constrained;
   if (plan.decodeStage != DecodeStage::Regular && !constrained) {

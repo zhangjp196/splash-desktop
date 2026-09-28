@@ -339,6 +339,17 @@ public:
   [[nodiscard]] MetalBuffer wrapSharedMemory(void *address, uint64_t bytes,
                                              std::shared_ptr<void> lifetime,
                                              std::string_view label = {});
+  // Same zero-copy wrap, but the buffer's deallocator keeps nothing: the
+  // caller owns the backing itself (through the C++ views), so a true idle
+  // unload can drop the mapping the moment it releases the buffer. Used for
+  // the weight files, never for Metal-persistent staging.
+  [[nodiscard]] MetalBuffer wrapSharedMemoryOwned(
+      void *address, uint64_t bytes, std::shared_ptr<void> lifetime,
+      std::string_view label = {});
+  // Shared implementation of the two zero-copy wraps above.
+  [[nodiscard]] MetalBuffer wrapSharedMemoryImpl(
+      void *address, uint64_t bytes, std::shared_ptr<void> lifetime,
+      std::string_view label, bool retainDeallocator);
   [[nodiscard]] MetalBuffer view(const MetalBuffer &base, uint64_t offsetBytes,
                                  uint64_t lengthBytes) const;
 
@@ -349,6 +360,22 @@ public:
   // again from the next command, until the allocation's last view is gone.
   // Keeping a buffer twice throws.
   void keepResident(const MetalBuffer &buffer);
+
+  // Registers a weight-file base buffer for true idle unload: when the
+  // residency keep-alive lapses, the file mapping is dropped (and with it the
+  // pages the GPU or the file cache held), and the base buffer is released. A
+  // `rebindHost` closure returns a fresh host mapping to the same file — the
+  // model layer reopens it — and the first command after the unload rebuilds
+  // the base buffer from it, so every view sees the same file again.
+  using IdleUnloadRebind =
+      std::function<std::pair<void *, std::shared_ptr<void>>(uint64_t &bytes)>;
+  void registerIdleUnload(const MetalBuffer &base,
+                          IdleUnloadRebind rebindHost);
+  // Runs on the residency queue when the keep-alive lapses: releases every
+  // registered weight mapping and its Metal buffer. The first command after
+  // rebuilds them through `reloadUnloadedWeights`.
+  void unloadIdleWeights();
+  void reloadUnloadedWeights();
   // The kept bytes whose residency the keep-alive has ended, until the next
   // command holds them again; Metal unwires them shortly after the end.
   [[nodiscard]] uint64_t lapsedResidentBytes() const noexcept;

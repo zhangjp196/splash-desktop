@@ -458,6 +458,11 @@ struct WarmupStepResult final {
 class Model {
 public:
   virtual ~Model() = default;
+  // True idle unload: the engine calls this when the request-idle deadline
+  // passes, so the model may release its weight files' mappings and Metal
+  // buffers back to the host. The next submit rebuilds them. A no-op on
+  // models that keep weights on the device.
+  virtual void releaseIdleWeights() {}
   virtual void checkHealth() {}
   [[nodiscard]] virtual bool needsHealthCheck() const noexcept { return false; }
   [[nodiscard]] virtual StateAdmission begin(const ModelRequest &request) = 0;

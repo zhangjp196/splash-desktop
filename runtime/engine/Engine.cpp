@@ -38,6 +38,10 @@ Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
 
 void Engine::submit(EngineRequest value) {
   const bool scoring = !value.scoreTokens.empty();
+  // Any new request ends an unloaded idle: the next step rebuilds the weight
+  // buffers at submission, and a later idle may release them again.
+  weightsUnloadedSinceActivity_ = false;
+  lastActivityAtMilliseconds_.reset();
   if (!value.id || value.prompt.empty() ||
       (scoring ? value.maxNewTokens != 0 : !value.maxNewTokens) ||
       value.prompt.size() + value.maxNewTokens > config_.maxContext ||
@@ -167,6 +171,7 @@ void Engine::setCompletionNotifier(std::function<void()> notifier) {
 bool Engine::tick(double now) {
   model_.checkHealth();
   nextHealthCheckMilliseconds_ = now + kHealthCheckIntervalMilliseconds;
+  maybeUnloadIdleWeights(now);
   bool progressed = scheduler_.expireDeadlines(now);
   progressed = checkIdleOffload(now) || progressed;
   if (now >= drainEndMilliseconds_)
@@ -260,6 +265,26 @@ bool Engine::tick(double now) {
 }
 
 bool Engine::idle() const noexcept { return requests_.empty() && !pending_; }
+
+void Engine::maybeUnloadIdleWeights(double now) {
+  if (config_.idleUnloadSeconds <= 0.0 || weightsUnloadedSinceActivity_) return;
+  // Command submission (idle offload, restore, cache transfers) must not
+  // count as activity: the engine can be busy with the GPU while requests are
+  // absent. Only request-level activity starts the idle clock, and nothing is
+  // unloaded while a request or its command is in flight.
+  if (pending_ || !requests_.empty()) {
+    lastActivityAtMilliseconds_ = now;
+    return;
+  }
+  if (!lastActivityAtMilliseconds_) {
+    lastActivityAtMilliseconds_ = now;
+    return;
+  }
+  if (now - *lastActivityAtMilliseconds_ >= config_.idleUnloadSeconds * 1000.0) {
+    model_.releaseIdleWeights();
+    weightsUnloadedSinceActivity_ = true;
+  }
+}
 
 bool Engine::drainingForRecovery() const {
   return drainEndMilliseconds_ > 0.0 &&
