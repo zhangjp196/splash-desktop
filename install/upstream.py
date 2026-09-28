@@ -317,6 +317,72 @@ def prepare(selection):
         _install_commit(selection, target, installed)
 
 
+def prepare_local(selection):
+    """Start a model served from a local target directory (--model-dir).
+    A Splash runtime package in the directory carries its own DFlash2 draft
+    and serves directly (legacy.prepare_local); an MLX or GGUF target is
+    inspected and installed as an assembly of links to the directory's own
+    files, as an upstream model's installation is published, with --draft-model
+    naming the matching draft (a local directory needs no request, a
+    repository ID is resolved like an upstream draft's). The target has no
+    repository or revision, so no Hub request is made for it."""
+    repo = hub.Repository.local_directory(selection.directory)
+    if _is_legacy_package(repo, selection.model):
+        legacy.prepare_local(selection)
+        return
+    if selection.draft_model is None:
+        raise models.ModelError(
+            f"{selection.directory} is not a Splash package; an MLX or GGUF "
+            "target directory requires --draft-model"
+        )
+    installed = None
+    if models.installation_kind(selection.link) == models.ASSEMBLY:
+        try:
+            installed = assembly.verify(selection.link)
+        except (models.ModelError, OSError) as error:
+            print(f"Reinstalling {selection.model}: {error}", flush=True)
+    draft = _local_draft(selection, installed)
+    if installed is not None and installed["sources"]["draft"] == draft.identity():
+        if (replaced := _retain_installed(selection)) is None:
+            print(
+                f"Splash model {selection.model} is already installed in "
+                f"{selection.link}",
+                flush=True,
+            )
+            return
+        print(f"Reinstalling {selection.model}: {replaced}", flush=True)
+    _install(selection, repo, installed, draft)
+
+
+def _local_draft(selection, installed):
+    """The DFlash2 draft a --model-dir installation is served with, which
+    --draft-model names: a local directory needs no request, while a
+    repository ID is resolved at the commit its default branch names now, as
+    an upstream draft is. The installed draft stands in when a repository ID
+    cannot be resolved and one was installed."""
+    name = selection.draft_model
+    if Path(name).is_absolute():
+        return hub.Repository.local_directory(name)
+    recorded = installed and installed["sources"]["draft"]
+    installed_commit = (
+        recorded["revision"]
+        if recorded and recorded["repo"] == name and recorded["revision"]
+        else None
+    )
+    try:
+        return hub.Repository.resolve(
+            name, installation=selection.link, installed=installed_commit
+        )
+    except models.ModelError as error:
+        if not recorded:
+            raise
+        fallback = hub.Repository.recorded(recorded)
+        models.warn(
+            f"cannot reach the Hub ({error}); using the installed draft {_at(fallback)}"
+        )
+        return fallback
+
+
 def _is_legacy_package(repo, model):
     """Whether the target repository is a legacy Splash package, whose
     manifest.json names a package format."""

@@ -181,6 +181,47 @@ def verify(link: Path, repo_id: str, *, full: bool):
     verify_artifacts(link, validate_manifest(link / "manifest.json"), full=full)
 
 
+def verify_local(link: Path, *, full: bool):
+    """Check a local Splash package at a selection link: its manifest and its
+    artifacts only, since a local directory belongs to no Hub snapshot."""
+    verify_artifacts(link, validate_manifest(link / "manifest.json"), full=full)
+
+
+def prepare_local(selection):
+    """Start a Splash runtime package from a local directory (--model-dir):
+    validate its manifest and artifacts and point the selection link at the
+    directory itself. The package carries its own DFlash2 draft and vision
+    weights, so no source options apply: there is nothing to download, pin or
+    prepare."""
+    if selection.variant is not None:
+        raise models.ModelError(
+            "this runtime package has no variants; drop the :VARIANT suffix"
+        )
+    if selection.revision or selection.language_only or selection.draft_model:
+        raise models.ModelError("source selection options require an upstream model ID")
+    link = selection.link
+    destination = Path(selection.directory)
+    manifest = validate_manifest(destination / "manifest.json")
+    selection.models_root.mkdir(parents=True, exist_ok=True)
+    with models.installation_lock(selection.models_root):
+        try:
+            verify_artifacts(link, manifest, full=False)
+        except (models.ModelError, OSError):
+            if link.exists() and not link.is_symlink():
+                raise models.ModelError(
+                    f"cannot identify the local package at {link}; "
+                    "move it aside before installing"
+                ) from None
+        else:
+            if link.is_symlink() and link.resolve() == destination.resolve():
+                print(f"Splash model {selection.model} is already installed in {link}")
+                return
+    models.link_selection(link, destination)
+    with models.installation_lock(selection.models_root):
+        verify_artifacts(link, manifest, full=False)
+    print(f"Installed verified Splash model {selection.model} in {link}")
+
+
 def _download_snapshot(repo_id: str, token):
     from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 

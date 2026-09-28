@@ -1,6 +1,7 @@
 build/
 .venv
 .venv.install.lock
+macos/.build/
 install/models/
 install/profiles/
 .DS_Store

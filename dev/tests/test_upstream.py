@@ -5,6 +5,7 @@ import fcntl
 import io
 import json
 import shutil
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,12 +25,64 @@ from dev.tests.installer_fixtures import (
     draft_dir,
     fake_hub,
     http_error,
+    local_selection,
     mlx_target,
     pins,
     selection,
     text_config,
 )
 from install import assembly, families, hub, legacy, models, upstream
+
+
+def package_directory(root: Path) -> Path:
+    """A minimal valid Qwen3.8-27B Splash package: every packed file the
+    manifest must list, aligned as the native loader requires."""
+    root.mkdir(parents=True, exist_ok=True)
+
+    def packed(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as file:
+            file.write(struct.pack("<8sII", b"MDFT0001", 0, 0))
+            file.seek(legacy.ALIGNMENT - 1)
+            file.write(b"\0")
+
+    target_layers = dict(DENSE.signature)["num_hidden_layers"]
+    for name in (
+        "draft/model.bin",
+        "vision/model.bin",
+        "target/embedding.bin",
+        "target/head.bin",
+        *(f"target/layer-{index}.bin" for index in range(target_layers)),
+        *(f"draft/layer-{index}.bin" for index in range(DENSE.draft.layers)),
+    ):
+        packed(root / name)
+    tokenizer = root / "tokenizer"
+    tokenizer.mkdir()
+    for name in legacy.PACKAGE_TOKENIZER_FILES:
+        (tokenizer / name).write_text(f"{name}\n")
+    records = [
+        {
+            "path": path.relative_to(root).as_posix(),
+            "size": path.stat().st_size,
+            "sha256": models.sha256(path),
+        }
+        for path in sorted(item for item in root.rglob("*") if item.is_file())
+    ]
+    manifest = {
+        "schema_version": 3,
+        "model": "Community fine-tuned model",
+        "format": {
+            "name": "splash-packed-q4",
+            "section_alignment_bytes": legacy.ALIGNMENT,
+            "target_layer_magic": "MDFL0006",
+            "draft_layer_magic": "MDFD0004",
+            "vision_magic": "MDFV0001",
+        },
+        "execution_geometry": {},
+        "artifacts": records,
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+    return root
 
 
 class UpstreamTest(unittest.TestCase):
@@ -47,6 +100,16 @@ class UpstreamTest(unittest.TestCase):
             contextlib.redirect_stderr(io.StringIO()) as warnings,
         ):
             upstream.prepare(chosen)
+        return output.getvalue(), warnings.getvalue()
+
+    @staticmethod
+    def prepare_local(chosen):
+        """upstream.prepare_local's output and warnings."""
+        with (
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as warnings,
+        ):
+            upstream.prepare_local(chosen)
         return output.getvalue(), warnings.getvalue()
 
     def test_every_family_names_its_own_draft_repository(self):
@@ -1050,6 +1113,104 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual((local.directory, local.revision), (self.root / MODEL, None))
         with self.assertRaisesRegex(models.ModelError, "draft directory not found"):
             hub.Repository.resolve(str(self.root / "deleted-draft"))
+
+    def test_a_local_target_directory_installs_without_a_hub_request(self):
+        # FakeHub stands ready but is never asked: target and draft are local.
+        fake = FakeHub(self, self.cache)
+        target = mlx_target(self.root / "Qwen3.8-27B-4bit", DENSE)
+        draft = draft_dir(self.root / "draft", DENSE)
+        chosen = local_selection(self.root, target, draft_model=str(draft.resolve()))
+        output, _ = self.prepare_local(chosen)
+        self.assertIn("Installing", output)
+        self.assertEqual(chosen.model, "local/Qwen3.8-27B-4bit")
+        record = assembly.verify(chosen.link)
+        self.assertEqual(
+            record["sources"]["target"],
+            {"repo": str(target.resolve()), "revision": None},
+        )
+        self.assertEqual(
+            record["sources"]["draft"],
+            {"repo": str(draft.resolve()), "revision": None},
+        )
+        linked = chosen.link / "target" / "model.safetensors"
+        self.assertTrue(linked.is_symlink())
+        self.assertEqual(linked.resolve(), (target / "model.safetensors").resolve())
+        self.assertEqual(fake.requests, [])
+        self.assertEqual(fake.downloads, [])
+
+    def test_a_local_target_directory_reuses_its_installation(self):
+        target = mlx_target(self.root / "Qwen3.8-27B-4bit", DENSE)
+        draft = draft_dir(self.root / "draft", DENSE)
+        chosen = local_selection(self.root, target, draft_model=str(draft.resolve()))
+        self.prepare_local(chosen)
+        installed = chosen.link.resolve()
+        output, _ = self.prepare_local(chosen)
+        self.assertIn("is already installed", output)
+        self.assertEqual(chosen.link.resolve(), installed)
+
+    def test_a_changed_local_file_rebuilds_the_assembly(self):
+        target = mlx_target(self.root / "Qwen3.8-27B-4bit", DENSE)
+        draft = draft_dir(self.root / "draft", DENSE)
+        chosen = local_selection(self.root, target, draft_model=str(draft.resolve()))
+        self.prepare_local(chosen)
+        first = chosen.link.resolve()
+        # A changed size, mtime and ctime fail verification, so it is rebuilt.
+        (target / "model.safetensors").write_text("{} ")
+        self.prepare_local(chosen)
+        self.assertNotEqual(chosen.link.resolve(), first)
+        self.assertTrue(
+            assembly.verify(chosen.link)["sources"]["target"]["revision"] is None
+        )
+
+    def test_several_local_ggufs_list_the_candidates(self):
+        target = self.root / "ggufs"
+        target.mkdir()
+        (target / "Model-UD-Q4_K_M.gguf").write_bytes(b"")
+        (target / "Model-UD-Q5_K_M.gguf").write_bytes(b"")
+        draft = draft_dir(self.root / "draft", DENSE)
+        chosen = local_selection(self.root, target, draft_model=str(draft.resolve()))
+        with self.assertRaisesRegex(models.ModelError, "select a GGUF"):
+            self.prepare_local(chosen)
+
+    def test_a_local_package_directory_serves_without_a_draft(self):
+        # A Splash package carries its own DFlash2 draft and vision weights,
+        # so --model-dir loads it with no draft selection and no assembly.
+        target = package_directory(self.root / "package")
+        chosen = local_selection(self.root, target, draft_model=None)
+        output, _ = self.prepare_local(chosen)
+        self.assertIn("Installed verified", output)
+        self.assertTrue(chosen.link.is_symlink())
+        self.assertEqual(chosen.link.resolve(), target.resolve())
+        self.assertFalse((chosen.link / "model.json").exists())
+        output, _ = self.prepare_local(chosen)
+        self.assertIn("is already installed", output)
+        # The package's own options are none: --draft-model is refused.
+        draft = draft_dir(self.root / "draft", DENSE)
+        opted = local_selection(self.root, target, draft_model=str(draft.resolve()))
+        with self.assertRaisesRegex(models.ModelError, "source selection options"):
+            self.prepare_local(opted)
+
+    def test_a_local_upstream_directory_still_requires_a_draft(self):
+        # A local MLX or GGUF target needs its matching DFlash2 draft named.
+        target = mlx_target(self.root / "Qwen3.8-27B-4bit", DENSE)
+        chosen = local_selection(self.root, target, draft_model=None)
+        with self.assertRaisesRegex(models.ModelError, "requires --draft-model"):
+            self.prepare_local(chosen)
+
+    def test_a_local_draft_repository_is_resolved_like_an_upstream_draft(self):
+        # --draft-model may name a repository; only its default branch asks
+        # the Hub. The local target is never resolved.
+        fake = FakeHub(self, self.cache)
+        fake.publish(DENSE.draft.repo, DRAFT_COMMIT, lambda p: draft_dir(p, DENSE))
+        target = mlx_target(self.root / "Qwen3.8-27B-4bit", DENSE)
+        chosen = local_selection(self.root, target, draft_model=DENSE.draft.repo)
+        self.prepare_local(chosen)
+        record = assembly.verify(chosen.link)
+        self.assertEqual(
+            record["sources"]["draft"],
+            {"repo": DENSE.draft.repo, "revision": DRAFT_COMMIT},
+        )
+        self.assertEqual(fake.requests, [(DENSE.draft.repo, None)])
 
     def test_unreachable_hub_uses_the_cache_or_explains_access(self):
         fake = FakeHub(self, self.cache)

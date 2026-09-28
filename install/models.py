@@ -3,15 +3,16 @@
 """Install and verify the model a Splash selection names.
 
 Terms the installer modules share:
-- selection: what `--model OWNER/REPO[:VARIANT]` and its source options name
-  (Selection); its selection link, under the models root, points to what
-  serves it.
+- selection: what `--model OWNER/REPO[:VARIANT]` or `--model-dir DIRECTORY`
+  and its source options name (Selection); its selection link, under the
+  models root, points to what serves it.
 - assembly: the directory an upstream model is served from, of links to
   source snapshot files and its record, model.json (assembly.py), built and
-  published by upstream.py. A legacy Splash package is served from its own
-  Hub snapshot instead (legacy.py).
+  published by upstream.py. A local target directory is assembled the same
+  way, of links to the directory's own files. A legacy Splash package is
+  served from its own Hub snapshot instead (legacy.py).
 - source snapshot: a repository at one commit in the Hub cache, or a local
-  draft directory (hub.py).
+  target or draft directory (hub.py).
 
 This module holds what the installers share, and the command line.
 """
@@ -137,6 +138,27 @@ def parse_draft_model(value: str) -> str:
         ) from None
 
 
+def parse_model_dir(value: str) -> str:
+    # Like a local draft, a local target directory is recorded as an absolute
+    # path, so the installation it selects does not depend on the working
+    # directory.
+    path = Path(value).expanduser() if value else None
+    if path is None or not path.is_dir():
+        raise argparse.ArgumentTypeError(f"local model directory not found: {value}")
+    return str(path.resolve())
+
+
+def derived_model_id(directory) -> str:
+    """The API model ID a local target directory serves as: its folder name
+    under the `local` owner, reduced to the characters a repository ID may
+    hold. A name that reduces to nothing becomes `local/model`."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", Path(directory).name)
+    name = re.sub(r"\.{2,}", ".", re.sub(r"-{2,}", "-", name))
+    # 96 is the repository-ID bound the server's validation enforces.
+    name = name[:96].strip("-.") or "model"
+    return f"local/{name}"
+
+
 def hash_file(path: Path, digest) -> str:
     """The hex digest of path's content fed to digest, a hashlib object."""
     with path.open("rb") as file:
@@ -185,6 +207,18 @@ def selection_link(
     return models / f"{repo_id}{VARIANT_SEPARATOR}{variant}"
 
 
+def local_selection_link(
+    models: Path, directory: Path, *, language_only=False, draft_model=None
+) -> Path:
+    """The selection link of a local target directory with these source
+    options, in the same .selections place as a selected Hub model: the
+    directory has no repository ID to name a link."""
+    selection = json.dumps(
+        [str(directory), language_only, draft_model], separators=(",", ":")
+    )
+    return models / ".selections" / hashlib.sha256(selection.encode()).hexdigest()
+
+
 def selection_links(models: Path):
     """Every selection link under models, in the places selection_link names."""
     return [path for path in models.glob("*/*") if path.is_symlink()]
@@ -192,30 +226,54 @@ def selection_links(models: Path):
 
 @dataclass(frozen=True)
 class Selection:
-    """What --model and its source options select, and its selection link."""
+    """What --model or --model-dir and its source options select, and its
+    selection link."""
 
     model: str
-    repo_id: str
+    repo_id: str | None
     variant: str | None
     revision: str | None
     language_only: bool
     draft_model: str | None
     models_root: Path
     link: Path
+    directory: Path | None = None
 
     @classmethod
     def of(
-        cls, models_root, model, *, revision=None, language_only=False, draft_model=None
+        cls,
+        models_root,
+        model=None,
+        *,
+        directory=None,
+        revision=None,
+        language_only=False,
+        draft_model=None,
     ):
-        repo_id, variant = split_model_id(model)
         models_root = Path(models_root).resolve()
-        link = selection_link(
-            models_root,
-            model,
-            revision=revision,
-            language_only=language_only,
-            draft_model=draft_model,
-        )
+        if directory is not None:
+            if model is not None:
+                raise ModelError(
+                    "a local model directory and a repository ID are exclusive"
+                )
+            directory = Path(directory).expanduser().resolve()
+            model = derived_model_id(directory)
+            repo_id = variant = None
+            link = local_selection_link(
+                models_root,
+                directory,
+                language_only=language_only,
+                draft_model=draft_model,
+            )
+        else:
+            repo_id, variant = split_model_id(model)
+            link = selection_link(
+                models_root,
+                model,
+                revision=revision,
+                language_only=language_only,
+                draft_model=draft_model,
+            )
         return cls(
             model,
             repo_id,
@@ -225,6 +283,7 @@ class Selection:
             draft_model,
             models_root,
             link,
+            directory,
         )
 
 
@@ -278,11 +337,19 @@ def link_selection(link: Path, target: Path):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Install Splash runtime weights")
     parser.add_argument("--models", type=Path, default=MODELS)
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--model",
-        required=True,
         type=parse_model_id,
         help="Hugging Face repository ID (owner/repo[:variant])",
+    )
+    source.add_argument(
+        "--model-dir",
+        dest="model_dir",
+        type=parse_model_dir,
+        metavar="DIRECTORY",
+        help="local model directory: a Splash package, or an MLX/GGUF target "
+        "(with --draft-model)",
     )
     parser.add_argument("--revision", help="optional upstream branch, tag or commit")
     parser.add_argument(
@@ -299,7 +366,13 @@ def parse_args(argv=None):
     commands.add_parser("prepare")
     commands.add_parser("verify").add_argument("--full", action="store_true")
     commands.add_parser("link", help="print the selection link")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.model_dir is not None and args.revision:
+        # A local target directory has no Hub revision to follow. Whether it
+        # also needs --draft-model depends on what it holds: a Splash runtime
+        # package carries its own draft, an MLX or GGUF target names one.
+        parser.error("--revision requires a Hugging Face model ID")
+    return args
 
 
 def main(argv=None):
@@ -307,6 +380,7 @@ def main(argv=None):
     selection = Selection.of(
         args.models,
         args.model,
+        directory=args.model_dir,
         revision=args.revision,
         language_only=args.language_only,
         draft_model=args.draft_model,
@@ -323,17 +397,25 @@ def main(argv=None):
         import upstream
     try:
         if args.command == "prepare":
-            upstream.prepare(selection)
+            if selection.directory is not None:
+                upstream.prepare_local(selection)
+            else:
+                upstream.prepare(selection)
         else:
             kind = installation_kind(selection.link)
             if kind == ASSEMBLY:
                 assembly.verify(selection.link, full=args.full)
             elif kind == PACKAGE:
-                legacy.verify(selection.link, selection.repo_id, full=args.full)
+                if selection.directory is not None:
+                    legacy.verify_local(selection.link, full=args.full)
+                else:
+                    legacy.verify(selection.link, selection.repo_id, full=args.full)
             else:
-                raise ModelError(f"{args.model} is not installed in {args.models}")
+                raise ModelError(
+                    f"{args.model or args.model_dir} is not installed in {args.models}"
+                )
             print(
-                f"Splash model {args.model} preflight passed "
+                f"Splash model {args.model or args.model_dir} preflight passed "
                 f"({'full' if args.full else 'quick'})."
             )
     except (ModelError, OSError) as error:

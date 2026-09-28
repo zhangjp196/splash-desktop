@@ -120,44 +120,112 @@
   </div>
   <button id="new-chat" type="button">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-6"/><path d="m15 4 5 5M14 10l6-6"/></svg>
-    New chat
+    <span data-i18n="new-chat">New chat</span>
   </button>
-  <div class="recent-label">Recents</div>
+  <div class="recent-label" data-i18n="recents">Recents</div>
   <nav id="recents" aria-label="Recent chats"></nav>
-  <label class="credentials">API key (if required)
-    <input id="api-key" type="password" autocomplete="off" spellcheck="false" aria-label="API key">
+  <label class="credentials"><span data-i18n="api-key">API key (if required)</span>
+    <input id="api-key" type="password" autocomplete="off" spellcheck="false" data-i18n-aria="api-key">
   </label>
 </aside>
 <div id="scrim"></div>
 <header id="mobile-header">
-  <button id="menu" type="button" aria-label="Open sidebar"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  <button id="menu" type="button" data-i18n-aria="open-sidebar"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
   <div class="brand">Splash</div>
-  <button id="mobile-new" type="button" aria-label="New chat"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-6"/><path d="m15 4 5 5M14 10l6-6"/></svg></button>
+  <button id="mobile-new" type="button" data-i18n-aria="mobile-new"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-6"/><path d="m15 4 5 5M14 10l6-6"/></svg></button>
 </header>
 <main><div id="chat"></div></main>
 <form id="form">
-  <button id="attach" type="button" aria-label="Add images" title="Add images">
+  <button id="attach" type="button" data-i18n-aria="add-images" data-i18n-title="add-images">
     <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
   </button>
   <input id="image-input" type="file" accept="image/*" multiple hidden>
   <div class="composer">
-    <div id="attachments" aria-label="Attached images"></div>
-    <textarea id="input" rows="1" placeholder="Message Splash" autofocus></textarea>
+    <div id="attachments" data-i18n-aria="attached-images"></div>
+    <textarea id="input" rows="1" data-i18n-placeholder="placeholder" placeholder="Message Splash" autofocus></textarea>
   </div>
   <div class="toolbar">
-    <label class="effort"><span>Thinking</span>
-      <select id="effort" aria-label="Thinking effort">
-        <option value="xhigh">XHigh</option>
-        <option value="medium">Medium</option>
-        <option value="low">Low</option>
-        <option value="none">Off</option>
+    <label class="effort"><span data-i18n="thinking">Thinking</span>
+      <select id="effort" data-i18n-aria="thinking-effort">
+        <option value="xhigh" data-i18n="thinking-xhigh">XHigh</option>
+        <option value="medium" data-i18n="thinking-medium">Medium</option>
+        <option value="low" data-i18n="thinking-low">Low</option>
+        <option value="none" data-i18n="thinking-none">Off</option>
       </select>
     </label>
-    <button id="send" aria-label="Send">&#8593;</button>
+    <button id="send" data-i18n-aria="send">&#8593;</button>
   </div>
 </form>
 
 <script>
+  const I18N = {
+    en: {
+      'new-chat': 'New chat',
+      'recents': 'Recents',
+      'api-key': 'API key (if required)',
+      'placeholder': 'Message Splash',
+      'thinking': 'Thinking',
+      'thinking-xhigh': 'XHigh',
+      'thinking-medium': 'Medium',
+      'thinking-low': 'Low',
+      'thinking-none': 'Off',
+      'send': 'Send',
+      'stop': 'Stop',
+      'open-sidebar': 'Open sidebar',
+      'mobile-new': 'New chat',
+      'add-images': 'Add images',
+      'thinking-effort': 'Thinking effort',
+      'attached-images': 'Attached images',
+      'generating': 'Generating response',
+      'how-can-i-help': 'How can I help?',
+      'attached-image': 'Attached image',
+      'read-failed': 'Read failed',
+      'loading': 'Loading…',
+      'remove': 'Remove {name}',
+      'image': 'Image',
+      'connection-closed-early': 'Connection closed early'
+    },
+    zh: {
+      'new-chat': '新的对话',
+      'recents': '最近对话',
+      'api-key': 'API 密钥（如需要）',
+      'placeholder': '向 Splash 提问',
+      'thinking': '思考',
+      'thinking-xhigh': '非常高',
+      'thinking-medium': '中',
+      'thinking-low': '低',
+      'thinking-none': '关闭',
+      'send': '发送',
+      'stop': '停止',
+      'open-sidebar': '打开侧栏',
+      'mobile-new': '新的对话',
+      'add-images': '添加图片',
+      'thinking-effort': '思考级别',
+      'attached-images': '已附加图片',
+      'generating': '正在生成回复',
+      'how-can-i-help': '我能帮你做点什么？',
+      'attached-image': '附加图片',
+      'read-failed': '读取失败',
+      'loading': '加载中…',
+      'remove': '移除 {name}',
+      'image': '图片',
+      'connection-closed-early': '连接提前关闭'
+    }
+  };
+  const t = key => {
+    const language = (navigator.language || 'en').toLowerCase();
+    const table = I18N[language.startsWith('zh') ? 'zh' : 'en'];
+    return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : I18N.en[key] ?? key;
+  };
+  // Static text and attributes follow the interface language; the rest of the
+  // page calls t() for what it writes later.
+  function localize() {
+    document.documentElement.lang = (navigator.language || 'en');
+    document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+    document.querySelectorAll('[data-i18n-aria]').forEach(el => { el.setAttribute('aria-label', t(el.dataset.i18nAria)); });
+    document.querySelectorAll('[data-i18n-title]').forEach(el => { el.title = t(el.dataset.i18nTitle); });
+  }
   const $ = selector => document.querySelector(selector);
   const chat = $('#chat');
   const form = $('#form');
@@ -319,7 +387,7 @@
     const details = document.createElement('details');
     details.open = live;
     details.hidden = !message.reasoning_content;
-    details.innerHTML = '<summary>Thinking</summary><div class="reasoning"></div>';
+    details.innerHTML = `<summary>${t('thinking')}</summary><div class="reasoning"></div>`;
     details.querySelector('.reasoning').textContent = message.reasoning_content || '';
     const content = document.createElement('div');
     content.className = 'content';
@@ -327,7 +395,7 @@
     const waiting = document.createElement('div');
     waiting.className = 'waiting';
     waiting.hidden = !live || Boolean(message.content || message.reasoning_content);
-    waiting.setAttribute('aria-label', 'Generating response');
+    waiting.setAttribute('aria-label', t('generating'));
     const stats = document.createElement('div');
     stats.className = 'stats';
     stats.hidden = !message.tps;
@@ -353,7 +421,7 @@
         images.forEach(url => {
           const image = document.createElement('img');
           image.src = url;
-          image.alt = 'Attached image';
+          image.alt = t('attached-image');
           gallery.append(image);
         });
         box.append(gallery);
@@ -370,7 +438,7 @@
     if (!messages.length) {
       const empty = document.createElement('div');
       empty.id = 'empty';
-      empty.textContent = 'How can I help?';
+      empty.textContent = t('how-can-i-help');
       chat.append(empty);
     } else messages.forEach(message => addMessage(message));
   }
@@ -434,7 +502,7 @@
     attachments.forEach(attachment => {
       const item = document.createElement('div');
       item.className = 'attachment';
-      const name = attachment.name || 'Attached image';
+      const name = attachment.name || t('attached-image');
       item.title = name;
       const preview = document.createElement(attachment.url ? 'img' : 'span');
       if (attachment.url) {
@@ -442,13 +510,13 @@
         preview.alt = name;
       } else {
         preview.className = `attachment-status${attachment.error ? ' error' : ''}`;
-        preview.textContent = attachment.error ? 'Read failed' : 'Loading…';
+        preview.textContent = attachment.error ? t('read-failed') : t('loading');
         preview.setAttribute('role', 'status');
       }
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'remove-image';
-      remove.setAttribute('aria-label', `Remove ${name}`);
+      remove.setAttribute('aria-label', t('remove').replace('{name}', name));
       remove.textContent = '\u00d7';
       remove.addEventListener('click', () => {
         attachments = attachments.filter(value => value !== attachment);
@@ -504,7 +572,7 @@
 
   function setRunning(running) {
     send.textContent = running ? '\u25a0' : '\u2191';
-    send.setAttribute('aria-label', running ? 'Stop' : 'Send');
+    send.setAttribute('aria-label', running ? t('stop') : t('send'));
     effort.disabled = running;
     attach.disabled = running;
     $('#new-chat').disabled = running;
@@ -583,10 +651,10 @@
         if (done) break;
       }
       if (buffer) doneEvent ||= consume(buffer, assistant, box);
-      if (!doneEvent) throw new Error('Connection closed early');
+      if (!doneEvent) throw new Error(t('connection-closed-early'));
       box.querySelector('.waiting').hidden = true;
       messages.push(assistant);
-      persist(text || pendingAttachments[0]?.name || 'Image');
+      persist(text || pendingAttachments[0]?.name || t('image'));
     } catch (error) {
       messages.pop();
       userBox.remove();
@@ -640,6 +708,7 @@
   $('#mobile-new').addEventListener('click', newChat);
   $('#menu').addEventListener('click', () => document.body.classList.add('menu-open'));
   $('#scrim').addEventListener('click', () => document.body.classList.remove('menu-open'));
+  localize();
   renderChat();
   renderRecents();
   updateComposer();

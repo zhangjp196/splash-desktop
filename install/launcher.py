@@ -105,18 +105,20 @@ def _ensure_installed(selection):
         str(ROOT / "install/models.py"),
         "--models",
         str(selection.models_root),
-        "--model",
-        selection.model,
-        "prepare",
     ]
+    if selection.directory is not None:
+        command += ["--model-dir", str(selection.directory)]
+    else:
+        command += ["--model", selection.model]
     for flag, value in (
         ("--revision", selection.revision),
         ("--draft-model", selection.draft_model),
     ):
         if value is not None:
-            command[-1:-1] = [flag, value]
+            command += [flag, value]
     if selection.language_only:
-        command.insert(-1, "--language-only")
+        command.append("--language-only")
+    command.append("prepare")
     if subprocess.run(command, cwd=ROOT).returncode:
         raise LauncherError("model download or verification failed")
 
@@ -188,9 +190,19 @@ def serve(args):
                 f"Splash is already serving{_serve_lock_owner(lock)}; "
                 "stop it with Ctrl+C first"
             ) from None
+        selection = model_artifacts.Selection.of(
+            paths.MODELS,
+            args.model,
+            directory=args.model_dir,
+            revision=args.revision,
+            language_only=args.language_only,
+            draft_model=args.draft_model,
+        )
         lock.seek(0)
         lock.truncate()
-        json.dump({"pid": os.getpid(), "model": args.model, "port": args.port}, lock)
+        json.dump(
+            {"pid": os.getpid(), "model": selection.model, "port": args.port}, lock
+        )
         lock.flush()
         # Fail before downloads/builds if another service owns the selected port.
         # The HTTP server also binds before loading weights, closing the race.
@@ -200,13 +212,6 @@ def serve(args):
             raise LauncherError(
                 f"cannot bind {args.host}:{args.port}: {error}"
             ) from None
-        selection = model_artifacts.Selection.of(
-            paths.MODELS,
-            args.model,
-            revision=args.revision,
-            language_only=args.language_only,
-            draft_model=args.draft_model,
-        )
         _ensure_installed(selection)
         # A concurrent install may advance the selection link. Keep this
         # process's tokenizer, draft and target on one immutable assembly,
@@ -223,7 +228,7 @@ def serve(args):
             "--tokenizer",
             str(root / "tokenizer"),
             "--model",
-            args.model,
+            selection.model,
             "--binary",
             str(paths.BINARY),
             "--host",
@@ -454,7 +459,9 @@ def parse_args(argv=None):
         epilog=(
             "Examples:\n"
             "  splash serve --model mlx-community/Qwen3.8-27B-4bit\n"
-            "  splash serve --model unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --max-context 128K\n\n"
+            "  splash serve --model unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --max-context 128K\n"
+            "  splash serve --model-dir ~/models/Qwen3.8-27B-4bit "
+            "--draft-model ~/models/Qwen3.8-27B-DFlash2\n\n"
             "After Ready, open http://127.0.0.1:8000 or connect an installed agent.\n"
             "The startup summary and /status report the effective context limit.\n"
             "A client may impose a smaller limit. Keep this terminal open; Ctrl+C stops serving."
@@ -472,12 +479,20 @@ def parse_args(argv=None):
         default=os.environ.get("SPLASH_PORT", str(PORT)),
         help="HTTP port (default: SPLASH_PORT or 8000)",
     )
-    server.add_argument(
+    source = server.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--model",
         type=model_artifacts.parse_model_id,
-        required=True,
         metavar="OWNER/REPO[:VARIANT]",
         help="upstream Hugging Face model, with a GGUF variant after ':' (e.g. :UD-Q4_K_M)",
+    )
+    source.add_argument(
+        "--model-dir",
+        dest="model_dir",
+        type=model_artifacts.parse_model_dir,
+        metavar="DIRECTORY",
+        help="local model directory: a Splash package, or an MLX/GGUF target "
+        "with --draft-model",
     )
     server.add_argument(
         "--revision",
@@ -557,6 +572,10 @@ def parse_args(argv=None):
     for name in clients.INSTALL_URLS:
         commands.add_parser(name, help=f"connect {name} to the running server")
     args = parser.parse_args(argv)
+    if args.command == "serve" and args.model_dir is not None and args.revision:
+        # A local target directory has no Hub revision. Its draft need is its
+        # own: a Splash package carries one, an MLX or GGUF target names one.
+        parser.error("--revision requires --model, not --model-dir")
     if (
         args.command == "serve"
         and args.default_reasoning_effort is not None

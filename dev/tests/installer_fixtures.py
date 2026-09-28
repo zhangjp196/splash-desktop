@@ -75,6 +75,18 @@ def selection(root, model=MODEL, **options):
     )
 
 
+def local_selection(root, directory, **options):
+    """A local target directory's selection under root/models, text only
+    unless options say. A Splash package needs no draft; an MLX or GGUF
+    target names one."""
+    return models.Selection.of(
+        root / "models",
+        directory=str(directory),
+        language_only=options.get("language_only", True),
+        draft_model=options.get("draft_model"),
+    )
+
+
 def http_error(status):
     request = httpx.Request("GET", "https://huggingface.co/api/models/owner/model")
     return HfHubHTTPError(

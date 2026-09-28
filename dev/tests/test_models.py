@@ -713,6 +713,96 @@ class ModelArtifactTest(unittest.TestCase):
             installer.selection_link(models, "owner/repo"), models / "owner/repo"
         )
 
+    def test_a_local_model_directory_derives_its_id_and_link(self):
+        target = self.root / "My Model 27B"
+        target.mkdir()
+        draft = self.root / "draft"
+        draft.mkdir()
+        chosen = installer.Selection.of(
+            self.root / "models",
+            directory=str(target),
+            language_only=True,
+            draft_model=str(draft.resolve()),
+        )
+        self.assertEqual(chosen.model, "local/My-Model-27B")
+        self.assertIsNone(chosen.repo_id)
+        self.assertIsNone(chosen.variant)
+        self.assertEqual(chosen.directory, target.resolve())
+        self.assertEqual(
+            chosen.link,
+            installer.local_selection_link(
+                (self.root / "models").resolve(),
+                target.resolve(),
+                language_only=True,
+                draft_model=str(draft.resolve()),
+            ),
+        )
+
+    def test_a_local_model_directory_takes_no_revision(self):
+        target = self.root / "model"
+        target.mkdir()
+        # A directory alone is valid: whether it needs a draft depends on what
+        # it holds (a Splash package carries one), so only --revision is
+        # refused here.
+        args = installer.parse_args(["--model-dir", str(target), "prepare"])
+        self.assertEqual(args.model_dir, str(target.resolve()))
+        for arguments in (
+            ["--model-dir", str(target), "--draft-model", "/nonexistent", "prepare"],
+            [
+                "--model-dir",
+                str(target),
+                "--draft-model",
+                str(target),
+                "--revision",
+                "a" * 40,
+                "prepare",
+            ],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                installer.parse_args(arguments)
+
+    def test_a_local_model_directory_is_exclusive_with_a_repository_id(self):
+        target = self.root / "model"
+        target.mkdir()
+        with self.assertRaises(SystemExit):
+            installer.parse_args(
+                ["--model", "owner/repo", "--model-dir", str(target), "prepare"]
+            )
+
+    def test_link_prints_a_local_model_directorys_selection_link(self):
+        models = self.root / "models"
+        draft = self.root / "draft"
+        draft.mkdir()
+        target = self.root / "Qwen3.8-27B-4bit"
+        target.mkdir()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(
+                installer.main(
+                    [
+                        "--models",
+                        str(models),
+                        "--model-dir",
+                        str(target),
+                        "--draft-model",
+                        os.path.relpath(draft),
+                        "--language-only",
+                        "link",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(
+            output.getvalue().strip(),
+            str(
+                installer.local_selection_link(
+                    models.resolve(),
+                    target.resolve(),
+                    language_only=True,
+                    draft_model=str(draft.resolve()),
+                )
+            ),
+        )
+
     def test_link_prints_the_selection_link_of_the_source_options(self):
         # make's MODEL_ROOT is this output; a relative draft folder names the
         # installation splash serve --draft-model selects from the same folder.

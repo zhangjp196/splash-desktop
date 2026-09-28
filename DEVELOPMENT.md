@@ -22,7 +22,11 @@ Splash identifies the model from its own metadata and pairs the DFlash2 draft
 trained for it. The first serve sets up Python dependencies, downloads the
 model and its draft, and prepares the weights once
 ([Weight preparation](#weight-preparation)); each start follows the model's
-revision ([Revisions](#revisions)). Legacy Splash packages remain loadable
+revision ([Revisions](#revisions)). `--model-dir DIRECTORY` serves a target
+already on disk instead, an MLX affine 4-bit, group-64 directory or a
+directory holding one GGUF, with the matching DFlash2 draft named by
+`--draft-model` ([Local model directories](#local-model-directories)).
+Legacy Splash packages remain loadable
 ([Legacy Splash packages](#legacy-splash-packages)). Public repositories need
 no login; private or gated ones need `HF_TOKEN` or `hf auth login`. Ctrl+C
 stops serving, and a second Ctrl+C stops the engine at once; stop before
@@ -92,6 +96,7 @@ loopback, so use a listener that includes loopback when launching agents locally
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--revision` | Default branch | Select an upstream target branch, tag, or commit. See [revisions](#revisions). |
+| `--model-dir` | None | Serve a local directory: a Splash package (no draft) or an MLX/GGUF target with `--draft-model`. See [local model directories](#local-model-directories). |
 | `--draft-model` | Matching DFlash2 checkpoint | Override the draft with a compatible repository or local directory. See [drafts](#drafts). |
 | `--language-only` | Off | Skip vision loading; image and PDF input is rejected. See [vision](#vision). |
 | `--host` | `127.0.0.1` | HTTP bind address. |
@@ -283,6 +288,36 @@ quantizes each projection to 4 bits in groups of 64 as MLX's affine
 quantization rounds it and copies every other tensor as stored. For both
 families the prepared files are byte for byte the Q4 drafts of the Splash
 packages.
+
+### Local model directories
+
+`--model-dir DIRECTORY` serves a target already on disk, without a Hub
+repository for it. A directory holding an MLX affine 4-bit, group-64 target,
+or one GGUF, is inspected by the same adapters as an upstream repository (its
+own configuration or GGUF header identifies the family), and installed as an
+assembly of links to its own files
+([Upstream model loading](#upstream-model-loading)). A directory that is a
+Splash runtime package instead verifies its manifest and artifacts and serves
+directly from the directory, linked to from the selection
+([Legacy Splash packages](#legacy-splash-packages)). The path is recorded
+absolute, so the selection does not depend on the working directory, and an
+MLX or GGUF target's content is verified on every start: a changed file fails
+verification and the assembly is prepared and published again. A directory
+with several target GGUFs is ambiguous and refused, listing them; keep one
+variant per directory.
+
+A local target has no repository revision to follow and no repository whose
+draft Splash may select. A Splash package carries its own DFlash2 draft, so
+none is needed; an MLX or GGUF target requires `--draft-model`, which names
+the matching DFlash2 checkpoint as a local directory, needing no request, or
+as a repository, whose default branch is followed like an upstream draft
+([Drafts](#drafts)). `--revision` is rejected, and `--language-only` applies
+as it does to an upstream model; a Splash package always serves its vision and
+rejects the source options alongside it. The API model ID is derived from the
+directory name as `local/<name>`, reduced to the characters a repository ID
+allows; `--served-model-name` adds aliases as usual. A Hugging Face cache is
+not involved: the files are read where they are. A Splash package is served
+from the directory it names, which the selection link points to.
 
 ### Tokenizer and chat templates
 
@@ -1146,6 +1181,41 @@ publish. Build bottles on the oldest supported macOS. Bottle/check commands use
 a temporary tap and remove their installation; they refuse to replace an existing
 Splash installation. The install check requires a poured bottle and runs the
 bundled launcher without a compiler or separate Python installation.
+
+### macOS app and disk image
+
+`make package-dmg` packages a self-contained `Splash-<version>.dmg`: the
+native SwiftUI control panel (`macos/`) with the runtime archive embedded
+under `Contents/Resources/runtime`, so installing the app needs no other
+download and neither does first run (only the chosen model does):
+
+```sh
+make package RELEASE_VERSION=1.0.0
+make package-dmg RELEASE_VERSION=1.0.0     # needs the archive above
+```
+
+The app owns no model or engine code: it locates the embedded runtime,
+launches `install/launcher.py serve`, shows its log and a live panel of
+`/status` metrics (decode/prefill rates, request counts, Metal memory, caches
+and admission waits), and keeps a menu bar item to start and stop it. The
+conversation is the server's own web page: a conspicuous button opens
+`chat.html` in the browser, and the main window holds no chat. Its labels and
+the chat page follow the system interface language (English and Simplified
+Chinese are bundled). The model
+section offers three modes — a Splash package (its draft is built in), an
+upstream MLX or GGUF model (the installer pairs its draft), or a local
+directory per [local model directories](#local-model-directories) — and the
+server section exposes port, memory, context, KV format, text-only, an API
+key, model aliases, an SSD cache quota, request-size and default reasoning
+effort. The bundle is built with Xcode's Swift toolchain, the placeholder icon
+is generated at package time, and neither the app nor the DMG is code-signed:
+it is for local installation, and distributing it requires signing and
+notarization. `make package-app` builds just `dist/Splash.app` (no DMG), and
+`RUNTIME_DIR=<directory>` overrides the archive with a staged runtime
+directory, for a source checkout without one. `SOURCE_OVERLAY=1` embeds this
+checkout's `install/` and `server/` instead of the archive's, so a published
+engine serves the working tree's installer and server code without a local
+rebuild.
 
 To publish, tag the verified release commit in `incoai/splash` with the
 version (no `v` prefix), preserving existing history and tags. Create a GitHub

@@ -79,6 +79,12 @@ Vision and the tokenizer come from the target model's source.
 [Model loading and compatibility](DEVELOPMENT.md#upstream-model-loading) ·
 [Supported formats](DEVELOPMENT.md#gguf-targets)
 
+To serve weights already on disk instead of downloading them, pass
+`--model-dir` — a Splash package needs no draft; an MLX or GGUF folder names
+the matching draft, for example
+`splash serve --model-dir ~/models/Qwen3.8-27B-4bit --draft-model ~/models/Qwen3.8-27B-DFlash2`.
+[Local model directories](DEVELOPMENT.md#local-model-directories)
+
 ## Settings
 
 Memory and context are sized automatically, up to the model's native context
@@ -154,6 +160,8 @@ tuning required.
 
 ## More
 
+- [macOS app](DEVELOPMENT.md#macos-app-and-disk-image): a DMG with a control
+  panel, a live status panel, and the chat page opened in your browser.
 - [Development](DEVELOPMENT.md): build from source, architecture, tests, and releases.
 - [Issues and feedback](https://github.com/incoai/splash/issues)
 - [Apache-2.0](LICENSE). GGUF kernels include MIT-licensed material from
