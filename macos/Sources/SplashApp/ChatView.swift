@@ -14,17 +14,8 @@ struct ChatView: View {
         VStack(spacing: 0) {
             toolbar
             Divider()
-            if !model.isRunning {
-                ContentUnavailableView(
-                    L10n.string("chat.empty.title"),
-                    systemImage: "bubble.left.and.bubble.right",
-                    description: Text(verbatim: L10n.string("chat.empty.description"))
-                )
-                .padding(.top, 80)
-            } else {
-                messageList
-                inputBar
-            }
+            messageList
+            inputBar
         }
         .background(.background)
     }
@@ -99,19 +90,27 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 10) {
-                    ForEach(model.chatMessages) { message in
-                        MessageBubble(
-                            message: message,
-                            streaming: model.chatSending
-                                && message.id == model.chatMessages.last?.id
+                    if !model.isRunning {
+                        ContentUnavailableView(
+                            L10n.string("chat.empty.title"),
+                            systemImage: "bubble.left.and.bubble.right",
+                            description: Text(verbatim: L10n.string("chat.empty.description"))
                         )
-                        .id(message.id)
-                    }
-                    if model.chatMessages.isEmpty {
+                        .padding(.top, 60)
+                    } else if model.chatMessages.isEmpty {
                         Text(verbatim: L10n.string("chat.hint"))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .padding(.top, 60)
+                    } else {
+                        ForEach(model.chatMessages) { message in
+                            MessageBubble(
+                                message: message,
+                                streaming: model.chatSending
+                                    && message.id == model.chatMessages.last?.id
+                            )
+                            .id(message.id)
+                        }
                     }
                 }
                 .padding(14)
@@ -137,6 +136,7 @@ struct ChatView: View {
                 .textFieldStyle(.plain)
                 .focused($inputFocused)
                 .onSubmit { model.sendChat() }
+                .disabled(!model.isRunning)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
@@ -155,7 +155,10 @@ struct ChatView: View {
                     Label(L10n.string("chat.send"), systemImage: "paperplane.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.chatInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    !model.isRunning
+                        || model.chatInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
             }
         }
         .padding(12)
