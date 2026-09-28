@@ -1,9 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Model source and server settings. A Splash package carries its own DFlash2
-/// draft and vision, an upstream MLX/GGUF model's draft is selected by the
-/// installer, and a local directory names one unless it is a Splash package.
+/// Model source and server settings, grouped by what they decide: which model,
+/// what the server exposes, how much memory it may use, what it does while
+/// idle, and what a request may carry. Every field feeds the settings value
+/// SQLite keeps, so this form is where the next launch comes from.
 struct ControlPanelView: View {
     @EnvironmentObject private var model: AppModel
 
@@ -17,33 +18,38 @@ struct ControlPanelView: View {
                 }
                 .pickerStyle(.menu)
                 .disabled(model.isRunning)
+                .onChange(of: model.modelMode) { edited() }
 
                 switch model.modelMode {
                 case .splash:
                     ModelField(
                         modelID: $model.modelID,
                         catalog: model.catalogIDs.filter { $0.lowercased().contains("splash") },
-                        disabled: model.isRunning
+                        disabled: model.isRunning,
+                        onEdit: edited
                     )
                 case .upstream:
                     ModelField(
                         modelID: $model.modelID,
                         catalog: model.catalogIDs.filter { !$0.lowercased().contains("splash") },
-                        disabled: model.isRunning
+                        disabled: model.isRunning,
+                        onEdit: edited
                     )
                 case .local:
                     DirectoryField(
                         title: L10n.string("field.target"),
                         path: $model.modelDirectory,
-                        prompt: L10n.string("field.target.prompt")
+                        prompt: L10n.string("field.target.prompt"),
+                        disabled: model.isRunning,
+                        onEdit: edited
                     )
-                    .disabled(model.isRunning)
                     DirectoryField(
                         title: L10n.string("field.draft"),
                         path: $model.draftDirectory,
-                        prompt: L10n.string("field.draft.prompt")
+                        prompt: L10n.string("field.draft.prompt"),
+                        disabled: model.isRunning,
+                        onEdit: edited
                     )
-                    .disabled(model.isRunning)
                 }
             } header: {
                 Label(L10n.string("section.model"), systemImage: "cube.box")
@@ -53,8 +59,10 @@ struct ControlPanelView: View {
                 TextField(L10n.string("field.port"), value: $model.port, format: .number)
                     .frame(width: 120)
                     .disabled(model.isRunning)
+                    .onChange(of: model.port) { edited() }
                 Toggle(L10n.string("field.language_only"), isOn: $model.languageOnly)
                     .disabled(model.isRunning || model.modelMode == .splash)
+                    .onChange(of: model.languageOnly) { edited() }
                 Picker(L10n.string("field.kv"), selection: $model.kvFormat) {
                     Text(verbatim: L10n.string("kv.int8")).tag("int8")
                     Text(verbatim: L10n.string("kv.bf16")).tag("bf16")
@@ -62,6 +70,7 @@ struct ControlPanelView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 220)
                 .disabled(model.isRunning)
+                .onChange(of: model.kvFormat) { edited() }
             } header: {
                 Label(L10n.string("section.server"), systemImage: "network")
             }
@@ -69,46 +78,65 @@ struct ControlPanelView: View {
             Section {
                 TextField(L10n.string("field.max_memory"), text: $model.maxMemory)
                     .disabled(model.isRunning)
+                    .onChange(of: model.maxMemory) { edited() }
                 TextField(L10n.string("field.max_context"), text: $model.maxContext)
                     .disabled(model.isRunning)
+                    .onChange(of: model.maxContext) { edited() }
                 TextField(L10n.string("field.max_cache_disk"), text: $model.maxCacheDisk)
                     .disabled(model.isRunning)
+                    .onChange(of: model.maxCacheDisk) { edited() }
+            } header: {
+                Label(L10n.string("section.memory"), systemImage: "memorychip")
+            }
+
+            Section {
                 TextField(L10n.string("field.idle_offload"), text: $model.idleOffloadSeconds)
                     .disabled(model.isRunning)
-                TextField(L10n.string("field.auto_stop"), text: $model.autoStopSeconds)
-                    .disabled(model.isRunning)
+                    .onChange(of: model.idleOffloadSeconds) { edited() }
                 TextField(L10n.string("field.residency"), text: $model.residencySeconds)
                     .disabled(model.isRunning)
+                    .onChange(of: model.residencySeconds) { edited() }
             } header: {
-                Label(L10n.string("section.limits"), systemImage: "slider.horizontal.3")
+                Label(L10n.string("section.idle"), systemImage: "leaf")
+            } footer: {
+                Text(verbatim: L10n.string("footer.idle"))
             }
 
             Section {
                 SecureField(L10n.string("field.api_key"), text: $model.apiKey)
                     .disabled(model.isRunning)
+                    .onChange(of: model.apiKey) { edited() }
                 TextField(L10n.string("field.served_names"), text: $model.servedNames)
                     .disabled(model.isRunning)
+                    .onChange(of: model.servedNames) { edited() }
                 TextField(L10n.string("field.max_request_size"), text: $model.maxRequestSize)
                     .disabled(model.isRunning)
+                    .onChange(of: model.maxRequestSize) { edited() }
                 Picker(L10n.string("field.reasoning_effort"), selection: $model.reasoningEffort) {
                     Text(verbatim: L10n.string("reasoning.default")).tag("")
-                    ForEach(["none", "minimal", "low", "medium", "high", "xhigh", "max"], id: \.self) { effort in
+                    ForEach(ServerSettings.reasoningEfforts, id: \.self) { effort in
                         Text(verbatim: effort).tag(effort)
                     }
                 }
                 .pickerStyle(.menu)
                 .disabled(model.isRunning)
+                .onChange(of: model.reasoningEffort) { edited() }
             } header: {
-                Label(L10n.string("section.advanced"), systemImage: "gearshape.2")
+                Label(L10n.string("section.request"), systemImage: "text.bubble")
             }
 
             Section {
                 HStack {
-                    Button(L10n.string("start"), action: model.start)
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .disabled(!model.canStart)
+                    Label(L10n.string("control.saved"), systemImage: "externaldrive.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                     Spacer()
+                    Button {
+                        model.restoreDefaultSettings()
+                    } label: {
+                        Label(L10n.string("control.defaults"), systemImage: "arrow.counterclockwise")
+                    }
+                    .disabled(model.isRunning)
                 }
             }
         }
@@ -123,6 +151,12 @@ struct ControlPanelView: View {
         case .local: return L10n.string("mode.local")
         }
     }
+
+    /// Every field routes its edits here, so a keystroke anywhere in the form
+    /// schedules one debounced write of the whole settings value.
+    private func edited() {
+        model.settingsEdited()
+    }
 }
 
 /// A model ID field with a menu of matching catalog examples, kept in sync:
@@ -131,16 +165,21 @@ private struct ModelField: View {
     @Binding var modelID: String
     let catalog: [String]
     let disabled: Bool
+    var onEdit: () -> Void = {}
 
     var body: some View {
         HStack {
             TextField("owner/repo[:variant]", text: $modelID)
                 .textFieldStyle(.roundedBorder)
                 .disabled(disabled)
+                .onChange(of: modelID) { onEdit() }
             if !catalog.isEmpty {
                 Menu(L10n.string("examples")) {
                     ForEach(catalog, id: \.self) { identifier in
-                        Button(identifier) { modelID = identifier }
+                        Button(identifier) {
+                            modelID = identifier
+                            onEdit()
+                        }
                     }
                 }
                 .fixedSize()
@@ -155,6 +194,8 @@ private struct DirectoryField: View {
     let title: String
     @Binding var path: String
     let prompt: String
+    var disabled = false
+    var onEdit: () -> Void = {}
 
     var body: some View {
         LabeledContent(title) {
@@ -164,7 +205,11 @@ private struct DirectoryField: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Button(L10n.string("choose"), action: choose)
+                Button(L10n.string("choose")) {
+                    choose()
+                    onEdit()
+                }
+                .disabled(disabled)
             }
         }
     }

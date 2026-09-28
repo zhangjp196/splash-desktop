@@ -46,7 +46,7 @@ struct SplashApp: App {
         WindowGroup("Splash") {
             RootView()
                 .environmentObject(model)
-                .frame(minWidth: 880, minHeight: 620)
+                .frame(minWidth: 900, minHeight: 660)
         }
         .commands {
             CommandGroup(replacing: .newItem) {}

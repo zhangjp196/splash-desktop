@@ -96,7 +96,7 @@ final class AppModel: ObservableObject {
     /// How the launcher is asked for a target. A Splash package carries its
     /// own DFlash2 draft; an upstream MLX or GGUF model's draft is selected
     /// by the installer; a local directory names one unless it is a package.
-    enum ModelMode: String, CaseIterable, Identifiable {
+    enum ModelMode: String, CaseIterable, Identifiable, Codable {
         case splash, upstream, local
         var id: String { rawValue }
     }
@@ -106,21 +106,22 @@ final class AppModel: ObservableObject {
     @Published var contextTokens: Int?
     @Published var live = LiveStatus()
 
+    // The first-launch values live in ServerSettings; the store replaces them
+    // below before the window is shown.
     @Published var modelMode: ModelMode = .upstream
-    @Published var modelID = "mlx-community/Qwen3.8-27B-4bit"
+    @Published var modelID = ServerSettings.First.modelID
     @Published var modelDirectory = ""
     @Published var draftDirectory = ""
-    @Published var port = 8000
+    @Published var port = ServerSettings.First.port
     @Published var languageOnly = false
     @Published var maxMemory = ""
     @Published var maxContext = ""
-    @Published var kvFormat = "int8"
+    @Published var kvFormat = ServerSettings.First.kvFormat
     @Published var apiKey = ""
     @Published var servedNames = ""
-    @Published var maxCacheDisk = ""
-    @Published var idleOffloadSeconds = "10"
-    @Published var autoStopSeconds = ""
-    @Published var residencySeconds = "10"
+    @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
+    @Published var idleOffloadSeconds = ServerSettings.First.idleOffloadSeconds
+    @Published var residencySeconds = ServerSettings.First.residencySeconds
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
 
@@ -137,14 +138,16 @@ final class AppModel: ObservableObject {
     private var process: Process?
     private var poll: Task<Void, Never>?
     private var stopping = false
+    /// True while stored settings are being applied, so the assignments do not
+    /// read as edits and schedule a save of what was just loaded.
+    private var restoring = false
+    private var pendingSave: Task<Void, Never>?
+    private let store = SettingsStore()
     // A server the app found already running on the configured port (its PID
     // from the launcher's serve-<port>.lock), shown and stoppable like its own.
     var foreignPID: pid_t?
     private var offlineCount = 0
     private let statusFetcher = LiveStatusFetcher()
-    // For the idle auto-stop: when a request last made the engine work.
-    private var lastRequestActivity = Date()
-    private var previousSubmitted = 0
 
     let catalogIDs = Runtime.catalog
 
@@ -154,6 +157,11 @@ final class AppModel: ObservableObject {
             language = stored
         }
         applyLanguage()
+        let stored = store.hasStoredSettings
+        applySettings(store.load())
+        // The first launch records what the app opened with, so the settings
+        // are on disk before the first edit rather than appearing from nowhere.
+        if !stored { _ = saveSettings() }
         // A server left over from a previous session is detected and taken
         // over asynchronously.
         Task { @MainActor in
@@ -169,6 +177,87 @@ final class AppModel: ObservableObject {
         case .english: L10n.languageOverride = "en"
         }
         UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey)
+    }
+
+    // MARK: Settings
+
+    /// The settings the form currently shows, the value SQLite keeps.
+    var settings: ServerSettings {
+        var settings = ServerSettings()
+        settings.modelMode = modelMode
+        settings.modelID = modelID
+        settings.modelDirectory = modelDirectory
+        settings.draftDirectory = draftDirectory
+        settings.port = port
+        settings.languageOnly = languageOnly
+        settings.kvFormat = kvFormat
+        settings.maxMemory = maxMemory
+        settings.maxContext = maxContext
+        settings.maxCacheDisk = maxCacheDisk
+        settings.idleOffloadSeconds = idleOffloadSeconds
+        settings.residencySeconds = residencySeconds
+        settings.maxRequestSize = maxRequestSize
+        settings.apiKey = apiKey
+        settings.servedNames = servedNames
+        settings.reasoningEffort = reasoningEffort
+        return settings
+    }
+
+    /// Changes when any setting does, so a view can autosave on a real edit
+    /// rather than on every keystroke of the field being typed in.
+    var settingsFingerprint: String { settings.fingerprint }
+
+    /// Show the settings and write them out. The autosave calls this after a
+    /// pause in typing; quitting and the defaults button call it directly.
+    @discardableResult
+    func saveSettings() -> Bool {
+        pendingSave?.cancel()
+        pendingSave = nil
+        return store.save(settings)
+    }
+
+    /// Autosave, coalescing a burst of edits into one write.
+    func scheduleSettingsSave() {
+        pendingSave?.cancel()
+        pendingSave = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled else { return }
+            self?.saveSettings()
+        }
+    }
+
+    /// Return the form to the values the app opened with, leaving a running
+    /// server alone: these are the next launch's settings, not this one's.
+    func restoreDefaultSettings() {
+        applySettings(.default)
+        saveSettings()
+    }
+
+    private func applySettings(_ settings: ServerSettings) {
+        restoring = true
+        defer { restoring = false }
+        modelMode = settings.modelMode
+        modelID = settings.modelID
+        modelDirectory = settings.modelDirectory
+        draftDirectory = settings.draftDirectory
+        port = settings.port
+        languageOnly = settings.languageOnly
+        kvFormat = settings.kvFormat
+        maxMemory = settings.maxMemory
+        maxContext = settings.maxContext
+        maxCacheDisk = settings.maxCacheDisk
+        idleOffloadSeconds = settings.idleOffloadSeconds
+        residencySeconds = settings.residencySeconds
+        maxRequestSize = settings.maxRequestSize
+        apiKey = settings.apiKey
+        servedNames = settings.servedNames
+        reasoningEffort = settings.reasoningEffort
+    }
+
+    /// Every edited field calls this, so one place decides when to write.
+    func settingsEdited() {
+        guard !restoring else { return }
+        scheduleSettingsSave()
     }
 
     // MARK: Derived state
@@ -223,8 +312,6 @@ final class AppModel: ObservableObject {
         contextTokens = nil
         live = LiveStatus()
         stopping = false
-        lastRequestActivity = Date()
-        previousSubmitted = 0
         var arguments = [launcher.path, "serve"]
         switch modelMode {
         case .splash, .upstream:
@@ -343,8 +430,6 @@ final class AppModel: ObservableObject {
             contextTokens = tokens
         }
         append(L10n.format("log.attached", foreignPID ?? 0) + "\n")
-        lastRequestActivity = Date()
-        previousSubmitted = 0
         phase = .ready
         pollStatus()
     }
@@ -365,6 +450,9 @@ final class AppModel: ObservableObject {
     /// Stop every tracked server before the app leaves, without waiting on a
     /// second sleep: the app delegate calls this synchronously on quit.
     func stopOnQuit() {
+        // Flush a debounced edit before the process goes away, so quitting in
+        // the middle of typing still keeps what was typed.
+        _ = saveSettings()
         poll?.cancel()
         poll = nil
         stopping = true
@@ -420,21 +508,9 @@ final class AppModel: ObservableObject {
         poll = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 await self?.refreshStatus()
-                await self?.autoStopIfIdle()
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
-    }
-
-    /// LM Studio-style engine unload: after the configured idle minutes with
-    /// no request activity, stop the server so its memory returns to the host.
-    private func autoStopIfIdle() async {
-        guard phase == .ready,
-              let seconds = Int(autoStopSeconds), seconds > 0,
-              Date().timeIntervalSince(lastRequestActivity) >= Double(seconds)
-        else { return }
-        append(L10n.format("log.auto_stopped", seconds) + "\n")
-        stop()
     }
 
     private func refreshStatus() async {
@@ -508,12 +584,6 @@ final class AppModel: ObservableObject {
             status.idleOffloadBytes = offload["bytes"] as? UInt64
         }
         status.updated = true
-        if status.submitted != previousSubmitted
-            || (status.decodeTokensPerSecond ?? 0) > 0
-            || (status.prefillTokensPerSecond ?? 0) > 0 {
-            lastRequestActivity = Date()
-            previousSubmitted = status.submitted
-        }
         live = status
     }
 }

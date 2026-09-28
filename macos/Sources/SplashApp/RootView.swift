@@ -1,45 +1,73 @@
 import SwiftUI
 
-/// The control panel: settings before serving, a live status panel and the
-/// log once it has. Conversations live in the server's own web page, opened
-/// in the browser.
+/// The window: a header that always shows the state and the actions, and the
+/// three views the app has. Live leads, because the running numbers are what
+/// the window is opened for; Control comes before the log, which is the last
+/// thing anyone reads.
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var tab = Tab.control
+    @State private var tab = Tab.live
 
-    enum Tab: Hashable { case control, live, log }
+    enum Tab: Hashable, CaseIterable {
+        case live, control, log
+
+        var title: String {
+            switch self {
+            case .live: return L10n.string("view.live")
+            case .control: return L10n.string("view.control")
+            case .log: return L10n.string("view.log")
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .live: return "chart.line.uptrend.xyaxis"
+            case .control: return "slider.horizontal.3"
+            case .log: return "terminal"
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             Header()
             Divider()
+            TabBar(selection: $tab)
+            Divider()
             switch tab {
-            case .control: ControlPanelView()
             case .live: LivePane()
+            case .control: ControlPanelView()
             case .log: LogPane()
             }
         }
         .background(.background)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Picker("", selection: $tab) {
-                    Label(L10n.string("view.control"), systemImage: "slider.horizontal.3")
-                        .tag(Tab.control)
-                    Label(L10n.string("view.live"), systemImage: "chart.line.uptrend.xyaxis")
-                        .tag(Tab.live)
-                    Label(L10n.string("view.log"), systemImage: "terminal")
-                        .tag(Tab.log)
-                }
-                .labelStyle(.titleAndIcon)
-                .pickerStyle(.segmented)
-                .frame(width: 360)
+    }
+}
+
+/// The navigation band under the header: the three views, full width, so the
+/// window's shape is obvious and the header keeps only state and actions.
+private struct TabBar: View {
+    @Binding var selection: RootView.Tab
+
+    var body: some View {
+        Picker("", selection: $selection) {
+            ForEach(RootView.Tab.allCases, id: \.self) { tab in
+                Label(tab.title, systemImage: tab.systemImage).tag(tab)
             }
         }
+        .labelStyle(.titleAndIcon)
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
     }
 }
 
 /// The brand row: a gradient mark, the running state as a pill, and the
-/// primary actions, on the window's toolbar material.
+/// primary actions, on a bar of the window's own material. It carries no
+/// navigation, so the tab band below it is the only place the window changes
+/// what it shows.
 private struct Header: View {
     @EnvironmentObject private var model: AppModel
 

@@ -7,7 +7,8 @@ struct LivePane: View {
 
     var body: some View {
         ScrollView {
-            if !model.live.updated {
+            let live = model.live
+            if !live.updated {
                 ContentUnavailableView(
                     L10n.string("live.empty.title"),
                     systemImage: "chart.line.uptrend.xyaxis",
@@ -15,8 +16,8 @@ struct LivePane: View {
                 )
                 .padding(.top, 80)
             } else {
-                let live = model.live
                 VStack(alignment: .leading, spacing: 22) {
+                    throughput(live)
                     MetricSection(
                         title: L10n.string("live.serving"),
                         systemImage: "bolt.fill",
@@ -44,6 +45,35 @@ struct LivePane: View {
         .background(.background)
     }
 
+    /// The three numbers that decide whether a request feels fast, given the
+    /// full width so they are readable at a glance from across the desk.
+    private func throughput(_ live: LiveStatus) -> some View {
+        HStack(spacing: 12) {
+            HeroCard(
+                title: L10n.string("live.decode"),
+                value: rate(live.decodeTokensPerSecond),
+                unit: L10n.string("live.caption.tokens_per_second"),
+                systemImage: "speedometer",
+                tint: .green
+            )
+            HeroCard(
+                title: L10n.string("live.prefill"),
+                value: rate(live.prefillTokensPerSecond),
+                unit: L10n.string("live.caption.tokens_per_second"),
+                systemImage: "arrow.down.to.line",
+                tint: .teal
+            )
+            HeroCard(
+                title: L10n.string("live.draft_acceptance"),
+                value: percent(live.draftAcceptanceRate),
+                unit: L10n.string("live.caption.draft_acceptance"),
+                systemImage: "checkmark.seal",
+                tint: .mint,
+                progress: live.draftAcceptanceRate
+            )
+        }
+    }
+
     private func serving(_ live: LiveStatus) -> [MetricCard] {
         let ready = live.ready
         let state = ready
@@ -63,20 +93,6 @@ struct LivePane: View {
                 title: L10n.string("live.context"), value: tokens(live.contextTokens),
                 systemImage: "text.alignleft", tint: .indigo
             ),
-            MetricCard(
-                title: L10n.string("live.decode"), value: rate(live.decodeTokensPerSecond),
-                caption: L10n.string("live.caption.tokens_per_second"),
-                systemImage: "speedometer", tint: .green
-            ),
-            MetricCard(
-                title: L10n.string("live.prefill"), value: rate(live.prefillTokensPerSecond),
-                caption: L10n.string("live.caption.tokens_per_second"),
-                systemImage: "arrow.down.to.line", tint: .teal
-            ),
-            MetricCard(
-                title: L10n.string("live.draft_acceptance"), value: percent(live.draftAcceptanceRate),
-                systemImage: "checkmark.seal", tint: .mint
-            ),
         ]
     }
 
@@ -91,7 +107,10 @@ struct LivePane: View {
             MetricCard(title: L10n.string("live.cancelled"), value: "\(live.cancelled)",
                        systemImage: "slash.circle", tint: .orange),
             MetricCard(title: L10n.string("live.pending"), value: "\(live.pending) / \(live.pendingLimit)",
-                       systemImage: "hourglass", tint: .purple),
+                       caption: L10n.string("live.caption.queue"),
+                       systemImage: "hourglass", tint: .purple,
+                       progress: live.pendingLimit > 0
+                           ? Double(live.pending) / Double(live.pendingLimit) : nil),
             MetricCard(title: L10n.string("live.waiting"), value: "\(live.waiting)",
                        systemImage: "clock", tint: .orange),
             MetricCard(title: L10n.string("live.waiting_memory"), value: "\(live.waitingMemory)",
@@ -108,11 +127,15 @@ struct LivePane: View {
     }
 
     private func memory(_ live: LiveStatus) -> [MetricCard] {
+        // Physical against the peak is the share the host is actually holding.
+        let held = share(live.physicalBytes, of: live.peakPhysicalBytes ?? live.peakBytes)
         return [
             MetricCard(title: L10n.string("live.physical_memory"),
                        value: bytes(live.physicalBytes),
                        caption: L10n.string("live.physical_memory_caption"),
-                       systemImage: "cpu", tint: .green),
+                       systemImage: "cpu", tint: .green,
+                       progress: held.value,
+                       progressCaption: held.caption),
             MetricCard(title: L10n.string("live.current_memory"), value: bytes(live.currentBytes),
                        caption: L10n.string("live.current_memory_caption"),
                        systemImage: "memorychip", tint: .blue),
@@ -121,19 +144,31 @@ struct LivePane: View {
             MetricCard(title: L10n.string("live.disk_cache"),
                        value: disk(live.diskUsedBytes, live.diskCapacityBytes),
                        caption: idleOffloadCaption(live),
-                       systemImage: "internaldrive", tint: .teal),
+                       systemImage: "internaldrive", tint: .teal,
+                       progress: share(live.diskUsedBytes, of: live.diskCapacityBytes).value),
         ]
     }
 
     private func caches(_ live: LiveStatus) -> [MetricCard] {
         return [
             MetricCard(title: L10n.string("live.hit_rate"), value: percent(live.cacheHitRate),
-                       systemImage: "target", tint: .green),
+                       systemImage: "target", tint: .green,
+                       progress: live.cacheHitRate),
             MetricCard(title: L10n.string("live.kv_disk_hit"), value: tokens(live.kvDiskHitTokens),
                        systemImage: "arrow.down.circle", tint: .teal),
             MetricCard(title: L10n.string("live.state_hit"), value: tokens(live.stateHitTokens),
                        systemImage: "arrow.triangle.2.circlepath", tint: .blue),
         ]
+    }
+
+    /// A used-of-total pair as a fraction and a caption, either of which is nil
+    /// when the total is unknown so nothing renders a misleading bar.
+    private func share(
+        _ used: UInt64?, of total: UInt64?
+    ) -> (value: Double?, caption: String?) {
+        guard let used, let total, total > 0 else { return (nil, nil) }
+        let fraction = min(1, Double(used) / Double(total))
+        return (fraction, L10n.format("live.caption.share", percent(fraction), bytes(total)))
     }
 
     private func tokens(_ value: Int?) -> String {
@@ -200,6 +235,9 @@ private struct MetricCard: View, Identifiable {
     var caption = ""
     var systemImage = "circle"
     var tint: Color = .accentColor
+    /// A 0...1 share of a known total; nil leaves the card without a bar.
+    var progress: Double?
+    var progressCaption: String?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -214,8 +252,15 @@ private struct MetricCard: View, Identifiable {
                     .font(.title3.weight(.semibold).monospacedDigit())
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
+                if let progress {
+                    Meter(fraction: progress, tint: tint)
+                        .padding(.top, 3)
+                }
                 if !caption.isEmpty {
                     Text(caption).font(.caption2).foregroundStyle(.tertiary)
+                }
+                if let progressCaption {
+                    Text(progressCaption).font(.caption2).foregroundStyle(.tertiary)
                 }
             }
             Spacer(minLength: 0)
@@ -225,6 +270,71 @@ private struct MetricCard: View, Identifiable {
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(.separator.opacity(0.5))
+        )
+    }
+}
+
+/// The bar under a card's value: how much of a known total it uses. A metric
+/// that only counts (requests, failures) keeps a plain caption instead.
+private struct Meter: View {
+    let fraction: Double
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(tint.opacity(0.15))
+                Capsule()
+                    .fill(tint)
+                    .frame(width: proxy.size.width * min(1, max(0, fraction)))
+            }
+        }
+        .frame(height: 4)
+        .animation(.easeOut(duration: 0.25), value: fraction)
+    }
+}
+
+/// The headline tile: the number is the point, so it is set large and the
+/// icon and label stay quiet around it.
+private struct HeroCard: View {
+    let title: String
+    let value: String
+    let unit: String
+    let systemImage: String
+    let tint: Color
+    var progress: Double?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(tint)
+                Text(title)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(value)
+                    .font(.system(size: 34, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(tint)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                Text(unit)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            if let progress {
+                Meter(fraction: progress, tint: tint)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(tint.opacity(0.18))
         )
     }
 }

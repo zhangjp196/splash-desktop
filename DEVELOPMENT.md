@@ -1209,6 +1209,18 @@ The app owns no model or engine code: it locates the embedded runtime,
 launches `install/launcher.py serve`, shows its log and a live panel of
 `/status` metrics (decode/prefill rates, request counts, Metal memory, caches
 and admission waits), and keeps a menu bar item to start and stop it. The
+window opens on the live panel, with control and the log behind it in the tab
+band under the header; the header itself carries only the state and the
+actions. Its settings live in SQLite at
+`~/Library/Application Support/ai.inco.splash/settings.db` (one key/value row
+per setting, `SPLASH_SETTINGS_DB` points it elsewhere): the panel saves each
+edit after a short pause, the next launch opens on what the last one saved, and
+Restore Defaults returns the form to the values the first launch opened with
+(upstream model, port 8000, 8-bit KV, a 16G SSD cache quota and a 10 second
+idle offload and residency). A stored value the launcher would reject falls
+back to its first-launch default rather than starting a server that refuses to
+run. `swift run --selfcheck-settings` exercises the store and that round trip
+headlessly against a temporary database. The
 conversation is the server's own web page: a conspicuous button opens
 `chat.html` in the browser, and the main window holds no chat. Its labels and
 the chat page follow the system interface language (English and Simplified
@@ -1216,8 +1228,11 @@ Chinese are bundled). The model
 section offers three modes — a Splash package (its draft is built in), an
 upstream MLX or GGUF model (the installer pairs its draft), or a local
 directory per [local model directories](#local-model-directories) — and the
-server section exposes port, memory, context, KV format, text-only, an API
-key, model aliases, an SSD cache quota, request-size and default reasoning
+remaining sections group the rest by what it decides: the server's port, KV
+format, text-only mode, API key and model aliases; the memory ceiling,
+context length and SSD cache quota; what happens while idle (offloading cached
+prefixes to the SSD tier, and releasing weights back to the GPU the way LM
+Studio unloads a model); and the per-request size and default reasoning
 effort. The bundle is built
 with Xcode's Swift toolchain, the placeholder icon
 is generated at package time, and neither the app nor the DMG is code-signed:
