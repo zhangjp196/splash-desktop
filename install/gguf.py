@@ -14,15 +14,12 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import math
 import struct
 from pathlib import Path
 
-if __package__:
-    from . import models
-    from .models import ModelError
-else:
-    import models
-    from models import ModelError
+from . import models
+from .models import ModelError
 
 # The files derived_files derives from a target GGUF, by assembly path.
 DERIVED_FILES = (
@@ -309,11 +306,6 @@ def model_config(metadata, vision=None):
         model_type=TEXT_MODEL_TYPES[arch],
         vocab_size=len(metadata.require("tokenizer.ggml.tokens", list)),
     )
-    if arch == "qwen35moe":
-        text.update(
-            num_experts=metadata.positive(arch + ".expert_count"),
-            num_experts_per_tok=metadata.positive(arch + ".expert_used_count"),
-        )
     config = {
         "model_type": TEXT_MODEL_TYPES[arch].removesuffix("_text"),
         "text_config": text,
@@ -321,6 +313,25 @@ def model_config(metadata, vision=None):
     if vision is not None:
         config["vision_config"] = vision_config(vision)
     return config
+
+
+def scalar_metadata(metadata):
+    """The header's scalar values as the native reader keeps them, for the
+    engine's model check, which holds them to the rules its GGUF planner
+    holds the file to at every start (GgufMetadata in
+    runtime/model/GgufFile.hpp): integers and booleans unsigned, a negative
+    one as its 64-bit two's complement, floats and strings, each kind apart,
+    as JSON alone would not keep them. JSON has no NaN or infinity, which no
+    rule accepts."""
+    typed = {"unsigned": {}, "float": {}, "string": {}}
+    for key, value in metadata.values.items():
+        if isinstance(value, int):
+            typed["unsigned"][key] = value % (1 << 64)
+        elif isinstance(value, float) and math.isfinite(value):
+            typed["float"][key] = value
+        elif isinstance(value, str):
+            typed["string"][key] = value
+    return typed
 
 
 def loaded_layers(metadata, arch):
@@ -440,13 +451,16 @@ EMBEDDING_TYPES = {
     "Q8_0",
     "Q4_0",
     "Q4_1",
+    "IQ3_S",
+    "IQ4_NL",
+    "IQ4_XS",
     "PQ2_0",
 }
 # The tensors the native loader reads from a target, and the types it accepts
 # for each (runtime/model/GgufImage.cpp): quantized projections; F32 norms,
 # small GDN vectors and MoE routers, which llama.cpp keeps unquantized and
-# which run unrounded; GDN alpha and beta both Q8_0, both F32 or both BF16,
-# which preparation widens to the F32 values it equals.
+# which run unrounded; GDN alpha and beta, both of one type: a quantized
+# format, F32 or BF16, which preparation widens to the F32 values it equals.
 F32 = {"F32"}
 MODEL_TENSORS = {
     "token_embd.weight": EMBEDDING_TYPES,
@@ -465,8 +479,8 @@ ATTENTION_TENSORS = {
 GDN_TENSORS = {
     "attn_qkv.weight": QUANTIZED_TYPES,
     "attn_gate.weight": QUANTIZED_TYPES,
-    "ssm_alpha.weight": {"Q8_0", "F32", "BF16"},
-    "ssm_beta.weight": {"Q8_0", "F32", "BF16"},
+    "ssm_alpha.weight": QUANTIZED_TYPES | {"F32", "BF16"},
+    "ssm_beta.weight": QUANTIZED_TYPES | {"F32", "BF16"},
     "ssm_conv1d.weight": F32,
     "ssm_a": F32,
     "ssm_dt.bias": F32,

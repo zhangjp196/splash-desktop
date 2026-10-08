@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AwakeClock.hpp"
 #include "MetalBackend.hpp"
 
 #import <Metal/Metal.h>
@@ -8,30 +9,36 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
-
-#include <sys/mman.h>
+#include <string_view>
 
 namespace splash::metal {
 
-// Holds the buffers of one residency set wired between the commands of a
-// command queue. Metal wires them while a command runs and lets them go a few
-// seconds later, and one request holds them only about two seconds, so a
-// heartbeat requests residency every 500 ms. After keepAlive without a command
-// it ends residency, which Metal applies at its next GPU operation on any
-// queue: a one-byte blit on a queue of its own, as the runtime keeps exactly
-// one command in flight on the command queue. The set is used only on the
-// heartbeat's serial queue.
+// Holds every buffer of a backend in one residency set, wired between the
+// commands of its command queue. Metal wires them while a command runs and
+// lets them go a few seconds later, and one request holds them only about two
+// seconds, so a heartbeat requests residency every 500 ms. After keepAlive
+// without a command, never when it is infinite, it ends residency, which Metal
+// applies at its next GPU operation on any queue: one dispatch of the kick
+// kernel, whose pipeline the backend builds with its library, on a queue of
+// its own, as the runtime keeps exactly one command in flight on the command
+// queue. Destruction ends residency without GPU work: a backend being torn
+// down must not start any. The set is used only on the heartbeat's serial
+// queue.
 class Residency final {
 public:
+  // A one-thread kernel that writes one word of its buffer 0
+  // (kernels/shared/residency.metal).
+  static constexpr std::string_view kKickPipeline = "residency_kick";
+
   Residency(id<MTLDevice> device, id<MTLCommandQueue> commands,
-            double keepAliveSeconds)
-      : commands_(commands), keepAlive_(keepAliveSeconds) {
+            id<MTLComputePipelineState> kick, double keepAliveSeconds)
+      : commands_(commands), kick_(kick), keepAlive_(keepAliveSeconds) {
     set_ = [device newResidencySetWithDescriptor:[MTLResidencySetDescriptor new]
                                            error:nil];
-    releaseQueue_ = [device newCommandQueue];
-    releaseTarget_ = [device newBufferWithLength:1
-                                         options:MTLResourceStorageModePrivate];
-    if (!set_ || !releaseQueue_ || !releaseTarget_)
+    kickQueue_ = [device newCommandQueue];
+    kickTarget_ = [device newBufferWithLength:sizeof(uint32_t)
+                                      options:MTLResourceStorageModePrivate];
+    if (!set_ || !kickQueue_ || !kickTarget_)
       throw MetalBackendError("unable to create the Metal residency set");
     [commands_ addResidencySet:set_];
     queue_ = dispatch_queue_create(
@@ -46,36 +53,26 @@ public:
   ~Residency() {
     dispatch_source_cancel(heartbeat_);
     // Runs after any beat or request already queued: they use this object.
+    // Metal applies the end at the process's next GPU operation, or frees
+    // the set at exit.
     dispatch_sync(queue_, ^{
-      @autoreleasepool {
-        [commands_ removeResidencySet:set_];
-        std::lock_guard lock(mutex_);
-        if (held_) release();
-      }
+      [commands_ removeResidencySet:set_];
+      std::lock_guard lock(mutex_);
+      if (held_) [set_ endResidency];
     });
   }
 
   Residency(const Residency &) = delete;
   Residency &operator=(const Residency &) = delete;
 
-  // Wires the buffer before returning and restarts the keep-alive. The set
-  // holds only the weight-file base buffers, which are host-visible no-copy
-  // mappings of read-only files; each is recorded so a lapsed residency can
-  // ask the kernel to drop the clean file pages it left in the page cache.
+  // Adds the buffer to the set and restarts the keep-alive: a held set wires
+  // it at the commit, and a lapsed one is requested again off the caller's
+  // thread (use()).
   void add(id<MTLBuffer> buffer) {
     dispatch_sync(queue_, ^{
       [set_ addAllocation:buffer];
       [set_ commit];
-      [set_ requestResidency];
     });
-    {
-      std::lock_guard lock(mutex_);
-      bytes_ += buffer.allocatedSize;
-      if (buffer.storageMode == MTLStorageModeShared) {
-        void *address = buffer.contents;
-        if (address) mapped_.push_back({address, buffer.allocatedSize});
-      }
-    }
     use();
   }
 
@@ -84,14 +81,6 @@ public:
       [set_ removeAllocation:buffer];
       [set_ commit];
     });
-    std::lock_guard lock(mutex_);
-    bytes_ -= buffer.allocatedSize;
-    if (buffer.storageMode == MTLStorageModeShared && !mapped_.empty()) {
-      void *address = buffer.contents;
-      std::erase_if(mapped_, [address](const auto &range) {
-        return range.first == address;
-      });
-    }
   }
 
   // Marks a command. A lapsed set is requested again at once, off the
@@ -99,8 +88,8 @@ public:
   void use() {
     {
       std::lock_guard lock(mutex_);
-      lastUse_ = std::chrono::steady_clock::now();
-      if (held_ || !bytes_) return;
+      lastUse_ = AwakeClock::now();
+      if (held_) return;
       held_ = true;
     }
     dispatch_async(queue_, ^{
@@ -110,12 +99,6 @@ public:
     });
   }
 
-  // The bytes of the set while it is not held.
-  [[nodiscard]] uint64_t lapsedBytes() const {
-    std::lock_guard lock(mutex_);
-    return held_ ? 0 : bytes_;
-  }
-
 private:
   static constexpr uint64_t kBeat = 500 * NSEC_PER_MSEC;
 
@@ -123,7 +106,7 @@ private:
     bool lapsed;
     {
       std::lock_guard lock(mutex_);
-      lapsed = std::chrono::steady_clock::now() - lastUse_ >= keepAlive_;
+      lapsed = AwakeClock::now() - lastUse_ >= keepAlive_;
       held_ = !lapsed;
     }
     if (!lapsed) {
@@ -131,45 +114,32 @@ private:
       return;
     }
     dispatch_source_set_timer(heartbeat_, DISPATCH_TIME_FOREVER, 0, 0);
-    release();
+    [set_ endResidency];
+    kickResidencyEnd();
   }
 
-  void release() {
-    [set_ endResidency];
-    id<MTLCommandBuffer> command = [releaseQueue_ commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-    [blit fillBuffer:releaseTarget_ range:NSMakeRange(0, 1) value:0];
-    [blit endEncoding];
+  void kickResidencyEnd() {
+    id<MTLCommandBuffer> command = [kickQueue_ commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:kick_];
+    [encoder setBuffer:kickTarget_ offset:0 atIndex:0];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [encoder endEncoding];
     [command commit];
-
-    // The weight files stay mapped for the life of the model, so ending the
-    // residency set leaves their pages in the system's clean file cache: a
-    // resource monitor still shows the whole file as used, and the pages only
-    // return under memory pressure. Drop them now — they are clean and
-    // file-backed, so the kernel evicts them and re-faults them from disk on
-    // the next command. Runs on the residency queue, after endResidency, so
-    // Metal has no claim to the pages.
-    if (bytes_) {
-      std::lock_guard lock(mutex_);
-      for (auto &[address, length] : mapped_) {
-        if (address && length) ::madvise(address, length, MADV_DONTNEED);
-      }
-    }
   }
 
   __strong id<MTLCommandQueue> commands_ = nil;
+  __strong id<MTLComputePipelineState> kick_ = nil;
   __strong id<MTLResidencySet> set_ = nil;
-  __strong id<MTLCommandQueue> releaseQueue_ = nil;
-  __strong id<MTLBuffer> releaseTarget_ = nil;
+  __strong id<MTLCommandQueue> kickQueue_ = nil;
+  __strong id<MTLBuffer> kickTarget_ = nil;
   __strong dispatch_queue_t queue_ = nil;
   __strong dispatch_source_t heartbeat_ = nil;
   const std::chrono::duration<double> keepAlive_;
-  mutable std::mutex mutex_;
-  std::chrono::steady_clock::time_point lastUse_;
+  std::mutex mutex_;
+  AwakeClock::time_point lastUse_;
   bool held_ = false;
-  uint64_t bytes_ = 0;
-  // Host-visible (file-backed) mappings added to the set, as (address, bytes).
-  std::vector<std::pair<void *, uint64_t>> mapped_;
 };
 
 } // namespace splash::metal

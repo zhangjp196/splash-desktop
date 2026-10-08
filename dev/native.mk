@@ -23,9 +23,6 @@ TUNING_SOURCES := \
 	dev/tuning/Tuning.cpp \
 	dev/tuning/Measurement.cpp \
 	dev/tuning/LinearTuning.cpp \
-	dev/tuning/AttentionTuning.cpp \
-	dev/tuning/DraftAttentionTuning.cpp \
-	dev/tuning/MoeTuning.cpp \
 	dev/tuning/TuningWorkloads.cpp
 # Control-plane tests compile the runtime sources they check: their sanitizer
 # builds cannot use the unsanitized engine library, and none links a framework.
@@ -33,7 +30,8 @@ CACHE_SOURCES := \
 	runtime/engine/KvPool.cpp \
 	runtime/engine/KvCache.cpp \
 	runtime/engine/StateCache.cpp \
-	runtime/engine/Cache.cpp
+	runtime/engine/Cache.cpp \
+	runtime/engine/WriteBehind.cpp
 BACKEND_CONTROL_SOURCES := \
 	runtime/engine/Scheduler.cpp \
 	runtime/model/DraftContextPlan.cpp \
@@ -44,22 +42,36 @@ NATIVE_RUNTIME_SOURCES := $(BACKEND_CONTROL_SOURCES) \
 	runtime/engine/NativeRuntime.cpp
 TEST_SLOT_FILE_ASAN := $(ENGINE_SANITIZER_BUILD)/slot-file-asan-ubsan
 TEST_SLOT_FILE_TSAN := $(ENGINE_SANITIZER_BUILD)/slot-file-tsan
-TEST_BACKEND_ASAN := $(ENGINE_SANITIZER_BUILD)/kv-first-engine-asan-ubsan
-TEST_BACKEND_TSAN := $(ENGINE_SANITIZER_BUILD)/kv-first-engine-tsan
+TEST_CACHE_DIRECTORY_ASAN := $(ENGINE_SANITIZER_BUILD)/cache-directory-asan-ubsan
+TEST_CACHE_DIRECTORY_TSAN := $(ENGINE_SANITIZER_BUILD)/cache-directory-tsan
+TEST_PERSISTENT_CACHE_ASAN := $(ENGINE_SANITIZER_BUILD)/persistent-cache-asan-ubsan
+TEST_PERSISTENT_CACHE_TSAN := $(ENGINE_SANITIZER_BUILD)/persistent-cache-tsan
+TEST_ENGINE_CACHE_ASAN := $(ENGINE_SANITIZER_BUILD)/engine-cache-asan-ubsan
+TEST_ENGINE_CACHE_TSAN := $(ENGINE_SANITIZER_BUILD)/engine-cache-tsan
+TEST_PROTOCOL_ASAN := $(ENGINE_SANITIZER_BUILD)/protocol-asan-ubsan
+TEST_PROTOCOL_TSAN := $(ENGINE_SANITIZER_BUILD)/protocol-tsan
+TEST_ENGINE_ASAN := $(ENGINE_SANITIZER_BUILD)/engine-asan-ubsan
+TEST_ENGINE_TSAN := $(ENGINE_SANITIZER_BUILD)/engine-tsan
 TEST_FD_TRANSPORT_ASAN := $(ENGINE_SANITIZER_BUILD)/native-fd-asan-ubsan
 TEST_FD_TRANSPORT_TSAN := $(ENGINE_SANITIZER_BUILD)/native-fd-tsan
 TEST_OPERATOR_TUNING_ASAN := $(ENGINE_SANITIZER_BUILD)/operator-tuning-asan-ubsan
 TEST_OPERATOR_TUNING_TSAN := $(ENGINE_SANITIZER_BUILD)/operator-tuning-tsan
 TEST_OPERATOR_MEASUREMENT_ASAN := $(ENGINE_SANITIZER_BUILD)/operator-measurement-asan-ubsan
 TEST_OPERATOR_MEASUREMENT_TSAN := $(ENGINE_SANITIZER_BUILD)/operator-measurement-tsan
+TEST_ANE_FFN_CALIBRATION_ASAN := $(ENGINE_SANITIZER_BUILD)/ane-ffn-calibration-asan-ubsan
+TEST_ANE_FFN_CALIBRATION_TSAN := $(ENGINE_SANITIZER_BUILD)/ane-ffn-calibration-tsan
 TEST_MEMORY_TEST := $(ENGINE_TEST_BUILD)/engine-memory-plan
-TEST_DEVICE_QUERIES := $(ENGINE_TEST_BUILD)/device-queries
 TEST_VISION_PREPARATION := $(ENGINE_TEST_BUILD)/vision-preparation
 TEST_AFFINE_PREPARATION := $(ENGINE_TEST_BUILD)/affine-preparation
 TEST_AFFINE_CHECKPOINT := $(ENGINE_TEST_BUILD)/affine-checkpoint
-TEST_PREPARED_WEIGHTS := $(ENGINE_TEST_BUILD)/prepared-weights
+TEST_MODEL_CONFIGURATION := $(ENGINE_TEST_BUILD)/model-configuration
+TEST_WEIGHT_SOURCE := $(ENGINE_TEST_BUILD)/weight-source
 TEST_GGUF_FILE := $(ENGINE_TEST_BUILD)/gguf-file
 TEST_GGUF_PROJECTION := $(ENGINE_TEST_BUILD)/gguf-projection
+TEST_ANE_FFN := $(ENGINE_TEST_BUILD)/ane-ffn
+TEST_ANE_FFN_CALIBRATION := $(ENGINE_TEST_BUILD)/ane-ffn-calibration
+TEST_ANE_FFN_STARTUP := $(ENGINE_TEST_BUILD)/ane-ffn-startup
+TEST_ANE_PROGRAM_FAULTS := $(ENGINE_TEST_BUILD)/ane-program-faults
 TEST_GGUF_DEQUANT := $(ENGINE_TEST_BUILD)/gguf-dequant
 TEST_GGUF_ROTATION := $(ENGINE_TEST_BUILD)/gguf-rotation
 TEST_GGUF_MOE := $(ENGINE_TEST_BUILD)/gguf-moe
@@ -70,17 +82,19 @@ TEST_GGUF_DEQUANT_AIR := $(ENGINE_TEST_BUILD)/gguf-dequant.air
 TEST_GGUF_DEQUANT_LIB := $(ENGINE_TEST_BUILD)/gguf-dequant.metallib
 # Every hash the weight tests compare against, and how to update them.
 WEIGHT_GOLDENS := dev/tests/fixtures/weight-goldens/goldens.json
+# An MLX config.json and a DFlash2 draft config built like each family's.
+MODEL_CONFIGS := dev/tests/fixtures/model-configs
 TEST_KV_PAGE_CACHE_TEST := $(ENGINE_TEST_BUILD)/kv-page-cache
-TEST_KV_FIRST_CACHE_TEST := $(ENGINE_TEST_BUILD)/kv-first-cache
+TEST_ENGINE_CACHE_TEST := $(ENGINE_TEST_BUILD)/engine-cache
 TEST_DRAFT_CONTEXT_PLAN_TEST := $(ENGINE_TEST_BUILD)/draft-context-plan
 TEST_RAGGED_SCHEDULER_TEST := $(ENGINE_TEST_BUILD)/ragged-scheduler
-TEST_CACHE_TEST := $(ENGINE_TEST_BUILD)/engine-cache
-TEST_KV_FIRST_ENGINE_TEST := $(ENGINE_TEST_BUILD)/kv-first-engine
+TEST_ENGINE_TEST := $(ENGINE_TEST_BUILD)/engine
 TEST_ELASTIC_KV_TEST := $(ENGINE_TEST_BUILD)/elastic-kv-pool
 TEST_PROTOCOL_TEST := $(ENGINE_TEST_BUILD)/protocol
 TEST_NATIVE_LOOP_TEST := $(ENGINE_TEST_BUILD)/native-engine-loop
 TEST_FD_TRANSPORT_TEST := $(ENGINE_TEST_BUILD)/native-fd-transport
 TEST_BOOTSTRAP_TEST := $(ENGINE_TEST_BUILD)/runtime-bootstrap
+TEST_NATIVE_ARGUMENTS_TEST := $(ENGINE_TEST_BUILD)/native-arguments
 TEST_RESOURCES_TEST := $(ENGINE_TEST_BUILD)/runtime-resources
 TEST_KV_PAGE_TIER_TEST := $(ENGINE_TEST_BUILD)/kv-page-tier
 TEST_METRICS_TEST := $(ENGINE_TEST_BUILD)/runtime-metrics
@@ -107,15 +121,14 @@ TEST_MODEL_EXECUTION_PLANS := $(ENGINE_TEST_BUILD)/model-execution-plans
 TEST_ATTENTION_PLAN := $(ENGINE_TEST_BUILD)/paged-attention-plan
 TEST_LINEAR_PLAN := $(ENGINE_TEST_BUILD)/linear-plan
 TEST_LINEAR_TUNING := $(ENGINE_TEST_BUILD)/linear-tuning
-TEST_ATTENTION_TUNING := $(ENGINE_TEST_BUILD)/attention-tuning
-TEST_DRAFT_ATTENTION_TUNING := $(ENGINE_TEST_BUILD)/draft-attention-tuning
-TEST_MOE_TUNING := $(ENGINE_TEST_BUILD)/moe-tuning
 TEST_TUNING_WORKLOADS := $(ENGINE_TEST_BUILD)/tuning-workloads
 TUNE_KERNELS := $(ENGINE_TEST_BUILD)/tune-kernels
 TEST_DFLASH_BATCH_CONTROL_TEST := $(ENGINE_TEST_BUILD)/dflash-batch-control
 TEST_DRAFT_ATTENTION_TEST := $(ENGINE_TEST_BUILD)/draft-attention
 TEST_GDN_DECODE_TEST := $(ENGINE_TEST_BUILD)/gdn-decode
 TEST_DRAFT_SELECTOR_TEST := $(ENGINE_TEST_BUILD)/draft-selector
+TEST_TARGET_SAMPLING_TEST := $(ENGINE_TEST_BUILD)/target-sampling
+TEST_VISION_METAL_TEST := $(ENGINE_TEST_BUILD)/vision-metal
 TEST_Q4_PREFILL_PROFILE := $(ENGINE_TEST_BUILD)/q4-prefill-profile
 TEST_Q4_DECODE_PROFILE := $(ENGINE_TEST_BUILD)/q4-decode-profile
 TEST_BACKEND_BENCHMARK := $(ENGINE_TEST_BUILD)/backend-benchmark
@@ -125,47 +138,56 @@ TEST_GGUF_PROJECTION_BENCHMARK := $(ENGINE_TEST_BUILD)/gguf-projection-benchmark
 TEST_GGUF_MOE_BENCHMARK := $(ENGINE_TEST_BUILD)/gguf-moe-benchmark
 TEST_MODEL_RUNTIME_ORACLE := $(ENGINE_TEST_BUILD)/model-runtime-oracle
 TEST_AFFINE_SOURCE_ORACLE := $(ENGINE_TEST_BUILD)/affine-source-oracle
+WEIGHT_DIGESTS := $(ENGINE_TEST_BUILD)/weight-digests
 TEST_VISION_ENCODER_TEST := $(ENGINE_TEST_BUILD)/vision-encoder
 TEST_Q8_AIR := $(ENGINE_TEST_BUILD)/q8-paged-kv.air
 TEST_Q8_LIB := $(ENGINE_TEST_BUILD)/q8-paged-kv.metallib
 # Both Q8 tests share the attention and store kernels of both phases.
 TEST_Q8_KERNEL_SOURCES := \
-	runtime/metal/kernels/prefill/attention_q8.metal \
-	runtime/metal/kernels/decode/attention_q8.metal \
-	runtime/metal/kernels/prefill/attention_q8_store.metal \
-	runtime/metal/kernels/decode/attention_q8_store.metal
+	runtime/metal/kernels/prefill/paged_attention.metal \
+	runtime/metal/kernels/decode/paged_attention.metal \
+	runtime/metal/kernels/prefill/paged_attention_store.metal \
+	runtime/metal/kernels/decode/paged_attention_store.metal
 TEST_Q8_KERNEL_AIRS := $(patsubst runtime/metal/kernels/%.metal,$(ENGINE_TEST_BUILD)/kernels/%.air,$(TEST_Q8_KERNEL_SOURCES))
+# Every library a MetalBackend loads has the kernel that ends its residency;
+# the test libraries built without the production kernels link it in.
+TEST_RESIDENCY_AIR := $(ENGINE_TEST_BUILD)/kernels/shared/residency.air
 TEST_Q8_ATTENTION_LIB := $(ENGINE_TEST_BUILD)/q8-attention.metallib
 TEST_METAL_BACKEND_TEST := $(ENGINE_TEST_BUILD)/metal-backend
+TEST_HANDOFF_TEST := $(ENGINE_TEST_BUILD)/handoff
 TEST_METAL_BACKEND_AIR := $(ENGINE_TEST_BUILD)/metal-backend.air
 TEST_METAL_BACKEND_LIB := $(ENGINE_TEST_BUILD)/metal-backend.metallib
 TEST_PRODUCTION_LIB := $(ENGINE_TEST_BUILD)/production-and-test.metallib
 
 TEST_SLOT_FILE := $(ENGINE_TEST_BUILD)/slot-file
+TEST_CACHE_DIRECTORY := $(ENGINE_TEST_BUILD)/cache-directory
+TEST_PERSISTENT_CACHE := $(ENGINE_TEST_BUILD)/persistent-cache
 
-TEST_CPU_TARGETS := $(TEST_SLOT_FILE) $(TEST_VISION_PREPARATION) $(TEST_AFFINE_CHECKPOINT) $(TEST_PREPARED_WEIGHTS) $(TEST_OPERATOR_WORKSPACE) \
+TEST_CPU_TARGETS := $(TEST_SLOT_FILE) $(TEST_CACHE_DIRECTORY) $(TEST_VISION_PREPARATION) $(TEST_AFFINE_CHECKPOINT) $(TEST_WEIGHT_SOURCE) $(TEST_OPERATOR_WORKSPACE) \
+	$(TEST_MODEL_CONFIGURATION) \
 	$(TEST_GGUF_FILE) \
 	$(TEST_GGUF_REFERENCE) $(TEST_GGUF_PLANNER) \
-	$(TEST_DEVICE_QUERIES) \
 	$(TEST_TUNING_WORKLOADS) \
-	$(TEST_LINEAR_PLAN) $(TEST_LINEAR_TUNING) $(TEST_ATTENTION_TUNING) \
-	$(TEST_DRAFT_ATTENTION_TUNING) $(TEST_MOE_TUNING) \
+	$(TEST_LINEAR_PLAN) $(TEST_LINEAR_TUNING) \
 	$(TEST_OPERATOR_TUNING) \
 	$(TEST_OPERATOR_MEASUREMENT) \
+	$(TEST_ANE_FFN_CALIBRATION) \
+	$(TEST_ANE_FFN_STARTUP) \
 	$(TEST_EXECUTION_PLANS) \
 	$(TEST_MODEL_EXECUTION_PLANS) \
 	$(TEST_MEMORY_TEST) \
 	$(TEST_KV_PAGE_CACHE_TEST) \
-	$(TEST_KV_FIRST_CACHE_TEST) \
+	$(TEST_ENGINE_CACHE_TEST) \
+	$(TEST_PERSISTENT_CACHE) \
 	$(TEST_DRAFT_CONTEXT_PLAN_TEST) \
 	$(TEST_RAGGED_SCHEDULER_TEST) \
-	$(TEST_CACHE_TEST) \
-	$(TEST_KV_FIRST_ENGINE_TEST) \
+	$(TEST_ENGINE_TEST) \
 	$(TEST_ELASTIC_KV_TEST) \
 	$(TEST_PROTOCOL_TEST) \
 	$(TEST_NATIVE_LOOP_TEST) \
 	$(TEST_FD_TRANSPORT_TEST) \
 	$(TEST_BOOTSTRAP_TEST) \
+	$(TEST_NATIVE_ARGUMENTS_TEST) \
 	$(TEST_METRICS_TEST) \
 	$(TEST_MEMORY_AUDIT_TEST) \
 	$(TEST_MEMORY_GOVERNOR_TEST) \
@@ -175,14 +197,13 @@ TEST_CPU_TARGETS := $(TEST_SLOT_FILE) $(TEST_VISION_PREPARATION) $(TEST_AFFINE_C
 TEST_METAL_TARGETS := $(TEST_AFFINE_PREPARATION) \
 	$(TEST_Q4_SGMATRIX_TEST) $(TEST_TUNING_WORKLOADS) \
 	$(TEST_GGUF_PROJECTION) \
+	$(TEST_ANE_FFN) \
+	$(TEST_ANE_PROGRAM_FAULTS) \
 	$(TEST_GGUF_DEQUANT) \
 	$(TEST_GGUF_ROTATION) \
 	$(TEST_GGUF_MOE) \
 	$(TEST_GGUF_PREPARATION) \
 	$(TEST_LINEAR_TUNING) \
-	$(TEST_ATTENTION_TUNING) \
-	$(TEST_DRAFT_ATTENTION_TUNING) \
-	$(TEST_MOE_TUNING) \
 	$(TEST_ATTENTION_PLAN) \
 	$(TEST_LINEAR_PLAN) \
 	$(TEST_RESOURCES_TEST) \
@@ -201,7 +222,10 @@ TEST_METAL_TARGETS := $(TEST_AFFINE_PREPARATION) \
 	$(TEST_DRAFT_ATTENTION_TEST) \
 	$(TEST_GDN_DECODE_TEST) \
 	$(TEST_DRAFT_SELECTOR_TEST) \
+	$(TEST_TARGET_SAMPLING_TEST) \
+	$(TEST_VISION_METAL_TEST) \
 	$(TEST_METAL_BACKEND_TEST) \
+	$(TEST_HANDOFF_TEST) \
 	$(LIB) $(TEST_METAL_BACKEND_LIB) $(TEST_PRODUCTION_LIB) $(TEST_Q8_LIB) $(TEST_Q8_ATTENTION_LIB) \
 	$(TEST_GGUF_DEQUANT_LIB)
 
@@ -211,257 +235,221 @@ TEST_CONFIG_TARGETS := $(filter-out $(LIB),$(sort $(TEST_CPU_TARGETS) $(TEST_MET
 	$(TEST_MODEL_RUNTIME_ORACLE) $(TEST_VISION_ENCODER_TEST) $(TEST_AFFINE_SOURCE_ORACLE) \
 	$(TEST_DECODE_PROFILE) $(TEST_ATTENTION_SWEEP) \
 	$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) \
-	$(TEST_Q8_AIR) $(TEST_Q8_KERNEL_AIRS) $(TEST_METAL_BACKEND_AIR) $(TEST_GGUF_DEQUANT_AIR)
+	$(TEST_Q8_AIR) $(TEST_Q8_KERNEL_AIRS) $(TEST_RESIDENCY_AIR) $(TEST_METAL_BACKEND_AIR) \
+	$(TEST_GGUF_DEQUANT_AIR)
 # Benchmarks and the tuning tool that build with the production flags.
 PRODUCTION_FLAG_TOOLS := $(TEST_Q4_PREFILL_PROFILE) $(TEST_Q4_DECODE_PROFILE) \
-	$(TEST_BACKEND_BENCHMARK) $(TUNE_KERNELS)
+	$(TEST_BACKEND_BENCHMARK) $(TUNE_KERNELS) $(WEIGHT_DIGESTS)
 PRODUCTION_CONFIG_TARGETS += $(PRODUCTION_FLAG_TOOLS)
 SANITIZER_CONFIG_TARGETS := $(TEST_SLOT_FILE_ASAN) $(TEST_SLOT_FILE_TSAN) \
-	$(TEST_BACKEND_ASAN) $(TEST_BACKEND_TSAN) \
+	$(TEST_CACHE_DIRECTORY_ASAN) $(TEST_CACHE_DIRECTORY_TSAN) \
+	$(TEST_PERSISTENT_CACHE_ASAN) $(TEST_PERSISTENT_CACHE_TSAN) \
+	$(TEST_ENGINE_CACHE_ASAN) $(TEST_ENGINE_CACHE_TSAN) \
+	$(TEST_PROTOCOL_ASAN) $(TEST_PROTOCOL_TSAN) \
+	$(TEST_ENGINE_ASAN) $(TEST_ENGINE_TSAN) \
 	$(TEST_FD_TRANSPORT_ASAN) $(TEST_FD_TRANSPORT_TSAN) \
 	$(TEST_OPERATOR_TUNING_ASAN) $(TEST_OPERATOR_TUNING_TSAN) \
-	$(TEST_OPERATOR_MEASUREMENT_ASAN) $(TEST_OPERATOR_MEASUREMENT_TSAN)
+	$(TEST_OPERATOR_MEASUREMENT_ASAN) $(TEST_OPERATOR_MEASUREMENT_TSAN) \
+	$(TEST_ANE_FFN_CALIBRATION_ASAN) $(TEST_ANE_FFN_CALIBRATION_TSAN)
 
-# These binaries compile runtime, tuning and test sources directly. Header
-# prerequisites and the force dependency are not compiler input files.
+# Every native test, benchmark and tool depends on the engine's and the tests'
+# headers, and compiles and links its other prerequisites in the order it
+# lists them: sources, objects and the engine library. A Metal library it
+# loads at run time and the force dependency are not compiler inputs either.
 ENGINE_TEST_HEADERS := $(filter %.h %.hpp,$(PRODUCTION_ENGINE_INPUTS)) \
 	$(wildcard dev/tuning/*.hpp dev/tests/engine/*.hpp)
-TEST_INPUTS = $(filter-out %.h %.hpp,$(BUILD_INPUTS))
+TEST_INPUTS = $(filter-out %.h %.hpp %.metallib,$(BUILD_INPUTS))
 $(filter-out %.air %.metallib,$(TEST_CONFIG_TARGETS)) $(PRODUCTION_FLAG_TOOLS) \
 	$(SANITIZER_CONFIG_TARGETS): $(ENGINE_TEST_HEADERS)
 
-$(ENGINE_TEST_BUILD):
+$(ENGINE_TEST_BUILD) $(ENGINE_SANITIZER_BUILD):
 	mkdir -p $@
 
-$(ENGINE_SANITIZER_BUILD):
-	mkdir -p $@
-
-$(TEST_PREPARED_WEIGHTS): dev/tests/engine/prepared_weights_test.cpp runtime/model/PreparedWeights.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
-$(TEST_AFFINE_CHECKPOINT): dev/tests/engine/affine_checkpoint_test.cpp $(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_AFFINE_PREPARATION): dev/tests/engine/affine_preparation_test.mm $(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_VISION_PREPARATION): dev/tests/engine/vision_preparation_test.cpp $(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GGUF_FILE): dev/tests/engine/gguf_file_test.cpp runtime/model/GgufFile.cpp runtime/model/PreparedWeights.cpp \
-		| $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
-$(TEST_GGUF_PROJECTION): dev/tests/engine/gguf_projection_test.mm $(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GGUF_DEQUANT): dev/tests/engine/gguf_dequant_test.mm $(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GGUF_ROTATION): dev/tests/engine/gguf_rotation_test.mm $(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GGUF_REFERENCE): dev/tests/engine/gguf_reference_test.mm $(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GGUF_PLANNER): dev/tests/engine/gguf_planner_test.mm $(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GGUF_PREPARATION): dev/tests/engine/gguf_preparation_test.mm $(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-# Production flags, not TEST_METALFLAGS: gguf-dequant checks the shipped
-# dequantizer bitwise, so it compiles as production does (its AIR does not
-# depend on -O3 with metal 32023, but that of some kernels does).
-$(TEST_GGUF_DEQUANT_AIR): dev/tests/engine/gguf_dequant_test.metal \
-		$(KERNEL_HEADERS) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(METAL) $(PROD_METALFLAGS) -c $< -o $@
-
-$(TEST_GGUF_DEQUANT_LIB): $(TEST_GGUF_DEQUANT_AIR)
-	$(RUN_CONFIGURED) $(METALLIB) $< -o $@
-
-$(TEST_DEVICE_QUERIES): dev/tests/engine/device_queries_test.mm | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $(TEST_INPUTS) \
-		-framework Foundation -o $@
-
+# CPU tests built from the runtime sources they check, without the engine
+# library or a framework. Those that also run under the sanitizers list their
+# sources with the sanitizer builds.
+$(TEST_WEIGHT_SOURCE): dev/tests/engine/weight_source_test.cpp runtime/model/WeightSource.cpp
+$(TEST_GGUF_FILE): dev/tests/engine/gguf_file_test.cpp runtime/model/GgufFile.cpp \
+		runtime/model/WeightSource.cpp
 $(TEST_MEMORY_TEST): runtime/metal/DeviceCapabilities.cpp \
 		runtime/engine/MemoryPlan.cpp \
-		dev/tests/engine/engine_memory_plan_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
+		dev/tests/engine/engine_memory_plan_test.cpp
 $(TEST_KV_PAGE_CACHE_TEST): runtime/engine/KvPool.cpp \
 		runtime/engine/KvCache.cpp \
-		dev/tests/engine/kv_page_cache_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
+		dev/tests/engine/kv_page_cache_test.cpp
 $(TEST_DRAFT_CONTEXT_PLAN_TEST): runtime/model/DraftContextPlan.cpp \
 		dev/benchmarks/PrefillWork.hpp \
-		dev/tests/engine/draft_context_plan_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
+		dev/tests/engine/draft_context_plan_test.cpp
 $(TEST_RAGGED_SCHEDULER_TEST): runtime/engine/Scheduler.cpp \
-		dev/tests/engine/ragged_scheduler_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
-$(TEST_CACHE_TEST): $(CACHE_SOURCES) \
-		dev/tests/engine/cache_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
-$(TEST_KV_FIRST_CACHE_TEST): $(CACHE_SOURCES) runtime/model/SlotFile.cpp \
-		dev/tests/engine/kv_first_cache_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
+		dev/tests/engine/ragged_scheduler_test.cpp
 $(TEST_ELASTIC_KV_TEST): runtime/engine/KvPool.cpp \
-		dev/tests/engine/elastic_kv_pool_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
-$(TEST_PROTOCOL_TEST): runtime/engine/Protocol.cpp \
-		dev/tests/engine/protocol_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
+		dev/tests/engine/elastic_kv_pool_test.cpp
 $(TEST_NATIVE_LOOP_TEST): $(NATIVE_RUNTIME_SOURCES) \
-		dev/tests/engine/native_engine_loop_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
-$(TEST_BOOTSTRAP_TEST): dev/tests/engine/runtime_bootstrap_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_RESOURCES_TEST): dev/tests/engine/runtime_resources_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_KV_PAGE_TIER_TEST): dev/tests/engine/kv_page_tier_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_METRICS_TEST): dev/tests/engine/runtime_metrics_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
-$(TEST_MODEL_PACKAGE_TEST): dev/tests/engine/model_package_test.cpp \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
+		runtime/engine/MemoryGovernor.cpp runtime/engine/MemoryControl.cpp \
+		dev/tests/engine/ProtocolPeer.cpp \
+		dev/tests/engine/native_engine_loop_test.cpp
+$(TEST_METRICS_TEST): dev/tests/engine/runtime_metrics_test.cpp
 $(TEST_MEMORY_AUDIT_TEST): runtime/metal/DeviceCapabilities.cpp \
 		runtime/engine/MemoryPlan.cpp runtime/engine/MemoryAudit.cpp \
-		dev/tests/engine/memory_audit_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
+		dev/tests/engine/memory_audit_test.cpp
 $(TEST_MEMORY_GOVERNOR_TEST): runtime/metal/DeviceCapabilities.cpp \
 		runtime/engine/MemoryPlan.cpp runtime/engine/MemoryGovernor.cpp \
-		dev/tests/engine/memory_governor_test.cpp | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
-
-$(TEST_QWEN_STATE_TEST): dev/tests/engine/qwen_state_storage_test.mm \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
+		dev/tests/engine/memory_governor_test.cpp
 $(TEST_STATUS_TEST): runtime/metal/DeviceCapabilities.cpp \
 		runtime/engine/MemoryPlan.cpp runtime/engine/MemoryAudit.cpp \
 		runtime/engine/Status.cpp \
-		dev/tests/engine/runtime_status_test.cpp | $(ENGINE_TEST_BUILD)
+		dev/tests/engine/runtime_status_test.cpp
+$(TEST_Q8_CPU_TEST): dev/tests/engine/q8_paged_kv_test.cc
+
+$(TEST_WEIGHT_SOURCE) $(TEST_GGUF_FILE) $(TEST_MEMORY_TEST) $(TEST_KV_PAGE_CACHE_TEST) \
+		$(TEST_DRAFT_CONTEXT_PLAN_TEST) $(TEST_RAGGED_SCHEDULER_TEST) \
+		$(TEST_ELASTIC_KV_TEST) $(TEST_NATIVE_LOOP_TEST) $(TEST_METRICS_TEST) \
+		$(TEST_MEMORY_AUDIT_TEST) $(TEST_MEMORY_GOVERNOR_TEST) $(TEST_STATUS_TEST) \
+		$(TEST_Q8_CPU_TEST) $(TEST_SLOT_FILE) $(TEST_CACHE_DIRECTORY) \
+		$(TEST_PERSISTENT_CACHE) $(TEST_ENGINE_CACHE_TEST) $(TEST_PROTOCOL_TEST) \
+		$(TEST_ENGINE_TEST) $(TEST_FD_TRANSPORT_TEST) $(TEST_OPERATOR_TUNING) \
+		$(TEST_OPERATOR_MEASUREMENT) $(TEST_ANE_FFN_CALIBRATION): | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
 
-$(TEST_Q8_CPU_TEST): dev/tests/engine/q8_paged_kv_test.cc | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $< -o $@
-
-$(TEST_Q8_AIR): dev/tests/engine/q8_page_format_oracle.metal runtime/metal/abi/ExecutionGeometry.h \
-		| $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(METAL) $(TEST_METALFLAGS) -c $< -o $@
-
-$(TEST_Q8_LIB): $(TEST_Q8_AIR)
-	$(RUN_CONFIGURED) $(METALLIB) $< -o $@
-
-$(ENGINE_TEST_BUILD)/kernels/%.air: runtime/metal/kernels/%.metal \
-		$(KERNEL_HEADERS) \
-		| $(ENGINE_TEST_BUILD)
-	@mkdir -p $(dir $@)
-	$(RUN_CONFIGURED) $(METAL) $(TEST_METALFLAGS) -c $< -o $@
-
-$(TEST_Q8_ATTENTION_LIB): $(TEST_Q8_KERNEL_AIRS) $(TEST_Q8_AIR)
-	$(RUN_CONFIGURED) $(METALLIB) $(BUILD_INPUTS) -o $@
-
-$(TEST_Q8_ATTENTION_TEST): dev/tests/engine/q8_flash_attention_metal_test.mm \
-		$(TEST_Q8_ATTENTION_LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_Q8_PREFILL_TEST): dev/tests/engine/q8_chunked_prefill_metal_test.mm \
-		$(ENGINE_LIBRARY) $(TEST_Q8_ATTENTION_LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_Q4_SGMATRIX_TEST): dev/tests/engine/q4_sgmatrix_metal_test.mm $(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) $(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_Q4_BATCH_TEST): dev/tests/engine/q4_batched_projection_metal_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_Q4_PREFILL_TEST): dev/tests/engine/q4_prefill_projection_metal_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_MOE_METAL_TEST): dev/tests/engine/moe_metal_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GGUF_MOE): dev/tests/engine/gguf_moe_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GDN_METAL_TEST): dev/tests/engine/gdn_metal_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
+# C++ tests linked with the frameworks.
+$(TEST_AFFINE_CHECKPOINT): dev/tests/engine/affine_checkpoint_test.cpp $(ENGINE_LIBRARY)
+$(TEST_MODEL_CONFIGURATION): dev/tests/engine/model_configuration_test.cpp $(ENGINE_LIBRARY)
+$(TEST_VISION_PREPARATION): dev/tests/engine/vision_preparation_test.cpp $(ENGINE_LIBRARY)
+$(TEST_NATIVE_ARGUMENTS_TEST): dev/tests/engine/native_arguments_test.cpp \
+		$(ENGINE_LIBRARY)
+$(TEST_ANE_FFN_STARTUP): dev/tests/engine/ane_ffn_startup_test.cpp $(ENGINE_LIBRARY)
+$(TEST_MODEL_PACKAGE_TEST): dev/tests/engine/model_package_test.cpp \
+		$(ENGINE_LIBRARY)
 $(TEST_OPERATOR_WORKSPACE): dev/tests/engine/operator_workspace_test.cc \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
+		$(ENGINE_LIBRARY)
 $(TEST_EXECUTION_PLANS): dev/tests/engine/execution_plans_test.cc \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
+		$(ENGINE_LIBRARY)
 $(TEST_MODEL_EXECUTION_PLANS): dev/tests/engine/model_execution_plan_test.cpp \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
+		$(ENGINE_LIBRARY)
 $(TEST_LINEAR_TUNING): dev/tests/engine/linear_tuning_test.cc $(TUNING_SOURCES) \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
+		$(ENGINE_INSTRUMENTED_METAL_OBJECT) $(ENGINE_LIBRARY)
+$(TEST_TUNING_WORKLOADS): dev/tests/engine/tuning_workloads_test.cpp $(TUNING_SOURCES) \
+		$(ENGINE_INSTRUMENTED_METAL_OBJECT) $(ENGINE_LIBRARY)
+$(TEST_VISION_METAL_TEST): dev/tests/engine/vision_metal_test.cpp \
+		$(ENGINE_LIBRARY) $(LIB)
+
+$(TEST_AFFINE_CHECKPOINT) $(TEST_MODEL_CONFIGURATION) $(TEST_VISION_PREPARATION) \
+		$(TEST_NATIVE_ARGUMENTS_TEST) $(TEST_ANE_FFN_STARTUP) $(TEST_MODEL_PACKAGE_TEST) $(TEST_OPERATOR_WORKSPACE) \
+		$(TEST_EXECUTION_PLANS) $(TEST_MODEL_EXECUTION_PLANS) $(TEST_LINEAR_TUNING) \
+		$(TEST_TUNING_WORKLOADS) $(TEST_VISION_METAL_TEST): | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) \
 		$(ENGINE_LINKFLAGS) -o $@
 
-$(TEST_ATTENTION_TUNING): dev/tests/engine/attention_tuning_test.cc $(TUNING_SOURCES) \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) \
-		$(ENGINE_LINKFLAGS) -o $@
+# Objective-C++ tests, oracles and benchmarks linked with the frameworks.
+$(TEST_AFFINE_PREPARATION): dev/tests/engine/affine_preparation_test.mm $(ENGINE_LIBRARY)
+$(TEST_GGUF_PROJECTION): dev/tests/engine/gguf_projection_test.mm $(ENGINE_LIBRARY) $(LIB)
+$(TEST_ANE_FFN): dev/tests/engine/ane_ffn_test.mm $(ENGINE_INSTRUMENTED_ANE_OBJECT) $(ENGINE_LIBRARY) $(LIB)
+$(TEST_ANE_PROGRAM_FAULTS): dev/tests/engine/ane_program_faults_test.mm \
+		$(ENGINE_INSTRUMENTED_ANE_OBJECT) $(ENGINE_LIBRARY) $(LIB)
+$(TEST_GGUF_DEQUANT): dev/tests/engine/gguf_dequant_test.mm $(ENGINE_LIBRARY)
+$(TEST_GGUF_ROTATION): dev/tests/engine/gguf_rotation_test.mm $(ENGINE_LIBRARY)
+$(TEST_GGUF_REFERENCE): dev/tests/engine/gguf_reference_test.mm $(ENGINE_LIBRARY)
+$(TEST_GGUF_PLANNER): dev/tests/engine/gguf_planner_test.mm $(ENGINE_LIBRARY)
+$(TEST_GGUF_PREPARATION): dev/tests/engine/gguf_preparation_test.mm $(ENGINE_LIBRARY)
+$(TEST_BOOTSTRAP_TEST): dev/tests/engine/runtime_bootstrap_test.mm \
+		dev/tests/engine/ProtocolPeer.cpp $(ENGINE_LIBRARY)
+$(TEST_RESOURCES_TEST): dev/tests/engine/runtime_resources_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_KV_PAGE_TIER_TEST): dev/tests/engine/kv_page_tier_test.mm \
+		$(ENGINE_LIBRARY)
+$(TEST_QWEN_STATE_TEST): dev/tests/engine/qwen_state_storage_test.mm \
+		$(ENGINE_LIBRARY)
+$(TEST_Q8_ATTENTION_TEST): dev/tests/engine/q8_flash_attention_metal_test.mm \
+		$(ENGINE_LIBRARY) $(TEST_Q8_ATTENTION_LIB)
+$(TEST_Q8_PREFILL_TEST): dev/tests/engine/q8_chunked_prefill_metal_test.mm \
+		$(ENGINE_LIBRARY) $(TEST_Q8_ATTENTION_LIB)
+$(TEST_Q4_SGMATRIX_TEST): dev/tests/engine/q4_sgmatrix_metal_test.mm $(ENGINE_LIBRARY) $(LIB)
+$(TEST_Q4_BATCH_TEST): dev/tests/engine/q4_batched_projection_metal_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_Q4_PREFILL_TEST): dev/tests/engine/q4_prefill_projection_metal_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_MOE_METAL_TEST): dev/tests/engine/moe_metal_test.mm \
+		$(ENGINE_INSTRUMENTED_METAL_OBJECT) $(ENGINE_LIBRARY) $(LIB)
+$(TEST_GGUF_MOE): dev/tests/engine/gguf_moe_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_GDN_METAL_TEST): dev/tests/engine/gdn_metal_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_ATTENTION_PLAN): dev/tests/engine/paged_attention_plan_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_LINEAR_PLAN): dev/tests/engine/linear_plan_test.mm $(TUNING_SOURCES) \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_DFLASH_BATCH_CONTROL_TEST): dev/tests/engine/dflash_batch_control_metal_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_DRAFT_ATTENTION_TEST): dev/tests/engine/draft_attention_metal_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_GDN_DECODE_TEST): dev/tests/engine/gdn_decode_metal_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_DRAFT_SELECTOR_TEST): dev/tests/engine/draft_selector_metal_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_TARGET_SAMPLING_TEST): dev/tests/engine/target_sampling_metal_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_Q8_METAL_TEST): dev/tests/engine/q8_paged_kv_metal_test.mm
+$(TEST_Q8_STORAGE_TEST): dev/tests/engine/q8_page_storage_test.mm \
+		$(ENGINE_LIBRARY)
+$(TEST_METAL_BACKEND_TEST): dev/tests/engine/metal_backend_test.mm \
+		$(ENGINE_INSTRUMENTED_METAL_OBJECT) $(ENGINE_LIBRARY)
+$(TEST_HANDOFF_TEST): dev/tests/engine/handoff_test.mm $(ENGINE_LIBRARY)
+$(TEST_VISION_ENCODER_TEST): dev/tests/engine/vision_encoder_test.mm \
+		$(ENGINE_LIBRARY)
+$(TEST_MODEL_RUNTIME_ORACLE): dev/tests/engine/model_runtime_oracle_test.mm \
+		$(ENGINE_INSTRUMENTED_METAL_OBJECT) $(ENGINE_INSTRUMENTED_ANE_OBJECT) $(ENGINE_LIBRARY) $(LIB) \
+		$(BUILD_ID_HEADER)
+# The oracle remembers the split's calibration under the build, as the engine does.
+$(TEST_MODEL_RUNTIME_ORACLE): ENGINE_TEST_CXXFLAGS += -include $(BUILD_ID_HEADER)
+# Compares the affine images loaded from an MLX model with the released
+# package, including all padding and metadata bytes. No target runs it, as it
+# needs an installed MLX model and the matching package (DEVELOPMENT.md).
+$(TEST_AFFINE_SOURCE_ORACLE): dev/tests/engine/affine_source_oracle_test.mm \
+		$(ENGINE_LIBRARY)
+$(TEST_DECODE_PROFILE): dev/benchmarks/decode_profile.mm \
+		$(ENGINE_INSTRUMENTED_METAL_OBJECT) $(ENGINE_LIBRARY) $(LIB)
+$(TEST_ATTENTION_SWEEP): dev/benchmarks/attention_sweep.mm \
+		dev/benchmarks/DispatchReplay.hpp \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_GGUF_PROJECTION_BENCHMARK): dev/benchmarks/gguf_projection_benchmark.mm \
+		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_GGUF_MOE_BENCHMARK): dev/benchmarks/gguf_moe_benchmark.mm \
+		dev/benchmarks/DispatchReplay.hpp \
+		$(ENGINE_LIBRARY) $(LIB)
 
-$(TEST_DRAFT_ATTENTION_TUNING): dev/tests/engine/draft_attention_tuning_test.cc $(TUNING_SOURCES) \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_MOE_TUNING): dev/tests/engine/moe_tuning_test.mm $(TUNING_SOURCES) \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
+$(TEST_AFFINE_PREPARATION) $(TEST_GGUF_PROJECTION) $(TEST_ANE_FFN) \
+		$(TEST_ANE_PROGRAM_FAULTS) $(TEST_GGUF_DEQUANT) $(TEST_GGUF_ROTATION) \
+		$(TEST_GGUF_REFERENCE) $(TEST_GGUF_PLANNER) $(TEST_GGUF_PREPARATION) \
+		$(TEST_BOOTSTRAP_TEST) $(TEST_RESOURCES_TEST) \
+		$(TEST_KV_PAGE_TIER_TEST) $(TEST_QWEN_STATE_TEST) $(TEST_Q8_ATTENTION_TEST) \
+		$(TEST_Q8_PREFILL_TEST) $(TEST_Q4_SGMATRIX_TEST) $(TEST_Q4_BATCH_TEST) \
+		$(TEST_Q4_PREFILL_TEST) $(TEST_MOE_METAL_TEST) $(TEST_GGUF_MOE) \
+		$(TEST_GDN_METAL_TEST) $(TEST_ATTENTION_PLAN) $(TEST_LINEAR_PLAN) \
+		$(TEST_DFLASH_BATCH_CONTROL_TEST) $(TEST_DRAFT_ATTENTION_TEST) \
+		$(TEST_GDN_DECODE_TEST) $(TEST_DRAFT_SELECTOR_TEST) \
+		$(TEST_TARGET_SAMPLING_TEST) $(TEST_Q8_METAL_TEST) $(TEST_Q8_STORAGE_TEST) \
+		$(TEST_METAL_BACKEND_TEST) $(TEST_HANDOFF_TEST) $(TEST_VISION_ENCODER_TEST) \
+		$(TEST_MODEL_RUNTIME_ORACLE) $(TEST_AFFINE_SOURCE_ORACLE) \
+		$(TEST_DECODE_PROFILE) $(TEST_ATTENTION_SWEEP) \
+		$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK): | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $(TEST_INPUTS) \
 		$(ENGINE_LINKFLAGS) -o $@
 
-$(TEST_TUNING_WORKLOADS): dev/tests/engine/tuning_workloads_test.cpp $(TUNING_SOURCES) \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) \
+# Profiles and tools built with the production flags.
+$(TEST_Q4_PREFILL_PROFILE): dev/benchmarks/q4_prefill_profile.mm $(ENGINE_LIBRARY)
+$(TEST_Q4_DECODE_PROFILE): dev/benchmarks/q4_decode_profile.mm $(ENGINE_LIBRARY)
+$(WEIGHT_DIGESTS): dev/tools/weight_digests.mm $(ENGINE_LIBRARY)
+
+$(TEST_Q4_PREFILL_PROFILE) $(TEST_Q4_DECODE_PROFILE) $(WEIGHT_DIGESTS): | $(ENGINE_TEST_BUILD)
+	$(RUN_CONFIGURED) $(CXX) $(ENGINE_OBJCXXFLAGS) $(TEST_INPUTS) \
+		$(ENGINE_LINKFLAGS) -o $@
+
+$(TEST_BACKEND_BENCHMARK): dev/benchmarks/backend_benchmark.mm \
+		dev/benchmarks/PrefillWork.hpp \
+		$(ENGINE_LIBRARY) $(LIB) $(BUILD_ID_HEADER) \
+		| $(ENGINE_TEST_BUILD)
+	$(RUN_CONFIGURED) $(CXX) $(ENGINE_OBJCXXFLAGS) -include $(BUILD_ID_HEADER) $< \
+		$(ENGINE_LIBRARY) \
 		$(ENGINE_LINKFLAGS) -o $@
 
 $(TUNE_KERNELS): dev/tuning/tune_kernels.mm $(TUNING_SOURCES) \
@@ -476,126 +464,39 @@ $(TUNE_KERNELS): dev/tuning/tune_kernels.mm $(TUNING_SOURCES) \
 tune-kernels: preflight $(TARGET) $(TUNE_KERNELS) $(LIB)
 	$(TUNE_KERNELS) $(LIB) "$(MODEL_ROOT)" $(TUNE_ARGS)
 
-$(TEST_ATTENTION_PLAN): dev/tests/engine/paged_attention_plan_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
+# Test kernels, each compiled from its Metal source with the test flags.
+$(TEST_Q8_AIR): dev/tests/engine/q8_page_format_oracle.metal runtime/metal/abi/ExecutionGeometry.h
+$(TEST_METAL_BACKEND_AIR): dev/tests/engine/metal_backend_test.metal
 
-$(TEST_LINEAR_PLAN): dev/tests/engine/linear_plan_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
+$(TEST_Q8_AIR) $(TEST_METAL_BACKEND_AIR): | $(ENGINE_TEST_BUILD)
+	$(RUN_CONFIGURED) $(METAL) $(TEST_METALFLAGS) -c $(filter %.metal,$^) -o $@
 
-$(TEST_DFLASH_BATCH_CONTROL_TEST): dev/tests/engine/dflash_batch_control_metal_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_DRAFT_ATTENTION_TEST): dev/tests/engine/draft_attention_metal_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GDN_DECODE_TEST): dev/tests/engine/gdn_decode_metal_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_DRAFT_SELECTOR_TEST): dev/tests/engine/draft_selector_metal_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_Q4_PREFILL_PROFILE): dev/benchmarks/q4_prefill_profile.mm \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_Q4_DECODE_PROFILE): dev/benchmarks/q4_decode_profile.mm \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_Q8_METAL_TEST): dev/tests/engine/q8_paged_kv_metal_test.mm | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_Q8_STORAGE_TEST): dev/tests/engine/q8_page_storage_test.mm \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_METAL_BACKEND_AIR): dev/tests/engine/metal_backend_test.metal \
+$(ENGINE_TEST_BUILD)/kernels/%.air: runtime/metal/kernels/%.metal \
+		$(KERNEL_HEADERS) \
 		| $(ENGINE_TEST_BUILD)
+	@mkdir -p $(dir $@)
 	$(RUN_CONFIGURED) $(METAL) $(TEST_METALFLAGS) -c $< -o $@
 
-$(TEST_METAL_BACKEND_LIB): $(TEST_METAL_BACKEND_AIR)
-	$(RUN_CONFIGURED) $(METALLIB) $< -o $@
+# Production flags, not TEST_METALFLAGS: gguf-dequant checks the shipped
+# dequantizer bitwise, so it compiles as production does (its AIR does not
+# depend on -O3 with metal 32023, but that of some kernels does).
+$(TEST_GGUF_DEQUANT_AIR): dev/tests/engine/gguf_dequant_test.metal \
+		$(KERNEL_HEADERS) | $(ENGINE_TEST_BUILD)
+	$(RUN_CONFIGURED) $(METAL) $(PROD_METALFLAGS) -c $< -o $@
 
+# Test libraries, each linked from the AIRs it lists.
+$(TEST_GGUF_DEQUANT_LIB): $(TEST_GGUF_DEQUANT_AIR) $(TEST_RESIDENCY_AIR)
+$(TEST_Q8_LIB): $(TEST_Q8_AIR) $(TEST_RESIDENCY_AIR)
+$(TEST_Q8_ATTENTION_LIB): $(TEST_Q8_KERNEL_AIRS)
+$(TEST_METAL_BACKEND_LIB): $(TEST_METAL_BACKEND_AIR) $(TEST_RESIDENCY_AIR)
 # The production kernels and the test kernels of metal_backend_test.metal in
 # one library, for the kernel tests that order a test copy between production
 # dispatches. It relinks whenever the production library does.
 $(TEST_PRODUCTION_LIB): $(PRODUCTION_AIRS) $(TEST_METAL_BACKEND_AIR) $(LIB)
+
+$(TEST_GGUF_DEQUANT_LIB) $(TEST_Q8_LIB) $(TEST_Q8_ATTENTION_LIB) $(TEST_METAL_BACKEND_LIB) \
+		$(TEST_PRODUCTION_LIB):
 	$(RUN_CONFIGURED) $(METALLIB) $(filter %.air,$^) -o $@
-
-$(TEST_METAL_BACKEND_TEST): dev/tests/engine/metal_backend_test.mm \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_VISION_ENCODER_TEST): dev/tests/engine/vision_encoder_test.mm \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_MODEL_RUNTIME_ORACLE): dev/tests/engine/model_runtime_oracle_test.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< \
-		$(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-# Compares locally prepared affine artifacts with the released package,
-# including all padding and metadata bytes. test-engine-cpu builds it so it
-# cannot break unnoticed; no target runs it, as it needs an installed MLX model
-# and the matching package (DEVELOPMENT.md).
-$(TEST_AFFINE_SOURCE_ORACLE): dev/tests/engine/affine_source_oracle_test.mm \
-		$(ENGINE_LIBRARY) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< $(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_DECODE_PROFILE): dev/benchmarks/decode_profile.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< \
-		$(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_ATTENTION_SWEEP): dev/benchmarks/attention_sweep.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< \
-		$(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-# The GGUF benchmarks call the operators directly; test-engine-cpu builds them
-# so they cannot fall behind unnoticed.
-$(TEST_GGUF_PROJECTION_BENCHMARK): dev/benchmarks/gguf_projection_benchmark.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< \
-		$(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_GGUF_MOE_BENCHMARK): dev/benchmarks/gguf_moe_benchmark.mm \
-		$(ENGINE_LIBRARY) $(LIB) | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< \
-		$(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
-
-$(TEST_BACKEND_BENCHMARK): dev/benchmarks/backend_benchmark.mm \
-		dev/benchmarks/PrefillWork.hpp \
-		$(ENGINE_LIBRARY) $(LIB) $(BUILD_ID_HEADER) \
-		| $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_OBJCXXFLAGS) -include $(BUILD_ID_HEADER) $< \
-		$(ENGINE_LIBRARY) \
-		$(ENGINE_LINKFLAGS) -o $@
 
 .PHONY: verify-build-identity
 verify-build-identity: $(TARGET) $(BUILD_ID_HEADER) $(BUILD_ID_STAMP)
@@ -610,46 +511,45 @@ verify-build-identity: $(TARGET) $(BUILD_ID_HEADER) $(BUILD_ID_STAMP)
 METAL_TEST_ENV := MTL_SHADER_VALIDATION=1
 test-engine: test-engine-cpu test-engine-metal
 
-test-engine-cpu: $(TEST_CPU_TARGETS) $(TEST_ATTENTION_SWEEP) $(TUNE_KERNELS) \
-		$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) \
-		$(TEST_AFFINE_SOURCE_ORACLE)
+test-engine-cpu: $(TEST_CPU_TARGETS) $(TEST_ATTENTION_SWEEP) $(TUNE_KERNELS)
 	$(TEST_SLOT_FILE)
+	$(TEST_CACHE_DIRECTORY)
 	$(BUILD_ID_PYTHON) dev/tests/engine/run_vision_preparation.py $(TEST_VISION_PREPARATION) $(WEIGHT_GOLDENS)
 	$(TEST_AFFINE_CHECKPOINT)
-	$(TEST_PREPARED_WEIGHTS)
+	$(TEST_MODEL_CONFIGURATION) $(MODEL_CONFIGS)
+	$(TEST_WEIGHT_SOURCE)
 	$(TEST_GGUF_FILE)
 	$(TEST_GGUF_REFERENCE) $(WEIGHT_GOLDENS)
 	$(TEST_GGUF_PLANNER)
-	$(TEST_DEVICE_QUERIES)
 	$(TEST_TUNING_WORKLOADS)
 	$(TEST_LINEAR_PLAN) --cpu
 	$(TEST_LINEAR_TUNING) --cpu
-	$(TEST_ATTENTION_TUNING)
-	$(TEST_DRAFT_ATTENTION_TUNING)
-	$(TEST_MOE_TUNING) --cpu
 	/bin/sh dev/tests/attention_sweep_cli.sh $(TEST_ATTENTION_SWEEP)
 	/bin/sh dev/tests/tune_kernels_cli.sh $(TUNE_KERNELS)
 	$(TEST_OPERATOR_WORKSPACE)
 	$(TEST_OPERATOR_TUNING)
 	$(TEST_OPERATOR_MEASUREMENT)
+	$(TEST_ANE_FFN_CALIBRATION)
+	$(TEST_ANE_FFN_STARTUP)
 	$(TEST_EXECUTION_PLANS)
 	$(TEST_MODEL_EXECUTION_PLANS)
 	$(TEST_MEMORY_TEST)
 	$(TEST_KV_PAGE_CACHE_TEST)
-	$(TEST_KV_FIRST_CACHE_TEST)
+	$(TEST_ENGINE_CACHE_TEST)
+	$(TEST_PERSISTENT_CACHE)
 	$(TEST_DRAFT_CONTEXT_PLAN_TEST)
 	$(TEST_RAGGED_SCHEDULER_TEST)
-	$(TEST_CACHE_TEST)
-	$(TEST_KV_FIRST_ENGINE_TEST)
+	$(TEST_ENGINE_TEST)
 	$(TEST_ELASTIC_KV_TEST)
-	$(TEST_PROTOCOL_TEST)
+	$(TEST_PROTOCOL_TEST) dev/tests/engine/protocol_golden.txt
 	$(TEST_NATIVE_LOOP_TEST)
 	$(TEST_FD_TRANSPORT_TEST)
 	$(TEST_BOOTSTRAP_TEST)
+	$(TEST_NATIVE_ARGUMENTS_TEST) dev/tests/engine/native_command_golden.txt
 	$(TEST_METRICS_TEST)
 	$(TEST_MEMORY_AUDIT_TEST)
 	$(TEST_MEMORY_GOVERNOR_TEST)
-	$(TEST_STATUS_TEST)
+	$(TEST_STATUS_TEST) dev/tests/engine/status_golden.json
 	$(TEST_Q8_CPU_TEST)
 
 test-engine-metal: $(TEST_METAL_TARGETS)
@@ -659,24 +559,26 @@ test-engine-metal: $(TEST_METAL_TARGETS)
 	$(METAL_TEST_ENV) $(TEST_GGUF_DEQUANT) $(TEST_GGUF_DEQUANT_LIB)
 	$(METAL_TEST_ENV) $(TEST_GGUF_ROTATION) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_GGUF_PROJECTION) $(TEST_PRODUCTION_LIB)
+	$(METAL_TEST_ENV) $(TEST_ANE_FFN) $(LIB) kernels
+	$(TEST_ANE_FFN) $(LIB) split
+	$(TEST_ANE_FFN) $(LIB) faults
+	$(TEST_ANE_FFN) $(LIB) program
+	$(TEST_ANE_PROGRAM_FAULTS) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_GGUF_MOE) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_TUNING_WORKLOADS) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_LINEAR_TUNING) $(LIB)
-	$(METAL_TEST_ENV) $(TEST_ATTENTION_TUNING) --metal $(LIB)
-	$(METAL_TEST_ENV) $(TEST_DRAFT_ATTENTION_TUNING) --metal $(LIB)
-	$(METAL_TEST_ENV) $(TEST_MOE_TUNING) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_ATTENTION_PLAN) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_LINEAR_PLAN) $(LIB)
 	$(TEST_LINEAR_PLAN) --capabilities $(LIB)
 	$(METAL_TEST_ENV) $(TEST_RESOURCES_TEST) $(LIB)
-	$(METAL_TEST_ENV) $(TEST_KV_PAGE_TIER_TEST) $(LIB)
+	$(METAL_TEST_ENV) $(TEST_KV_PAGE_TIER_TEST) $(TEST_METAL_BACKEND_LIB)
 	$(METAL_TEST_ENV) $(TEST_MODEL_PACKAGE_TEST) $(TEST_METAL_BACKEND_LIB)
 	$(METAL_TEST_ENV) $(TEST_QWEN_STATE_TEST) $(TEST_Q8_LIB)
 	$(METAL_TEST_ENV) $(TEST_Q8_METAL_TEST) $(TEST_Q8_LIB)
-	$(METAL_TEST_ENV) $(TEST_Q8_STORAGE_TEST) $(TEST_Q8_LIB)
+	$(METAL_TEST_ENV) $(TEST_Q8_STORAGE_TEST) $(TEST_METAL_BACKEND_LIB)
 	$(METAL_TEST_ENV) $(TEST_Q8_ATTENTION_TEST) $(TEST_Q8_ATTENTION_LIB)
 	$(METAL_TEST_ENV) $(TEST_Q8_PREFILL_TEST) $(TEST_Q8_ATTENTION_LIB)
-	$(METAL_TEST_ENV) $(TEST_Q4_BATCH_TEST) $(LIB)
+	$(METAL_TEST_ENV) $(TEST_Q4_BATCH_TEST) $(TEST_PRODUCTION_LIB)
 	$(METAL_TEST_ENV) $(TEST_Q4_PREFILL_TEST) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_Q4_SGMATRIX_TEST) $(TEST_PRODUCTION_LIB)
 	$(METAL_TEST_ENV) $(TEST_MOE_METAL_TEST) $(LIB)
@@ -685,7 +587,10 @@ test-engine-metal: $(TEST_METAL_TARGETS)
 	$(METAL_TEST_ENV) $(TEST_DRAFT_ATTENTION_TEST) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_GDN_DECODE_TEST) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_DRAFT_SELECTOR_TEST) $(LIB)
+	$(METAL_TEST_ENV) $(TEST_TARGET_SAMPLING_TEST) $(LIB)
+	$(METAL_TEST_ENV) $(TEST_VISION_METAL_TEST) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_METAL_BACKEND_TEST) $(TEST_METAL_BACKEND_LIB)
+	$(METAL_TEST_ENV) $(TEST_HANDOFF_TEST) $(TEST_METAL_BACKEND_LIB)
 
 .PHONY: test-real
 # The vision fixture is named after the installed model's family: model.json
@@ -705,6 +610,7 @@ test-real: preflight $(TARGET) $(TEST_MODEL_RUNTIME_ORACLE) \
 			$(METAL_TEST_ENV) $(TEST_VISION_ENCODER_TEST) $(LIB) "$(MODEL_ROOT)" \
 				dev/tests/fixtures/vision-parity/$$family; \
 		else echo "vision parity: skipped, the installation serves text only"; fi
+	$(TEST_MODEL_RUNTIME_ORACLE) $(LIB) "$(MODEL_ROOT)" --ane-ffn-share 0
 	$(TEST_MODEL_RUNTIME_ORACLE) $(LIB) "$(MODEL_ROOT)"
 
 .PHONY: benchmark-prefill benchmark-decode benchmark-backend \
@@ -727,8 +633,10 @@ benchmark-attention-sweep: $(TEST_ATTENTION_SWEEP) $(LIB)
 	$(TEST_ATTENTION_SWEEP) $(LIB) $(ATTENTION_SWEEP_ARGS)
 
 # One GGUF projection on both decode tiles at every lane count and K split
-# (the split tiers of runtime/ops/LinearGguf.cpp); GGUF_PROJECTION_ARGS passes
-# <fmt[+fmt+fmt]> <N[+N+N]> <K> [none|residual|gateup] [rounds].
+# (the split tiers of runtime/ops/LinearGguf.cpp), or with prefill=R[,R...]
+# on the 128-row prefill tile at each chunk of R rows; GGUF_PROJECTION_ARGS
+# passes <fmt[+fmt+fmt]> <N[+N+N]> <K> [none|residual|gateup] [rounds]
+# [prefill=R[,R...]].
 GGUF_PROJECTION_ARGS ?= q4k 5120 8192
 benchmark-gguf-projection: $(TEST_GGUF_PROJECTION_BENCHMARK) $(LIB)
 	$(TEST_GGUF_PROJECTION_BENCHMARK) $(LIB) $(GGUF_PROJECTION_ARGS)
@@ -743,15 +651,27 @@ benchmark-backend: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
 	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)"
 
 # CPU tests that also run under the sanitizers: each is built three times
-# from the same sources.
+# from the same sources, once as the CPU tests above are and once under each
+# sanitizer.
 $(TEST_SLOT_FILE) $(TEST_SLOT_FILE_ASAN) $(TEST_SLOT_FILE_TSAN): \
 		runtime/model/SlotFile.cpp dev/tests/engine/slot_file_test.cpp
-$(TEST_KV_FIRST_ENGINE_TEST) $(TEST_BACKEND_ASAN) $(TEST_BACKEND_TSAN): \
+$(TEST_CACHE_DIRECTORY) $(TEST_CACHE_DIRECTORY_ASAN) $(TEST_CACHE_DIRECTORY_TSAN): \
+		runtime/engine/CacheDirectory.cpp dev/tests/engine/cache_directory_test.cpp
+$(TEST_PERSISTENT_CACHE) $(TEST_PERSISTENT_CACHE_ASAN) $(TEST_PERSISTENT_CACHE_TSAN): \
+		$(CACHE_SOURCES) runtime/model/SlotFile.cpp dev/tests/engine/persistent_cache_test.cpp
+$(TEST_ENGINE_CACHE_TEST) $(TEST_ENGINE_CACHE_ASAN) $(TEST_ENGINE_CACHE_TSAN): \
+		$(CACHE_SOURCES) runtime/model/SlotFile.cpp dev/tests/engine/engine_cache_test.cpp
+$(TEST_PROTOCOL_TEST) $(TEST_PROTOCOL_ASAN) $(TEST_PROTOCOL_TSAN): \
+		runtime/engine/Protocol.cpp dev/tests/engine/ProtocolPeer.cpp \
+		dev/tests/engine/protocol_test.cpp
+$(TEST_ENGINE_TEST) $(TEST_ENGINE_ASAN) $(TEST_ENGINE_TSAN): \
 		$(BACKEND_CONTROL_SOURCES) \
-		dev/tests/engine/kv_first_engine_test.cpp
+		dev/benchmarks/PrefillWork.hpp \
+		dev/tests/engine/engine_test.cpp
 $(TEST_FD_TRANSPORT_TEST) $(TEST_FD_TRANSPORT_ASAN) $(TEST_FD_TRANSPORT_TSAN): \
 		$(NATIVE_RUNTIME_SOURCES) \
 		runtime/engine/FdTransport.cpp \
+		dev/tests/engine/ProtocolPeer.cpp \
 		dev/tests/engine/native_fd_transport_test.cpp
 $(TEST_OPERATOR_TUNING) $(TEST_OPERATOR_TUNING_ASAN) $(TEST_OPERATOR_TUNING_TSAN): \
 		dev/tuning/Tuning.cpp \
@@ -759,10 +679,8 @@ $(TEST_OPERATOR_TUNING) $(TEST_OPERATOR_TUNING_ASAN) $(TEST_OPERATOR_TUNING_TSAN
 $(TEST_OPERATOR_MEASUREMENT) $(TEST_OPERATOR_MEASUREMENT_ASAN) $(TEST_OPERATOR_MEASUREMENT_TSAN): \
 		dev/tuning/Tuning.cpp dev/tuning/Measurement.cpp \
 		dev/tests/engine/operator_measurement_test.cpp
-
-$(TEST_SLOT_FILE) $(TEST_KV_FIRST_ENGINE_TEST) $(TEST_FD_TRANSPORT_TEST) \
-		$(TEST_OPERATOR_TUNING) $(TEST_OPERATOR_MEASUREMENT): | $(ENGINE_TEST_BUILD)
-	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
+$(TEST_ANE_FFN_CALIBRATION) $(TEST_ANE_FFN_CALIBRATION_ASAN) $(TEST_ANE_FFN_CALIBRATION_TSAN): \
+		runtime/ops/AneFfnCalibration.cpp dev/tests/engine/ane_ffn_calibration_test.cpp
 
 $(filter %-asan-ubsan,$(SANITIZER_CONFIG_TARGETS)): SANITIZERS := address,undefined
 $(filter %-tsan,$(SANITIZER_CONFIG_TARGETS)): SANITIZERS := thread
@@ -777,11 +695,21 @@ TSAN_TEST_ENV := TSAN_OPTIONS=halt_on_error=1
 test-sanitizers: $(SANITIZER_CONFIG_TARGETS)
 	$(ASAN_TEST_ENV) $(TEST_SLOT_FILE_ASAN)
 	$(TSAN_TEST_ENV) $(TEST_SLOT_FILE_TSAN)
-	$(ASAN_TEST_ENV) $(TEST_BACKEND_ASAN)
-	$(TSAN_TEST_ENV) $(TEST_BACKEND_TSAN)
+	$(ASAN_TEST_ENV) $(TEST_CACHE_DIRECTORY_ASAN)
+	$(TSAN_TEST_ENV) $(TEST_CACHE_DIRECTORY_TSAN)
+	$(ASAN_TEST_ENV) $(TEST_PERSISTENT_CACHE_ASAN)
+	$(TSAN_TEST_ENV) $(TEST_PERSISTENT_CACHE_TSAN)
+	$(ASAN_TEST_ENV) $(TEST_ENGINE_CACHE_ASAN)
+	$(TSAN_TEST_ENV) $(TEST_ENGINE_CACHE_TSAN)
+	$(ASAN_TEST_ENV) $(TEST_PROTOCOL_ASAN) dev/tests/engine/protocol_golden.txt
+	$(TSAN_TEST_ENV) $(TEST_PROTOCOL_TSAN) dev/tests/engine/protocol_golden.txt
+	$(ASAN_TEST_ENV) $(TEST_ENGINE_ASAN)
+	$(TSAN_TEST_ENV) $(TEST_ENGINE_TSAN)
 	$(ASAN_TEST_ENV) $(TEST_FD_TRANSPORT_ASAN)
 	$(TSAN_TEST_ENV) $(TEST_FD_TRANSPORT_TSAN)
 	$(ASAN_TEST_ENV) $(TEST_OPERATOR_TUNING_ASAN)
 	$(TSAN_TEST_ENV) $(TEST_OPERATOR_TUNING_TSAN)
 	$(ASAN_TEST_ENV) $(TEST_OPERATOR_MEASUREMENT_ASAN)
 	$(TSAN_TEST_ENV) $(TEST_OPERATOR_MEASUREMENT_TSAN)
+	$(ASAN_TEST_ENV) $(TEST_ANE_FFN_CALIBRATION_ASAN)
+	$(TSAN_TEST_ENV) $(TEST_ANE_FFN_CALIBRATION_TSAN)

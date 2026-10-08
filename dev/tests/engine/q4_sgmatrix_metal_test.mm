@@ -1,5 +1,8 @@
+#include "TestBuffers.hpp"
+#include "TestChecks.hpp"
 #include "metal/MetalBackend.hpp"
 #include "metal/abi/Gguf.h"
+#include "metal/abi/Linear.h"
 #include "ops/Linear.hpp"
 #include "ops/Normalization.hpp"
 #include "ops/PagedAttention.hpp"
@@ -16,6 +19,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -24,14 +28,13 @@ using namespace splash::ops;
 using namespace splash::ops::tuning;
 using namespace splash::test;
 namespace {
-void require(bool value, const char *message) { if (!value) throw std::runtime_error(message); }
 struct Guarded {
   metal::MetalBuffer backing, view;
   uint64_t size;
   Guarded(metal::MetalBackend &backend, uint64_t bytes) : size(bytes) {
-    backing = backend.allocateBuffer(bytes + 256);
+    backing = test::sharedBuffer(backend, bytes + 256);
     std::memset(backing.contents(), 0xa5, bytes + 256);
-    view = backend.view(backing, 0, bytes);
+    if (bytes) view = backend.view(backing, 0, bytes);
   }
   void check() const {
     const auto *p = static_cast<const uint8_t *>(backing.contents());
@@ -42,8 +45,8 @@ uint32_t hash(uint32_t v) { v ^= v >> 16; v *= 0x7feb352d; v ^= v >> 15; return 
 Projection weights(metal::MetalBackend &backend, LinearMatrix shape, uint32_t seed, bool zero) {
   const uint64_t params = uint64_t(shape.outputSize) * shape.inputSize / 64;
   Projection p(shape.outputSize, shape.inputSize,
-               AffineWeights{backend.allocateBuffer(params * 32), backend.allocateBuffer(params * 2),
-                             backend.allocateBuffer(params * 2)});
+               AffineWeights{test::sharedBuffer(backend, params * 32), test::sharedBuffer(backend, params * 2),
+                             test::sharedBuffer(backend, params * 2)});
   auto *q = static_cast<uint8_t *>(p.affine().weights.contents());
   auto *s = static_cast<uint16_t *>(p.affine().scales.contents());
   auto *b = static_cast<uint16_t *>(p.affine().biases.contents());
@@ -63,8 +66,9 @@ Exact exact(const Projection &p, const uint16_t *input, uint32_t row, uint32_t c
   const auto *bi = static_cast<const uint16_t *>(p.affine().biases.contents());
   double value = 0, magnitude = 0, quantMagnitude = 0;
   const uint32_t groups = p.inputSize / 64;
+  constexpr uint32_t tile = SPLASH_AFFINE_TILE_ROWS;
   for (uint32_t g = 0; g < groups; ++g) {
-    const uint64_t at = (uint64_t(col / 256) * groups + g) * 256 + col % 256;
+    const uint64_t at = (uint64_t(col / tile) * groups + g) * tile + col % tile;
     double dot = 0, sum = 0, absolute = 0;
     for (uint32_t k = 0; k < 64; ++k) {
       const double x = bf16ToFloat(input[uint64_t(row) * p.inputSize + g * 64 + k]);
@@ -112,13 +116,13 @@ bool within(const Reference &ref, uint16_t actual) {
 void runCase(metal::MetalBackend &backend, uint32_t n, uint32_t k, uint32_t splits,
              LinearEpilogue epilogue, uint32_t fixture, uint32_t rows) {
   const LinearWorkload workload{{n, k}, rows, LinearPhase::Decode, epilogue};
-  const auto plan = Linear::plan(workload,
-      {LinearTile::Simdgroup, n / (epilogue == LinearEpilogue::GateUp ? 32 : 64), LinearSimdgroups::Four, splits});
+  const auto plan =
+      Linear::plan(workload, {LinearTile::Q4Register, 0, LinearSimdgroups::Four, splits}, FloatOutput::BFloat16);
   const auto size = plan.scratchSize();
   Guarded input(backend, 2ULL * rows * k), output(backend, 2ULL * rows * n), residual(backend, 2ULL * rows * n);
   Guarded table(backend, size.input), sums(backend, size.sums), partials(backend, size.partials), counters(backend, size.counters);
   LinearScratch scratch{table.view, sums.view, partials.view, counters.view};
-  std::memset(counters.view.contents(), 0, size.counters);
+  if (size.counters) std::memset(counters.view.contents(), 0, size.counters);
   auto *x = static_cast<uint16_t *>(input.view.contents());
   auto *r = static_cast<uint16_t *>(residual.view.contents());
   for (uint32_t i = 0; i < rows * k; ++i) {
@@ -138,7 +142,7 @@ void runCase(metal::MetalBackend &backend, uint32_t n, uint32_t k, uint32_t spli
   // publication, stale counters and dependencies between consecutive dispatches.
   for (uint32_t repeat = 0; repeat < 3; ++repeat)
     linear.add(graph, b, p, plan, epilogue == LinearEpilogue::GateUp ? &gate : nullptr);
-  (void)backend.submitCommand(graph.dispatches());
+  (void)backend.submitCommandAsync(graph.dispatches()).wait();
   const auto *prepared = static_cast<const uint16_t *>(table.view.contents());
   const auto *rowSums = static_cast<const float *>(sums.view.contents());
   for (uint32_t g=0;g<k/64;++g) for (uint32_t row=0;row<rows;++row) {
@@ -153,7 +157,7 @@ void runCase(metal::MetalBackend &backend, uint32_t n, uint32_t k, uint32_t spli
   }
   const auto *actual = static_cast<const uint16_t *>(output.view.contents());
   const std::vector<uint16_t> first(actual, actual + rows * n);
-  (void)backend.submitCommand(graph.dispatches());
+  (void)backend.submitCommandAsync(graph.dispatches()).wait();
   require(std::memcmp(first.data(), actual, 2ULL * rows * n) == 0, "nondeterministic split reduction");
   const auto *counts = static_cast<const uint32_t *>(counters.view.contents());
   for (uint64_t i = 0; i < size.counters / 4; ++i) require(counts[i] == 0, "counter not reset");
@@ -168,7 +172,7 @@ void runCase(metal::MetalBackend &backend, uint32_t n, uint32_t k, uint32_t spli
         std::cerr << "M=" << rows << " N=" << n << " K=" << k << " S=" << splits << " epilogue=" << int(epilogue)
                   << " fixture=" << fixture << " row=" << row << " col=" << col
                   << " actual=" << bf16ToFloat(value) << " reference=" << ref.value << " error=" << ref.error << '\n';
-        throw std::runtime_error("simdgroup result exceeds independent fp64 error bound");
+        throw std::runtime_error("Q4 register tile result exceeds independent fp64 error bound");
       }
       if (fixture == 3)
         require(bf16ToFloat(value) == bf16ToFloat(floatToBf16(float(ref.value))),
@@ -212,8 +216,8 @@ void splitVisibility(metal::MetalBackend &backend,
     const auto [n, k] = matrix;
     SplitOperand o{{matrix, rows, LinearPhase::Decode, epilogue},
                    weights(backend, matrix, 31 + 100 * i, false), weights(backend, matrix, 177 + 100 * i, false),
-                   backend.allocateBuffer(2ULL * rows * k), backend.allocateBuffer(2ULL * rows * n),
-                   backend.allocateBuffer(2ULL * rows * n), {}, {}};
+                   test::sharedBuffer(backend, 2ULL * rows * k), test::sharedBuffer(backend, 2ULL * rows * n),
+                   test::sharedBuffer(backend, 2ULL * rows * n), {}, {}};
     auto *x = static_cast<uint16_t *>(o.input.contents());
     auto *r = static_cast<uint16_t *>(o.residual.contents());
     for (uint32_t j = 0; j < rows * k; ++j) x[j] = floatToBf16(float(int(hash(j + 37 + 1000 * i) % 257) - 128) / 32);
@@ -233,14 +237,13 @@ void splitVisibility(metal::MetalBackend &backend,
     const Linear policy(device);
     const auto a = policy.plan(operands[0].workload).configuration();
     const auto b = policy.plan(operands[1].workload).configuration();
-    if (a.tile == LinearTile::Simdgroup && b.tile == LinearTile::Simdgroup && std::max(a.splits, b.splits) > 1)
+    if (a.tile == LinearTile::Q4Register && b.tile == LinearTile::Q4Register && std::max(a.splits, b.splits) > 1)
       splitPairs.insert({a.splits, b.splits});
   }
   require(!splitPairs.empty(), "the policy splits neither projection");
   const auto plan = [&](uint32_t i, uint32_t splits) {
     const LinearWorkload &w = operands[i].workload;
-    return Linear::plan(w, {LinearTile::Simdgroup, w.matrix.outputSize / (w.epilogue == LinearEpilogue::GateUp ? 32 : 64),
-                              LinearSimdgroups::Four, splits});
+    return Linear::plan(w, {LinearTile::Q4Register, 0, LinearSimdgroups::Four, splits}, FloatOutput::BFloat16);
   };
   LinearScratchSize size;
   const auto grow = [&](const LinearPlan &p) {
@@ -253,7 +256,7 @@ void splitVisibility(metal::MetalBackend &backend,
   Guarded table(backend, size.input), sums(backend, size.sums), partials(backend, size.partials), counters(backend, size.counters);
   std::memset(counters.view.contents(), 0, size.counters);
   const LinearScratch scratch{table.view, sums.view, partials.view, counters.view};
-  const auto poison = backend.allocateBuffer(size.partials);
+  const auto poison = test::sharedBuffer(backend, size.partials);
   const Linear linear(backend.capabilities());
   const auto add = [&](metal::CommandGraph &graph, uint32_t i, uint32_t splits) {
     const SplitOperand &o = operands[i];
@@ -266,7 +269,7 @@ void splitVisibility(metal::MetalBackend &backend,
       std::to_string(pair[1].first.inputSize);
   metal::CommandGraph unsplit;
   for (uint32_t i = 0; i < 2; ++i) add(unsplit, i, 1);
-  (void)backend.submitCommand(unsplit.dispatches());
+  (void)backend.submitCommandAsync(unsplit.dispatches()).wait();
   for (uint32_t i = 0; i < 2; ++i) requireFp64(operands[i], 1, shape + " unsplit");
   for (const auto &splits : splitPairs) {
     const std::string what = shape + " splits " + std::to_string(splits[0]) + "/" + std::to_string(splits[1]);
@@ -280,7 +283,7 @@ void splitVisibility(metal::MetalBackend &backend,
     std::vector<std::vector<uint8_t>> first;
     for (uint32_t bits : {0x7E800000U, 0x7FC00000U, 0x7E800000U}) {
       std::fill_n(static_cast<uint32_t *>(poison.contents()), size.partials / 4, bits);
-      (void)backend.submitCommand(graph.dispatches());
+      (void)backend.submitCommandAsync(graph.dispatches()).wait();
       const auto *counts = static_cast<const uint32_t *>(counters.view.contents());
       for (uint64_t c = 0; c < size.counters / 4; ++c) require(counts[c] == 0, "counter not reset");
       for (uint32_t i = 0; i < 2; ++i) {
@@ -301,7 +304,7 @@ struct NormCase {
   NormWeights weight;
 };
 NormCase normCase(metal::MetalBackend &backend, uint32_t k, uint32_t rows, bool float32) {
-  NormCase c{backend.allocateBuffer(k*rows*2), makeNormWeights(backend, k, float32, [&](uint32_t i) {
+  NormCase c{test::sharedBuffer(backend, k*rows*2), makeNormWeights(backend, k, float32, [&](uint32_t i) {
     const float value=float(int(i%17)-8)/4;
     return float32 ? value*(1+float(hash(i)%4093)/65536) : value;
   })};
@@ -321,9 +324,9 @@ void requireNorm(const NormCase &c, const metal::MetalBuffer &output, uint32_t k
 void fusedNorm(metal::MetalBackend &backend, uint32_t k, uint32_t rows, LinearInput layout, bool float32) {
   const uint64_t sumsBytes = tableSumsBytes(layout, k, rows);
   const NormCase c=normCase(backend,k,rows,float32);
-  auto output=backend.allocateBuffer(k*rows*2), fused=backend.allocateBuffer(k*rows*2);
-  auto a=backend.allocateBuffer(tableBytes(k,rows)), b=backend.allocateBuffer(tableBytes(k,rows));
-  auto sa=backend.allocateBuffer(sumsBytes), sb=backend.allocateBuffer(sumsBytes);
+  auto output=test::sharedBuffer(backend, k*rows*2), fused=test::sharedBuffer(backend, k*rows*2);
+  auto a=test::sharedBuffer(backend, tableBytes(k,rows)), b=test::sharedBuffer(backend, tableBytes(k,rows));
+  auto sa=test::sharedBuffer(backend, sumsBytes), sb=test::sharedBuffer(backend, sumsBytes);
   metal::CommandGraph graph;
   require(Normalization::addRms(graph,c.input,c.weight,output,k,rows).layout==LinearInput::Plain,
           "plain norm claimed a table");
@@ -332,7 +335,7 @@ void fusedNorm(metal::MetalBackend &backend, uint32_t k, uint32_t rows, LinearIn
   addReferencePreparation(graph,layout,output,a,sa,k,rows/8);
   const PreparedInput prepared=Normalization::addRms(graph,c.input,c.weight,fused,k,rows,{b,sb,{},{}},layout);
   require(prepared.layout==layout && prepared.source.sameView(fused),"fused norm did not report the table it wrote");
-  (void)backend.submitCommand(graph.dispatches());
+  (void)backend.submitCommandAsync(graph.dispatches()).wait();
   requireNorm(c,output,k,rows,"norm differs from the fp64 reference");
   require(!std::memcmp(output.contents(),fused.contents(),k*rows*2),"fused norm changed bf16 output");
   require(!std::memcmp(a.contents(),b.contents(),tableBytes(k,rows)),"fused operand permutation mismatch");
@@ -343,24 +346,105 @@ void fusedNorm(metal::MetalBackend &backend, uint32_t k, uint32_t rows, LinearIn
 // prefill whose consumer reads no sums runs instead.
 void prefillNorm(metal::MetalBackend &backend, uint32_t k, uint32_t rows) {
   const NormCase c=normCase(backend,k,rows,false);
-  auto output=backend.allocateBuffer(k*rows*2), plain=backend.allocateBuffer(k*rows*2);
-  auto sums=backend.allocateBuffer((rows+31)/32*32*(k/64)*4);
+  auto output=test::sharedBuffer(backend, k*rows*2), plain=test::sharedBuffer(backend, k*rows*2);
+  auto sums=test::sharedBuffer(backend, (rows+31)/32*32*(k/64)*4);
   metal::CommandGraph graph;
   Normalization::addRmsWithQ4Sums(graph,c.input,c.weight,output,sums,k,rows);
   Normalization::addRms(graph,c.input,c.weight,plain,k,rows);
   require(graph.dispatches().back().pipelineName.starts_with("norm_rms_staged")==
               (rows<=SPLASH_STAGED_NORM_ROWS && k<=SPLASH_STAGED_NORM_WIDTH),
           "plain norm staged the wrong rows");
-  (void)backend.submitCommand(graph.dispatches());
+  (void)backend.submitCommandAsync(graph.dispatches()).wait();
   requireNorm(c,output,k,rows,"prefill norm differs from the fp64 reference");
   require(!std::memcmp(output.contents(),plain.contents(),k*rows*2),"prefill norm rows differ from the plain norm's");
+}
+// Each buffer the norms reach, at its extent and one element short: the rows
+// of inputs and outputs, the weights in either type, the table and sums a
+// table layout writes, and the Q4-sum norm's sums, [32-row tile][64-input
+// group][row of the tile], which end at the last row's sum of the last group.
+// The Q4-sum norm refuses F32 weights, which have no kernel, and no rows or a
+// width of partial groups, before anything is encoded.
+void normExtents(metal::MetalBackend &backend) {
+  const auto requireNormExtents = [&](uint32_t width, uint32_t rows, bool float32, const auto &encode) {
+    const NormCase c = normCase(backend, width, rows, float32);
+    const metal::MetalBuffer output = test::sharedBuffer(backend, uint64_t{width} * rows * 2);
+    const uint64_t weightElement = float32 ? 4 : 2;
+    requireExtent(backend, c.input, uint64_t{width} * rows * 2, 2, "norm input",
+                  [&](metal::CommandGraph &graph, const metal::MetalBuffer &input) {
+                    encode(graph, input, c.weight, output);
+                  });
+    requireExtent(backend, output, uint64_t{width} * rows * 2, 2, "norm output",
+                  [&](metal::CommandGraph &graph, const metal::MetalBuffer &view) {
+                    encode(graph, c.input, c.weight, view);
+                  });
+    requireExtent(backend, c.weight.buffer, width * weightElement, weightElement, "norm weight",
+                  [&](metal::CommandGraph &graph, const metal::MetalBuffer &weights) {
+                    encode(graph, c.input, NormWeights{weights, float32}, output);
+                  });
+  };
+  // The plain kernel, the staged one and the table layouts.
+  for (const auto [width, rows, float32] :
+       {std::tuple{5120U, 37U, false}, std::tuple{2048U, 8U, true}})
+    requireNormExtents(width, rows, float32,
+                       [&](metal::CommandGraph &graph, const metal::MetalBuffer &input, const NormWeights &weight,
+                           const metal::MetalBuffer &output) {
+                         (void)Normalization::addRms(graph, input, weight, output, width, rows);
+                       });
+  constexpr uint32_t width = 5120;
+  for (const auto [layout, float32] :
+       {std::pair{LinearInput::Table64, false}, std::pair{LinearInput::Table16, true}}) {
+    constexpr uint32_t rows = 16;
+    const metal::MetalBuffer table = test::sharedBuffer(backend, tableBytes(width, rows)),
+                             sums = test::sharedBuffer(backend, tableSumsBytes(layout, width, rows));
+    const auto encode = [&](metal::CommandGraph &graph, const metal::MetalBuffer &input, const NormWeights &weight,
+                            const metal::MetalBuffer &output, const LinearScratch &scratch) {
+      (void)Normalization::addRms(graph, input, weight, output, width, rows, scratch, layout);
+    };
+    requireNormExtents(width, rows, float32,
+                       [&](metal::CommandGraph &graph, const metal::MetalBuffer &input, const NormWeights &weight,
+                           const metal::MetalBuffer &output) {
+                         encode(graph, input, weight, output, {table, sums, {}, {}});
+                       });
+    const NormCase c = normCase(backend, width, rows, float32);
+    const metal::MetalBuffer output = test::sharedBuffer(backend, uint64_t{width} * rows * 2);
+    requireExtent(backend, table, tableBytes(width, rows), 2, "linear table",
+                  [&](metal::CommandGraph &graph, const metal::MetalBuffer &view) {
+                    encode(graph, c.input, c.weight, output, {view, sums, {}, {}});
+                  });
+    requireExtent(backend, sums, tableSumsBytes(layout, width, rows), 4, "linear table sums",
+                  [&](metal::CommandGraph &graph, const metal::MetalBuffer &view) {
+                    encode(graph, c.input, c.weight, output, {table, view, {}, {}});
+                  });
+  }
+  constexpr uint32_t rows = 37, groups = width / 64;
+  // Row 36 is row 4 of the second tile.
+  const uint64_t sumsBytes = ((uint64_t{1} * groups + groups - 1) * 32 + 4 + 1) * 4;
+  const metal::MetalBuffer sums = test::sharedBuffer(backend, sumsBytes);
+  requireNormExtents(width, rows, false,
+                     [&](metal::CommandGraph &graph, const metal::MetalBuffer &input, const NormWeights &weight,
+                         const metal::MetalBuffer &output) {
+                       Normalization::addRmsWithQ4Sums(graph, input, weight, output, sums, width, rows);
+                     });
+  const NormCase c = normCase(backend, width, rows, false), f32 = normCase(backend, width, rows, true);
+  const metal::MetalBuffer output = test::sharedBuffer(backend, uint64_t{width} * rows * 2);
+  requireExtent(backend, sums, sumsBytes, 4, "norm sums", [&](metal::CommandGraph &graph, const metal::MetalBuffer &view) {
+    Normalization::addRmsWithQ4Sums(graph, c.input, c.weight, output, view, width, rows);
+  });
+  metal::CommandGraph graph;
+  for (const auto &[weight, normWidth, normRows] :
+       {std::tuple{f32.weight, width, rows}, std::tuple{c.weight, width - 32, rows}, std::tuple{c.weight, 0U, rows},
+        std::tuple{c.weight, width, 0U}})
+    rejects([&] { Normalization::addRmsWithQ4Sums(graph, c.input, weight, output, sums, normWidth, normRows); },
+            "the Q4-sum norm takes bf16 weights and whole 64-input groups",
+            "the Q4-sum norm took F32 weights, a partial group or no rows");
+  require(graph.empty(), "a refused Q4-sum norm encoded a dispatch");
 }
 void fusedAttentionGate(metal::MetalBackend &backend, uint32_t heads, uint32_t kvHeads, uint32_t lanes,
                         LinearInput layout) {
   const uint32_t width = heads * 256, packedWidth = 2 * width + 2 * kvHeads * 256, rows = lanes * 8;
   const uint64_t sumsBytes = tableSumsBytes(layout, width, rows);
-  auto packed = backend.allocateBuffer(uint64_t{packedWidth} * 16 * lanes);
-  auto attention = backend.allocateBuffer(uint64_t{width} * 32 * 2 * lanes);
+  auto packed = test::sharedBuffer(backend, uint64_t{packedWidth} * 16 * lanes);
+  auto attention = test::sharedBuffer(backend, uint64_t{width} * 32 * 2 * lanes);
   for (auto buffer : {packed, attention}) {
     auto *data = static_cast<uint16_t *>(buffer.contents());
     for (uint64_t i = 0; i < buffer.sizeBytes() / 2; ++i)
@@ -370,16 +454,17 @@ void fusedAttentionGate(metal::MetalBackend &backend, uint32_t heads, uint32_t k
   Guarded a(backend, tableBytes(width, rows)), b(backend, tableBytes(width, rows));
   Guarded sa(backend, sumsBytes), sb(backend, sumsBytes);
   metal::CommandGraph graph;
-  require(PagedAttention::addVerifyGate(graph, packed, attention, output.view, 8, 32, 32,
-                                        heads, {1, kvHeads, 256}, lanes).layout == LinearInput::Plain,
+  require(PagedAttention::addVerifyGate(graph, packed, attention, output.view, heads, {1, kvHeads, 256}, lanes, {},
+                                        LinearInput::Plain)
+                  .layout == LinearInput::Plain,
           "plain attention gate claimed a table");
   addReferencePreparation(graph, layout, output.view, a.view, sa.view, width, lanes);
   const PreparedInput prepared =
-      PagedAttention::addVerifyGate(graph, packed, attention, fused.view, 8, 32, 32,
+      PagedAttention::addVerifyGate(graph, packed, attention, fused.view,
                                     heads, {1, kvHeads, 256}, lanes, {b.view, sb.view, {}, {}}, layout);
   require(prepared.layout == layout && prepared.source.sameView(fused.view),
           "fused attention gate did not report the table it wrote");
-  (void)backend.submitCommand(graph.dispatches());
+  (void)backend.submitCommandAsync(graph.dispatches()).wait();
   require(!std::memcmp(output.view.contents(), fused.view.contents(), width * 16 * lanes),
           "fused attention gate output");
   require(!std::memcmp(a.view.contents(), b.view.contents(), tableBytes(width, rows)),
@@ -416,13 +501,14 @@ int main(int argc,char **argv) {
         for (uint32_t rows : {8U,16U,24U,32U}) fusedNorm(backend, width, rows, layout, float32);
     for (uint32_t width : {64U, 2048U, 5120U, 17408U})
       for (uint32_t rows : {1U,37U,64U,65U}) prefillNorm(backend, width, rows);
+    normExtents(backend);
     // 27B out_proj then down, and gdn_in then gate/up: K 6144, 17408 and 5120.
     for (uint32_t lanes : {1U, 4U}) {
       splitVisibility(backend, {{{{5120, 6144}, LinearEpilogue::Residual}, {{5120, 17408}, LinearEpilogue::Residual}}}, lanes);
       splitVisibility(backend, {{{{16640, 5120}, LinearEpilogue::None}, {{17408, 5120}, LinearEpilogue::GateUp}}}, lanes);
     }
-    std::cout << "Q4 simdgroup: PASS cases=" << cases
+    std::cout << "Q4 register tile: PASS cases=" << cases
               << " (fp64, range, cancellation, guards, repeated dispatch, fused norm and attention gate in both"
                  " table layouts, norms with bf16 and F32 weights, shared split scratch)\n";
-  } catch (const std::exception &e) { std::cerr << "Q4 simdgroup: FAIL: " << e.what() << '\n'; return 1; }
+  } catch (const std::exception &e) { std::cerr << "Q4 register tile: FAIL: " << e.what() << '\n'; return 1; }
 }

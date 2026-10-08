@@ -21,6 +21,7 @@
 #include "../../../runtime/ops/Linear.hpp"
 #include "../../../runtime/ops/MoE.hpp"
 #include "GgufFormatReference.hpp"
+#include "MoeExtents.hpp"
 #include "metal/abi/Gguf.h"
 #include "metal/abi/MoE.h"
 
@@ -56,6 +57,7 @@ using splash::ops::MoE;
 using splash::ops::MoeBuffers;
 using splash::ops::MoeConfig;
 using splash::ops::MoeScratchField;
+using splash::ops::kAssumedGpuCores;
 using splash::ops::kMoeScratchFields;
 using splash::ops::MoeExpertSimdgroups;
 using splash::ops::MoeExpertTile;
@@ -63,6 +65,7 @@ using splash::ops::MoeGgufTile;
 using splash::ops::MoePlan;
 using splash::ops::MoeShape;
 using splash::ops::MoeWeights;
+using splash::ops::moeRouteWideRows;
 using splash::ops::LinearEpilogue;
 using splash::ops::LinearMatrix;
 using splash::ops::LinearPhase;
@@ -207,7 +210,7 @@ int floatProjection(MetalBackend &backend) {
             std::memset(output.contents(), 0x7F, output.sizeBytes());
             CommandGraph graph;
             splash::ops::addGgufFloat(graph, input, w.segment, output, rows, stride, offset, type, tile);
-            static_cast<void>(backend.submitCommand(graph.dispatches()));
+            static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
             size_t outside = 0, touched = 0;
             for (uint32_t r = 0; r <= rows; ++r)
               for (uint32_t c = 0; c < stride; ++c) {
@@ -286,7 +289,7 @@ int floatSegments(MetalBackend &backend, uint32_t floatColumns) {
       CommandGraph graph;
       add(graph, input, full, y);
       add(graph, input, quantizedOnly, reference);
-      static_cast<void>(backend.submitCommand(graph.dispatches()));
+      static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
       const auto *got = static_cast<const uint16_t *>(y.contents()), *want = static_cast<const uint16_t *>(reference.contents());
       size_t differ = 0, outside = 0, written = 0;
       for (uint32_t r = 0; r < rows; ++r)
@@ -323,8 +326,8 @@ int floatSegments(MetalBackend &backend, uint32_t floatColumns) {
       const LinearScratch scratch = scratchFor(plan);
       check(lanes * 8, plan.storageRows(), "decode B" + std::to_string(lanes),
             [&](CommandGraph &graph, MetalBuffer input, const Projection &p, MetalBuffer output) {
-              splash::ops::LinearDispatchStats stats;
-              static_cast<void>(linear.addDecodeBatch(graph, input, p, output, lanes, stats, scratch));
+              static_cast<void>(linear.add(graph, {.input = input, .output = output, .scratch = scratch}, p,
+                                           linear.decodePlan(p, lanes)));
             });
     }
     for (const uint32_t rows : {1u, 24u, 33u, 263u}) {
@@ -357,20 +360,22 @@ int floatOnlyChain(MetalBackend &backend) {
   int failures = 0;
   for (uint32_t lanes = 1; lanes <= 4; ++lanes) {
     const uint64_t rows = lanes * 8, bytes = rows * N * 2;
-    const LinearScratchSize size = linear.decodePlan(blocks, lanes).scratchSize();
+    const LinearPlan plan = linear.decodePlan(blocks, lanes);
+    const LinearScratchSize size = plan.scratchSize();
     const LinearScratch scratch{zeros(backend, size.input, "chain-table"), zeros(backend, size.sums, "chain-sums"),
                                 zeros(backend, size.partials, "chain-partials"),
                                 zeros(backend, size.counters, "chain-counters")};
     const MetalBuffer input = bfloatBuffer(backend, activations(rows * K), "chain-input");
     const MetalBuffer scores = zeros(backend, bytes, "chain-scores"), chained = zeros(backend, bytes, "chain-output"),
                       alone = zeros(backend, bytes, "chain-reference");
-    splash::ops::LinearDispatchStats stats;
     CommandGraph graph, reference;
-    const PreparedInput prepared = linear.addDecodeBatch(graph, input, floats, scores, lanes, stats, scratch);
-    static_cast<void>(linear.addDecodeBatch(graph, input, blocks, chained, lanes, stats, scratch, prepared));
-    static_cast<void>(backend.submitCommand(graph.dispatches()));
-    static_cast<void>(linear.addDecodeBatch(reference, input, blocks, alone, lanes, stats, scratch));
-    static_cast<void>(backend.submitCommand(reference.dispatches()));
+    const PreparedInput prepared =
+        linear.add(graph, {.input = input, .output = scores, .scratch = scratch}, floats, linear.decodePlan(floats, lanes));
+    static_cast<void>(
+        linear.add(graph, {.input = input, .output = chained, .scratch = scratch, .prepared = prepared}, blocks, plan));
+    static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
+    static_cast<void>(linear.add(reference, {.input = input, .output = alone, .scratch = scratch}, blocks, plan));
+    static_cast<void>(backend.submitCommandAsync(reference.dispatches()).wait());
     if (std::memcmp(chained.contents(), alone.contents(), bytes)) {
       printf("  float-only projection B%u: a register plan chained after it read another table FAIL\n", lanes);
       ++failures;
@@ -443,7 +448,7 @@ std::vector<uint16_t> runPlan(MetalBackend &backend, const Model &m, Buffers &b,
   std::memset(b.moe.output.contents(), 0, b.moe.output.sizeBytes());
   CommandGraph graph;
   MoE::add(graph, b.moe, m.weights, plan);
-  static_cast<void>(backend.submitCommand(graph.dispatches()));
+  static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
   const auto *selected = static_cast<const uint32_t *>(b.moe.scratch.selectedExperts.contents());
   const auto *routing = static_cast<const float *>(b.moe.scratch.routingWeights.contents());
   const auto *routeRows = static_cast<const uint32_t *>(b.moe.scratch.routeRows.contents());
@@ -567,6 +572,60 @@ std::vector<uint16_t> runPlan(MetalBackend &backend, const Model &m, Buffers &b,
   return result;
 }
 
+// Each buffer a register decode plan and a staged 32-row prefill plan reach,
+// at its extent and one element short, and each weight: the planes of every
+// expert tensor, whose rows fill whole tiles, in units of a row's group of
+// 32 inputs or meta unit (metal/abi/QuantFormat.h), and the shared scalar
+// gate's fp32 weights.
+void bufferExtents(MetalBackend &backend) {
+  const Model m = makeModel(backend, 0);
+  const MoeShape shape{kHidden, kExperts, kTopK, kIntermediate, WeightLayout::Block32};
+  Buffers b;
+  b.moe.input = zeros(backend, uint64_t{kMaximumRows} * kHidden * 2, "moe-input");
+  b.moe.residual = zeros(backend, uint64_t{kMaximumRows} * kHidden * 2, "moe-residual");
+  b.moe.output = zeros(backend, uint64_t{kMaximumRows} * kHidden * 2, "moe-output");
+  for (const MoePlan &plan :
+       {MoE::decodePlan(shape, 4,
+                        MoeConfig{MoeExpertTile::M8, moeRouteWideRows(kAssumedGpuCores), MoeExpertSimdgroups::Eight,
+                                  MoeGgufTile::Register}),
+        MoE::prefillPlan(shape, 33, MoeConfig{MoeExpertTile::M32})}) {
+    allocate(backend, b, plan);
+    splash::test::requireMoeExtents(backend, b.moe, m.weights, plan);
+  }
+  const MoePlan plan = MoE::prefillPlan(shape, 33, MoeConfig{MoeExpertTile::M32});
+  allocate(backend, b, plan);
+  const BlockMoeWeights &blocks = m.weights.blocks();
+  // A weight buffer of the block that `with` puts in its place.
+  const auto requireWeightExtent = [&](const MetalBuffer &buffer, uint64_t bytes, uint64_t element,
+                                       const std::string &name, const auto &with) {
+    splash::test::requireExtent(backend, buffer, bytes, element, name, [&](CommandGraph &graph, const MetalBuffer &view) {
+      BlockMoeWeights changed = blocks;
+      with(changed, view);
+      MoE::add(graph, b.moe, changed, plan);
+    });
+  };
+  for (const auto &[member, name] : {std::pair{&BlockMoeWeights::gate, "gate"}, std::pair{&BlockMoeWeights::up, "up"},
+                                     std::pair{&BlockMoeWeights::down, "down"}})
+    for (const auto &[segment, kind] : {std::pair{&BlockExpertProjection::routed, "MoE expert "},
+                                        std::pair{&BlockExpertProjection::shared, "MoE shared "}}) {
+      const QuantizedSegment &tensor = blocks.*member.*segment;
+      const QuantFormat &format = kQuantFormats[tensor.formatId];
+      const uint64_t groups = uint64_t{tensor.outputSize} * (tensor.inputSize / 32);
+      for (const auto &[plane, planeName, unitBytes, units] :
+           {std::tuple{&QuantizedSegment::plane0, " plane0", format.plane0_bytes, groups},
+            std::tuple{&QuantizedSegment::plane1, " plane1", format.plane1_bytes, groups},
+            std::tuple{&QuantizedSegment::meta, " meta", format.meta_bytes, groups / format.meta_groups}}) {
+        if (!unitBytes) continue;
+        requireWeightExtent(tensor.*plane, units * unitBytes, unitBytes, std::string(kind) + name + planeName,
+                            [&](BlockMoeWeights &changed, const MetalBuffer &view) {
+                              (changed.*member.*segment).*plane = view;
+                            });
+      }
+    }
+  requireWeightExtent(blocks.sharedScalarGate.plane0, uint64_t{kHidden} * 4, 4, "MoE shared scalar gate weight",
+                      [](BlockMoeWeights &changed, const MetalBuffer &view) { changed.sharedScalarGate.plane0 = view; });
+}
+
 int moe(MetalBackend &backend) {
   int failures = 0;
   Buffers b;
@@ -588,7 +647,8 @@ int moe(MetalBackend &backend) {
       std::vector<uint16_t> widest;
       for (uint32_t lanes = 4; lanes >= 1; --lanes) {
         const MoePlan plan = MoE::decodePlan(
-            shape, lanes, MoeConfig{MoeExpertTile::M8, splash::ops::kMoeRouteWideRows, MoeExpertSimdgroups::Eight, tile});
+            shape, lanes,
+            MoeConfig{MoeExpertTile::M8, moeRouteWideRows(kAssumedGpuCores), MoeExpertSimdgroups::Eight, tile});
         const std::string label = formats + (tile == MoeGgufTile::Register ? " register" : " staged") + " decode B" +
                                   std::to_string(lanes);
         const std::vector<uint16_t> rows = runPlan(backend, m, b, plan, tile == MoeGgufTile::Staged, products, stats, label);
@@ -603,7 +663,8 @@ int moe(MetalBackend &backend) {
       // Prefill chunks on the same 8-row tiles (ExecutionPlans::moePrefill).
       for (const uint32_t chunk : {kMaximumRows, 27u, 9u}) {
         const MoePlan plan = MoE::prefillPlan(
-            shape, chunk, MoeConfig{MoeExpertTile::M8, splash::ops::kMoeRouteWideRows, MoeExpertSimdgroups::Eight, tile});
+            shape, chunk,
+            MoeConfig{MoeExpertTile::M8, moeRouteWideRows(kAssumedGpuCores), MoeExpertSimdgroups::Eight, tile});
         const std::string label = formats + (tile == MoeGgufTile::Register ? " register" : " staged") + " prefill rows=" +
                                   std::to_string(chunk);
         const std::vector<uint16_t> rows = runPlan(backend, m, b, plan, tile == MoeGgufTile::Staged, products, stats, label);
@@ -618,10 +679,10 @@ int moe(MetalBackend &backend) {
              100.0 * stats.gateUpFlips / (stats.outputs / 2), 100.0 * stats.downFlips / stats.outputs,
              stats.gateUpWorst, stats.downWorst, failures > before ? "FAIL" : "ok");
     }
-    // The 32-row tiles, whose 16- and 32-row matmuls both run at 263 rows,
-    // with the router on each float tile: a row's result is the same in every
-    // chunk on one tile (either tile's scores of a row depend on that row
-    // alone).
+    // The 32-row tiles, whose live-row matmuls (moe_live_rows) differ by
+    // chunk, with the router on each float tile: a row's result is the same
+    // in every chunk on one tile (either tile's scores of a row depend on that
+    // row alone).
     for (const FloatTile router : {FloatTile::Simdgroup, FloatTile::NeuralAccelerator}) {
       const int before = failures;
       Stats stats;
@@ -659,6 +720,7 @@ int main(int argc, const char *argv[]) {
     }
     try {
       MetalBackend backend(argv[1]);
+      bufferExtents(backend);
       const int failures = floatProjection(backend) + floatSegments(backend, 64) + floatSegments(backend, 96) +
                            floatOnlyChain(backend) + moe(backend);
       if (failures) {

@@ -5,6 +5,7 @@
 #include "model/QwenHybridLayout.hpp"
 #include "model/QwenTarget.hpp"
 #include "model/QwenTargetFiles.hpp"
+#include "model/WeightImages.hpp"
 #include "model/WeightStore.hpp"
 #include "ops/GDN.hpp"
 #include "ops/Linear.hpp"
@@ -22,8 +23,9 @@
 namespace splash::model {
 
 // How a target's files store its tensors; loadQwenTarget pairs each source's
-// files with their format. Affine files, packed or prepared from MLX, hold
-// every projection, a fused one too, as one affine Q4 tensor, and bf16 norms.
+// files with their format. Affine files, from a package or written from MLX,
+// hold every projection, a fused one too, as one affine Q4 tensor, and bf16
+// norms.
 struct AffineTargetFormat final {
   static constexpr ops::GdnHeadOrder gdnOutputOrder = ops::GdnHeadOrder::Grouped;
 
@@ -46,7 +48,7 @@ struct AffineTargetFormat final {
   }
 };
 
-// Prepared GGUF images hold each GGUF tensor as one block-quantized segment,
+// GGUF images hold each GGUF tensor as one block-quantized segment,
 // a fused projection as its tensors in output column order, and the GGUF's
 // F32 norms. The GGUF keeps the GDN output projection's input columns in
 // llama.cpp's tiled value-head order, so the GDN writes its output in it; a
@@ -77,33 +79,33 @@ struct BlockTargetFormat final {
 // (instantiated for both formats).
 template <class Format>
 [[nodiscard]] QwenMixerWeights readQwenMixer(WeightFile &file, const Format &format,
-                                             const QwenMixerGeometry &geometry,
+                                             const QwenTargetDimensions &target,
                                              bool fullAttention);
 
-// Opens the packed files of a target directory: one per hybrid layer, head.bin
-// and embedding.bin.
-template <class Layout> struct PackedTargetFiles final {
-  metal::MetalBackend &backend;
+// Loads the files of a package's target directory: one per hybrid layer,
+// head.bin and embedding.bin.
+template <class Layout> struct PackageTargetFiles final {
+  WeightImages &images;
   std::filesystem::path directory;
   const Layout &layout;
   [[nodiscard]] WeightFile layer(uint32_t index) const {
     const std::string filename = "layer-" + std::to_string(index) + ".bin";
-    return WeightFile(backend, directory / filename, "target/" + filename, Layout::layerMagic, index,
-                      layout.isFullAttentionLayer(index) ? 1U : 0U);
+    return images.load(packageImage(directory / filename, "target/" + filename, Layout::layerMagic, index,
+                                    layout.isFullAttentionLayer(index) ? 1U : 0U));
   }
   [[nodiscard]] WeightFile head() const {
-    return WeightFile(backend, directory / "head.bin", "target/head.bin", Layout::headMagic, layout.layers, 2);
+    return images.load(packageImage(directory / "head.bin", "target/head.bin", Layout::headMagic, layout.layers, 2));
   }
   [[nodiscard]] WeightFile embedding() const {
-    return WeightFile(backend, directory / "embedding.bin", "target/embedding.bin", kEmbeddingMagic,
-                      layout.vocabularySize, layout.hiddenSize);
+    return images.load(packageImage(directory / "embedding.bin", "target/embedding.bin", kEmbeddingMagic,
+                                    layout.vocabularySize, layout.hiddenSize));
   }
 };
 
-// Reads a target through immutable WeightFiles, packaged or prepared locally,
-// in their format: per layer the input norm, mixer, post-attention norm and
-// the architecture's FFN through readFfn, then the head and the token
-// embedding. Weights is the architecture's weight struct.
+// Reads a target through the files of its images, packaged or written from
+// an upstream source, in their format: per layer the input norm, mixer,
+// post-attention norm and the architecture's FFN through readFfn, then the
+// head and the token embedding. Weights is the architecture's weight struct.
 template <class Weights, class Layout, class Files, class Format, class ReadFfn>
 [[nodiscard]] Weights
 readQwenTargetWeights(metal::MetalBackend &backend, const Layout &layout, Files &&files,
@@ -118,7 +120,7 @@ readQwenTargetWeights(metal::MetalBackend &backend, const Layout &layout, Files 
     WeightFile file = files.layer(layerIndex);
     auto &layer = result.layers.emplace_back();
     layer.inputNorm = format.norm(file, layout.hiddenSize, "input-norm");
-    layer.mixer = readQwenMixer(file, format, layout.mixerGeometry(), fullAttention);
+    layer.mixer = readQwenMixer(file, format, layout, fullAttention);
     layer.postAttentionNorm = format.norm(file, layout.hiddenSize, "post-attention-norm");
     readFfn(file, layer, format);
     file.finish();
@@ -153,17 +155,10 @@ readQwenTargetWeights(metal::MetalBackend &backend, const Layout &layout, Files 
 // agree with each other and every projection fits the Q4 storage tiles.
 template <class Layout> void requireQwenLayout(const Layout &layout) {
   const auto zero = [](auto... dimensions) { return ((dimensions == 0) || ...); };
-  uint32_t ffnWidth = 0;
-  bool ffnZero = false;
-  bool routingInconsistent = false;
-  if constexpr (Layout::ffnKind == QwenFfnKind::Dense) {
-    ffnWidth = layout.intermediateSize;
-    ffnZero = zero(ffnWidth);
-  } else {
-    ffnWidth = layout.expertIntermediateSize;
-    ffnZero = zero(layout.experts, layout.expertsPerToken, ffnWidth);
-    routingInconsistent = layout.expertsPerToken > layout.experts;
-  }
+  const bool dense = layout.ffnKind == QwenFfnKind::Dense;
+  const uint32_t ffnWidth = dense ? layout.intermediateSize : layout.expertIntermediateSize;
+  const bool ffnZero = dense ? zero(ffnWidth) : zero(layout.experts, layout.expertsPerToken, ffnWidth);
+  const bool routingInconsistent = !dense && layout.expertsPerToken > layout.experts;
   if (ffnZero || !(layout.rotaryTheta > 0.0F) ||
       zero(layout.maximumContextTokens, layout.layers, layout.hiddenSize, layout.vocabularySize,
            layout.packedGdnWidth, layout.packedFullWidth, layout.convolutionDimension, layout.gdnKeyHeads,
@@ -202,7 +197,7 @@ loadQwenTarget(metal::MetalBackend &backend, const Layout &layout, const QwenTar
   const AffineTargetFormat affine{};
   if (const auto *mlx = std::get_if<std::reference_wrapper<AffineTargetLoader>>(&files))
     return readQwenTargetWeights<Weights>(backend, layout, mlx->get(), affine, readFfn);
-  return readQwenTargetWeights<Weights>(backend, layout, std::get<PackedTargetFiles<Layout>>(files), affine,
+  return readQwenTargetWeights<Weights>(backend, layout, std::get<PackageTargetFiles<Layout>>(files), affine,
                                         readFfn);
 }
 

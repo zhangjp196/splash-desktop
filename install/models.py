@@ -25,26 +25,31 @@ import hashlib
 import json
 import os
 import re
+import signal
+import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-if __package__:
-    from . import paths
-else:
-    import paths
+if __name__ == "__main__" and not __package__:
+    # Run as a script by make, the launcher and `python install/models.py`:
+    # import siblings as the install package.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    __package__ = "install"
+
+# The model ID syntax, which --model shares with the server, in modules of
+# the standard library alone: the launcher imports this before .venv exists.
+from server import serve_options
+
+from . import paths
 
 MODELS = paths.MODELS
-# The bound on one JSON metadata file.
+# The bound on one JSON metadata file the installer reads; such files are
+# kilobytes, so a larger one is refused unread. The engine bounds the files it
+# reads by its own rule.
 MAX_JSON_BYTES = 4 * 1024 * 1024
-REPO_ID = re.compile(
-    r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?/"
-    r"[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9_])?"
-)
-VARIANT_SEPARATOR = ":"
-VARIANT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # What installation_kind finds at a selection link.
 ASSEMBLY, PACKAGE = "assembly", "package"
 # Staging an interrupted installation leaves, which garbage collection
@@ -61,6 +66,40 @@ class ModelError(RuntimeError):
 def warn(message):
     """Report something the user may need to act on, on stderr."""
     print(f"Warning: {message}", file=sys.stderr, flush=True)
+
+
+def run_engine(arguments, check):
+    """The output of one of the engine's checks, `ENGINE ARGUMENTS`, which
+    check names. A ModelError names an engine that cannot run, or that
+    refuses the command line as one built before the check does, and what
+    replaces it; else it gives the engine's refusal, its error: line without
+    that prefix, or the whole report of an engine that ended before main()
+    (dyld on an older macOS)."""
+    engine = paths.BINARY
+    replace = "reinstall Splash" if paths.PACKAGED else "rebuild it with make"
+    try:
+        result = subprocess.run(
+            [str(engine), *arguments], capture_output=True, text=True
+        )
+    except OSError as error:
+        raise ModelError(
+            f"cannot run the engine {engine} ({error.strerror}); {replace}"
+        ) from None
+    if result.returncode == os.EX_USAGE:
+        raise ModelError(f"the engine {engine} does not know this {check}; {replace}")
+    if result.returncode:
+        report = result.stderr.strip()
+        refusals = [
+            line.removeprefix("error: ")
+            for line in report.splitlines()
+            if line.startswith("error: ")
+        ]
+        raise ModelError(
+            refusals[-1]
+            if result.returncode > 0 and refusals
+            else f"the engine's {check} failed: {report or f'status {result.returncode}'}"
+        )
+    return result.stdout
 
 
 def is_hex_digest(value, length: int) -> bool:
@@ -88,40 +127,18 @@ def is_safe_path(name) -> bool:
 
 
 def validate_repo_id(value: str) -> str:
-    # Keep argument validation available before the Hub dependency is installed.
-    if (
-        not isinstance(value, str)
-        or not REPO_ID.fullmatch(value)
-        or "--" in value
-        or ".." in value
-        or value.endswith(".git")
-    ):
-        raise ModelError("model must be a full Hugging Face repository ID (owner/repo)")
-    return value
+    try:
+        return serve_options.check_repo_id(value)
+    except ValueError as error:
+        raise ModelError(str(error)) from None
 
 
 def split_model_id(value: str) -> tuple[str, str | None]:
     """owner/repo[:variant] -> (repository ID, variant or None)."""
-    if not isinstance(value, str):
-        raise ModelError("model must be a full Hugging Face repository ID (owner/repo)")
-    repo_id, separator, variant = value.partition(VARIANT_SEPARATOR)
-    validate_repo_id(repo_id)
-    if not separator:
-        return repo_id, None
-    if not VARIANT.fullmatch(variant) or ".." in variant:
-        raise ModelError(
-            "model variant must be a short name such as UD-Q4_K_M "
-            f"(owner/repo{VARIANT_SEPARATOR}VARIANT)"
-        )
-    return repo_id, variant
-
-
-def parse_model_id(value: str) -> str:
     try:
-        split_model_id(value)
-    except ModelError as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
-    return value
+        return serve_options.split_model_id(value)
+    except ValueError as error:
+        raise ModelError(str(error)) from None
 
 
 def parse_draft_model(value: str) -> str:
@@ -204,7 +221,7 @@ def selection_link(
         return models / ".selections" / hashlib.sha256(selection.encode()).hexdigest()
     if variant is None:
         return models / repo_id
-    return models / f"{repo_id}{VARIANT_SEPARATOR}{variant}"
+    return models / f"{repo_id}{serve_options.VARIANT_SEPARATOR}{variant}"
 
 
 def local_selection_link(
@@ -340,7 +357,7 @@ def parse_args(argv=None):
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument(
         "--model",
-        type=parse_model_id,
+        type=serve_options.parse_model_id,
         help="Hugging Face repository ID (owner/repo[:variant])",
     )
     source.add_argument(
@@ -389,13 +406,12 @@ def main(argv=None):
         print(selection.link)
         return 0
     # The installers import this module, so it imports them once it exists.
-    if __package__:
-        from . import assembly, legacy, upstream
-    else:
-        import assembly
-        import legacy
-        import upstream
+    from . import assembly, legacy, upstream
+
     try:
+        # The launcher starts this with the stop signals blocked, so that one
+        # sent while it starts is not lost; it arrives here.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
         if args.command == "prepare":
             if selection.directory is not None:
                 upstream.prepare_local(selection)
@@ -421,6 +437,8 @@ def main(argv=None):
     except (ModelError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        return 130
     return 0
 
 
@@ -430,7 +448,5 @@ if __name__ == "__main__":
     # one main() reports.
     import importlib
 
-    installer = importlib.import_module(
-        f"{__package__}.models" if __package__ else "models"
-    )
+    installer = importlib.import_module("install.models")
     raise SystemExit(installer.main())

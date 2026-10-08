@@ -2,7 +2,8 @@
 // Decode weights with FP32 group coefficients, then round once to the half tile,
 // matching llama.cpp Metal dequantize.h / mul_mm.metal (MIT notice in THIRD_PARTY_NOTICES). Keep activations BF16.
 // Weight planes and meta in the MDGG0001 layout (metal/abi/QuantFormat.h), decoded by kernels/common/quant_formats.h.
-// Activations bf16 [rows][K]; weights staged as fp16 in threadgroup memory; fp32 accumulation; bf16 output.
+// Activations bf16 [rows][K]; weights staged as fp16 in threadgroup memory; fp32 accumulation; bf16 output (fp32 from
+// the _a_f32 instances, the logits).
 // Keep the source order of float operations, which Metal's default fast math lets the compiler reassociate. Set
 // before the includes, so it also holds for the shared format and reduction code compiled here.
 #pragma clang fp reassociate(off)
@@ -29,77 +30,21 @@ inline void gguf_store_sums(thread Acc &acc, uint splits, uint split, device coh
 
 // ---------------- prefill tiles: a shared B stage (TileN x KS, all threads dequantize), each simdgroup owns RowsPerSG
 // rows. `rows` counts the chunk's rows from the tile's first: simdgroups past them (the last tile of a chunk that is not
-// a multiple of the tile) still stage but skip their matmuls and stores, so a chunk costs its rows rounded up to
-// RowsPerSG rather than to the tile (a 33-row Q4_K 17408 x 5120 chunk: 1.7x faster on M5 and M3 than a 128-row tile).
+// a multiple of the tile) skip their matmuls and stores, so a chunk costs its rows rounded up to RowsPerSG rather than
+// to the tile (a 33-row Q4_K 17408 x 5120 chunk: 1.7x faster on M5 and M3 than a 128-row tile). Full tiles run this
+// loop too; a branch-free copy for them is no faster (M3 Max, M5 Max).
 template <class F, ushort RowsPerSG, ushort Simdgroups, ushort TileN, ushort KS, GgufEpilogue Ep = EpNone>
 inline void gguf_prefill_tile(device bfloat *input, device uchar *w0, device uchar *w1, device uchar *meta, device bfloat *output,
-                    uint output_size, uint input_size, uint output_origin, uint rows, threadgroup half *stage,
-                    threadgroup half2 *tl, uint simd_lane, uint simd_group, uint out_stride = 0, uint out_offset = 0,
-                    device bfloat *aux = nullptr) {
-  // 0 = output_size (Gguf.h). The host always passes the stride, but dropping the fallback changes these kernels'
-  // code, a change to measure on its own.
-  if (out_stride == 0) out_stride = output_size;
+                    uint input_size, uint output_origin, uint rows, threadgroup half *stage, threadgroup half2 *tl,
+                    uint simd_lane, uint simd_group, uint out_stride, uint out_offset, device bfloat *aux = nullptr) {
   const bool owns_rows = simd_group * RowsPerSG < rows;   // uniform per simdgroup
-  // Prefetch: the steps whose weights are loaded ahead of the one being staged.
-  constexpr ushort Prefetch = 1, Threads = Simdgroups * 32, GPS = KS / 32, Items = TileN * GPS,
-                   IPT = (Items + Threads - 1) / Threads;
-  auto a = tensor(input + ulong(simd_group) * RowsPerSG * input_size, dextents<int, 2>{int(input_size), RowsPerSG}, array<int, 2>{1, int(input_size)});
-  constexpr auto descriptor = matmul2d_descriptor(RowsPerSG, TileN, KS, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
-  matmul2d<descriptor, execution_simdgroups<1>> operation;
-  const uint groups = input_size / 32, steps = groups / GPS, units = groups / F::MetaGroups;
-  const uint plane_tile = output_origin / QUANT_TILE_ROWS, plane_row = output_origin % QUANT_TILE_ROWS;
-  device uchar *tw0 = w0 + (ulong(plane_tile) * groups * QUANT_TILE_ROWS + plane_row) * F::P0;
-  device uchar *tw1 = w1 + (ulong(plane_tile) * groups * QUANT_TILE_ROWS + plane_row) * F::P1;
-  device uchar *tmeta = meta + (ulong(plane_tile) * units * QUANT_TILE_ROWS + plane_row) * F::MetaBytes;
-  auto a0 = a.template slice<KS, RowsPerSG>(0, 0);
-  tensor<threadgroup half, dextents<int, 2>, tensor_inline> bt0(stage, dextents<int, 2>{KS, TileN}, array<int, 2>{1, KS});
-  tensor<threadgroup half, dextents<int, 2>, tensor_inline> bt1(stage + KS * TileN, dextents<int, 2>{KS, TileN}, array<int, 2>{1, KS});
-  auto b0 = bt0.slice<KS, TileN>(0, 0), b1 = bt1.slice<KS, TileN>(0, 0);
-  auto acc = operation.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
-#pragma unroll
-  for (ushort i = 0; i < acc.get_capacity(); ++i) acc[i] = 0.0f;
-  const uint thread_index = simd_group * 32 + simd_lane;
-  typename F::Payload packed[Prefetch][IPT]; typename F::Meta hdr[IPT]; uint hdr_unit[IPT];
-#pragma unroll
-  for (ushort it = 0; it < IPT; ++it) {
-    const uint item = thread_index + it * Threads; const bool live = item < Items;
-    const uint col = live ? item % TileN : 0, gi = live ? item / TileN : 0;
-#pragma unroll
-    for (ushort pf = 0; pf < Prefetch; ++pf) {
-      const ulong g = ulong(pf) * GPS + gi;
-      if (live && pf < steps) packed[pf][it] = F::load(tw0 + (g * QUANT_TILE_ROWS + col) * F::P0, tw1 + (g * QUANT_TILE_ROWS + col) * F::P1);
-    }
-    hdr[it] = F::loadMeta(tmeta + col * F::MetaBytes); hdr_unit[it] = 0;
-  }
-  // The step loop with or without this simdgroup's matmuls, one copy each: a full tile runs the loop unchanged (a
-  // branch around the matmul inside the loop cost 1-3% at full tiles on the M3 Max).
-  const auto run_steps = [&](auto with_matmuls) {
-    for (uint step = 0; step < steps; ++step) {
-      threadgroup half *buf = stage + (step & 1) * (KS * TileN);
-#pragma unroll
-      for (ushort it = 0; it < IPT; ++it) {
-        const uint item = thread_index + it * Threads; if (item >= Items) break;
-        const uint col = item % TileN, gi = item / TileN, g = step * GPS + gi, unit = g / F::MetaGroups; const ushort j = g % F::MetaGroups;
-        if (unit != hdr_unit[it]) { hdr[it] = F::loadMeta(tmeta + (ulong(unit) * QUANT_TILE_ROWS + col) * F::MetaBytes); hdr_unit[it] = unit; }
-        dequant32<F>(packed[0][it], hdr[it], j, tl, buf + col * KS + gi * 32);
-      }
-      threadgroup_barrier(mem_flags::mem_threadgroup);
-      if (step + Prefetch < steps) {
-#pragma unroll
-        for (ushort it = 0; it < IPT; ++it) {
-          const uint item = thread_index + it * Threads; if (item >= Items) break;
-          const uint col = item % TileN, gi = item / TileN; const ulong g = ulong(step + Prefetch) * GPS + gi;
-          packed[Prefetch - 1][it] = F::load(tw0 + (g * QUANT_TILE_ROWS + col) * F::P0, tw1 + (g * QUANT_TILE_ROWS + col) * F::P1);
-        }
-      }
-      if constexpr (decltype(with_matmuls)::value) {
-        auto a_slice = a.template slice<KS, RowsPerSG>(step * KS, 0);
-        if (step & 1) operation.run(a_slice, b1, acc); else operation.run(a_slice, b0, acc);
-      }
-    }
-  };
-  if (!owns_rows) { run_steps(false_type{}); return; }
-  run_steps(true_type{});
+  device bfloat *rows_input = input + ulong(simd_group) * RowsPerSG * input_size;
+  auto acc = staged_accumulator<RowsPerSG, TileN, KS>(rows_input, input_size, stage);
+  gguf_zero(acc);
+  gguf_staged_steps<F, RowsPerSG, TileN, KS, Simdgroups * 32>(rows_input, w0, w1, meta, input_size, output_origin, stage, tl,
+                                                              simd_group * 32 + simd_lane, 0, input_size / KS, owns_rows,
+                                                              acc);
+  if (!owns_rows) return;
 #pragma unroll
   for (ushort i = 0; i < acc.get_capacity(); ++i) {
     if (!acc.is_valid_element(i)) continue;
@@ -117,9 +62,8 @@ constant constexpr uint kPrefillStages = 2 * GGUF_TILE_COLUMNS * GGUF_PREFILL_ST
 // MPP computes 16-row fragments, so a tile holds 8, 16 or 32 rows (these kernels and the fused ones): a 3-lane step
 // runs the 32-row tile over the storage of four lanes (LinearPlan::storageRows) and the padding lane's rows are
 // computed and discarded. Rows are independent, so every active row is the bits of any other tile height
-// (gguf-projection full); on a 16-core M5 Pro the 32-row tile at three lanes costs what it costs at four, 3-15% less
-// than a 16-row plus an 8-row matmul per stage (0.207 vs 0.218 ms, Q4_K 12288 x 5120, DRAM-cold; 20-core: 0.173 vs
-// 0.203).
+// (gguf-projection checks it); the 32-row tile at three lanes costs what it costs at four, 3-15% less than a 16-row
+// plus an 8-row matmul per stage (DRAM-cold, 16- and 20-core M5 Pro).
 // Gate/up runs as a gate pass (a) into the gate scratch and an up pass (g) whose epilogue applies silu(gate) to the bf16
 // up value, as the Apple9 register kernels do. The destination's type Out is bf16, or fp32 for the plain epilogue's
 // logits (a_f32, ops::Projection::destination).
@@ -137,11 +81,8 @@ inline void gguf_decode_tile(device bfloat *input, device uchar *w0, device ucha
                                           (group.y + 1) * per, acc);
   gguf_store_sums<Rows>(acc, p.splits, group.y, partials, counters + p.out_offset / GGUF_TILE_COLUMNS + group.x, p.out_stride, column0,
                         simd_group * 32 + simd_lane, arrival, [&](uint row, uint column, float v) {
-    // gguf_epilogue inline: calling it here reorders the lambda's captures.
     const ulong o = ulong(row) * p.out_stride + column0 + column;
-    if constexpr (Ep == EpResidual) v += float(aux[o]);
-    if constexpr (Ep == EpUpWithGate) v = float(bfloat(v)) * gguf_silu(float(aux[o]));
-    output[o] = Out(v);
+    output[o] = gguf_epilogue<Ep, Out>(v, aux, o);
   });
 }
 // The staged decode kernels: grid (column tiles, K partitions), two simdgroups.
@@ -229,25 +170,48 @@ GGUF_DECODE_FUSED(8) GGUF_DECODE_FUSED(16) GGUF_DECODE_FUSED(32)
     GGUF_PREFILL_TABLES(F);                                                                                        \
     const uint first = group.x * GGUF_PREFILL_ROWS, rows = p.rows > first ? p.rows - first : 0;                    \
     gguf_prefill_tile<F, GGUF_PREFILL_SIMDGROUP_ROWS, GGUF_PREFILL_SIMDGROUPS, GGUF_TILE_COLUMNS, GGUF_PREFILL_STEP>(input + ulong(first) * p.input_size, w0, w1, meta,                        \
-                                         output + ulong(first) * (p.out_stride ? p.out_stride : p.output_size),   \
-                                         p.output_size, p.input_size, group.y * GGUF_TILE_COLUMNS, rows, stage, tl, \
-                                         simd_lane, simd_group, p.out_stride, p.out_offset);                      \
+                                         output + ulong(first) * p.out_stride, p.input_size,                       \
+                                         group.y * GGUF_TILE_COLUMNS, rows, stage, tl, simd_lane, simd_group,      \
+                                         p.out_stride, p.out_offset);                                              \
   }
 #define GGUF_PREFILL_EPILOGUE(F, f, ep, Ep)                                                                        \
   kernel void gguf_prefill_##f##_##ep(GGUF_PREFILL_BUFFERS, device bfloat *aux [[buffer(5)]],                    \
                                       constant GgufPrefillParams &p [[buffer(6)]], GGUF_PREFILL_THREAD) {          \
     GGUF_PREFILL_TABLES(F);                                                                                        \
-    const uint rs = p.out_stride ? p.out_stride : p.output_size;                                                   \
     const uint first = group.x * GGUF_PREFILL_ROWS, rows = p.rows > first ? p.rows - first : 0;                    \
     gguf_prefill_tile<F, GGUF_PREFILL_SIMDGROUP_ROWS, GGUF_PREFILL_SIMDGROUPS, GGUF_TILE_COLUMNS, GGUF_PREFILL_STEP, Ep>(input + ulong(first) * p.input_size, w0, w1, meta,                    \
-                                             output + ulong(first) * rs, p.output_size, p.input_size,              \
+                                             output + ulong(first) * p.out_stride, p.input_size,                   \
                                              group.y * GGUF_TILE_COLUMNS, rows, stage, tl, simd_lane, simd_group,  \
-                                             p.out_stride, p.out_offset, aux + ulong(first) * rs);                 \
+                                             p.out_stride, p.out_offset, aux + ulong(first) * p.out_stride);       \
   }
 #define GGUF_PREFILL_FORMAT(F, f) \
   GGUF_PREFILL(F, f) GGUF_PREFILL_EPILOGUE(F, f, r, EpResidual) GGUF_PREFILL_EPILOGUE(F, f, g, EpUpWithGate)
 QUANT_FORMATS(GGUF_PREFILL_FORMAT)
 #undef GGUF_PREFILL_FORMAT
+
+// The residual kernels over a view of the leading inputs of wider weight rows, for the Neural Engine FFN split's down
+// projection, one per format. Each runs the tile of its residual kernel on the planes advanced past the groups and
+// meta units the view leaves unread in the rows of the plane tiles before its column tile, which the tile then
+// addresses as rows of input_size inputs.
+#define GGUF_PREFILL_LEADING_INPUTS(F, f)                                                                          \
+  kernel void gguf_prefill_##f##_r_leading_inputs(GGUF_PREFILL_BUFFERS, device bfloat *aux [[buffer(5)]],          \
+                                                  constant GgufPrefillLeadingParams &leading [[buffer(6)]],        \
+                                                  GGUF_PREFILL_THREAD) {                                           \
+    GGUF_PREFILL_TABLES(F);                                                                                        \
+    constant GgufPrefillParams &p = leading.prefill;                                                               \
+    const uint first = group.x * GGUF_PREFILL_ROWS, rows = p.rows > first ? p.rows - first : 0;                    \
+    const ulong before = ulong(group.y * GGUF_TILE_COLUMNS / QUANT_TILE_ROWS) * QUANT_TILE_ROWS;                   \
+    const uint groups = p.input_size / 32, plane_groups = leading.plane_input_size / 32;                           \
+    const ulong unread = before * (plane_groups - groups),                                                         \
+                unread_units = before * (plane_groups / F::MetaGroups - groups / F::MetaGroups);                   \
+    gguf_prefill_tile<F, GGUF_PREFILL_SIMDGROUP_ROWS, GGUF_PREFILL_SIMDGROUPS, GGUF_TILE_COLUMNS, GGUF_PREFILL_STEP, \
+                      EpResidual>(input + ulong(first) * p.input_size, w0 + unread * F::P0, w1 + unread * F::P1,   \
+                                  meta + unread_units * F::MetaBytes, output + ulong(first) * p.out_stride,        \
+                                  p.input_size, group.y * GGUF_TILE_COLUMNS, rows, stage, tl, simd_lane,           \
+                                  simd_group, p.out_stride, p.out_offset, aux + ulong(first) * p.out_stride);      \
+  }
+QUANT_FORMATS(GGUF_PREFILL_LEADING_INPUTS)
+#undef GGUF_PREFILL_LEADING_INPUTS
 #undef GGUF_PREFILL_EPILOGUE
 #undef GGUF_PREFILL
 #undef GGUF_PREFILL_TABLES

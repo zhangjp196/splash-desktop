@@ -13,8 +13,9 @@ namespace {
 namespace gguf = splash::test::gguf;
 using splash::test::require;
 using splash::model::ggml::kF32;
-using splash::model::ggml::kQ4_K;
 
+constexpr uint32_t kQ4_K = 12;
+static_assert(std::string_view(splash::model::ggmlTypeTraits(kQ4_K)->name) == "Q4_K");
 constexpr uint64_t kQ4KBlockBytes = 144;
 
 // A file of one tensor, "weight", with one Q4_K block of data.
@@ -52,7 +53,8 @@ int main() {
                                              {{"weight", {256, 1}, kQ4_K, gguf::Bytes(kQ4KBlockBytes)}}));
     splash::model::WeightSource source(path);
     splash::model::GgufFile valid(source);
-    require(valid.architecture() == "fixture" && valid.unsignedValue("fixture.block_count") == 2,
+    const splash::model::GgufMetadata &metadata = valid.metadata();
+    require(metadata.architecture() == "fixture" && metadata.unsignedValue("fixture.block_count") == 2,
             "metadata values changed");
     const auto &weight = valid.require("weight");
     require(weight.bytes == kQ4KBlockBytes && weight.elements() == 256 && weight.rows() == 1,
@@ -60,7 +62,7 @@ int main() {
     require(source.dataOffset() + weight.offset + weight.bytes == source.bytes(),
             "valid data must end exactly at EOF");
 
-    constexpr std::string_view overflow = "GGUF size overflows uint64", pastEnd = "runs past the end of the file";
+    constexpr std::string_view overflow = "GGUF size overflows", pastEnd = "runs past the end of the file";
     rejects("shape overflow", model({256, uint64_t{1} << 60}), overflow);
     rejects("row product overflow", model({256, uint64_t{1} << 63, 2}), overflow);
     rejects("byte size overflow", model({uint64_t{1} << 62}, 0, kF32), overflow);
@@ -74,6 +76,13 @@ int main() {
     rejects("truncated tensor", truncated, pastEnd);
     const gguf::Tensor block{"weight", {256, 1}, kQ4_K, gguf::Bytes(kQ4KBlockBytes)};
     rejects("duplicate name", gguf::file({}, {block, block}), "duplicate GGUF tensor: weight");
+    // Whatever the types of the two values, and for an array too.
+    rejects("duplicate key",
+            gguf::file({gguf::uint32Key("fixture.block_count", 2), gguf::stringKey("fixture.block_count", "2")}, {}),
+            "duplicate GGUF metadata key: fixture.block_count");
+    rejects("duplicate array key",
+            gguf::file({gguf::int32ArrayKey("fixture.widths", {1}), gguf::int32ArrayKey("fixture.widths", {2})}, {}),
+            "duplicate GGUF metadata key: fixture.widths");
     rejects("overflowing array size", emptyUint64Array(uint64_t{1} << 62), overflow);
     rejects("truncated array", emptyUint64Array(100), "GGUF header is truncated");
     gguf::Bytes nested;

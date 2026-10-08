@@ -1,17 +1,20 @@
 #pragma once
 
-// The affine images of a checkpoint in the existing packed ABI, as
-// model/AffineTarget.cpp plans an MLX target's and model/DraftCheckpoint.cpp a
-// DFlash2 draft's: their identity and their writer. An MLX projection's
-// codes, scales and biases are reordered into 256-row tiles without
-// requantization, a BF16 projection is quantized into the same tiles as MLX's
-// affine quantization rounds it, the GDN decay becomes
+// The affine images of a checkpoint, laid out as a Splash package's files,
+// which the target and draft loaders read (QwenTargetLoader.hpp,
+// DFlashDraft.cpp): model/AffineTarget.cpp plans an MLX target's and
+// model/DraftCheckpoint.cpp a DFlash2 draft's, and writeAffineImage writes
+// them. An MLX projection's codes, scales and biases are reordered into
+// 256-row tiles without requantization, a BF16 projection is quantized into
+// the same tiles as MLX's affine quantization rounds it, the GDN decay becomes
 // float(-exp(double(A_log))), and every other tensor is copied as stored.
 
-#include "model/PreparedWeights.hpp"
+#include "model/WeightSource.hpp"
 
+#include <cstdint>
+#include <span>
 #include <string>
-#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace splash::model::affine {
@@ -46,7 +49,8 @@ struct Section {
 };
 
 // A 16-byte header (magic, layer, type) in a 16 KiB block, then 16 KiB-aligned
-// sections; quantized lists the affine modules it reads and their bits.
+// sections; quantized lists the affine modules it reads and their bits, which
+// inspection holds an MLX checkpoint's quantization to (ModelDescriptor.mm).
 struct Image {
   std::string name, magic;
   uint32_t layer = 0, type = 0;
@@ -55,17 +59,7 @@ struct Image {
   std::vector<std::pair<std::string, uint32_t>> quantized;
 };
 
-// The identity of an image planned from a checkpoint at `source`, the
-// component directory/name.
-[[nodiscard]] PreparedWeight affineImageWeight(const Image &image, std::string_view directory,
-                                               const std::string &source);
-
-// Writes an image into its preallocated, zeroed destination within the
-// preparation staging bound; admit runs before each chunk.
-void writeAffineImage(int destination, const Image &image, const PreparationCheck &admit);
-// writeAffineImage for image, which outlives the writer.
-[[nodiscard]] inline WeightWriter affineImageWriter(const Image &image) {
-  return [&image](int destination, const PreparationCheck &admit) { writeAffineImage(destination, image, admit); };
-}
+// Writes every byte of a bound image into destination, which is its size.
+void writeAffineImage(std::span<uint8_t> destination, const Image &image);
 
 } // namespace splash::model::affine

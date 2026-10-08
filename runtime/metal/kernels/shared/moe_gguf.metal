@@ -7,13 +7,12 @@
 // MoE experts (ops/MoE.cpp; kernels/shared/moe.metal groups the rows): threadgroup (x, y) computes
 // 64 columns of grouped tile y with the weights of the tile's expert (moe_gguf_segment), in the format the tile picks
 // at run time: on a 16-core M5 Pro one run-time-format dispatch over two segments is within -11..+8% of a dispatch
-// per format (time-sg at 23040x2048 Q4_K and 92160x512 Q5_K, one to four lanes). aux is the gate of the up pass.
+// per format (23040x2048 Q4_K and 92160x512 Q5_K, one to four lanes). aux is the gate of the up pass.
 // Two simdgroups each stream their own 32 columns through the decode tile, grid (N / 64, tiles), on 8-row tiles
 // (decode steps, short prefill chunks) or 32-row tiles (longer chunks, ops::moeGgufPrefillTile), where a tile runs the
-// 16- or 32-row matmul that holds its live rows: an expert's last tile is mostly partial. On the 35B's real prefill
-// routes (wikitext, chat, code; the three passes of a layer on a 16-core M5 Pro) 32-row tiles take 2.42-2.78 ms at
-// 512 rows and 6.70-6.83 ms at 2048 rows against 3.44-3.86 and 8.20-8.23 for 64-row tiles sharing one 64-column stage
-// over four 16-row simdgroups, and 1.29-1.71 ms against 1.59-2.60 for 8-row tiles at 128-256 rows.
+// 8-, 16- or 32-row matmul that holds its live rows (moe_live_rows): an expert's last tile is mostly partial. On the
+// 35B's real prefill routes the 32-row tiles take 17-30% less time than 64-row tiles sharing one 64-column stage over
+// four 16-row simdgroups (512 and 2048 rows, 16-core M5 Pro).
 template <ushort Rows, GgufEpilogue Ep>
 inline void moe_gguf_expert_tile(device bfloat *input, device const MoeTileDescriptor *tiles, device const uint *tile_count,
                                  device uchar *w0, device uchar *w1, device uchar *meta, device uchar *sw0, device uchar *sw1,
@@ -34,15 +33,11 @@ inline void moe_gguf_expert_tile(device bfloat *input, device const MoeTileDescr
     staged_accumulate_any<R, GGUF_STAGED_COLUMNS, GGUF_STAGED_STEP>(s.format, x, s.w0, s.w1, s.meta, p.input_size, origin, my, tl,
                                             simd_group * 32 + simd_lane, simd_lane, 0, p.input_size / GGUF_STAGED_STEP, acc);
     gguf_elements(acc, [&](uint row, uint column, float v) {
-      // gguf_epilogue inline: calling it here reorders the lambda's captures.
       const ulong o = out + ulong(row) * p.output_size + origin + column;
-      if constexpr (Ep == EpUpWithGate) v = float(bfloat(v)) * gguf_silu(float(aux[o]));
-      output[o] = bfloat(v);
+      output[o] = gguf_epilogue<Ep>(v, aux, o);
     });
   };
-  if constexpr (Rows == 8) run(integral_constant<ushort, 8>{});
-  else if (tile.rows <= 16) run(integral_constant<ushort, 16>{});
-  else run(integral_constant<ushort, 32>{});
+  moe_live_rows<Rows>(tile.rows, run);
 }
 template <ushort Rows, GgufEpilogue Ep>
 kernel void moe_expert_gguf(device bfloat *input [[buffer(0)]], device const MoeTileDescriptor *tiles [[buffer(1)]],

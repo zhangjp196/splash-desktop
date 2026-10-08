@@ -45,8 +45,9 @@ The positions where they differ are near-ties: there, llama.cpp's two best
 tokens are a median 0.03–0.10 nats apart, against 2.6–2.7 nats over all
 positions. Splash's perplexity is 0.1–0.4% (27B) and 0.1–0.9% (35B) above
 llama.cpp's; llama.cpp's CPU backend is 1.7–1.8% above its Metal on the 27B.
-Splash's figures cover an M5 Pro and an M3 Max with `--kv-format bf16`; the
-default INT8 cache gives 99.23–99.25% and 97.92–97.94% on the M5 Pro.
+Splash's figures cover an M5 Pro and an M3 Max with `--kv-format bf16` and
+`--disable-ane`; the default INT8 cache gives 99.23–99.25% and 97.92–97.94% on
+the M5 Pro.
 
 Speed uses the selected SPEED-Bench coding prompts described above, with
 greedy sampling. llama-server runs with its default settings, which do not
@@ -62,9 +63,10 @@ with the MTP draft Unsloth ships:
 | Qwen3.8-27B · llama.cpp with MTP | 27 | 20 |
 
 Splash decodes 2.5–3.2× as fast as llama.cpp on the 35B and 4.5–5.3× on
-the 27B (2.7–4.6× against its MTP). Prefilling a 2,048-token chunk, it runs
-at 559 tok/s against 374 on the 27B and 3,662 against 1,968 on the 35B on
-the M5 Pro, and at 245 against 193 and 1,814 against 1,575 on the M3 Max.
+the 27B (2.7–4.6× against its MTP); the ratios are of the unrounded rates.
+Prefilling a 2,048-token chunk, it runs at 559 tok/s against 374 on the 27B
+and 3,662 against 1,968 on the 35B on the M5 Pro, and at 245 against 193 and
+1,814 against 1,575 on the M3 Max.
 
 ## Smaller GGUFs on 24 GB Macs
 
@@ -72,12 +74,24 @@ Measured on a 24 GB M6 (12-core GPU), with each model's DFlash2 draft:
 
 | Unsloth GGUF | Code decode | Advertised context limit |
 | --- | ---: | ---: |
-| `Qwen3.8-27B-GGUF:UD-IQ3_XXS` | 43.5 tok/s | 102,393 tokens |
+| `Qwen3.8-27B-GGUF:UD-IQ3_XXS` | 43.5 tok/s | 73,721 tokens (102,393 with `--language-only`) |
 | `Qwen3.6-35B-A3B-GGUF:UD-Q2_K_XL` | 145 tok/s | 256K tokens |
 
 The context column reports capacity, not the prompt length of the decode
-measurement. Host memory pressure can suspend a long request. Startup
-suggests `--max-cache-disk` when memory may not hold that context.
+measurement. Coding agents need about 100K tokens (Claude Code's own prompt is
+about 33K, and at 64K it compacted repeatedly and stopped), so serve the 27B
+with `--language-only` for them.
+
+Splash grows its caches only while macOS has 3 GiB free and gives cached memory
+back when it runs short, but a request in service still takes the memory it
+needs within `--max-memory`, so these models leave other applications little
+room. A request that cannot get memory waits for it, then fails with
+`resource_timeout`: close memory-heavy applications, or serve with
+`--language-only`. Critical memory pressure can suspend a long request. Startup
+suggests `--max-cache-disk` when memory may not hold the advertised context.
+The SSD cache then writes whenever memory runs short: serving
+Ternary-Bonsai-2-27B PQ2_0 to six clients' mixed traffic for 30 minutes, a
+16 GiB SSD cache on the M6 wrote 26 GB, about 50 GB an hour, and read 36 GB.
 
 See [the low-bit GGUF measurements](https://github.com/incoai/splash/pull/160)
 for the workloads, memory pressure, SSD settings and limitations, and

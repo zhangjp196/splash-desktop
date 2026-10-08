@@ -1,9 +1,9 @@
 #pragma once
 
 // Layout constants of the weight files: preparation writes them, the weight
-// store reads them. Preparation code takes them from this header, so the
-// preparation identity does not follow the reader's API.
-// Editing this file re-prepares every affine and vision model.
+// store reads them.
+
+#include "metal/abi/Linear.h"
 
 #include <array>
 #include <cstdint>
@@ -17,9 +17,11 @@ inline constexpr uint32_t kQ4GroupElements = 64;
 inline constexpr uint64_t kBFloat16Bytes = 2;
 
 inline constexpr uint64_t kWeightFileAlignment = 16 * 1024;
-inline constexpr uint32_t kQ4StorageN = 256;
+// The rows of an affine projection's storage tile.
+inline constexpr uint32_t kQ4StorageN = SPLASH_AFFINE_TILE_ROWS;
 
-// The packed vision tower.
+// A vision tower's image, a package's vision/model.bin or one written from an
+// upstream source.
 inline constexpr std::string_view kVisionMagic = "MDFV0001";
 
 // offset rounded up to the next section boundary.

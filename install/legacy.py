@@ -1,9 +1,9 @@
-"""Legacy Splash packages: prebuilt packed weights published on the Hub with a
+"""Legacy Splash packages: prebuilt weight files published on the Hub with a
 manifest.json, which predate upstream loading and stay installable.
 
 A package is installed as a selection link to its verified Hub snapshot,
 pinned for that installation. The native model descriptor validates
-architecture, tensors, headers and execution geometry before mapping weights.
+architecture, tensors, headers and execution geometry before loading weights.
 huggingface_hub is imported where it is used, for the reasons hub.py gives.
 """
 
@@ -12,12 +12,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-if __package__:
-    from . import families, hub, models
-else:
-    import families
-    import hub
-    import models
+from . import hub, models
 
 ALIGNMENT = 16384
 # The tokenizer/ files a package ships.
@@ -33,18 +28,21 @@ PACKAGE_TOKENIZER_FILES = {
 class PackageFormat(NamedTuple):
     schema_version: int
     target_layer_magic: str
-    # The family whose target and draft layout the format packs.
-    family: str
+    # The layer files the format holds for the target and for the draft,
+    # one per layer of the family it holds (Qwen3.8-27B, Qwen3.6-35B-A3B).
+    target_layers: int
+    draft_layers: int
     # Manifest section -> the architecture it must declare.
     declarations: dict
 
 
 PACKAGE_FORMATS = {
-    "splash-packed-q4": PackageFormat(3, "MDFL0006", "Qwen3.8-27B", {}),
+    "splash-packed-q4": PackageFormat(3, "MDFL0006", 64, 5, {}),
     "splash-packed-q4-moe": PackageFormat(
         4,
         "MDFM0001",
-        "Qwen3.6-35B-A3B",
+        40,
+        6,
         {"target": "qwen3_5_moe", "draft": "DFlash2DraftModel"},
     ),
 }
@@ -76,7 +74,7 @@ def _validate_records(records, artifact_paths):
             and record["size"] % ALIGNMENT
         ):
             raise models.ModelError(
-                f"runtime package packed file is unaligned: {record['path']}"
+                f"runtime package weight file is unaligned: {record['path']}"
             )
         artifact_paths.add(record["path"])
 
@@ -105,9 +103,7 @@ def validate_manifest(path: Path):
         type(format_.get(key)) is not type(value) or format_[key] != value
         for key, value in expected_format.items()
     ):
-        raise models.ModelError(
-            "runtime package has an unsupported packed weight format"
-        )
+        raise models.ModelError("runtime package has an unsupported weight format")
     for key, architecture in layout.declarations.items():
         declaration = manifest.get(key)
         if (
@@ -129,14 +125,12 @@ def validate_manifest(path: Path):
         for parent in PurePosixPath(name).parents
     ):
         raise models.ModelError("runtime package artifact paths overlap")
-    family = families.named(layout.family)
-    target_layers = dict(family.signature)["num_hidden_layers"]
     required_files = {
         "target/embedding.bin",
         "target/head.bin",
-        *(f"target/layer-{index}.bin" for index in range(target_layers)),
+        *(f"target/layer-{index}.bin" for index in range(layout.target_layers)),
         "draft/model.bin",
-        *(f"draft/layer-{index}.bin" for index in range(family.draft.layers)),
+        *(f"draft/layer-{index}.bin" for index in range(layout.draft_layers)),
         "vision/model.bin",
         *(f"tokenizer/{name}" for name in PACKAGE_TOKENIZER_FILES),
     }
@@ -157,7 +151,7 @@ def verify_artifacts(root: Path, manifest, *, full: bool):
             )
         if path.suffix == ".bin" and record["size"] % ALIGNMENT:
             raise models.ModelError(
-                f"installed packed file is unaligned: {record['path']}"
+                f"installed weight file is unaligned: {record['path']}"
             )
         if full and models.sha256(path) != record["sha256"].lower():
             raise models.ModelError(

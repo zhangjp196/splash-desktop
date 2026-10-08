@@ -346,7 +346,7 @@ final class AppModel: ObservableObject {
             arguments += ["--idle-offload-seconds", String(seconds)]
         }
         if let seconds = Int(residencySeconds), seconds >= 1, seconds <= 86_400 {
-            arguments += ["--residency-seconds", String(seconds)]
+            arguments += ["--idle-release", String(seconds)]
         }
         if !maxRequestSize.isEmpty { arguments += ["--max-request-size", maxRequestSize] }
         if !reasoningEffort.isEmpty {

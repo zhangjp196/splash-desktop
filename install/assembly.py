@@ -11,9 +11,10 @@ The paths an assembly links, and what reads each:
   config.json            the target configuration: the MLX config.json, or
                          the one derived from the GGUF (ModelDescriptor.mm
                          inspectSourceModel)
-  target/config.json     the same MLX file again, where
-                         SafetensorsCheckpoint.mm reads a checkpoint's
-                         configuration
+  target/config.json, vision/config.json
+                         the MLX config.json again, as each checkpoint
+                         directory's own config, read by engines up to 1.2,
+                         which a release check runs on this installation
   target/<shard>         the MLX safetensors shards (SafetensorsCheckpoint.mm)
   target/<name>.gguf     the GGUF target (GgufTarget.cpp findTargetGguf)
   tokenizer/config.json  the same configuration again, from which the
@@ -25,8 +26,7 @@ The paths an assembly links, and what reads each:
   draft/config.json, draft/<name>.safetensors
                          the DFlash2 checkpoint (ModelDescriptor.mm,
                          DraftCheckpoint.cpp)
-  vision/config.json, vision/<shard>
-                         the MLX shards holding vision_tower.*
+  vision/<shard>         the MLX shards holding vision_tower.*
                          (VisionLoader.cpp, through SafetensorsCheckpoint.mm)
   vision/mmproj.gguf     the GGUF vision projector (VisionLoader.cpp)
 """
@@ -40,12 +40,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-if __package__:
-    from . import gguf, hub, models
-else:
-    import gguf
-    import hub
-    import models
+from . import gguf, hub, models
 
 GGUF_VISION = "vision/mmproj.gguf"
 TARGET_FORMATS = ("mlx-affine", "gguf")
@@ -154,8 +149,6 @@ def verify(assembly: Path, *, full=False):
     record = models.read_json(assembly / "model.json")
     if not _well_formed(record):
         raise models.ModelError("invalid resolved model record")
-    if _packed_draft(record["files"]):
-        raise models.ModelError("its draft is not a DFlash2 checkpoint")
     for name, entry in record["files"].items():
         path = assembly / name
         stat = path.stat()
@@ -213,13 +206,6 @@ def _well_formed(record):
             for name, entry in files.items()
         )
     )
-
-
-def _packed_draft(files):
-    """Whether the assembly links a packed draft, draft/model.bin and
-    draft/layer-N.bin, as assemblies did before drafts were prepared from
-    their DFlash2 checkpoints; the runtime loads only a checkpoint now."""
-    return any(name.startswith("draft/") and name.endswith(".bin") for name in files)
 
 
 def pins(record):

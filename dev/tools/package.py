@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -37,6 +38,7 @@ COMPLETION_FILES = (
     "models",
     "_splash",
     "splash.bash",
+    "splash.fish",
     "official-models.txt",
     "suggested-models.txt",
 )
@@ -54,6 +56,7 @@ SERVER_FILES = (
     "tool_schema.py",
     "tokenization.py",
     "json_codec.py",
+    "lru.py",
     "latency.py",
     "metrics.py",
     "errors.py",
@@ -63,10 +66,14 @@ SERVER_FILES = (
     "documents.py",
     "document_worker.py",
     "http_security.py",
+    "connections.py",
+    "origins.py",
+    "serve_options.py",
     "thinking.py",
     "schema_validation.py",
     "crash_trace.py",
     "chat.html",
+    "favicon.svg",
 )
 # Splash's license and the notices of the third-party code it ships.
 LICENSE_FILES = ("LICENSE", "THIRD_PARTY_NOTICES")
@@ -141,12 +148,13 @@ class Splash < Formula
     chmod 0755, bin/"splash"
     zsh_completion.install_symlink libexec/"install/completions/_splash"
     bash_completion.install_symlink libexec/"install/completions/splash.bash" => "splash"
+    fish_completion.install_symlink libexec/"install/completions/splash.fish"
   end
 
   def caveats
     <<~CAVEAT
       Serve a model:
-        splash serve --model mlx-community/Qwen3.8-27B-4bit
+        splash serve --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
     CAVEAT
   end
 
@@ -219,13 +227,22 @@ def main(argv=None):
             cwd=stage,
             check=True,
         )
+        # The server's entry point as the launcher starts it, which the
+        # import above does not run. Not isolated: -I would ignore PYTHONPATH.
+        subprocess.run(
+            [str(python), "-P", "-m", "server.server", "--help"],
+            cwd=stage,
+            env={**os.environ, "PYTHONPATH": str(stage)},
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
         subprocess.run(
             [str(python), "-B", str(stage / "install/launcher.py"), "--help"],
             cwd=stage,
             check=True,
         )
-        packed = Path(temporary) / archive.name
-        with tarfile.open(packed, "w:gz") as release:
+        temporary_archive = Path(temporary) / archive.name
+        with tarfile.open(temporary_archive, "w:gz") as release:
             release.add(
                 stage,
                 arcname=name,
@@ -233,7 +250,7 @@ def main(argv=None):
                     None if "__pycache__" in Path(item.name).parts else item
                 ),
             )
-        packed.replace(archive)
+        temporary_archive.replace(archive)
     checksum = digest(archive)
     archive.with_suffix(archive.suffix + ".sha256").write_text(checksum + "\n")
     url = (

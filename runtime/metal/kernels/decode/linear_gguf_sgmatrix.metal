@@ -165,10 +165,9 @@ inline void decode(device const bfloat *table, device const float *sums, device 
   load(cur);
   for (uint u = u0; u < u1; ++u) {
     // This unit's coefficients for the simdgroup's NC columns, each decoded
-    // once. Every source load is issued before the first decode waits for one:
-    // on the 40-core M3 the zero-point formats (16 coefficients per column and
-    // unit) gain at one to four lanes, Q6_K 5120x17408 2.5/3.8/3.1/1.1% and
-    // Q3_K 7.6/4.3/3.3/2.2%; the other formats stay within 0.7%.
+    // once. Every source load is issued before the first decode waits for one,
+    // which takes 1-8% off the zero-point formats (16 coefficients per column
+    // and unit) at one to four lanes on the 40-core M3 Max.
     constexpr uint I = (NC * S::J + 31) / 32;
     CoefSource<F> src[I];
 #pragma unroll
@@ -374,7 +373,7 @@ GGUF_SG_FUSED(4)
 // MoE experts (ops/MoE.cpp): threadgroup (x, y) computes 64 columns of grouped 8-row tile y from its Table16 tile
 // (kernels/shared/moe.metal) with the weights of the tile's expert (moe_gguf_segment), in the format the tile picks
 // at run time: on the 40-core M3 Max one run-time-format kernel is within +1.6% of the per-format kernels
-// (time-sg at 23040x2048 Q4_K and 92160x512 Q5_K, one to four lanes). No K splits, so no partials or counters.
+// (23040x2048 Q4_K and 92160x512 Q5_K, one to four lanes). No K splits, so no partials or counters.
 // aux is the gate of the up pass. Grid (column tiles, expert tiles), GGUF_REGISTER_THREADS threads.
 template <GgufEpilogue Ep>
 inline void gguf_sg_expert(device const bfloat *table, device const float *sums, device const MoeTileDescriptor *tiles,

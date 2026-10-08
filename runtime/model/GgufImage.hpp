@@ -1,6 +1,6 @@
 #pragma once
 
-// Plans the prepared images (model/GgufImageLayout.hpp) of a Qwen3.8 (qwen35)
+// Plans the images (model/GgufImageLayout.hpp) of a Qwen3.8 (qwen35)
 // or Qwen3.6 MoE (qwen35moe) target read straight from a llama.cpp GGUF, from
 // its metadata alone: section offsets, the header and descriptor bytes, and
 // the source rows each tensor section is written from
@@ -12,39 +12,14 @@
 #include <vector>
 
 #include "model/GgufFile.hpp"
+#include "model/QwenHybridLayout.hpp"
 
 namespace splash::model::gguf {
 
-struct TargetGeometry {
-  uint32_t layers = 0;
-  uint32_t hiddenSize = 0;
-  uint32_t vocabularySize = 0;
-  uint32_t intermediateSize = 0; // dense FFN
-  uint32_t gdnKeyHeads = 0;
-  uint32_t gdnValueHeads = 0;
-  uint32_t gdnHeadDimension = 0;
-  uint32_t convolutionDimension = 0;
-  uint32_t attentionWidth = 0;
-  uint32_t attentionKvHeads = 0;
-  uint32_t attentionHeadDimension = 0;
-  // The rotated dimension pairs of each attention head and their RoPE base.
-  uint32_t rotaryPairs = 0;
-  float rotaryTheta = 0.0F;
-  uint32_t fullAttentionPeriod = 0;
-  // A sparse MoE FFN (qwen35moe) when experts is set; the shared expert has
-  // the routed experts' intermediate width.
-  uint32_t experts = 0;
-  uint32_t expertsPerToken = 0;
-  uint32_t expertIntermediateSize = 0;
-  [[nodiscard]] bool isFullAttentionLayer(uint32_t layer) const noexcept {
-    return (layer + 1) % fullAttentionPeriod == 0;
-  }
-  [[nodiscard]] bool sparseMoe() const noexcept { return experts != 0; }
-  // The general.architecture of a GGUF of this target.
-  [[nodiscard]] const char *architecture() const noexcept {
-    return sparseMoe() ? "qwen35moe" : "qwen35";
-  }
-};
+// The general.architecture of a GGUF of a target with this FFN.
+[[nodiscard]] constexpr const char *architecture(QwenFfnKind ffn) noexcept {
+  return ffn == QwenFfnKind::SparseMoe ? "qwen35moe" : "qwen35";
+}
 
 // The order of a tensor's rows in the image. Rows below `from` keep their
 // order; from there on, blocks of headRows rows are value heads, which
@@ -72,14 +47,15 @@ struct Fill {
   uint64_t offset = 0;
   std::vector<uint8_t> bytes;
 };
-// Rows written back to back as stored or, for F32 rows the kernels read as
-// bf16, as the bf16 values they equal exactly, or for BF16 rows the kernels
-// read as F32, as the F32 values they equal.
+// How a copy writes each value: as stored, narrowed from F32 to the bf16
+// value it equals exactly (rows the kernels read as bf16), or widened from
+// BF16 to the F32 value it equals (rows the kernels read as F32).
+enum class Conversion : uint8_t { None, NarrowToBfloat16, WidenToFloat32 };
+// Rows written back to back, each value converted as `conversion` says.
 struct Copy {
   uint64_t destination = 0;
   TensorRows source;
-  bool bfloat16 = false;
-  bool float32 = false;
+  Conversion conversion = Conversion::None;
 };
 // Quantized rows repacked into the planes of their format; the rows of the
 // sources in order, then zero rows up to `rows`.
@@ -92,6 +68,7 @@ struct Repack {
 };
 struct Image {
   std::string name; // layer-N.bin, head.bin, embedding.bin
+  std::string magic; // kGgufImageMagic
   uint32_t layer = 0;
   uint32_t type = 0;
   uint64_t bytes = 0;
@@ -100,10 +77,16 @@ struct Image {
   std::vector<Repack> repacks;
 };
 
+// The target geometry a GGUF's metadata declares, its architecture included,
+// with the rotary embedding and norms the kernels compute: the RoPE base and
+// rotated dimensions, the RMS epsilon and no RoPE scaling. planImages checks
+// the file's first, and model-check the installer's copy before any weight
+// download. Throws GgufError naming every mismatch.
+void requireMetadata(const GgufMetadata &metadata, const QwenTargetDimensions &geometry);
+
 // The layers' images, then the head's and the embedding's. Checks the
-// architecture, the geometry the metadata declares, its rotary embedding and
-// norms included, and each tensor's shape; throws GgufError naming every
-// missing tensor and every tensor of a type this build cannot load.
-[[nodiscard]] std::vector<Image> planImages(const GgufFile &file, const TargetGeometry &geometry);
+// metadata (requireMetadata) and each tensor's shape; throws GgufError naming
+// every missing tensor and every tensor of a type this build cannot load.
+[[nodiscard]] std::vector<Image> planImages(const GgufFile &file, const QwenTargetDimensions &geometry);
 
 } // namespace splash::model::gguf

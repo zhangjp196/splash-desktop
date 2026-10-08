@@ -7,6 +7,13 @@
 #include <stdint.h>
 #endif
 
+// The expert slots of the routing kernels (ops::MoE): a row's router scores
+// take this many floats, the block's experts first, and the select and
+// grouping kernels run one thread per slot, so a MoE block routes at most
+// this many experts. An affine router stores this many rows: one Q8 storage
+// tile.
+#define SPLASH_MOE_EXPERT_SLOTS 256u
+
 struct MoeRouteParams {
   uint32_t rows;
   uint32_t input_size;
