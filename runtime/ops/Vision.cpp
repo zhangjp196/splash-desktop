@@ -68,8 +68,8 @@ std::array<uint64_t, 12> scratchLayout(const VisionLayout &layout,
 }
 
 void requireLayout(const VisionLayout &layout) {
-  // Packages share the same vision tower; only the language-space projection
-  // width varies with the text model.
+  // The targets share the same vision tower; only the language-space
+  // projection width varies with the text model.
   VisionLayout tower = layout;
   tower.outputHiddenSize = kTower.outputHiddenSize;
   if (tower != kTower || !layout.outputHiddenSize || layout.outputHiddenSize % kMergerColumnTile) {

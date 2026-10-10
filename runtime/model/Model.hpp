@@ -373,10 +373,9 @@ maskWordsPerToken(uint32_t vocabularySize) noexcept {
 
 // Compile-time ceiling of the one native DFlash execution contract. A draft
 // must have been trained for blocks of draftQueryRows rows over
-// draftContextTokens context tokens, which inspectModelRoot checks a
-// package's manifest and a DFlash2 checkpoint's config for; the other limits
-// are the runtime's own. Cache-page and attention-kernel geometry live with
-// their operators.
+// draftContextTokens context tokens, which inspectModelRoot checks a DFlash2
+// checkpoint's config for; the other limits are the runtime's own. Cache-page
+// and attention-kernel geometry live with their operators.
 struct ExecutionLimits final {
   static constexpr uint32_t maximumBatchWidth = 4;
   static constexpr uint32_t prefillTokenBudget = 2048;
@@ -436,9 +435,11 @@ struct ModelMemoryActual final {
 
 struct ModelTelemetry final {
   uint64_t stateAllocatedBytes = 0;
-  // Pooled state buffers no lane holds: GDN parity cells and draft rings.
+  // Pooled state buffers no lane holds: GDN parity cells, draft rings and
+  // context windows.
   uint32_t idleGdnCells = 0;
   uint32_t idleDraftRings = 0;
+  uint32_t idleContextWindows = 0;
   uint64_t targetPrefillRows = 0;
   uint64_t draftContextRowsActive = 0;
   uint64_t draftContextRowsMaterialization = 0;
@@ -545,9 +546,10 @@ public:
   // and retry.
   [[nodiscard]] virtual std::unique_ptr<StateOffload>
   snapshotToDisk(uint64_t, std::function<void()>) { return {}; }
-  // The cached states whose buffers a lane's activation would still have to
-  // allocate: each one evicted returns to the pool what a lane takes. Zero
-  // when the pool holds a lane's buffers.
+  // The cached states whose eviction would return to the pool what a lane's
+  // activation still has to allocate: zero when the pool holds a lane's
+  // buffers, and the maximum when no number of states does (a buffer no
+  // cached state holds, such as Qwen's draft rings).
   [[nodiscard]] virtual uint32_t statesToActivate() const noexcept { return 0; }
   // Releases one unit of idle model memory and returns its bytes; zero when
   // nothing in scope is idle. A unit is one pooled state buffer (keepLane

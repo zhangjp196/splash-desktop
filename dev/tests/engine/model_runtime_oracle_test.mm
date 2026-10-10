@@ -1,3 +1,4 @@
+#include "LinearNumerics.hpp"
 #include "TestChecks.hpp"
 #include "ane/ProgramInstrumentation.hpp"
 #include "engine/RuntimeResources.hpp"
@@ -10,7 +11,6 @@
 #include "ops/PageStorage.hpp"
 #include "ops/Sampling.hpp"
 #include "ops/Vision.hpp"
-#include "tuning/LinearNumerics.hpp"
 
 #include <algorithm>
 #include <array>
@@ -127,7 +127,7 @@ Similarity compareBfloat(const metal::MetalBuffer &left,
   const uint16_t *b = bfloatContents(right, "right BF16 buffer");
   SimilarityAccumulator accumulator;
   for (uint64_t index = 0; index < elements; index += stride) {
-    accumulator.add(ops::tuning::bf16ToFloat(a[index]), ops::tuning::bf16ToFloat(b[index]));
+    accumulator.add(test::bf16ToFloat(a[index]), test::bf16ToFloat(b[index]));
   }
   return accumulator.result();
 }
@@ -379,9 +379,13 @@ metal::MetalBuffer recurrentHalf(const metal::MetalBackend &backend,
 
 using StateSamples = std::vector<std::pair<std::string, std::vector<float>>>;
 
+// The ring rows of positions from `capturedFrom` on, which the chunks after a
+// restore captured from their own rows, are sampled apart as captured_* rings:
+// compareCommittedSamples holds them bit for bit.
 StateSamples sampleCommittedState(const metal::MetalBackend &backend,
                                   const model::QwenStateStorage &states,
-                                  uint32_t lane) {
+                                  uint32_t lane,
+                                  uint64_t capturedFrom = std::numeric_limits<uint64_t>::max()) {
   StateSamples result;
   const auto add = [&](std::string name, const metal::MetalBuffer &buffer,
                        bool bfloat) {
@@ -389,7 +393,7 @@ StateSamples sampleCommittedState(const metal::MetalBackend &backend,
     const uint64_t count = buffer.sizeBytes() / (bfloat ? 2 : 4);
     const uint64_t stride = std::max<uint64_t>(1, count / 65536);
     for (uint64_t index = 0; index < count; index += stride) {
-      values.push_back(bfloat ? ops::tuning::bf16ToFloat(static_cast<const uint16_t *>(
+      values.push_back(bfloat ? test::bf16ToFloat(static_cast<const uint16_t *>(
                                                  buffer.contents())[index])
                              : static_cast<const float *>(buffer.contents())[index]);
     }
@@ -411,41 +415,79 @@ StateSamples sampleCommittedState(const metal::MetalBackend &backend,
   for (uint32_t layer = 0; layer < ring.size(); ++layer) {
     const auto *keys = bfloatContents(ring[layer].keys, "draft keys");
     const auto *values = bfloatContents(ring[layer].values, "draft values");
-    std::vector<float> keySamples, valueSamples;
+    std::vector<float> keySamples, valueSamples, capturedKeys, capturedValues;
     for (uint64_t index = 0; index < elements; index += stride) {
       const uint32_t dimension = index % layout.headDimension;
       const uint32_t position = (index / layout.headDimension) % lengths.draftLength;
       const uint32_t head = index / (uint64_t{layout.headDimension} * lengths.draftLength);
       const uint32_t ring = (lengths.draftBase + position) % window;
-      keySamples.push_back(ops::tuning::bf16ToFloat(
+      const bool captured = lengths.draftBase + position >= capturedFrom;
+      (captured ? capturedKeys : keySamples).push_back(test::bf16ToFloat(
           keys[(uint64_t{head} * window + ring) * layout.headDimension + dimension]));
-      valueSamples.push_back(ops::tuning::bf16ToFloat(
+      (captured ? capturedValues : valueSamples).push_back(test::bf16ToFloat(
           values[(uint64_t{head} * layout.headDimension + dimension) * window + ring]));
     }
     result.emplace_back("draft_key_" + std::to_string(layer), std::move(keySamples));
     result.emplace_back("draft_value_" + std::to_string(layer), std::move(valueSamples));
+    if (!capturedKeys.empty()) {
+      result.emplace_back("captured_key_" + std::to_string(layer), std::move(capturedKeys));
+      result.emplace_back("captured_value_" + std::to_string(layer), std::move(capturedValues));
+    }
+  }
+  // The context window's rows of the rings' positions, byte for byte: a
+  // restore copies the window and computes the rings from it again.
+  if (lengths.draftLength && lengths.hasCurrentContextWindow()) {
+    const auto *bytes = static_cast<const uint8_t *>(states.window(lane).contents());
+    const uint64_t codeBytes = layout.contextWidth / 2;
+    const uint64_t groupBytes = uint64_t{layout.contextWidth} / SPLASH_DRAFT_CONTEXT_GROUP * 4;
+    const uint64_t rowBytes = codeBytes + groupBytes;
+    const uint64_t total = uint64_t{lengths.draftLength} * rowBytes;
+    std::vector<float> samples;
+    for (uint64_t index = 0; index < total; index += std::max<uint64_t>(1, total / 65536)) {
+      const uint64_t slot = (lengths.draftBase + index / rowBytes) % window;
+      const uint64_t offset = index % rowBytes;
+      samples.push_back(bytes[offset < codeBytes
+                                  ? slot * codeBytes + offset
+                                  : draft_context_codes_bytes(layout.contextWidth) +
+                                        slot * groupBytes + (offset - codeBytes)]);
+    }
+    result.emplace_back("context_window", std::move(samples));
   }
   return result;
 }
 
+// Exact compares every tensor bit for bit, but for `restoredRings` the
+// draft rings, which a restore computed again from the 4-bit context window:
+// they must stay close to the rings computed from the rows themselves.
+// Otherwise it reports the drift of the tensors both sides sampled; a lane
+// past its prompt has no current context window to sample.
 void compareCommittedSamples(const StateSamples &before,
-                              const StateSamples &after, bool exact) {
-  require(before.size() == after.size(), "preemption state sample shape changed");
-  for (size_t tensor = 0; tensor < before.size(); ++tensor) {
-    const auto &[name, values] = before[tensor];
-    require(values.size() == after[tensor].second.size(),
-            "preemption tensor sample shape changed");
-    if (exact) {
-      require(values == after[tensor].second,
+                              const StateSamples &after, bool exact,
+                              bool restoredRings = false) {
+  if (exact)
+    require(before.size() == after.size(), "preemption state sample shape changed");
+  for (const auto &[name, values] : before) {
+    const auto other = std::ranges::find(after, name, &StateSamples::value_type::first);
+    if (other == after.end()) {
+      require(!exact, "preemption state sample shape changed: " + name);
+      continue;
+    }
+    const std::vector<float> &compared = other->second;
+    require(values.size() == compared.size(), "preemption tensor sample shape changed");
+    const bool rebuilt = restoredRings && name.starts_with("draft_");
+    if (exact && !rebuilt) {
+      require(values == compared,
               "regenerated state differs from independent teacher forcing: " + name);
       continue;
     }
     SimilarityAccumulator comparison;
     for (size_t index = 0; index < values.size(); ++index)
-      comparison.add(values[index], after[tensor].second[index]);
+      comparison.add(values[index], compared[index]);
     const Similarity result = comparison.result();
-    std::cout << "preemption_state " << name << " cosine=" << result.cosine
-              << " maximum_absolute=" << result.maximumAbsolute << '\n';
+    std::cout << (rebuilt ? "restored_ring " : "preemption_state ") << name
+              << " cosine=" << result.cosine << " maximum_absolute=" << result.maximumAbsolute << '\n';
+    if (rebuilt)
+      require(result.cosine >= 0.99, "rings computed again from the context window drifted: " + name);
   }
 }
 
@@ -777,8 +819,9 @@ void requireRepeatedImagePlacements(model::Runtime &executor,
                std::span<const uint32_t>(prompt).subspan(64), pages, false);
   require(executor.telemetry().imageEncodes == encodes + 2,
           "prefix restore discarded data for a later image placement");
+  // The checkpoint's rows come back into the rings from the context window.
   compareCommittedSamples(
-      expected, sampleCommittedState(backend, states, *restored.lane), true);
+      expected, sampleCommittedState(backend, states, *restored.lane), true, true);
   executor.end(request.id);
   checkpoint.reset();
   while (executor.reclaimIdleState(false, IdleMemory::BuffersThenCaches)) {
@@ -786,6 +829,48 @@ void requireRepeatedImagePlacements(model::Runtime &executor,
   require(backend.memoryStats().allocatedBytes == originalBytes,
           "repeated image placements retained resources");
   std::cout << "repeated_image_placements=PASS\n";
+}
+
+// A restore at a full window: the chunk after it stores its rows into the
+// window slots of the oldest restored positions and writes their ring slots,
+// so the rings computed again from the window must come before them: a later
+// rebuild would overwrite the chunk's captured rings, which match bit for bit.
+// The restored lane matches the cold teacher-forced lane that made the
+// checkpoint.
+void requireFullWindowRestore(model::Runtime &executor,
+                              const metal::MetalBackend &backend,
+                              const model::QwenStateStorage &states) {
+  constexpr uint32_t window = model::ExecutionLimits::draftContextTokens;
+  constexpr uint32_t boundary = window + 64;
+  std::vector<uint32_t> prompt(boundary + 64);
+  for (uint32_t index = 0; index < prompt.size(); ++index)
+    prompt[index] = 1 + index;
+  const std::span<const uint32_t> tokens(prompt);
+  const std::vector<uint32_t> pages = pageRange(0, prompt.size() / kv::kPageTokens);
+  EngineRequest request = makeRequest(104, prompt, 1);
+  beginCold(executor, request, 0);
+  const std::array<uint32_t, 1> checkpoints{boundary};
+  executor.setDraftContextPlan(request.id, planDraftContext(0, prompt.size(), checkpoints));
+  prefillChunk(executor, request.id, 0, tokens.first(window), pages);
+  prefillChunk(executor, request.id, window, tokens.subspan(window, boundary - window), pages);
+  auto checkpoint = executor.snapshot(request.id);
+  require(checkpoint != nullptr, "full-window checkpoint allocation failed");
+  prefillChunk(executor, request.id, boundary, tokens.subspan(boundary), pages);
+  const auto expected = sampleCommittedState(backend, states, 0, boundary);
+  executor.end(request.id);
+  // With the idle rings reclaimed, the restored lane's rings hold none of the
+  // teacher's rows: only the rebuild puts them back.
+  while (executor.reclaimIdleState(false, IdleMemory::BuffersThenCaches)) {
+  }
+
+  request.id = 105;
+  beginCold(executor, request, 0);
+  restoreActivePrefix(executor, request.id, prompt.size(), boundary, checkpoint);
+  prefillChunk(executor, request.id, boundary, tokens.subspan(boundary), pages);
+  compareCommittedSamples(expected, sampleCommittedState(backend, states, 0, boundary), true,
+                          true);
+  executor.end(request.id);
+  std::cout << "full_window_restore=PASS\n";
 }
 
 // Fills every byte of a lane's GDN recurrent state, the FP32 half of the cell
@@ -2019,7 +2104,11 @@ int main(int argc, char **argv) {
 
     // Recurrent cache entries are policy-neutral. The consumer replays one
     // teacher-forced token, then selects from the regenerated final hidden
-    // with its own sampling stream.
+    // with its own sampling stream: its anchor is a cold run's. The tokens
+    // after the anchor come from draft rings the restore computed again from
+    // the context window (compareCommittedSamples), so they are compared with
+    // those of a second consumer, of a second producer's snapshot under
+    // another policy, whose rings come from an equal context window.
     std::vector<uint32_t> samplingPrefix(128);
     for (uint32_t index = 0; index < samplingPrefix.size(); ++index) {
       samplingPrefix[index] =
@@ -2076,10 +2165,40 @@ int main(int argc, char **argv) {
                      std::span<const uint32_t>(samplingPrompt).subspan(128, 1),
                      coldSamplingPages),
         32, samplingPrompt.size(), coldSamplingPages);
-    require(coldSample.outputTokens == replayedSample.outputTokens,
-            "sampling restore replay reused producer policy state");
+    require(!coldSample.outputTokens.empty() &&
+                coldSample.outputTokens.front() == replayedSample.outputTokens.front(),
+            "sampling restore replay did not select from the regenerated final hidden");
     executor.end(32);
     samplingPromptSnapshot.reset();
+
+    EngineRequest otherSource = samplingSource;
+    otherSource.id = 33;
+    otherSource.sampling = {
+        .temperature = 0.7F, .topP = 0.9F, .topK = 8, .seed = 27183};
+    beginCold(executor, otherSource, 0);
+    prefillChunk(executor, 33, 0,
+                 std::span<const uint32_t>(samplingPrefix).first(120),
+                 coldSamplingPages);
+    prefillChunk(executor, 33, 120,
+                 std::span<const uint32_t>(samplingPrefix).subspan(120, 8),
+                 coldSamplingPages);
+    std::shared_ptr<const CompositeState> otherSnapshot = executor.snapshot(33);
+    require(otherSnapshot != nullptr, "sampling snapshot allocation failed");
+    executor.end(33);
+    EngineRequest otherReplay = replayedSampling;
+    otherReplay.id = 34;
+    beginCold(executor, otherReplay, 0);
+    restoreActivePrefix(executor, 34, samplingPrompt.size(), 128, otherSnapshot);
+    ModelStepResult otherSample = firstStep(
+        executor,
+        prefillChunk(executor, 34, 128,
+                     std::span<const uint32_t>(samplingPrompt).subspan(128, 1),
+                     coldSamplingPages),
+        34, samplingPrompt.size(), coldSamplingPages);
+    require(otherSample.outputTokens == replayedSample.outputTokens,
+            "sampling restore replay reused producer policy state");
+    executor.end(34);
+    otherSnapshot.reset();
 
     const auto beforeConstrained = executor.telemetry();
 
@@ -3175,7 +3294,11 @@ int main(int argc, char **argv) {
     // Negative presence and frequency favour the output's tokens by their
     // counts, so the decisions they change follow the counts, a verify row's
     // draft prefix included; presence 1.5 is Qwen's recommendation, and
-    // repetition also reads the prompt's tokens.
+    // repetition also reads the prompt's tokens. The prompt repeats a chat
+    // template, which a model's greedy transcript may copy by margins the
+    // milder settings leave alone (the 35B mxfp4's survive them all);
+    // repetition 3 divides the copied tokens' logits, so that one setting
+    // changes a decision to probe on every model.
     const PreemptionRun control = runPreemption(RequestKind::Greedy, 0);
     const float drift = probeLoss(control.transcript, {});
     const float tolerance = std::max(2.0F * drift, 0.1F);
@@ -3185,7 +3308,8 @@ int main(int argc, char **argv) {
     for (const ops::SamplingPenalties penalties :
          {ops::SamplingPenalties{1.0F, -2.0F, -2.0F},
           ops::SamplingPenalties{1.0F, 1.5F, 0.0F},
-          ops::SamplingPenalties{1.3F, 1.5F, 0.0F}}) {
+          ops::SamplingPenalties{1.3F, 1.5F, 0.0F},
+          ops::SamplingPenalties{3.0F, 0.0F, 0.0F}}) {
       const auto reference = runPreemption(RequestKind::Greedy, 0, penalties);
       const auto promptResumed =
           runPreemption(RequestKind::Greedy, 1, penalties);
@@ -3390,6 +3514,7 @@ int main(int argc, char **argv) {
       executor.end(93);
       std::cout << "discontinuous_capture_fails=PASS\n";
     }
+    requireFullWindowRestore(executor, backend, states);
 
     const auto rowsBeforeInvalidWarmup = executor.telemetry().targetPrefillRows;
     for (uint32_t rows : {0U, model::ExecutionLimits::prefillTokenBudget + 1,

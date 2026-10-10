@@ -1135,7 +1135,7 @@ void testLongSuffixSkipsDraftRestore() {
   runUntilIdle(engine);
   require(!executor.restoredDraft &&
               !executor.plans.at(11).restoresDraftState,
-          "long suffix copied a draft ring that its final window overwrites");
+          "long suffix restored draft state that its final window overwrites");
 }
 
 // A lane cancelled while the command that ends at its armed boundary is in
@@ -4110,9 +4110,9 @@ void testStateAdmissionKeepsThePooledLaneBuffers() {
 
 // While growth is paused, a lane short of state buffers takes a cached
 // state's: the oldest in RAM goes when those in RAM cover what the pool
-// lacks, and none goes when they do not.
+// lacks, and none goes when they do not, or when no number of states can.
 void testPausedStateAdmissionReusesCachedStates() {
-  for (uint32_t lacked : {1U, 2U}) {
+  for (uint32_t lacked : {1U, 2U, std::numeric_limits<uint32_t>::max()}) {
     test::TestKvStorage storage(64, 4096, 4);
     KvPool pool(storage, 0);
     engine::Cache cache(pool, nullptr, nullptr);

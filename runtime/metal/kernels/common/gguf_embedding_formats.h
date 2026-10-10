@@ -1,12 +1,14 @@
 #pragma once
 
 #include "metal/abi/QuantTables.h"
+#include "metal/kernels/common/quant_formats.h"
 #include <metal_stdlib>
 
 // The native GGUF blocks of the token tables (ops/Embedding.cpp), one struct
 // per format: a row is hidden / Weights blocks of Bytes bytes, each laid out as
-// the format's ggml block_* at the byte offsets its struct names, and value is
-// element dim as bf16. Every format's value keeps the source order of its
+// the format's ggml block_* (an MLX affine or nvfp4 table: the loader's block
+// of metal/abi/QuantFormat.h) at the byte offsets its struct names, and value
+// is element dim as bf16. Every format's value keeps the source order of its
 // float operations (reassociate(off)), as the GGUF GEMMs do.
 
 // The little-endian half at byte `at` of a block.
@@ -150,3 +152,56 @@ struct GgufEmbedIQ3S {
     return bfloat(float(gguf_half(block, D)) * float(1 + 2 * s) * float(magnitude) * sign);
   }
 };
+// block_mxfp4: uchar e | uchar qs[16], element l in nibble l / 16 of qs[l % 16], an E2M1 code; value =
+// kFP4Values[code] (twice the E2M1 value) times 2^(e - 128), llama.cpp's GGML_E8M0_TO_FP32_HALF.
+struct GgufEmbedMXFP4 {
+  enum : uint { Weights = 32, Bytes = 17, E = 0, Codes = 1 };
+  __attribute__((always_inline)) static bfloat value(device const uchar *block, uint dim) {
+#pragma clang fp reassociate(off)
+    const uint l = dim % Weights, e = block[E];
+    const uchar q = (block[Codes + l % 16] >> (4 * (l / 16))) & 15;
+    return bfloat(float(kFP4Values[q]) * as_type<float>(e < 2 ? 0x00200000u << e : (e - 1) << 23));
+  }
+};
+// The loader's nvfp4 block: uchar scales[16] | float g | uchar codes[128], element l in nibble l % 2 of codes[l / 2]
+// and its 16-group's E4M3 scale scales[l / 16]; value = kFP4Values[code] (twice the E2M1 value) times the scale the
+// projections' coefficient rounds once (kernels/common/quant_formats.h), (e4m3 / 2^8) (128 g).
+struct GgufEmbedNVFP4 {
+  enum : uint { Weights = 256, Bytes = 148, Scales = 0, G = QUANT_NVFP4_G, Codes = QUANT_NVFP4_CODES };
+  __attribute__((always_inline)) static bfloat value(device const uchar *block, uint dim) {
+#pragma clang fp reassociate(off)
+    const uint l = dim % Weights;
+    const uchar q = (block[Codes + l / 2] >> (4 * (l % 2))) & 15;
+    const float g = as_type<float>(uint(block[G]) | uint(block[G + 1]) << 8 | uint(block[G + 2]) << 16 |
+                                   uint(block[G + 3]) << 24);
+    return bfloat(float(kFP4Values[q]) * (float(quant_e4m3_pair(block[Scales + l / 16]).x) * (128.0f * g)));
+  }
+};
+// MLX affine {bf16 s, bf16 z, codes}: element l of the group is code l of the codes' little-endian bit string of
+// Bits-bit codes; value = s * code + z, rounded once to bf16.
+template <uint Bits, uint Group> struct GgufEmbedAffine {
+  enum : uint { Weights = Group, Bytes = 4 + Group * Bits / 8, S = 0, Z = 2, Codes = 4 };
+  __attribute__((always_inline)) static bfloat value(device const uchar *block, uint dim) {
+#pragma clang fp reassociate(off)
+    const uint at = (dim % Weights) * Bits, shift = at % 8;
+    device const uchar *codes = block + Codes + at / 8;
+    const uint word = uint(codes[0]) | (shift + Bits > 8 ? uint(codes[1]) << 8 : 0u);
+    const float code = float((word >> shift) & ((1u << Bits) - 1));
+    const float s = float(as_type<bfloat>(ushort(block[S] | (block[S + 1] << 8))));
+    const float z = float(as_type<bfloat>(ushort(block[Z] | (block[Z + 1] << 8))));
+    return bfloat(code * s + z);
+  }
+};
+// A bf16 token table, which a safetensors checkpoint keeps unquantized: each value is its own block.
+struct GgufEmbedBF16 {
+  enum : uint { Weights = 1, Bytes = 2 };
+  __attribute__((always_inline)) static bfloat value(device const uchar *block, uint) {
+    return as_type<bfloat>(ushort(block[0] | (block[1] << 8)));
+  }
+};
+#define GGUF_EMBED_AFFINE(B)                                                                                       \
+  typedef GgufEmbedAffine<B, 32> GgufEmbedAF##B##G32; typedef GgufEmbedAffine<B, 64> GgufEmbedAF##B##G64;        \
+  typedef GgufEmbedAffine<B, 128> GgufEmbedAF##B##G128;
+GGUF_EMBED_AFFINE(2) GGUF_EMBED_AFFINE(3) GGUF_EMBED_AFFINE(4) GGUF_EMBED_AFFINE(5) GGUF_EMBED_AFFINE(6)
+GGUF_EMBED_AFFINE(8)
+#undef GGUF_EMBED_AFFINE

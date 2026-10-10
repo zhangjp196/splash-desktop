@@ -37,7 +37,7 @@ from .latency import LatencyMetrics
 from .lru import LRUCache
 from .metrics import is_finite_number
 from .serve_options import REASONING_EFFORTS, parse_served_model_name
-from .tokenization import PromptTokenizer
+from .tokenization import PromptTokenizer, tokenizable
 from .tool_schema import (
     THINK_END,
     THINK_END_TOKEN_ID,
@@ -270,7 +270,7 @@ class Frontend:
         self.chat_templates = chat_templates
         self.prompt_tokenizer = PromptTokenizer(tokenizer)
         self.backend = backend
-        # The package id the engine loaded. /status reports it, so an alias
+        # The model id the engine loaded. /status reports it, so an alias
         # can never hide what served a request (#81).
         self.model = model
         served = tuple(parse_served_model_name(name) for name in served_model_names)
@@ -825,7 +825,7 @@ class Frontend:
 
     def _tokenize(self, text, **options):
         with self.latencies.measure("tokenization"):
-            return self.tokenizer(text, **options)
+            return self.tokenizer(tokenizable(text), **options)
 
     def _apply_chat_template(self, messages, template):
         with self.latencies.measure("template"):

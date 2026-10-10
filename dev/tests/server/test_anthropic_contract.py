@@ -47,6 +47,50 @@ def request_body(**fields):
     }
 
 
+def tool_search_body(content, **fields):
+    return request_body(
+        messages=[
+            {"role": "user", "content": "Check Paris."},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_search",
+                        "name": "ToolSearch",
+                        "input": {"query": "select:weather"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_search",
+                        "content": content,
+                    }
+                ],
+            },
+        ],
+        tools=[
+            {"name": "ToolSearch", "input_schema": {"type": "object"}},
+            {
+                "name": "weather",
+                "description": "Get the weather for a city.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+                "defer_loading": True,
+            },
+            {"name": "time", "input_schema": {"type": "object"}},
+        ],
+        **fields,
+    )
+
+
 def stream_events(payload):
     return [
         json.loads(line.removeprefix("data: "))
@@ -56,6 +100,98 @@ def stream_events(payload):
 
 
 class AnthropicAdapterTest(unittest.TestCase):
+    def test_tool_references_preserve_text_order_and_error_status(self):
+        for is_error in (False, True):
+            with self.subTest(is_error=is_error):
+                body = tool_search_body(
+                    [
+                        {"type": "text", "text": "Found:"},
+                        {"type": "tool_reference", "tool_name": "weather"},
+                        {"type": "text", "text": "Also:"},
+                        {"type": "tool_reference", "tool_name": "time"},
+                    ]
+                )
+                body["messages"][-1]["content"][0]["is_error"] = is_error
+                original = copy.deepcopy(body)
+                chat = anthropic_to_chat_prompt(
+                    body, thinking_resolver=no_signed_thinking
+                )
+                expected = (
+                    "Found:\nAvailable tool: weather\nAlso:\nAvailable tool: time\n"
+                )
+                if is_error:
+                    expected = "Tool execution failed:\n" + expected
+                self.assertEqual(
+                    chat["messages"][-1],
+                    {
+                        "role": "tool",
+                        "tool_call_id": "toolu_search",
+                        "content": expected,
+                    },
+                )
+                self.assertEqual(body, original)
+
+    def test_tool_references_preserve_image_positions(self):
+        url = png_data_url()
+        body = tool_search_body(
+            [
+                {"type": "tool_reference", "tool_name": "weather"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": url.split(",", 1)[1],
+                    },
+                },
+                {"type": "tool_reference", "tool_name": "time"},
+            ]
+        )
+        chat = anthropic_to_chat_prompt(body, thinking_resolver=no_signed_thinking)
+        self.assertEqual(
+            chat["messages"][-1]["content"],
+            [
+                {"type": "text", "text": "\nAvailable tool: weather\n"},
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "text", "text": "\nAvailable tool: time\n"},
+            ],
+        )
+
+    def test_tool_reference_without_tools_preserves_name(self):
+        name = "mcp__hindsight__recall"
+        body = tool_search_body([{"type": "tool_reference", "tool_name": name}])
+        del body["tools"]
+        chat = anthropic_to_chat_prompt(body, thinking_resolver=no_signed_thinking)
+        self.assertEqual(chat["messages"][-1]["content"], f"\nAvailable tool: {name}\n")
+
+    def test_tool_references_require_valid_names(self):
+        for name in (None, "", 7, [], "bad name", "bad\nname", "x" * 129):
+            with self.subTest(name=name), self.assertRaises(APIError) as caught:
+                anthropic_to_chat_prompt(
+                    tool_search_body([{"type": "tool_reference", "tool_name": name}]),
+                    thinking_resolver=no_signed_thinking,
+                )
+            self.assertEqual(caught.exception.status, 400)
+            self.assertIn("tool_reference.tool_name", caught.exception.message)
+
+    def test_tool_references_are_only_supported_in_tool_results(self):
+        for role in ("user", "assistant"):
+            with self.subTest(role=role), self.assertRaises(APIError) as caught:
+                anthropic_to_chat_prompt(
+                    request_body(
+                        messages=[
+                            {
+                                "role": role,
+                                "content": [
+                                    {"type": "tool_reference", "tool_name": "weather"}
+                                ],
+                            }
+                        ]
+                    ),
+                    thinking_resolver=no_signed_thinking,
+                )
+            self.assertEqual(caught.exception.status, 400)
+
     def test_redacted_history_preserves_visible_text_and_tool_calls(self):
         body = request_body(
             messages=[
@@ -383,6 +519,69 @@ class AnthropicAdapterTest(unittest.TestCase):
 
 
 class AnthropicHTTPContractTest(HarnessTestCase):
+    def test_tool_search_count_and_generation_allow_discovered_tool_calls(self):
+        runtime = FakeRuntime(Plan([[5]]), Plan([[5]]))
+        tokenizer = FakeTokenizer()
+        harness = self.harness(runtime, tokenizer=tokenizer)
+        body = tool_search_body([{"type": "tool_reference", "tool_name": "weather"}])
+        status, _, payload = harness.request("POST", "/v1/messages/count_tokens", body)
+        self.assertEqual(status, 200, payload)
+        count = json.loads(payload)["input_tokens"]
+        counted = copy.deepcopy(tokenizer.templates[-1])
+        self.assertEqual(counted[0][-1]["content"], "\nAvailable tool: weather\n")
+        weather = next(
+            tool["function"]
+            for tool in counted[1]["tools"]
+            if tool["function"]["name"] == "weather"
+        )
+        self.assertEqual(weather["parameters"], body["tools"][1]["input_schema"])
+        self.assertEqual(runtime.requests, [])
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                status, _, payload = harness.request(
+                    "POST", "/v1/messages", {**body, "stream": stream}
+                )
+                self.assertEqual(status, 200, payload)
+                self.assertEqual(tokenizer.templates[-1], counted)
+                if stream:
+                    events = stream_events(payload)
+                    usage = events[0]["message"]["usage"]
+                    call = next(
+                        event["content_block"]
+                        for event in events
+                        if event["type"] == "content_block_start"
+                        and event["content_block"]["type"] == "tool_use"
+                    )
+                else:
+                    response = json.loads(payload)
+                    usage = response["usage"]
+                    call = response["content"][0]
+                    self.assertEqual(call["input"], {"city": "Paris"})
+                self.assertEqual(call["name"], "weather")
+                self.assertEqual(
+                    count, usage["input_tokens"] + usage["cache_read_input_tokens"]
+                )
+        self.assertEqual(len(runtime.requests), 2)
+
+    def test_invalid_tool_result_blocks_reject_before_inference(self):
+        runtime = FakeRuntime()
+        harness = self.harness(runtime)
+        for block in (
+            {"type": "tool_reference"},
+            {"type": "tool_reference", "tool_name": False},
+            {"type": "unsupported_content"},
+        ):
+            for path in ("/v1/messages", "/v1/messages/count_tokens"):
+                with self.subTest(block=block, path=path):
+                    status, _, payload = harness.request(
+                        "POST", path, tool_search_body([block])
+                    )
+                    self.assertEqual(status, 400, payload)
+                    self.assertEqual(
+                        json.loads(payload)["error"]["type"], "invalid_request_error"
+                    )
+        self.assertEqual(runtime.requests, [])
+
     def test_trailing_assistant_prefill_is_refused(self):
         runtime = FakeRuntime()
         harness = self.harness(runtime)

@@ -96,6 +96,15 @@ SSE_KEEPALIVE_SECONDS = 2.0
 NATIVE_START_TIMEOUT = 600.0
 ROOT = Path(__file__).parents[1]
 CHAT_HTML = Path(__file__).with_name("chat.html").read_bytes()
+CHAT_ASSETS = {
+    f"/chat-assets/{name}": (Path(__file__).parent / "chat-assets" / name).read_bytes()
+    for name in (
+        "markdown-it-15.0.2.min.js",
+        "highlight-11.12.0.min.js",
+        "github-11.12.0.min.css",
+        "github-dark-11.12.0.min.css",
+    )
+}
 # The chat page's brand mark, in its text colors, which the page shows too.
 # Browsers, and other clients, ask for a site's icon at /favicon.ico.
 FAVICON_SVG = Path(__file__).with_name("favicon.svg").read_bytes()
@@ -298,8 +307,11 @@ class FrontendHandler(BaseHTTPRequestHandler):
             )
             public = self.command == "OPTIONS" or (
                 self.command in ("GET", "HEAD")
-                and self.route
-                in ("/", "/index.html", "/favicon.ico", "/health", "/ready")
+                and (
+                    self.route
+                    in ("/", "/index.html", "/favicon.ico", "/health", "/ready")
+                    or self.route in CHAT_ASSETS
+                )
             )
             if not public:
                 authenticate(self.headers, self.server.api_key)
@@ -502,11 +514,14 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.route
-        if path in ("/", "/index.html", "/favicon.ico"):
+        if path in ("/", "/index.html", "/favicon.ico") or path in CHAT_ASSETS:
             if not self.server.webui:
                 self._safe_error(APIError(404, "not found", "not_found"))
             elif path == "/favicon.ico":
                 self._send(200, FAVICON_SVG, "image/svg+xml")
+            elif path in CHAT_ASSETS:
+                mime = "text/css" if path.endswith(".css") else "text/javascript"
+                self._send(200, CHAT_ASSETS[path], f"{mime}; charset=utf-8")
             else:
                 self._send(200, CHAT_HTML, "text/html; charset=utf-8")
             return

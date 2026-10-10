@@ -464,8 +464,10 @@ def parse_args(argv=None):
                 parser.error(f"missing retained benchmark or library: {path}")
     if not weights.loads_in_memory(args.candidate / "build"):
         parser.error(f"the candidate build has no {weights.WEIGHT_DIGESTS}")
-    args.kind = smoke.model_artifacts.installation_kind(args.model_root)
-    if args.kind is None:
+    if (
+        smoke.model_artifacts.installation_kind(args.model_root)
+        != smoke.model_artifacts.ASSEMBLY
+    ):
         parser.error(f"missing installed model: {args.model_root}")
     if args.output_dir is None:
         args.output_dir = ROOT / "build/release" / results_slug(args.model_root)
@@ -524,7 +526,6 @@ def main(argv=None) -> int:
             trees["candidate"] / "build",
             args.model_root,
             environments["baseline"],
-            args.kind == smoke.model_artifacts.ASSEMBLY,
         )
         document["pass"] = (
             document["comparison"]["pass"] and document["weights"]["pass"]

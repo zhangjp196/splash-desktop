@@ -60,19 +60,23 @@ class DiagnosticsTests(HarnessTestCase):
             "POST", "/v1/chat/completions", chat_body(reasoning_effort="none")
         )
         self.assertEqual(status, 200)
-        self.assertEqual(len(records), 1)
-        record = records[0]
-        self.assertEqual(record["outcome"], "stop")
+        # The request's start, when the engine admits it, then its end.
+        self.assertEqual([record["outcome"] for record in records], ["started", "stop"])
+        started, record = records
         self.assertNotIn("queue_ms", record)
         self.assertNotIn("queue_ms", record["metrics"])
-        self.assertNotIn("hello", json.dumps(record))
+        self.assertNotIn("hello", json.dumps(records))
 
-        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
-            diagnostics.print_request(record)
-        line = output.getvalue()
-        self.assertRegex(line, r"^\d{2}:\d{2}:\d{2} Done · input [^\n]*\n$")
-        self.assertNotIn("request_id", line)
-        self.assertNotIn("hello", line)
+        for logged, pattern in (
+            (started, r"^\d{2}:\d{2}:\d{2} Started · input \d+ · cached \d+\n$"),
+            (record, r"^\d{2}:\d{2}:\d{2} Done · input [^\n]*\n$"),
+        ):
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                diagnostics.print_request(logged)
+            line = output.getvalue()
+            self.assertRegex(line, pattern)
+            self.assertNotIn("request_id", line)
+            self.assertNotIn("hello", line)
 
     def test_console_request_summary(self):
         record = {
@@ -97,6 +101,22 @@ class DiagnosticsTests(HarnessTestCase):
             output.getvalue(),
             "14:32:08 Done · input 10,240 · cached 8,192 · output 320"
             " · TTFT 0.8s · 85.0 tok/s\n",
+        )
+
+    def test_console_request_start(self):
+        with (
+            mock.patch.object(api.time, "strftime", return_value="19:03:32"),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            diagnostics.print_request(
+                {
+                    "outcome": "started",
+                    "prompt_tokens": 153_545,
+                    "cached_tokens": 23_456,
+                }
+            )
+        self.assertEqual(
+            output.getvalue(), "19:03:32 Started · input 153,545 · cached 23,456\n"
         )
 
     def test_console_shows_the_tool_block_signature(self):

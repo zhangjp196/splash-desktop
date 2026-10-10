@@ -11,6 +11,7 @@ from . import protocol as wire
 from .documents import DocumentBudget, document_parts, file_content
 from .errors import APIError
 from .metrics import timings_dict, usage_dict
+from .tool_schema import TOOL_NAME
 
 IMAGE_PAD_TOKEN = "<|image_pad|>"
 VISION_UNAVAILABLE = (
@@ -912,7 +913,9 @@ def _anthropic_tool_result(block):
         raise APIError(400, "invalid Anthropic tool_result block")
     if not isinstance(block.get("is_error", False), bool):
         raise APIError(400, "tool_result.is_error must be a boolean")
-    content = _anthropic_content(block.get("content", ""), "tool_result")
+    content = _anthropic_content(
+        _tool_references_as_text(block.get("content", "")), "tool_result"
+    )
     if block.get("is_error"):
         failed = "Tool execution failed:\n"
         content = (
@@ -921,6 +924,28 @@ def _anthropic_tool_result(block):
             else [{"type": "text", "text": failed}, *content]
         )
     return {"role": "tool", "tool_call_id": block["tool_use_id"], "content": content}
+
+
+def _tool_references_as_text(content):
+    """tool_result content with each tool_reference block, a tool search's
+    result, as text naming the tool. The prompt already declares every tool of
+    the request, deferred ones too, so the name is what the model needs to call
+    the tool it found."""
+    if not isinstance(content, list):
+        return content
+    return [
+        _tool_reference_text(part)
+        if isinstance(part, dict) and part.get("type") == "tool_reference"
+        else part
+        for part in content
+    ]
+
+
+def _tool_reference_text(block):
+    name = block.get("tool_name")
+    if not isinstance(name, str) or TOOL_NAME.fullmatch(name) is None:
+        raise APIError(400, f"tool_reference.tool_name must match {TOOL_NAME.pattern}")
+    return {"type": "text", "text": f"\nAvailable tool: {name}\n"}
 
 
 def _anthropic_tools(tools):

@@ -43,6 +43,7 @@ def status_event(correlation_id: int = 1, **fields) -> wire.StatusJsonEvent:
         "schema_version": wire.STATUS_SCHEMA_VERSION,
         "ready": True,
         "memory_pressure": "normal",
+        "thermal_state": "nominal",
         "metal": {"healthy": True},
     }
     for key, value in fields.items():

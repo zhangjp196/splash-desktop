@@ -41,6 +41,14 @@ def print_request(record):
     if outcome == "error":
         print_status(f"Error · {record.get('error_code', 'runtime_error')}", error=True)
         return
+    if outcome == "started":
+        # The engine admitted the request: a long prompt's prefill runs
+        # from here until its Done line.
+        print_status(
+            f"Started · input {record['prompt_tokens']:,}"
+            f" · cached {record['cached_tokens']:,}"
+        )
+        return
     metrics = record.get("metrics", {})
     latency = metrics.get("request_latency", {})
     parts = [

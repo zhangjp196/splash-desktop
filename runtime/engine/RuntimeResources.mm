@@ -78,7 +78,7 @@ void requireStartupHeadroom(
 // The format of a persistent cache's files and of what its copies hold. A
 // change to either, such as a fix to a kernel that writes KV or state, bumps
 // it, so that no start takes back copies of the old one.
-constexpr uint32_t kPersistentCacheFormat = 1;
+constexpr uint32_t kPersistentCacheFormat = 2;
 // How long a start waits for the cache directory another process holds: one
 // that is closing has finished its flush, or been stopped by the server, by
 // then (server/runtime.py `_shutdown_grace_seconds`).
@@ -131,11 +131,9 @@ PersistentCacheFiles openPersistentCache(const std::filesystem::path &root,
 std::string calibrationKey(std::span<const ops::SwiGluProjections> layers) {
   std::string key = "ane-ffn calibration";
   for (const ops::SwiGluProjections &layer : layers)
-    for (const ops::Projection *projection : {layer.gate, layer.up, layer.down}) {
-      const bool affine = projection->layout() == ops::WeightLayout::Affine64;
-      key += " " + std::to_string(projection->outputSize) + "x" + std::to_string(projection->inputSize) + ":" +
-             (affine ? "a" : "g" + std::to_string(projection->blocks().segments.front().formatId));
-    }
+    for (const ops::Projection *projection : {layer.gate, layer.up, layer.down})
+      key += " " + std::to_string(projection->outputSize) + "x" + std::to_string(projection->inputSize) + ":g" +
+             std::to_string(projection->blocks().segments.front().formatId);
   return key;
 }
 
@@ -226,7 +224,8 @@ std::string persistentCacheNamespace(const RuntimeCacheIdentity &identity,
             << gdn.convolutionChannels << ' ' << gdn.recurrentGroups << ' ' << gdn.recurrentRows
             << ' ' << gdn.recurrentColumns << '\n'
             << "draft " << draft.layers << ' ' << draft.kvHeads << ' ' << draft.headDimension << ' '
-            << SPLASH_DRAFT_SLIDING_WINDOW << '\n';
+            << SPLASH_DRAFT_SLIDING_WINDOW << '\n'
+            << "context " << draft.contextWidth << " q4 " << SPLASH_DRAFT_CONTEXT_GROUP << '\n';
   // 128 bits name it.
   return model::weightDigest(canonical.str()).substr(0, 32);
 }

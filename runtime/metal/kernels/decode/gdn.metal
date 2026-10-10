@@ -472,9 +472,9 @@ inline void gdn_decode_batch_phase(
 #define GDN_DECODE_ENTRY(Name, KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, W) \
   kernel void Name(GDN_DECODE_BUFFERS(W), \
       constant GDNDecodeBatchParams &params [[buffer(17)]], GDN_DECODE_THREADS) { \
-    GDN_DECODE_BODY(KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, nullptr, nullptr, q4sg::Table64) \
+    GDN_DECODE_BODY(KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, nullptr, nullptr, gguf_sg::Table16) \
   }
-// The out-projection's table (Layout: q4sg::Table64 affine, gguf_sg::Table16 GGUF).
+// The out-projection's table (Layout: gguf_sg::Table16).
 #define GDN_DECODE_TABLE_ENTRY(Name, KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, Layout, W) \
   kernel void Name(GDN_DECODE_BUFFERS(W), \
       device bfloat *table [[buffer(17)]], device float *sums [[buffer(18)]], \
@@ -485,9 +485,9 @@ inline void gdn_decode_batch_phase(
 // Two rows overlap reductions and arithmetic without the register cost of four.
 GDN_DECODE_ENTRY(verify_gdn_fused, 16, 48, 128, 10240, 16640, bfloat)
 GDN_DECODE_ENTRY(verify_gdn_fused_vh32, 16, 32, 128, 8192, 12544, bfloat)
-// Table64 feeds the affine models, whose norms are bf16; Table16 a GGUF's, whose norms are F32.
-GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table64, 16, 48, 128, 10240, 16640, q4sg::Table64, bfloat)
-GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table64_vh32, 16, 32, 128, 8192, 12544, q4sg::Table64, bfloat)
+// Table16 feeds the register tile, after norms that are F32 (a GGUF's) or bf16 (an MLX target's).
+GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table16, 16, 48, 128, 10240, 16640, gguf_sg::Table16, bfloat)
+GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table16_vh32, 16, 32, 128, 8192, 12544, gguf_sg::Table16, bfloat)
 GDN_DECODE_ENTRY(verify_gdn_fused_f32, 16, 48, 128, 10240, 16640, float)
 GDN_DECODE_ENTRY(verify_gdn_fused_vh32_f32, 16, 32, 128, 8192, 12544, float)
 GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table16_f32, 16, 48, 128, 10240, 16640, gguf_sg::Table16, float)

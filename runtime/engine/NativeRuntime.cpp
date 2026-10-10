@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace splash::engine {
 
@@ -34,7 +35,8 @@ NativeRuntime::NativeRuntime(NativeLoopConfig config, double idleReleaseSeconds,
       statusProvider_(std::move(statusProvider)), limits_(limits),
       parser_(limits_), core_(config_.engine, cache, model, *this) {
   if (!output_ || !statusProvider_ || !config_.metrics || !config_.weights ||
-      !config_.unixMicros || !config_.monotonicMilliseconds)
+      !config_.weightAdmission || !config_.unixMicros ||
+      !config_.monotonicMilliseconds)
     throw std::invalid_argument("the native engine loop lacks a component it needs");
   if (!(idleReleaseSeconds_ > 0.0))
     throw std::invalid_argument("the idle release must be positive");
@@ -98,10 +100,8 @@ bool NativeRuntime::tick() {
   try {
     // The engine runs no request until its weights are back, taken back a
     // part per tick so that frames are answered between them.
-    if (restoreStarted_) {
-      restoreWeights();
-      return true;
-    }
+    if (restoreStarted_)
+      return restoreWeights();
     return core_.tick(config_.monotonicMilliseconds());
   } catch (...) {
     executionFailed(std::current_exception());
@@ -141,15 +141,64 @@ void NativeRuntime::releaseIdleWeights() {
           " s without a request; the next request restores them");
 }
 
-void NativeRuntime::restoreWeights() {
-  if (!config_.weights->restore())
-    return;
+bool NativeRuntime::restoreWeights() {
+  bool restored = false;
+  try {
+    // Memory the requests waiting need: the host's margins do not hold it
+    // back, critical pressure and the engine's limit refuse it.
+    const Serving serving(config_.engine.serving, !telemetry_.empty());
+    restored = config_.weights->restore(config_.weightAdmission);
+  } catch (const metal::MetalAllocationError &refusal) {
+    return weightsRefused(refusal.failure());
+  }
+  restoreRefusedSince_.reset();
+  if (!restored)
+    return true;
   ++weightRestores_;
   const double now = config_.monotonicMilliseconds();
   idleSinceMilliseconds_ = now;
   logLine("Weights restored in ", std::fixed, std::setprecision(2),
           (now - *restoreStarted_) / 1000.0, " s");
   restoreStarted_.reset();
+  return true;
+}
+
+// Admission refused the next part of the weights, which stays released. Once
+// the resource wait limit has passed since the first refusal after the last
+// part that came back, or at once when no request waits, the restore gives
+// up: the weights give back the parts that came back, the requests waiting
+// fail retryably, and the next request starts over.
+bool NativeRuntime::weightsRefused(metal::AllocationFailure failure) {
+  if (!telemetry_.empty()) {
+    const double now = config_.monotonicMilliseconds();
+    if (!restoreRefusedSince_) {
+      restoreRefusedSince_ = now;
+      logLine("Weights wait for memory to be restored: ",
+              metal::allocationFailureName(failure));
+    }
+    if (now - *restoreRefusedSince_ <
+        config_.engine.resourceWaitTimeoutMilliseconds)
+      return false;
+  }
+  config_.weights->release();
+  restoreStarted_.reset();
+  restoreRefusedSince_.reset();
+  if (telemetry_.empty()) {
+    logLine("Weights not restored: no request waits for them");
+    return true;
+  }
+  ++weightRestoreFailures_;
+  std::vector<uint64_t> waiting;
+  waiting.reserve(telemetry_.size());
+  for (const auto &entry : telemetry_)
+    waiting.push_back(entry.first);
+  const std::string message = resourceTimeoutMessage(failure);
+  logLine("Weights not restored, ", waiting.size(), " waiting request",
+          waiting.size() == 1 ? "" : "s", " failed: ", message,
+          "; the next request restores them");
+  for (uint64_t id : waiting)
+    core_.failRequest(id, LaneOutcome::ResourceTimeout, message);
+  return true;
 }
 
 void NativeRuntime::executionFailed(std::exception_ptr failure) {
@@ -182,10 +231,23 @@ void NativeRuntime::announceReady() {
 }
 
 std::optional<double> NativeRuntime::millisecondsUntilNextWakeup() const {
+  if (restoreRefusedSince_)
+    return kResourceRetryBackoffMilliseconds;
   auto wakeup = core_.nextWakeupMilliseconds();
   if (!wakeup)
     return std::nullopt;
   return std::max(0.0, *wakeup - config_.monotonicMilliseconds());
+}
+
+engine::ResourceWaitSnapshot NativeRuntime::resourceWaitSnapshot() const {
+  const double now = config_.monotonicMilliseconds();
+  engine::ResourceWaitSnapshot wait = core_.resourceWaitSnapshot(now);
+  if (restoreRefusedSince_) {
+    wait.memory += static_cast<uint32_t>(telemetry_.size());
+    wait.oldestWaitMilliseconds =
+        std::max(wait.oldestWaitMilliseconds, now - *restoreRefusedSince_);
+  }
+  return wait;
 }
 
 bool NativeRuntime::handle(protocol::ClientMessage &message) {
@@ -256,7 +318,7 @@ bool NativeRuntime::handleRequest(protocol::RequestFrame &request) {
   if (telemetry_.size() == 1 && config_.holdingRequests)
     config_.holdingRequests(true);
   // Released weights are written back before the engine runs the request
-  // (tick()); a failure to restore them stops the engine.
+  // (tick()).
   if (config_.weights->released() && !restoreStarted_)
     restoreStarted_ = nowMonotonic;
   return true;
@@ -409,6 +471,15 @@ void NativeRuntime::promptProgress(uint64_t requestId,
       requestId, processedTokens,
       durationMicros(telemetry.startedMilliseconds.value(),
                      config_.monotonicMilliseconds())});
+}
+
+engine::EngineSnapshot NativeRuntime::statusSnapshot() const {
+  engine::EngineSnapshot result = core_.snapshot();
+  const double now = config_.monotonicMilliseconds();
+  for (engine::ActiveRequestSnapshot &request : result.activeRequests)
+    if (const auto found = telemetry_.find(request.id); found != telemetry_.end())
+      request.ageMilliseconds = now - found->second.arrivedMilliseconds;
+  return result;
 }
 
 void NativeRuntime::tokens(uint64_t requestId,

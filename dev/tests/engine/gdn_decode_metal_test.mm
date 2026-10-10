@@ -16,9 +16,9 @@
 #include "metal/abi/GDN.h"
 #include "model/StateLayout.hpp"
 #include "ops/GDN.hpp"
-#include "tuning/LinearNumerics.hpp"
 
 #include "LinearInputReference.hpp"
+#include "LinearNumerics.hpp"
 #include "NormReference.hpp"
 
 #import <Foundation/Foundation.h>
@@ -42,8 +42,6 @@ using splash::metal::MetalBackend;
 using splash::metal::MetalBuffer;
 using namespace splash::ops;
 using namespace splash::test;
-using splash::ops::tuning::bf16ToFloat;
-using splash::ops::tuning::floatToBf16;
 
 constexpr uint32_t kRows = SPLASH_TARGET_VERIFY_ROWS;
 constexpr uint32_t kMaxLanes = SPLASH_MAXIMUM_BATCH_WIDTH;
@@ -599,14 +597,12 @@ struct PreparedTables final {
 std::string caseName(const char *test, const GdnShape &shape, uint32_t lanes, LinearInput layout) {
   return std::string(test) + " vh" + std::to_string(shape.valueHeads) + " lanes " +
          std::to_string(lanes) +
-         (layout == LinearInput::Plain     ? " plain"
-          : layout == LinearInput::Table64 ? " Table64"
-                                           : " Table16");
+         (layout == LinearInput::Plain ? " plain" : " Table16");
 }
 
 void fusedPreparation(MetalBackend &backend, const GdnShape &shape, uint32_t lanes, LinearInput layout,
                       bool float32) {
-  const std::string what = caseName("fused GDN", shape, lanes, layout);
+  const std::string what = caseName(float32 ? "fused GDN, F32 norms," : "fused GDN, bf16 norms,", shape, lanes, layout);
   Fixture fixture(backend, shape, lanes, float32);
   const PreparedTables tables(backend, layout, shape.valueHeads * shape.headDimension, lanes);
   CommandGraph reference;
@@ -935,21 +931,9 @@ void rejectsInvalid(MetalBackend &backend) {
         buffers.linearScratch.input = sharedBuffer(backend, 16);
         buffers.linearScratch.sums = sharedBuffer(backend, 4);
         GDN::addDecode(graph, buffers, shape, 1, 0, fixture.cell.strides(), GdnHeadOrder::Grouped,
-                       splash::ops::LinearInput::Table64);
-      },
-      "linear table buffer holds", "a GDN decode wrote a table into short scratch");
-  rejects(
-      [&] {
-        // Sums sized for the affine table are below the GGUF table's.
-        const uint32_t width = shape.valueHeads * shape.headDimension;
-        auto buffers = fixture.decodeBuffers(0);
-        buffers.linearScratch.input = sharedBuffer(backend, tableBytes(width, kRows));
-        buffers.linearScratch.sums =
-            sharedBuffer(backend, tableSumsBytes(LinearInput::Table64, width, kRows));
-        GDN::addDecode(graph, buffers, shape, 1, 0, fixture.cell.strides(), GdnHeadOrder::Grouped,
                        LinearInput::Table16);
       },
-      "linear table sums buffer holds", "a GGUF table's sums were written into an affine table's");
+      "linear table buffer holds", "a GDN decode wrote a table into short scratch");
   rejects(
       [&] {
         // F32 weights need twice the bytes of bf16 ones.
@@ -973,17 +957,16 @@ int main(int argc, char **argv) {
     // A commit's layers are a full batch of rows apart, so one lane's commit
     // reaches past the rows of the lanes it runs.
     for (const GdnShape &shape : kShapes)
-      for (const uint32_t lanes : {1U, kMaxLanes}) {
-        bufferExtents(backend, shape, LinearInput::Table64, false, lanes);
-        bufferExtents(backend, shape, LinearInput::Table16, true, lanes);
+      for (const uint32_t lanes : {1U, kMaxLanes})
+        for (const bool float32 : {false, true}) bufferExtents(backend, shape, LinearInput::Table16, float32, lanes);
+    // Table16 feeds the register tile after norms that are F32 (a GGUF's, in
+    // tiled head order) or bf16 (an MLX target's, grouped).
+    for (const GdnShape &shape : kShapes)
+      for (uint32_t lanes = 1; lanes <= kMaxLanes; ++lanes) {
+        fusedPreparation(backend, shape, lanes, LinearInput::Table16, true);
+        tiledHeadOrder(backend, shape, lanes, LinearInput::Table16, true);
+        fusedPreparation(backend, shape, lanes, LinearInput::Table16, false);
       }
-    // Table64 feeds the affine models, whose norms are bf16; Table16 a GGUF's, whose norms are F32.
-    for (LinearInput layout : {LinearInput::Table64, LinearInput::Table16})
-      for (const GdnShape &shape : kShapes)
-        for (uint32_t lanes = 1; lanes <= kMaxLanes; ++lanes) {
-          fusedPreparation(backend, shape, lanes, layout, layout == LinearInput::Table16);
-          tiledHeadOrder(backend, shape, lanes, layout, layout == LinearInput::Table16);
-        }
     // A GGUF's out-projection on the staged tile reads the tiled rows plain.
     for (const GdnShape &shape : kShapes)
       for (uint32_t lanes = 1; lanes <= kMaxLanes; ++lanes)

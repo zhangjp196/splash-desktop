@@ -712,6 +712,13 @@ class NativeBackend:
             )
             with self.lock:
                 job.cache = cache
+            self._log(
+                {
+                    "outcome": "started",
+                    "prompt_tokens": len(job.prompt_tokens),
+                    "cached_tokens": cache.matched_tokens,
+                }
+            )
             job.events.put(("start", None))
         elif isinstance(event, wire.PromptProgressEvent):
             job.events.put(
@@ -903,6 +910,10 @@ class NativeBackend:
             }
         if error:
             record["error_code"] = error.code
+        self._log(record)
+
+    def _log(self, record):
+        # A request's start, when the engine admits it, and its end.
         try:
             self.request_logger(record)
         except Exception:

@@ -205,6 +205,11 @@ def prometheus_metrics(status):
         lines.append(
             f'splash_memory_pressure{{state="{state}"}} {1 if pressure == state else 0}'
         )
+    thermal = status.get("thermal_state")
+    for state in ("nominal", "fair", "serious", "critical"):
+        lines.append(
+            f'splash_thermal_state{{state="{state}"}} {1 if thermal == state else 0}'
+        )
     for name, path in PROMETHEUS_SERIES.items():
         metric_value = value(path)
         if metric_value is not None:

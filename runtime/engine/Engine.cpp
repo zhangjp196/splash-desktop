@@ -9,11 +9,6 @@
 namespace splash::engine {
 namespace {
 
-// A request refused memory retries at once when the engine frees some
-// (signalResourceProgress). Memory that comes back without that, as the
-// host's does, it finds by retrying this often: at most a tenth of a second
-// later, without spinning the loop on attempts.
-constexpr double kResourceRetryBackoffMilliseconds = 100.0;
 // While a command is in flight the loop wakes at least this often to run the
 // command watchdog (Model::checkHealth), so a command the backend gives up on
 // fails the engine within a second of its timeout, as a ticket's own wait
@@ -25,26 +20,6 @@ constexpr int kMaskWaitLimitMilliseconds = 5000;
 // A junction costs a snapshot, a command split and up to a draft window of
 // draft-context rows; a later request must save at least that much prefill.
 constexpr uint32_t kMinimumJunctionGain = model::ExecutionLimits::draftContextTokens;
-
-// While an active one lives, allocations are memory a request in service
-// needs (EngineConfig::serving).
-class Serving final {
-public:
-  Serving(const std::function<void(bool)> &mark, bool active)
-      : mark_(active ? &mark : nullptr) {
-    if (mark_)
-      (*mark_)(true);
-  }
-  ~Serving() {
-    if (mark_)
-      (*mark_)(false);
-  }
-  Serving(const Serving &) = delete;
-  Serving &operator=(const Serving &) = delete;
-
-private:
-  const std::function<void(bool)> *mark_;
-};
 
 // A refusal for memory, which reclaim or the host's recovery may end.
 bool memoryDenied(const StateAdmission &admission) noexcept {
@@ -69,6 +44,13 @@ std::string pageShortfall(const TokenAdmission &admission) {
 }
 
 } // namespace
+
+std::string resourceTimeoutMessage(metal::AllocationFailure failure) {
+  std::string message = "memory did not become available within the resource wait limit";
+  if (failure == metal::AllocationFailure::HostPressure)
+    message += ": macOS is short of memory; close memory-heavy applications";
+  return message;
+}
 
 Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
                EngineEventSink &events)
@@ -226,10 +208,8 @@ bool Engine::tick(double now) {
       active.resourceWait.earlierLaneWorkMilliseconds = now;
     const double deadline = resourceDeadline(active);
     if (!active.finalized && deadline > 0.0 && now >= deadline) {
-      std::string message = "memory did not become available within the resource wait limit";
-      if (active.resourceWait.allocationFailure == metal::AllocationFailure::HostPressure)
-        message += ": macOS is short of memory; close memory-heavy applications";
-      settle(active, {LaneOutcome::ResourceTimeout, std::move(message)});
+      settle(active, {LaneOutcome::ResourceTimeout,
+                      resourceTimeoutMessage(active.resourceWait.allocationFailure)});
       progressed = true;
     }
   }
@@ -397,6 +377,21 @@ EngineSnapshot Engine::snapshot() const {
   result.scheduler = scheduler_.snapshot();
   result.resources = cache_.snapshot();
   result.writeBehind = writeBehind_.snapshot();
+  for (const auto &[id, active] : requests_) {
+    if (active.finalized)
+      continue;
+    result.activeRequests.push_back(
+        {.id = id,
+         .phase = scheduler_.phase(id),
+         .priority = active.request.priority,
+         .promptTokens = active.promptTokens,
+         .promptProcessed =
+             std::min(scheduler_.promptProcessed(id), active.promptTokens),
+         .generatedTokens = static_cast<uint32_t>(active.exactTokens.size() -
+                                                  active.promptTokens),
+         .maxNewTokens = active.request.maxNewTokens});
+  }
+  std::ranges::sort(result.activeRequests, {}, &ActiveRequestSnapshot::id);
   return result;
 }
 
@@ -1474,10 +1469,11 @@ bool Engine::checkIdleOffload(double now) {
 
 // While growth is paused a lane short of state buffers takes a cached
 // state's, as a request short of pages takes idle cached pages below:
-// evicting the state returns its cell and ring to the pool the lane draws
-// from, and nothing is allocated. A state goes only when those in RAM cover
-// what the pool lacks; otherwise the cache survives, and the request grows
-// if it is in service and waits if it is not.
+// evicting the state returns its cell and context window to the pool the
+// lane draws from, and nothing is allocated. A state goes only when those in
+// RAM cover what the pool lacks, which they never do for the draft rings no
+// cached state holds; otherwise the cache survives, and the request grows if
+// it is in service and waits if it is not.
 CacheReclaimResult Engine::reuseCachedStateWhilePaused(ReclaimClass upTo) {
   if (reclaimIdleState(true))
     return {true, 0};

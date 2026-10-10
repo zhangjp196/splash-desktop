@@ -8,8 +8,8 @@
 #include "../../../runtime/ops/GDN.hpp"
 #include "metal/abi/ExecutionGeometry.h"
 #include "metal/abi/GDN.h"
-#include "tuning/LinearNumerics.hpp"
 
+#include "LinearNumerics.hpp"
 #include "NormReference.hpp"
 
 #import <Foundation/Foundation.h>
@@ -73,9 +73,9 @@ private:
 };
 
 uint16_t toBf16(double value) {
-  return splash::ops::tuning::floatToBf16(static_cast<float>(value));
+  return splash::test::floatToBf16(static_cast<float>(value));
 }
-double fromBf16(uint16_t value) { return splash::ops::tuning::bf16ToFloat(value); }
+double fromBf16(uint16_t value) { return splash::test::bf16ToFloat(value); }
 double roundBf16(double value) { return fromBf16(toBf16(value)); }
 double bf16Ulp(double value) {
   return std::max(std::fabs(value), 1e-30) * 0.0078125;

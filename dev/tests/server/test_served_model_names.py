@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
 
+from dev.tests.installer_fixtures import link_assembly
 from dev.tests.server_fixtures import (
     PATHS,
     CharTokenizer,
@@ -353,9 +354,9 @@ class ServedModelNamesTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(launcher, "RUNTIME_DIR", Path(tmp)),
+            mock.patch.object(launcher.paths, "MODELS", Path(tmp) / "models"),
             mock.patch.object(launcher.socket, "socket"),
-            mock.patch.object(launcher, "_ensure_installed"),
-            mock.patch.object(launcher.catalog, "spawn_refresh"),
+            mock.patch.object(launcher, "_ensure_installed", side_effect=link_assembly),
             mock.patch.object(launcher.os, "execve") as execute,
         ):
             launcher.main(
@@ -382,9 +383,11 @@ class ServedModelNamesTests(unittest.TestCase):
                 self.subTest(flags=flags),
                 tempfile.TemporaryDirectory() as tmp,
                 mock.patch.object(launcher, "RUNTIME_DIR", Path(tmp)),
+                mock.patch.object(launcher.paths, "MODELS", Path(tmp) / "models"),
                 mock.patch.object(launcher.socket, "socket"),
-                mock.patch.object(launcher, "_ensure_installed"),
-                mock.patch.object(launcher.catalog, "spawn_refresh"),
+                mock.patch.object(
+                    launcher, "_ensure_installed", side_effect=link_assembly
+                ),
                 mock.patch.object(launcher.os, "execve") as execute,
             ):
                 launcher.main(

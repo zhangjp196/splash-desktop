@@ -88,15 +88,13 @@ void requireCompatibleModel(const LoadedModel &model);
 // The bytes of every image the model's weights load into.
 [[nodiscard]] uint64_t modelWeightBytes(const std::filesystem::path &root, const ModelDescriptor &descriptor);
 
-// The vision role's upstream source, planned; null for a package's vision
-// file or a model without vision.
+// The vision role's source, planned; null for a model without vision.
 [[nodiscard]] std::unique_ptr<VisionLoader> planVisionLoader(const std::filesystem::path &root,
                                                              const ModelDescriptor &descriptor);
-// The vision role: written by `loader` when there is one, else read from the
-// package's vision file; empty weights for a model without vision.
+// The vision role written by `loader`; empty weights for a model without
+// vision (no loader).
 [[nodiscard]] QwenVisionWeights loadVisionWeights(metal::MetalBackend &backend, WeightImages &images,
-                                                  const std::filesystem::path &root,
-                                                  const ModelDescriptor &descriptor, const VisionLoader *loader);
+                                                  const VisionLoader *loader);
 
 // Production loading is selected by the validated descriptor. There
 // is one shared engine and DFlash controller; only model execution differs.
