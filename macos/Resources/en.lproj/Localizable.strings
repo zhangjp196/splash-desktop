@@ -10,7 +10,7 @@
 "field.target" = "Target folder";
 "field.target.prompt" = "an MLX 4-bit or GGUF directory, or a Splash package";
 "field.draft" = "Draft folder";
-"field.draft.prompt" = "the matching DFlash2 checkpoint (a Splash package needs none)";
+"field.draft.prompt" = "the matching DFlash2 checkpoint (a Splash package needs none; empty downloads it)";
 "field.port" = "Port";
 "field.language_only" = "Text only (skip vision)";
 "field.kv" = "KV cache";

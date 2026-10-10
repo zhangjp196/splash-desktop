@@ -85,8 +85,10 @@ Vision and the tokenizer come from the target model's source.
 [Supported formats](DEVELOPMENT.md#gguf-targets)
 
 To serve weights already on disk instead of downloading them, pass
-`--model-dir` — a Splash package needs no draft; an MLX or GGUF folder names
-the matching draft, for example
+`--model-dir` — a Splash package needs no draft; for an MLX or GGUF folder
+pass `--draft-model`, or leave it out to download the DFlash2 draft of the
+model's family, for example
+`splash serve --model-dir ~/models/Qwen3.8-27B-4bit` or
 `splash serve --model-dir ~/models/Qwen3.8-27B-4bit --draft-model ~/models/Qwen3.8-27B-DFlash2`.
 [Local model directories](DEVELOPMENT.md#local-model-directories)
 

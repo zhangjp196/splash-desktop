@@ -10,7 +10,7 @@
 "field.target" = "目标文件夹";
 "field.target.prompt" = "MLX 4-bit 或 GGUF 目录，或 Splash 包";
 "field.draft" = "Draft 文件夹";
-"field.draft.prompt" = "匹配的 DFlash2 检查点（Splash 包无需填写）";
+"field.draft.prompt" = "匹配的 DFlash2 检查点（Splash 包无需填写；留空则自动下载）";
 "field.port" = "端口";
 "field.language_only" = "仅文本（跳过视觉）";
 "field.kv" = "KV 缓存";

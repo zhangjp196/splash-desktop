@@ -290,7 +290,7 @@ final class AppModel: ObservableObject {
             return !modelID.trimmingCharacters(in: .whitespaces).isEmpty
         case .local:
             // A Splash package needs no draft; an MLX or GGUF target without
-            // one is refused by the launcher with a clear line in the log.
+            // one has its family's DFlash2 draft downloaded by the installer.
             return !modelDirectory.isEmpty
         }
     }

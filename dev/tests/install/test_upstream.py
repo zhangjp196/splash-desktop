@@ -1611,12 +1611,22 @@ class UpstreamTest(unittest.TestCase):
         self.assertIsNone(record)
         self.assertEqual(link, chosen.link)
 
-    def test_a_local_upstream_directory_still_requires_a_draft(self):
-        # A local MLX or GGUF target needs its matching DFlash2 draft named.
+    def test_a_local_directory_without_a_draft_uses_the_family_draft(self):
+        # A local MLX or GGUF target needs no --draft-model: the DFlash2
+        # checkpoint its family publishes is resolved from the Hub and
+        # downloaded, as an upstream model's draft is.
+        fake = FakeHub(self, self.cache)
+        fake.publish(DENSE.draft_repo, DRAFT_COMMIT, lambda p: draft_dir(p, DENSE))
         target = mlx_target(self.root / "Qwen3.8-27B-4bit", DENSE)
         chosen = local_selection(self.root, target, draft_model=None)
-        with self.assertRaisesRegex(models.ModelError, "requires --draft-model"):
-            self.prepare_local(chosen)
+        output, _ = self.prepare_local(chosen)
+        self.assertIn(f"draft {DENSE.draft_repo}", output)
+        record = assembly.verify(chosen.link)
+        self.assertEqual(
+            record["sources"]["draft"],
+            {"repo": DENSE.draft_repo, "revision": DRAFT_COMMIT},
+        )
+        self.assertEqual(fake.requests, [(DENSE.draft_repo, None)])
 
     def test_a_local_draft_repository_is_resolved_like_an_upstream_draft(self):
         # --draft-model may name a repository; only its default branch asks

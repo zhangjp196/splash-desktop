@@ -1328,10 +1328,12 @@ variant per directory.
 
 A local target has no repository revision to follow and no repository whose
 draft Splash may select. A Splash package carries its own DFlash2 draft, so
-none is needed; an MLX or GGUF target requires `--draft-model`, which names
-the matching DFlash2 checkpoint as a local directory, needing no request, or
-as a repository, whose default branch is followed like an upstream draft
-([Drafts](#drafts)). `--revision` is rejected, and `--language-only` applies
+none is needed; an MLX or GGUF target's matching DFlash2 checkpoint is named
+by `--draft-model` as a local directory, needing no request, or as a
+repository, whose default branch is followed like an upstream draft; without
+it, the DFlash2 release the target's family publishes is resolved from the Hub
+and downloaded, as an upstream model's draft is ([Drafts](#drafts)).
+`--revision` is rejected, and `--language-only` applies
 as it does to an upstream model; a Splash package always serves its vision and
 rejects the source options alongside it. The API model ID is derived from the
 directory name, reduced to the characters a repository ID

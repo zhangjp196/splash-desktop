@@ -379,25 +379,27 @@ def prepare_local(selection):
     A Splash runtime package in the directory carries its own DFlash2 draft
     and serves directly (legacy.prepare_local); an MLX or GGUF target is
     inspected and installed as an assembly of links to the directory's own
-    files, as an upstream model's installation is published, with --draft-model
-    naming the matching draft (a local directory needs no request, a
-    repository ID is resolved like an upstream draft's). The target has no
-    repository or revision, so no Hub request is made for it."""
+    files, as an upstream model's installation is published. --draft-model
+    names the matching draft as a local directory, or as a repository resolved
+    like an upstream draft's; without it, the DFlash2 checkpoint the target's
+    family publishes is resolved from the Hub and downloaded, as an upstream
+    model's draft is. The target has no repository or revision, so no Hub
+    request is made for the target itself."""
     repo = hub.Repository.local_directory(selection.directory)
     if _is_legacy_package(repo, selection.model):
         legacy.prepare_local(selection)
         return
-    if selection.draft_model is None:
-        raise models.ModelError(
-            f"{selection.directory} is not a Splash package; an MLX or GGUF "
-            "target directory requires --draft-model"
-        )
     installed = None
     if models.installation_kind(selection.link) == models.ASSEMBLY:
         try:
             installed = assembly.verify(selection.link)
         except (models.ModelError, OSError) as error:
             print(f"Reinstalling {selection.model}: {error}", flush=True)
+    if selection.draft_model is None:
+        # No draft named: the family's DFlash2 release stands in, which
+        # _install resolves from the Hub and downloads when it is missing.
+        _install(selection, repo, installed)
+        return
     draft = _local_draft(selection, installed)
     if installed is not None and installed["sources"]["draft"] == draft.identity():
         if (replaced := _retain_installed(selection)) is None:
