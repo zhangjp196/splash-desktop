@@ -16,6 +16,8 @@
 "field.kv" = "KV 缓存";
 "kv.int8" = "8 位";
 "kv.bf16" = "BF16";
+"field.neural_engine" = "使用神经引擎（ANE）";
+"help.neural_engine" = "在更快时用神经引擎做稠密 FFN 预填充（Qwen3.8-27B）。关闭会传入 --disable-ane。";
 "field.max_memory" = "最大内存（如 28G）";
 "field.max_context" = "最大上下文（如 100K）";
 "field.max_cache_disk" = "磁盘缓存配额（0 关闭，如 16G）";

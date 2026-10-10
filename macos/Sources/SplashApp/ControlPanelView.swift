@@ -71,6 +71,10 @@ struct ControlPanelView: View {
                 .frame(width: 220)
                 .disabled(model.isRunning)
                 .onChange(of: model.kvFormat) { edited() }
+                Toggle(L10n.string("field.neural_engine"), isOn: $model.neuralEngine)
+                    .disabled(model.isRunning)
+                    .help(L10n.string("help.neural_engine"))
+                    .onChange(of: model.neuralEngine) { edited() }
             } header: {
                 Label(L10n.string("section.server"), systemImage: "network")
             }

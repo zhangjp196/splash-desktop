@@ -1598,6 +1598,19 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaisesRegex(models.ModelError, "source selection options"):
             self.prepare_local(opted)
 
+    def test_a_local_package_serves_with_no_assembly_to_hold(self):
+        # The launcher holds no model.json for a Splash package: it serves
+        # from the directory itself, so assembly.hold returns the link and no
+        # record, and the serve path never opens a model.json that is absent.
+        target = package_directory(self.root / "package")
+        chosen = local_selection(
+            self.root, target, language_only=False, draft_model=None
+        )
+        self.prepare_local(chosen)
+        link, record = assembly.hold(chosen.link, chosen.models_root)
+        self.assertIsNone(record)
+        self.assertEqual(link, chosen.link)
+
     def test_a_local_upstream_directory_still_requires_a_draft(self):
         # A local MLX or GGUF target needs its matching DFlash2 draft named.
         target = mlx_target(self.root / "Qwen3.8-27B-4bit", DENSE)

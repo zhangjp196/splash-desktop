@@ -117,6 +117,7 @@ final class AppModel: ObservableObject {
     @Published var maxMemory = ""
     @Published var maxContext = ""
     @Published var kvFormat = ServerSettings.First.kvFormat
+    @Published var neuralEngine = true
     @Published var apiKey = ""
     @Published var servedNames = ""
     @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
@@ -191,6 +192,7 @@ final class AppModel: ObservableObject {
         settings.port = port
         settings.languageOnly = languageOnly
         settings.kvFormat = kvFormat
+        settings.neuralEngine = neuralEngine
         settings.maxMemory = maxMemory
         settings.maxContext = maxContext
         settings.maxCacheDisk = maxCacheDisk
@@ -243,6 +245,7 @@ final class AppModel: ObservableObject {
         port = settings.port
         languageOnly = settings.languageOnly
         kvFormat = settings.kvFormat
+        neuralEngine = settings.neuralEngine
         maxMemory = settings.maxMemory
         maxContext = settings.maxContext
         maxCacheDisk = settings.maxCacheDisk
@@ -336,6 +339,7 @@ final class AppModel: ObservableObject {
         if !maxMemory.isEmpty { arguments += ["--max-memory", maxMemory] }
         if !maxContext.isEmpty { arguments += ["--max-context", maxContext] }
         if kvFormat != "int8" { arguments += ["--kv-format", kvFormat] }
+        if !neuralEngine { arguments.append("--disable-ane") }
         if !apiKey.isEmpty { arguments += ["--api-key", apiKey] }
         for name in servedNames.split(separator: ",") {
             let trimmed = name.trimmingCharacters(in: .whitespaces)

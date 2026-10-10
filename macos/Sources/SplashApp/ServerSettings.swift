@@ -30,6 +30,7 @@ struct ServerSettings: Codable, Equatable {
     var port = First.port
     var languageOnly = false
     var kvFormat = First.kvFormat
+    var neuralEngine = true
     var maxMemory = ""
     var maxContext = ""
     var maxCacheDisk = First.maxCacheDisk
@@ -65,6 +66,7 @@ struct ServerSettings: Codable, Equatable {
             ("port", String(port)),
             ("languageOnly", languageOnly ? "1" : "0"),
             ("kvFormat", kvFormat),
+            ("neuralEngine", neuralEngine ? "1" : "0"),
             ("maxMemory", maxMemory),
             ("maxContext", maxContext),
             ("maxCacheDisk", maxCacheDisk),
@@ -92,6 +94,7 @@ struct ServerSettings: Codable, Equatable {
         if let value = Self.number(rows["port"], in: 0...65_535) { port = value }
         if let value = rows["languageOnly"] { languageOnly = value == "1" }
         if let value = rows["kvFormat"], Self.kvFormats.contains(value) { kvFormat = value }
+        if let value = rows["neuralEngine"] { neuralEngine = value == "1" }
         if let value = rows["maxMemory"] { maxMemory = value }
         if let value = rows["maxContext"] { maxContext = value }
         if let value = rows["maxCacheDisk"] { maxCacheDisk = value }

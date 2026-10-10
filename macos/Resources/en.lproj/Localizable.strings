@@ -16,6 +16,8 @@
 "field.kv" = "KV cache";
 "kv.int8" = "8-bit";
 "kv.bf16" = "BF16";
+"field.neural_engine" = "Use Neural Engine (ANE)";
+"help.neural_engine" = "Prefill the dense FFN on the Neural Engine when it is faster (Qwen3.8-27B). Turn off to pass --disable-ane.";
 "field.max_memory" = "Max memory (e.g. 28G)";
 "field.max_context" = "Max context (e.g. 100K)";
 "field.max_cache_disk" = "Disk cache quota (0 = off, e.g. 16G)";

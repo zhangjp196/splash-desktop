@@ -45,6 +45,7 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.port = 9123
     edited.languageOnly = true
     edited.kvFormat = "bf16"
+    edited.neuralEngine = false
     edited.maxMemory = "28G"
     edited.maxContext = "100K"
     edited.maxCacheDisk = "0"

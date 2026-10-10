@@ -308,11 +308,15 @@ def _check_metadata(entry):
 
 
 def hold(link: Path, models_root: Path):
-    """The assembly a selection link serves from, and what holds it: its
-    model.json opened under a shared lock. While that file is open, in this
-    process or one that inherited it, collect_garbage keeps the assembly. The
-    link is read under the installation lock, where collection runs, so there
-    is no moment the assembly is neither linked nor held."""
+    """The directory a selection link serves from, and what holds it: for an
+    assembly, its model.json opened under a shared lock. While that file is
+    open, in this process or one that inherited it, collect_garbage keeps the
+    assembly. The link is read under the installation lock, where collection
+    runs, so there is no moment the assembly is neither linked nor held. A
+    Splash package a `--model-dir` served is served from the link itself:
+    (link, None)."""
+    if models.installation_kind(link) != models.ASSEMBLY:
+        return link, None
     with models.installation_lock(models_root):
         assembly = link.resolve(strict=True)
         record = (assembly / "model.json").open("rb")
