@@ -1061,7 +1061,7 @@ a module it leaves unquantized, is refused for any of them before any weight
 download, naming it, and the loader refuses one the checkpoint holds
 unquantized. The router, the shared-expert gate, GDN alpha and beta and the
 token table may be unquantized. An affine weight is `s * q + z` for its group's
-bf16 `.scales` and `.biases` and its code `q`, packed little-endian in
+bf16 or fp16 `.scales` and `.biases` and its code `q`, packed little-endian in
 `.weight`'s 32-bit words at every width; an mxfp4 weight is an E2M1 code times
 its group's power of two, a uint8 scale, which is GGUF's MXFP4; an nvfp4 weight
 is an E2M1 code times its 16 elements' E4M3 scale, a uint8, which is NVFP4
@@ -1073,10 +1073,13 @@ each quantized tensor in the format mlx-lm infers from its tensors, an affine
 `af<bits>g<group>` format of `runtime/metal/abi/QuantFormat.h`, MXFP4 or
 NVFP4, at the checkpoint's bits per weight (NVFP4's at 4.625, its tensor scale
 stored once per 256 weights); projections and experts as block planes, a
-quantized token table as native rows and an unquantized one as its bf16 rows.
+quantized token table as native rows and an unquantized one as its bf16 or
+fp16 rows.
 The block MoE kernels read the router and the shared-expert gate in F32, so
 these load as the F32 values of their quantization, and so do GDN alpha and
-beta unless both are in one format. Norms stay bf16 and the GDN value heads in
+beta unless both are in one format. Norms stay bf16, and an fp16 norm, scale,
+bias, convolution or dt_bias rounds to the bf16 nearest it, so an
+`oQ4e-fp16` release loads too, and the GDN value heads in
 MLX's grouped order.
 
 ### Model Optimizer targets

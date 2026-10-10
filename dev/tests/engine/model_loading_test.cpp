@@ -699,6 +699,21 @@ void testSyntheticBlockModel(MetalBackend &backend, const std::filesystem::path 
     unquantized("language_model.model.embed_tokens");
     require(std::get<Qwen3_8Weights>(loadModel(backend, root, descriptor).target).tokenEmbedding.blocks().isBfloat16(),
             "a bf16 token table did not load as its bf16 rows");
+
+    // An fp16 checkpoint: norms, scales and biases stored F16 rather than
+    // BF16 (an "oQ4e-fp16" release), which the loader rounds to bf16 and
+    // loads as the bf16 checkpoint's, modules and norms alike.
+    std::vector<splash::test::SyntheticTensor> fp16 = splash::test::mlxTargetTensors(target, bitsAndGroup);
+    for (splash::test::SyntheticTensor &tensor : fp16)
+        if (tensor.dtype == "BF16") tensor.dtype = "F16";
+    splash::test::writeSyntheticShard(root / "target" / "model.safetensors", fp16);
+    const auto fp16Model = loadModel(backend, root, descriptor);
+    const auto &fp16Weights = std::get<Qwen3_8Weights>(fp16Model.target);
+    require(!fp16Weights.layers[0].inputNorm.float32,
+            "an fp16 norm did not load as bf16");
+    require(segmentFormats(fp16Weights.layers[1].gateProjection) ==
+                std::vector<uint32_t>{format("gate_proj")},
+            "an fp16 affine projection did not keep its format");
 }
 
 // The name of a convention of NVFP4 and FP8 checkpoints.

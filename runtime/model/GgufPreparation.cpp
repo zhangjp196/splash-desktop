@@ -83,6 +83,45 @@ std::vector<float> tensorScales(const gguf::TensorRows &rows, uint64_t start, ui
   return result;
 }
 
+// The float a half's bits hold.
+float widenHalf(uint16_t bits) {
+  const uint32_t sign = uint32_t(bits & 0x8000) << 16;
+  const uint32_t exponent = (bits >> 10) & 0x1F, mantissa = bits & 0x3FF;
+  uint32_t value;
+  if (exponent == 0) {
+    if (mantissa == 0) return std::bit_cast<float>(sign);
+    uint32_t shifted = mantissa;
+    int shift = 0;
+    while ((shifted & 0x400) == 0) {
+      shifted <<= 1;
+      ++shift;
+    }
+    value = sign | (uint32_t(127 - 15 - shift) << 23) | ((shifted & 0x3FF) << 13);
+  } else if (exponent == 31) {
+    value = sign | 0x7F800000u | (mantissa << 13);
+  } else {
+    value = sign | (uint32_t(exponent + 127 - 15) << 23) | (mantissa << 13);
+  }
+  return std::bit_cast<float>(value);
+}
+
+// The bf16 nearest a half's value, ties to even.
+uint16_t halfToBfloat16(uint16_t bits) {
+  const uint32_t value = std::bit_cast<uint32_t>(widenHalf(bits));
+  return static_cast<uint16_t>((value + 0x7FFF + ((value >> 16) & 1)) >> 16);
+}
+
+// The F32 GDN decay -exp(A_log) of `count` F16 values.
+void gdnDecayFromHalf(const uint8_t *values, uint64_t count, uint8_t *to) {
+  for (uint64_t i = 0; i < count; ++i) {
+    uint16_t bits;
+    std::memcpy(&bits, values + 2 * i, 2);
+    const auto decay = static_cast<float>(-std::exp(static_cast<double>(widenHalf(bits))));
+    if (!std::isfinite(decay)) throw GgufError("non-finite GDN decay");
+    std::memcpy(to + 4 * i, &decay, 4);
+  }
+}
+
 // Native bytes [column, column + span) of `count` source rows of a quantized
 // safetensors tensor from source row `start` on, back to back, read from its
 // tensors: per native block an affine tensor's scale, bias and codes; an
@@ -96,6 +135,8 @@ void readSafetensorsRows(const gguf::TensorRows &rows, uint64_t start, uint64_t 
   const QuantFormat &format = nativeFormat(rows);
   const uint32_t id = gguf_format_of(rows.type);
   const bool affine = quant_affine_format(id);
+  const bool halfScales = affine && rows.safetensors.scales->dtype == "F16";
+  const bool halfBiases = affine && rows.safetensors.biases->dtype == "F16";
   // Bytes of a native block from the scales tensor (its biases take as many
   // as its scales) and from the codes tensor.
   const uint64_t block = format.block_bytes, groups = rows.rowBytes / block;
@@ -119,8 +160,13 @@ void readSafetensorsRows(const gguf::TensorRows &rows, uint64_t start, uint64_t 
       const uint8_t *in = codeBytes.data() + b * codes;
       const float scale = g[row + b / spanBlocks];
       if (affine) {
-        std::memcpy(out, scales.data() + 2 * b, 2);
-        std::memcpy(out + 2, biases.data() + 2 * b, 2);
+        uint16_t scaleBits, biasBits;
+        std::memcpy(&scaleBits, scales.data() + 2 * b, 2);
+        std::memcpy(&biasBits, biases.data() + 2 * b, 2);
+        if (halfScales) scaleBits = halfToBfloat16(scaleBits);
+        if (halfBiases) biasBits = halfToBfloat16(biasBits);
+        std::memcpy(out, &scaleBits, 2);
+        std::memcpy(out + 2, &biasBits, 2);
         std::memcpy(out + 4, in, codes);
       } else if (id == GGUF_FMT_NVFP4) {
         std::memcpy(out, scales.data() + QUANT_NVFP4_G * b, QUANT_NVFP4_G);
@@ -392,6 +438,26 @@ void addCopyTasks(uint8_t *image, const gguf::Copy &copy,
         switch (copy.conversion) {
         case gguf::Conversion::NarrowToBfloat16:
           narrowToBfloat16(staging.data(), count * width / 4, to, rows.name);
+          break;
+        case gguf::Conversion::F16ToBfloat16: {
+          for (uint64_t i = 0; i < count * width / 2; ++i) {
+            uint16_t bits;
+            std::memcpy(&bits, staging.data() + 2 * i, 2);
+            const uint16_t narrowed = halfToBfloat16(bits);
+            std::memcpy(to + 2 * i, &narrowed, 2);
+          }
+          break;
+        }
+        case gguf::Conversion::WidenHalfToFloat32:
+          for (uint64_t i = 0; i < count * width / 2; ++i) {
+            uint16_t bits;
+            std::memcpy(&bits, staging.data() + 2 * i, 2);
+            const float widened = widenHalf(bits);
+            std::memcpy(to + 4 * i, &widened, 4);
+          }
+          break;
+        case gguf::Conversion::DecayFromF16:
+          gdnDecayFromHalf(staging.data(), count * width / 2, to);
           break;
         case gguf::Conversion::WidenToFloat32: widenToFloat32(staging.data(), count * width / 2, to); break;
         case gguf::Conversion::CenteredNorm: centeredNorm(staging.data(), count * width / 2, to); break;

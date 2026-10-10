@@ -41,7 +41,8 @@ public:
   void norm(const std::string &name, uint64_t elements) { normWeight(name, elements, Conversion::CenteredNorm); }
 
   // The GDN's gated norm, whose weight both store as the norm multiplies by:
-  // as stored (bf16) from MLX names, or widened to F32 as the other norms of
+  // as stored (bf16 or fp16) from MLX names, or widened to F32 as the other
+  // norms of
   // a transformers checkpoint's images are.
   void gatedNorm(const std::string &name, uint64_t elements) {
     normWeight(name, elements, Conversion::WidenToFloat32);
@@ -53,17 +54,19 @@ public:
   // hold the same bytes.
   void convolution(const std::string &name) {
     const uint64_t channels = geometry_.convolutionDimension, taps = kGdnConvolutionTaps;
-    stored(name + ".weight", {"BF16"},
+    stored(name + ".weight", {"BF16", "F16"},
            names_ == ModuleNames::Mlx ? std::vector<uint64_t>{channels, taps, 1}
                                       : std::vector<uint64_t>{channels, 1, taps});
   }
 
   // The bf16 GDN time-step bias of every value head, as stored.
-  void timeBias(const std::string &name) { stored(name, {"BF16"}, {geometry_.gdnValueHeads}); }
+  void timeBias(const std::string &name) { stored(name, {"BF16", "F16"}, {geometry_.gdnValueHeads}); }
 
   // The F32 GDN decay -exp(A_log) of every value head.
   void decay(const std::string &name) {
-    const SourceTensor &tensor = require(name, {"BF16", "F32"}, {geometry_.gdnValueHeads});
+    const SourceTensor &tensor = require(name, {"BF16", "F32", "F16"}, {geometry_.gdnValueHeads});
+    if (tensor.dtype == "F16")
+      return image_.copy(rows(name, tensor, ggml::kF32, 1, tensor.bytes), Conversion::DecayFromF16);
     image_.copy(rows(name, tensor, tensor.dtype == "BF16" ? ggml::kBF16 : ggml::kF32, 1, tensor.bytes),
                 Conversion::Decay);
   }
@@ -140,9 +143,10 @@ public:
       image_.copy(*source);
       return;
     }
-    const SourceTensor &table = require(module + ".weight", {"BF16"}, {vocabulary, hidden});
+    const SourceTensor &table = require(module + ".weight", {"BF16", "F16"}, {vocabulary, hidden});
     image_.descriptor(ggml::kBF16, vocabulary, hidden, {}, {table.bytes, 0, 0}, module);
-    image_.copy(rows(module + ".weight", table, ggml::kBF16, vocabulary, table.bytes / vocabulary));
+    image_.copy(rows(module + ".weight", table, ggml::kBF16, vocabulary, table.bytes / vocabulary),
+                table.dtype == "F16" ? Conversion::F16ToBfloat16 : Conversion::None);
   }
 
   [[nodiscard]] gguf::Image finish() { return image_.finish(); }
@@ -164,13 +168,14 @@ private:
   // A tensor copied as stored into a section of its own.
   void stored(const std::string &name, std::initializer_list<std::string_view> dtypes, std::vector<uint64_t> shape) {
     const SourceTensor &tensor = require(name, dtypes, shape);
-    image_.copy(rows(name, tensor, ggml::kBF16, 1, tensor.bytes));
+    image_.copy(rows(name, tensor, ggml::kBF16, 1, tensor.bytes),
+                tensor.dtype == "F16" ? Conversion::F16ToBfloat16 : Conversion::None);
   }
 
   // A norm's bf16 weight, as stored from MLX names, or converted to F32 as
   // `transformers` says from transformers names.
   void normWeight(const std::string &name, uint64_t elements, Conversion transformers) {
-    if (!float32Norms(names_)) return stored(name + ".weight", {"BF16"}, {elements});
+    if (!float32Norms(names_)) return stored(name + ".weight", {"BF16", "F16"}, {elements});
     const SourceTensor &tensor = require(name + ".weight", {"BF16"}, {elements});
     image_.copy(rows(name + ".weight", tensor, ggml::kBF16, 1, tensor.bytes), transformers);
   }
@@ -208,9 +213,9 @@ private:
     const uint64_t group = columns / scales->shape.back(), bits = codes.shape.back() * 32 / columns;
     uint32_t format = GGUF_FMT_COUNT;
     const SourceTensor *biases = nullptr;
-    if (scales->dtype == "BF16") {
+    if (scales->dtype == "BF16" || scales->dtype == "F16") {
       format = quant_affine_format_of(uint32_t(bits), uint32_t(group));
-      biases = &require(module + ".biases", {"BF16"}, scales->shape);
+      biases = &require(module + ".biases", {"BF16", "F16"}, scales->shape);
     } else if (scales->dtype == "U8" && bits == 4 && group == 32) {
       format = GGUF_FMT_MXFP4;
     } else if (scales->dtype == "U8" && bits == 4 && group == 16) {
@@ -219,7 +224,7 @@ private:
     if (format == GGUF_FMT_COUNT)
       throw WeightStoreError(module + " is " + std::to_string(bits) + "-bit in groups of " + std::to_string(group) +
                              " with " + scales->dtype + " scales; MLX weights load as affine 2, 3, 4, 5, 6 or 8 "
-                             "bits in groups of 32, 64 or 128 with bf16 scales, or as mxfp4 or nvfp4");
+                             "bits in groups of 32, 64 or 128 with bf16 or f16 scales, or as mxfp4 or nvfp4");
     requireWholeBlocks(module, format, columns);
     return TensorRows{module, kQuantFormats[format].ggml_type, 0, experts * rows,
                       ggufRowBytes(kQuantFormats[format], columns), {}, codes.file, {&codes, scales, biases}};
@@ -285,7 +290,10 @@ private:
       image_.copyAt(destination, *source, Conversion::DequantizeToFloat32);
       return;
     }
-    const SourceTensor &weight = require(module + ".weight", {"BF16", "F32"}, {rows, columns});
+    const SourceTensor &weight = require(module + ".weight", {"BF16", "F32", "F16"}, {rows, columns});
+    if (weight.dtype == "F16")
+      return image_.copyAt(destination, this->rows(module, weight, ggml::kF32, rows, weight.bytes / rows),
+                           Conversion::WidenHalfToFloat32);
     const bool bfloat16 = weight.dtype == "BF16";
     image_.copyAt(destination, this->rows(module, weight, bfloat16 ? ggml::kBF16 : ggml::kF32, rows, weight.bytes / rows),
                   bfloat16 ? Conversion::WidenToFloat32 : Conversion::None);

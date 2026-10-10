@@ -297,6 +297,8 @@ uint64_t convertedBytes(const TensorRows &source, Conversion conversion, uint64_
   switch (conversion) {
   case Conversion::NarrowToBfloat16: return sourceBytes / 2;
   case Conversion::WidenToFloat32: case Conversion::CenteredNorm: return sourceBytes * 2;
+  case Conversion::F16ToBfloat16: return sourceBytes;
+  case Conversion::WidenHalfToFloat32: case Conversion::DecayFromF16: return sourceBytes * 2;
   case Conversion::Decay: return source.type == ggml::kBF16 ? sourceBytes * 2 : sourceBytes;
   case Conversion::DequantizeToFloat32: {
     const uint32_t format = gguf_format_of(source.type);

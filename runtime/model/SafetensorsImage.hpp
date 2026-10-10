@@ -8,12 +8,13 @@
 // tensors hold: MLX affine (metal/abi/QuantFormat.h), mxfp4 or nvfp4 as MLX
 // infers it, or NVFP4 or FP8 as the other two store them: projections and
 // experts as planes, a quantized token table as native rows. An unquantized
-// token table is copied as its bf16 rows. Norms are bf16 as MLX stores them, or the F32 1 + w of the w
+// token table is copied as its bf16 or fp16 rows. Norms are bf16 or fp16 as
+// MLX stores them, or the F32 1 + w of the w
 // transformers stores; the convolution and dt_bias are copied as stored, and
 // the GDN decay is float(-exp(double(A_log))). The MoE router and the
 // shared-expert gate, which the block kernels read in F32, become the F32
-// values of their quantization (or of their bf16 weights), and so do GDN
-// alpha and beta unless both are quantized in one format.
+// values of their quantization (or of their bf16 or fp16 weights), and so do
+// GDN alpha and beta unless both are quantized in one format.
 
 #include "model/GgufImage.hpp"
 #include "model/QwenHybridLayout.hpp"
@@ -38,7 +39,7 @@ enum class ModuleNames : uint8_t { Mlx, Transformers };
 
 // Whether the images hold the norms as F32, as they hold a checkpoint's of
 // transformers names (their 1 + w, the GDN's gated norm widened), rather than
-// MLX's bf16 norms as stored.
+// MLX's bf16 or fp16 norms as stored.
 [[nodiscard]] constexpr bool float32Norms(ModuleNames names) noexcept { return names == ModuleNames::Transformers; }
 
 // The layers' images, then the head's and the embedding's. The checkpoint

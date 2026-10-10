@@ -99,7 +99,22 @@ struct Fill {
 // alpha and beta of two formats), or as the F32 1 + w of a BF16 RMSNorm
 // weight w, which transformers stores 1 below the weight the norm multiplies
 // by (exact but for |w| < 2^-16, which it rounds once).
-enum class Conversion : uint8_t { None, NarrowToBfloat16, WidenToFloat32, Decay, DequantizeToFloat32, CenteredNorm };
+enum class Conversion : uint8_t {
+  None,
+  NarrowToBfloat16,
+  WidenToFloat32,
+  Decay,
+  DequantizeToFloat32,
+  CenteredNorm,
+  // An F16 value rounded to the bf16 nearest it (ties to even), which the
+  // block kernels read where MLX stores fp16 norms, scales and biases.
+  F16ToBfloat16,
+  // An F16 value widened to F32, as an fp16 weight of a module the kernels
+  // read in F32.
+  WidenHalfToFloat32,
+  // The F32 GDN decay -exp(A_log) of F16 A_log values.
+  DecayFromF16,
+};
 // Rows written back to back, each value converted as `conversion` says.
 struct Copy {
   uint64_t destination = 0;
