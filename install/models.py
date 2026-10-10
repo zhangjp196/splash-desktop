@@ -9,8 +9,7 @@ Terms the installer modules share:
 - assembly: the directory an upstream model is served from, of links to
   source snapshot files and its record, model.json (assembly.py), built and
   published by upstream.py. A local target directory is assembled the same
-  way, of links to the directory's own files, and a local Splash package is
-  served from the directory itself (legacy.py).
+  way, of links to the directory's own files.
 - source snapshot: a repository at one commit in the Hub cache, or a local
   target or draft directory (hub.py).
 
@@ -437,7 +436,7 @@ def main(argv=None):
         print(selection.link)
         return 0
     # The installers import this module, so it imports them once it exists.
-    from . import assembly, legacy, upstream
+    from . import assembly, upstream
 
     try:
         # The launcher starts this with the stop signals blocked, so that one
@@ -450,21 +449,17 @@ def main(argv=None):
                 upstream.prepare(selection)
         else:
             kind = installation_kind(selection.link)
-            if kind == ASSEMBLY:
-                assembly.verify(selection.link, full=args.full)
-            elif kind == PACKAGE:
-                if selection.directory is not None:
-                    legacy.verify_local(selection.link, full=args.full)
-                else:
-                    refuse_package(
-                        args.model or args.model_dir,
-                        read_json(selection.link / "manifest.json"),
-                        selection.link,
-                    )
-            else:
+            if kind == PACKAGE:
+                refuse_package(
+                    args.model or args.model_dir,
+                    read_json(selection.link / "manifest.json"),
+                    selection.link,
+                )
+            if kind != ASSEMBLY:
                 raise ModelError(
                     f"{args.model or args.model_dir} is not installed in {args.models}"
                 )
+            assembly.verify(selection.link, full=args.full)
             print(
                 f"Splash model {args.model or args.model_dir} preflight passed "
                 f"({'full' if args.full else 'quick'})."

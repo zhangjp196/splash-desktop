@@ -21,17 +21,10 @@ struct ControlPanelView: View {
                 .onChange(of: model.modelMode) { edited() }
 
                 switch model.modelMode {
-                case .splash:
-                    ModelField(
-                        modelID: $model.modelID,
-                        catalog: model.catalogIDs.filter { $0.lowercased().contains("splash") },
-                        disabled: model.isRunning,
-                        onEdit: edited
-                    )
                 case .upstream:
                     ModelField(
                         modelID: $model.modelID,
-                        catalog: model.catalogIDs.filter { !$0.lowercased().contains("splash") },
+                        catalog: model.catalogIDs,
                         disabled: model.isRunning,
                         onEdit: edited
                     )
@@ -61,7 +54,7 @@ struct ControlPanelView: View {
                     .disabled(model.isRunning)
                     .onChange(of: model.port) { edited() }
                 Toggle(L10n.string("field.language_only"), isOn: $model.languageOnly)
-                    .disabled(model.isRunning || model.modelMode == .splash)
+                    .disabled(model.isRunning)
                     .onChange(of: model.languageOnly) { edited() }
                 Picker(L10n.string("field.kv"), selection: $model.kvFormat) {
                     Text(verbatim: L10n.string("kv.int8")).tag("int8")
@@ -150,7 +143,6 @@ struct ControlPanelView: View {
 
     private func label(_ mode: AppModel.ModelMode) -> String {
         switch mode {
-        case .splash: return L10n.string("mode.splash")
         case .upstream: return L10n.string("mode.upstream")
         case .local: return L10n.string("mode.local")
         }

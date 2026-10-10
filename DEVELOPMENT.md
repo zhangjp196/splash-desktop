@@ -1316,10 +1316,7 @@ repository for it. A directory holding an MLX affine 4-bit, group-64 target,
 or one GGUF, is inspected by the same adapters as an upstream repository (its
 own configuration or GGUF header identifies the family), and installed as an
 assembly of links to its own files
-([Upstream model loading](#upstream-model-loading)). A directory that is a
-Splash runtime package instead verifies its manifest and artifacts and serves
-directly from the directory, linked to from the selection
-([Splash packages](#splash-packages)). The path is recorded
+([Upstream model loading](#upstream-model-loading)). The path is recorded
 absolute, so the selection does not depend on the working directory, and an
 MLX or GGUF target's content is verified on every start: a changed file fails
 verification and the assembly is prepared and published again. A directory
@@ -1327,19 +1324,16 @@ with several target GGUFs is ambiguous and refused, listing them; keep one
 variant per directory.
 
 A local target has no repository revision to follow and no repository whose
-draft Splash may select. A Splash package carries its own DFlash2 draft, so
-none is needed; an MLX or GGUF target's matching DFlash2 checkpoint is named
-by `--draft-model` as a local directory, needing no request, or as a
+draft Splash may select. An MLX or GGUF target's matching DFlash2 checkpoint is
+named by `--draft-model` as a local directory, needing no request, or as a
 repository, whose default branch is followed like an upstream draft; without
 it, the DFlash2 release the target's family publishes is resolved from the Hub
 and downloaded, as an upstream model's draft is ([Drafts](#drafts)).
 `--revision` is rejected, and `--language-only` applies
-as it does to an upstream model; a Splash package always serves its vision and
-rejects the source options alongside it. The API model ID is derived from the
+as it does to an upstream model. The API model ID is derived from the
 directory name, reduced to the characters a repository ID
 allows; `--served-model-name` adds aliases as usual. A Hugging Face cache is
-not involved: the files are read where they are. A Splash package is served
-from the directory it names, which the selection link points to.
+not involved: the files are read where they are.
 
 ## Internals
 

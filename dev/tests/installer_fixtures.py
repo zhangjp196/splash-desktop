@@ -83,8 +83,8 @@ def selection(root, model=MODEL, **options):
 
 def local_selection(root, directory, **options):
     """A local target directory's selection under root/models, text only
-    unless options say. A Splash package needs no draft; an MLX or GGUF
-    target names one, or its family's draft is used."""
+    unless options say. An MLX or GGUF target names a draft, or its family's
+    draft is used."""
     return models.Selection.of(
         root / "models",
         directory=str(directory),

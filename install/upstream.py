@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import assembly, families, gguf, hub, legacy, models
+from . import assembly, families, gguf, hub, models
 
 # The tokenizer files an MLX target may supply, linked when present.
 TOKENIZER_FILES = (
@@ -376,19 +376,14 @@ def prepare(selection):
 
 def prepare_local(selection):
     """Start a model served from a local target directory (--model-dir).
-    A Splash runtime package in the directory carries its own DFlash2 draft
-    and serves directly (legacy.prepare_local); an MLX or GGUF target is
-    inspected and installed as an assembly of links to the directory's own
-    files, as an upstream model's installation is published. --draft-model
-    names the matching draft as a local directory, or as a repository resolved
-    like an upstream draft's; without it, the DFlash2 checkpoint the target's
-    family publishes is resolved from the Hub and downloaded, as an upstream
-    model's draft is. The target has no repository or revision, so no Hub
-    request is made for the target itself."""
+    An MLX or GGUF target is inspected and installed as an assembly of links
+    to the directory's own files, as an upstream model's installation is
+    published. --draft-model names the matching draft as a local directory, or
+    as a repository resolved like an upstream draft's; without it, the DFlash2
+    checkpoint the target's family publishes is resolved from the Hub and
+    downloaded, as an upstream model's draft is. The target has no repository
+    or revision, so no Hub request is made for it."""
     repo = hub.Repository.local_directory(selection.directory)
-    if _is_legacy_package(repo, selection.model):
-        legacy.prepare_local(selection)
-        return
     installed = None
     if models.installation_kind(selection.link) == models.ASSEMBLY:
         try:
@@ -440,16 +435,6 @@ def _local_draft(selection, installed):
             f"cannot reach the Hub ({error}); using the installed draft {_at(fallback)}"
         )
         return fallback
-
-
-def _is_legacy_package(repo, model):
-    """Whether the target repository is a legacy Splash package, whose
-    manifest.json names a package format."""
-    if "manifest.json" not in repo.files:
-        return False
-    with hub.as_model_errors(f"cannot install {model}"):
-        manifest = models.read_json(repo.file("manifest.json"))
-    return legacy.is_package_manifest(manifest)
 
 
 def _start_installed(selection, target, installed):

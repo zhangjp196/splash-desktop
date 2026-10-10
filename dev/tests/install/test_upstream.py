@@ -6,7 +6,6 @@ import io
 import json
 import re
 import shutil
-import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,7 +31,7 @@ from dev.tests.installer_fixtures import (
     pins,
     selection,
 )
-from install import assembly, families, hub, legacy, models, paths, upstream
+from install import assembly, families, hub, models, paths, upstream
 
 # The engine's refusal of a model of no family Splash serves, naming what
 # tells it apart.
@@ -40,58 +39,6 @@ UNSUPPORTED = (
     "no supported model has this architecture [(]{}[)]; "
     "supported: Qwen3.8-27B, Qwen3.6-35B-A3B"
 )
-
-
-def package_directory(root: Path) -> Path:
-    """A minimal valid Qwen3.8-27B Splash package: every packed file the
-    manifest must list, aligned as the native loader requires."""
-    root.mkdir(parents=True, exist_ok=True)
-
-    def packed(path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("wb") as file:
-            file.write(struct.pack("<8sII", b"MDFT0001", 0, 0))
-            file.seek(legacy.ALIGNMENT - 1)
-            file.write(b"\0")
-
-    target_layers = family_config(DENSE)["text_config"]["num_hidden_layers"]
-    draft_layers = family_config(DENSE, "draft/config.json")["num_hidden_layers"]
-    for name in (
-        "draft/model.bin",
-        "vision/model.bin",
-        "target/embedding.bin",
-        "target/head.bin",
-        *(f"target/layer-{index}.bin" for index in range(target_layers)),
-        *(f"draft/layer-{index}.bin" for index in range(draft_layers)),
-    ):
-        packed(root / name)
-    tokenizer = root / "tokenizer"
-    tokenizer.mkdir()
-    for name in legacy.PACKAGE_TOKENIZER_FILES:
-        (tokenizer / name).write_text(f"{name}\n")
-    records = [
-        {
-            "path": path.relative_to(root).as_posix(),
-            "size": path.stat().st_size,
-            "sha256": models.sha256(path),
-        }
-        for path in sorted(item for item in root.rglob("*") if item.is_file())
-    ]
-    manifest = {
-        "schema_version": 3,
-        "model": "Community fine-tuned model",
-        "format": {
-            "name": "splash-packed-q4",
-            "section_alignment_bytes": legacy.ALIGNMENT,
-            "target_layer_magic": "MDFL0006",
-            "draft_layer_magic": "MDFD0004",
-            "vision_magic": "MDFV0001",
-        },
-        "execution_geometry": {},
-        "artifacts": records,
-    }
-    (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True))
-    return root
 
 
 class UpstreamTest(unittest.TestCase):
@@ -1575,41 +1522,6 @@ class UpstreamTest(unittest.TestCase):
         chosen = local_selection(self.root, target, draft_model=str(draft.resolve()))
         with self.assertRaisesRegex(models.ModelError, "select a GGUF"):
             self.prepare_local(chosen)
-
-    def test_a_local_package_directory_serves_without_a_draft(self):
-        # A Splash package carries its own DFlash2 draft and vision weights,
-        # so --model-dir loads it with no draft selection and no assembly.
-        target = package_directory(self.root / "package")
-        chosen = local_selection(
-            self.root, target, language_only=False, draft_model=None
-        )
-        output, _ = self.prepare_local(chosen)
-        self.assertIn("Installed verified", output)
-        self.assertTrue(chosen.link.is_symlink())
-        self.assertEqual(chosen.link.resolve(), target.resolve())
-        self.assertFalse((chosen.link / "model.json").exists())
-        output, _ = self.prepare_local(chosen)
-        self.assertIn("is already installed", output)
-        # The package's own options are none: --draft-model is refused.
-        draft = draft_dir(self.root / "draft", DENSE)
-        opted = local_selection(
-            self.root, target, language_only=False, draft_model=str(draft.resolve())
-        )
-        with self.assertRaisesRegex(models.ModelError, "source selection options"):
-            self.prepare_local(opted)
-
-    def test_a_local_package_serves_with_no_assembly_to_hold(self):
-        # The launcher holds no model.json for a Splash package: it serves
-        # from the directory itself, so assembly.hold returns the link and no
-        # record, and the serve path never opens a model.json that is absent.
-        target = package_directory(self.root / "package")
-        chosen = local_selection(
-            self.root, target, language_only=False, draft_model=None
-        )
-        self.prepare_local(chosen)
-        link, record = assembly.hold(chosen.link, chosen.models_root)
-        self.assertIsNone(record)
-        self.assertEqual(link, chosen.link)
 
     def test_a_local_directory_without_a_draft_uses_the_family_draft(self):
         # A local MLX or GGUF target needs no --draft-model: the DFlash2

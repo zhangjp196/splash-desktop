@@ -93,11 +93,11 @@ final class AppModel: ObservableObject {
         case failed(String)
     }
 
-    /// How the launcher is asked for a target. A Splash package carries its
-    /// own DFlash2 draft; an upstream MLX or GGUF model's draft is selected
-    /// by the installer; a local directory names one unless it is a package.
+    /// How the launcher is asked for a target: an upstream MLX or GGUF model
+    /// whose draft the installer selects, or a local directory that names its
+    /// target and draft (or the family's).
     enum ModelMode: String, CaseIterable, Identifiable, Codable {
-        case splash, upstream, local
+        case upstream, local
         var id: String { rawValue }
     }
 
@@ -286,11 +286,11 @@ final class AppModel: ObservableObject {
             return false
         }
         switch modelMode {
-        case .splash, .upstream:
+        case .upstream:
             return !modelID.trimmingCharacters(in: .whitespaces).isEmpty
         case .local:
-            // A Splash package needs no draft; an MLX or GGUF target without
-            // one has its family's DFlash2 draft downloaded by the installer.
+            // An MLX or GGUF target without a named draft has its family's
+            // DFlash2 draft downloaded by the installer.
             return !modelDirectory.isEmpty
         }
     }
@@ -327,7 +327,7 @@ final class AppModel: ObservableObject {
         stopping = false
         var arguments = [launcher.path, "serve"]
         switch modelMode {
-        case .splash, .upstream:
+        case .upstream:
             arguments += ["--model", modelID.trimmingCharacters(in: .whitespaces)]
         case .local:
             arguments += ["--model-dir", modelDirectory]
@@ -335,7 +335,7 @@ final class AppModel: ObservableObject {
             if !draft.isEmpty { arguments += ["--draft-model", draft] }
         }
         arguments += ["--port", String(port)]
-        if languageOnly && modelMode != .splash { arguments.append("--language-only") }
+        if languageOnly { arguments.append("--language-only") }
         if !maxMemory.isEmpty { arguments += ["--max-memory", maxMemory] }
         if !maxContext.isEmpty { arguments += ["--max-context", maxContext] }
         if kvFormat != "int8" { arguments += ["--kv-format", kvFormat] }

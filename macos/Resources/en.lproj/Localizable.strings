@@ -1,4 +1,3 @@
-"mode.splash" = "Splash package";
 "mode.upstream" = "Upstream model (MLX/GGUF)";
 "mode.local" = "Local folder";
 "model.picker" = "Model mode";
@@ -8,9 +7,9 @@
 "section.idle" = "When idle";
 "section.request" = "Requests and access";
 "field.target" = "Target folder";
-"field.target.prompt" = "an MLX 4-bit or GGUF directory, or a Splash package";
+"field.target.prompt" = "an MLX 4-bit or GGUF directory";
 "field.draft" = "Draft folder";
-"field.draft.prompt" = "the matching DFlash2 checkpoint (a Splash package needs none; empty downloads it)";
+"field.draft.prompt" = "the matching DFlash2 checkpoint (empty downloads the family's)";
 "field.port" = "Port";
 "field.language_only" = "Text only (skip vision)";
 "field.kv" = "KV cache";

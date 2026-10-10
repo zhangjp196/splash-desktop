@@ -243,8 +243,7 @@ def serve(args):
         # process's tokenizer, draft and target on one immutable assembly,
         # held until the server exits.
         root, record = assembly.hold(selection.link, selection.models_root)
-        if record is not None:
-            os.set_inheritable(record.fileno(), True)
+        os.set_inheritable(record.fileno(), True)
         # The server package of this installation, from any working
         # directory: -P keeps the directory, which may hold a package of the
         # same name, off sys.path, and PYTHONPATH names the root.
