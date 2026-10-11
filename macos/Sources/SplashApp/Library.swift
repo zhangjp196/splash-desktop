@@ -29,29 +29,60 @@ struct ModelDirectory: Codable, Identifiable, Equatable {
     var kindValue: ModelKind { ModelKind(rawValue: kind) ?? .unknown }
 }
 
-/// A model configuration the app has started, for one-click switching: the
-/// fields that decide which model serves and how.
-struct ModelCombo: Codable, Identifiable, Equatable {
+/// A saved configuration the models pane adds, edits and switches to: a name
+/// the user can set and the whole `ServerSettings` the server starts with.
+struct ModelConfig: Codable, Identifiable, Equatable {
     var id = UUID()
-    var mode: String
-    var modelID: String
-    var modelDirectory: String
-    var draftDirectory: String
-    var languageOnly: Bool
-    var kvFormat: String
+    var name = ""
+    var settings: ServerSettings
 
-    var modeValue: AppModel.ModelMode { AppModel.ModelMode(rawValue: mode) ?? .upstream }
+    init(settings: ServerSettings) { self.settings = settings }
+
+    /// The name, or one derived from the model it serves.
+    var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty { return trimmed }
+        switch settings.modelMode {
+        case .upstream:
+            return settings.modelID.isEmpty ? L10n.string("config.untitled") : settings.modelID
+        case .local:
+            return settings.modelDirectory.isEmpty
+                ? L10n.string("config.untitled")
+                : (settings.modelDirectory as NSString).lastPathComponent
+        }
+    }
 }
 
-/// Persists the recent model combinations and the directory list as JSON in
-/// UserDefaults, beside the settings SQLite keeps.
+/// Persists the configurations, the active one's id and the directory list as
+/// JSON in UserDefaults, beside the settings SQLite keeps.
 final class LibraryStore {
-    private let defaults = UserDefaults.standard
-    private static let combosKey = "splash.recent-combos"
+    private let defaults: UserDefaults
+    private static let configsKey = "splash.configs"
+    private static let activeKey = "splash.active-config"
     private static let directoriesKey = "splash.model-directories"
 
-    func loadCombos() -> [ModelCombo] { decode([ModelCombo].self, Self.combosKey) ?? [] }
-    func saveCombos(_ combos: [ModelCombo]) { encode(combos, Self.combosKey) }
+    /// `SPLASH_SETTINGS_DB` redirects the settings SQLite for the headless
+    /// selfcheck; the library follows it into a suite of its own, so the
+    /// selfcheck never touches the user's real configurations.
+    init() {
+        if ProcessInfo.processInfo.environment["SPLASH_SETTINGS_DB"] != nil {
+            defaults = UserDefaults(suiteName: "splash.selfcheck") ?? .standard
+        } else {
+            defaults = .standard
+        }
+    }
+
+    func loadConfigs() -> [ModelConfig] { decode([ModelConfig].self, Self.configsKey) ?? [] }
+    func saveConfigs(_ configs: [ModelConfig]) { encode(configs, Self.configsKey) }
+
+    func loadActive() -> UUID? {
+        defaults.string(forKey: Self.activeKey).flatMap(UUID.init(uuidString:))
+    }
+    func saveActive(_ id: UUID?) {
+        if let id { defaults.set(id.uuidString, forKey: Self.activeKey) }
+        else { defaults.removeObject(forKey: Self.activeKey) }
+    }
+
     func loadDirectories() -> [ModelDirectory] { decode([ModelDirectory].self, Self.directoriesKey) ?? [] }
     func saveDirectories(_ directories: [ModelDirectory]) { encode(directories, Self.directoriesKey) }
 

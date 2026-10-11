@@ -128,7 +128,8 @@ final class AppModel: ObservableObject {
 
     // The model library: the configurations the app has served, and the
     // directories it manages, persisted as JSON beside the settings.
-    @Published var recentCombos: [ModelCombo] = []
+    @Published var configs: [ModelConfig] = []
+    @Published var activeConfigID: UUID?
     @Published var modelDirectories: [ModelDirectory] = []
 
     /// The interface language follows the system unless the user fixes it.
@@ -169,8 +170,16 @@ final class AppModel: ObservableObject {
         // The first launch records what the app opened with, so the settings
         // are on disk before the first edit rather than appearing from nowhere.
         if !stored { _ = saveSettings() }
-        recentCombos = libraryStore.loadCombos()
+        configs = libraryStore.loadConfigs()
+        activeConfigID = libraryStore.loadActive()
         modelDirectories = libraryStore.loadDirectories()
+        if configs.isEmpty {
+            let seed = ModelConfig(settings: settings)
+            configs = [seed]
+            activeConfigID = seed.id
+            libraryStore.saveConfigs(configs)
+            libraryStore.saveActive(seed.id)
+        }
         Task { @MainActor in
             await refreshDirectorySizes()
         }
@@ -244,6 +253,8 @@ final class AppModel: ObservableObject {
     func restoreDefaultSettings() {
         applySettings(.default)
         saveSettings()
+        activeConfigID = nil
+        libraryStore.saveActive(nil)
     }
 
     private func applySettings(_ settings: ServerSettings) {
@@ -274,52 +285,38 @@ final class AppModel: ObservableObject {
         scheduleSettingsSave()
     }
 
-    // MARK: Model library
+    // MARK: Model configurations
 
-    private static let combosShown = 12
-
-    /// Record the configuration about to start, most recent first, so the
-    /// models pane can switch back to it in one click.
-    func recordCurrentCombo() {
-        switch modelMode {
-        case .upstream where modelID.trimmingCharacters(in: .whitespaces).isEmpty: return
-        case .local where modelDirectory.isEmpty: return
-        default: break
+    /// Store a configuration and make it the one the server starts with.
+    func save(_ config: ModelConfig) {
+        if let index = configs.firstIndex(where: { $0.id == config.id }) {
+            configs[index] = config
+        } else {
+            configs.append(config)
         }
-        let combo = ModelCombo(
-            mode: modelMode.rawValue,
-            modelID: modelID,
-            modelDirectory: modelDirectory,
-            draftDirectory: draftDirectory,
-            languageOnly: languageOnly,
-            kvFormat: kvFormat
-        )
-        var combos = recentCombos.filter {
-            !($0.mode == combo.mode && $0.modelID == combo.modelID
-                && $0.modelDirectory == combo.modelDirectory
-                && $0.draftDirectory == combo.draftDirectory)
-        }
-        combos.insert(combo, at: 0)
-        if combos.count > Self.combosShown { combos.removeLast(combos.count - Self.combosShown) }
-        recentCombos = combos
-        libraryStore.saveCombos(combos)
+        libraryStore.saveConfigs(configs)
+        apply(config)
     }
 
-    /// Apply a remembered configuration to the form without starting it.
-    func apply(_ combo: ModelCombo) {
-        modelMode = combo.modeValue
-        modelID = combo.modelID
-        modelDirectory = combo.modelDirectory
-        draftDirectory = combo.draftDirectory
-        languageOnly = combo.languageOnly
-        if ServerSettings.kvFormats.contains(combo.kvFormat) { kvFormat = combo.kvFormat }
+    /// Make a configuration current: the form and the next start follow it.
+    func apply(_ config: ModelConfig) {
+        activeConfigID = config.id
+        libraryStore.saveActive(config.id)
+        applySettings(config.settings)
         saveSettings()
     }
 
-    func removeCombo(_ combo: ModelCombo) {
-        recentCombos.removeAll { $0.id == combo.id }
-        libraryStore.saveCombos(recentCombos)
+    func removeConfig(_ config: ModelConfig) {
+        configs.removeAll { $0.id == config.id }
+        libraryStore.saveConfigs(configs)
+        if activeConfigID == config.id {
+            activeConfigID = nil
+            libraryStore.saveActive(nil)
+        }
     }
+
+    /// A new configuration to edit, seeded from the current settings.
+    func newConfig() -> ModelConfig { ModelConfig(settings: settings) }
 
     /// Add a directory the app manages, or refresh one already listed.
     func addModelDirectory(_ url: URL) {
@@ -432,7 +429,6 @@ final class AppModel: ObservableObject {
             return
         }
         log = ""
-        recordCurrentCombo()
         contextTokens = nil
         live = LiveStatus()
         stopping = false

@@ -10,7 +10,7 @@ struct RootView: View {
     @State private var section: Section = .models
 
     enum Section: String, CaseIterable, Identifiable {
-        case models, live, settings, log
+        case models, live, log
 
         var id: String { rawValue }
 
@@ -18,7 +18,6 @@ struct RootView: View {
             switch self {
             case .models: return L10n.string("view.models")
             case .live: return L10n.string("view.live")
-            case .settings: return L10n.string("view.control")
             case .log: return L10n.string("view.log")
             }
         }
@@ -27,7 +26,6 @@ struct RootView: View {
             switch self {
             case .models: return "square.stack.3d.up"
             case .live: return "chart.line.uptrend.xyaxis"
-            case .settings: return "slider.horizontal.3"
             case .log: return "terminal"
             }
         }
@@ -42,7 +40,6 @@ struct RootView: View {
                 switch section {
                 case .models: ModelsPane()
                 case .live: LivePane()
-                case .settings: ControlPanelView()
                 case .log: LogPane()
                 }
             }

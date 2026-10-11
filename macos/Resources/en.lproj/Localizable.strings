@@ -100,23 +100,35 @@
 "language.follow" = "Follow system";
 "settings.language" = "Interface language";
 
-// The models pane: recently used configurations and managed directories.
+// The models pane: configurations and managed directories.
 "view.models" = "Models";
-"models.recent" = "Recently used";
-"models.directories" = "Model folders";
-"models.add_directory" = "Add folder…";
+"models.configs" = "Configurations";
+"models.add_config" = "Add configuration";
+"models.edit" = "Edit";
+"models.active" = "In use";
 "models.use" = "Use";
 "models.use_start" = "Use & Start";
 "models.remove" = "Remove";
+"models.directories" = "Model folders";
+"models.add_directory" = "Add folder…";
 "models.reveal" = "Reveal in Finder";
 "models.set_target" = "Use as target";
 "models.set_draft" = "Use as draft";
-"models.empty.recent" = "Nothing served yet. Start a model and it will appear here.";
+"models.empty.configs" = "No configurations yet. Add one to choose a model.";
 "models.empty.dirs" = "No folders yet. Add a model folder to switch to it quickly.";
 "models.vision" = "Has a vision tower";
 "models.text_only" = "text only";
+"models.ane_off" = "ANE off";
 "kind.splash" = "Splash package";
 "kind.unknown" = "Unknown";
+
+// The configuration editor.
+"config.name" = "Name";
+"config.untitled" = "Untitled";
+"config.add.title" = "New configuration";
+"config.edit.title" = "Edit configuration";
+"config.save" = "Save";
+"config.cancel" = "Cancel";
 
 // Background running, when the window closes with the server up.
 "menu.show" = "Show Window";

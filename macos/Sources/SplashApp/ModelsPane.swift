@@ -1,34 +1,62 @@
 import AppKit
 import SwiftUI
 
-/// The models pane: the configurations the app has served, for one-click
-/// switching, and the directories it manages, so a local model is one pick
-/// away.
+/// The models pane: the configurations the app can serve, added and edited
+/// here, and the folders it manages, so a local model is one pick away.
 struct ModelsPane: View {
     @EnvironmentObject private var model: AppModel
+    @State private var draft = ModelConfig(settings: ServerSettings.default)
+    @State private var editing = false
+    @State private var isNew = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                recentSection
+                configsSection
                 directoriesSection
             }
             .padding(20)
-            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: 880, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .sheet(isPresented: $editing) {
+            ConfigEditor(
+                config: $draft,
+                isNew: isNew,
+                onSave: {
+                    model.save(draft)
+                    editing = false
+                },
+                onCancel: { editing = false }
+            )
+            .frame(minWidth: 560, minHeight: 640)
         }
     }
 
-    private var recentSection: some View {
+    private var configsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(L10n.string("models.recent"), systemImage: "clock.arrow.circlepath")
-            if model.recentCombos.isEmpty {
-                EmptyHint(L10n.string("models.empty.recent"))
+            HStack {
+                SectionHeader(L10n.string("models.configs"), systemImage: "slider.horizontal.3")
+                Spacer()
+                Button {
+                    draft = model.newConfig()
+                    isNew = true
+                    editing = true
+                } label: {
+                    Label(L10n.string("models.add_config"), systemImage: "plus")
+                }
+            }
+            if model.configs.isEmpty {
+                EmptyHint(L10n.string("models.empty.configs"))
             } else {
                 Card {
-                    ForEach(model.recentCombos) { combo in
-                        ComboRow(combo: combo)
-                        if combo.id != model.recentCombos.last?.id { Divider() }
+                    ForEach(model.configs) { config in
+                        ConfigRow(config: config) {
+                            draft = config
+                            isNew = false
+                            editing = true
+                        }
+                        if config.id != model.configs.last?.id { Divider() }
                     }
                 }
             }
@@ -71,34 +99,44 @@ struct ModelsPane: View {
     }
 }
 
-/// A remembered configuration, with the ways to use it again.
-private struct ComboRow: View {
+/// A saved configuration, with the ways to use it and edit it.
+private struct ConfigRow: View {
     @EnvironmentObject private var model: AppModel
-    let combo: ModelCombo
+    let config: ModelConfig
+    var onEdit: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: combo.modeValue == .local ? "folder" : "shippingbox")
+            Image(systemName: config.settings.modelMode == .local ? "folder" : "shippingbox")
                 .foregroundStyle(.secondary)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.body.weight(.medium)).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(config.displayName).font(.body.weight(.medium)).lineLimit(1)
+                    if model.activeConfigID == config.id { ActiveBadge() }
+                }
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
             }
             Spacer()
-            Button(L10n.string("models.use")) { model.apply(combo) }
-                .disabled(model.isRunning)
+            Button(L10n.string("models.use")) { model.apply(config) }
+                .disabled(model.isRunning || model.activeConfigID == config.id)
             Button {
-                model.apply(combo)
+                model.apply(config)
                 model.start()
             } label: {
                 Label(L10n.string("models.use_start"), systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
             .disabled(model.isRunning || model.isBusy)
+            Button(action: onEdit) {
+                Image(systemName: "slider.horizontal.3")
+            }
+            .buttonStyle(.borderless)
+            .help(L10n.string("models.edit"))
             Menu {
-                Button(L10n.string("models.remove"), role: .destructive) { model.removeCombo(combo) }
+                Button(L10n.string("models.edit")) { onEdit() }
+                Button(L10n.string("models.remove"), role: .destructive) { model.removeConfig(config) }
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -107,29 +145,76 @@ private struct ComboRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-    }
-
-    private var title: String {
-        switch combo.modeValue {
-        case .local: return (combo.modelDirectory as NSString).lastPathComponent
-        case .upstream: return combo.modelID
+        .contextMenu {
+            Button(L10n.string("models.edit")) { onEdit() }
+            Button(L10n.string("models.remove"), role: .destructive) { model.removeConfig(config) }
         }
     }
 
     private var subtitle: String {
-        var parts = [modeLabel]
-        if combo.modeValue == .local, !combo.draftDirectory.isEmpty {
-            parts.append("Draft: \((combo.draftDirectory as NSString).lastPathComponent)")
+        var parts: [String] = []
+        switch config.settings.modelMode {
+        case .upstream:
+            parts.append(L10n.string("mode.upstream"))
+            if !config.settings.modelID.isEmpty { parts.append(config.settings.modelID) }
+        case .local:
+            parts.append(L10n.string("mode.local"))
+            if !config.settings.modelDirectory.isEmpty {
+                parts.append((config.settings.modelDirectory as NSString).lastPathComponent)
+            }
+            if !config.settings.draftDirectory.isEmpty {
+                parts.append("Draft: \((config.settings.draftDirectory as NSString).lastPathComponent)")
+            }
         }
-        parts.append(combo.kvFormat.uppercased())
-        if combo.languageOnly { parts.append(L10n.string("models.text_only")) }
+        parts.append(config.settings.kvFormat.uppercased())
+        if !config.settings.neuralEngine { parts.append(L10n.string("models.ane_off")) }
+        if config.settings.languageOnly { parts.append(L10n.string("models.text_only")) }
         return parts.joined(separator: " · ")
     }
+}
 
-    private var modeLabel: String {
-        switch combo.modeValue {
-        case .upstream: return L10n.string("mode.upstream")
-        case .local: return L10n.string("mode.local")
+/// A small capsule on the configuration in use.
+private struct ActiveBadge: View {
+    var body: some View {
+        Text(L10n.string("models.active"))
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(Color.green.opacity(0.18), in: Capsule())
+            .foregroundStyle(.green)
+    }
+}
+
+/// The configuration editor: a name and the whole settings form, in a sheet.
+private struct ConfigEditor: View {
+    @Binding var config: ModelConfig
+    let isNew: Bool
+    var onSave: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                HStack {
+                    Text(L10n.string("config.name")).foregroundStyle(.secondary)
+                    TextField("", text: $config.name, prompt: Text(verbatim: config.displayName))
+                        .textFieldStyle(.roundedBorder)
+                }
+                .padding(12)
+                .background(.bar)
+                Divider()
+                SettingsForm(settings: $config.settings)
+            }
+            .navigationTitle(L10n.string(isNew ? "config.add.title" : "config.edit.title"))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.string("config.cancel"), action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.string("config.save"), action: onSave)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
         }
     }
 }
@@ -212,8 +297,7 @@ private struct SectionHeader: View {
     }
 
     var body: some View {
-        Label(title, systemImage: systemImage)
-            .font(.headline)
+        Label(title, systemImage: systemImage).font(.headline)
     }
 }
 
