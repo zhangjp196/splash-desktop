@@ -315,8 +315,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// A new configuration to edit, seeded from the current settings.
-    func newConfig() -> ModelConfig { ModelConfig(settings: settings) }
+    /// A new, empty configuration to edit: the defaults, with no model chosen
+    /// yet, so adding one starts from scratch instead of copying the current.
+    func newConfig() -> ModelConfig {
+        var defaults = ServerSettings.default
+        defaults.modelID = ""
+        defaults.modelDirectory = ""
+        defaults.draftDirectory = ""
+        return ModelConfig(settings: defaults)
+    }
 
     /// Add a directory the app manages, or refresh one already listed.
     func addModelDirectory(_ url: URL) {
