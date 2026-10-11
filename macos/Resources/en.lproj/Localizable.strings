@@ -108,6 +108,7 @@
 "models.active" = "In use";
 "models.use" = "Use";
 "models.use_start" = "Use & Start";
+"models.start" = "Start";
 "models.remove" = "Remove";
 "models.directories" = "Model folders";
 "models.add_directory" = "Add folder…";
@@ -129,6 +130,7 @@
 "config.edit.title" = "Edit configuration";
 "config.save" = "Save";
 "config.cancel" = "Cancel";
+"footer.model" = "A Hugging Face MLX or GGUF model ID, or a local folder that holds one.";
 
 // Background running, when the window closes with the server up.
 "menu.show" = "Show Window";

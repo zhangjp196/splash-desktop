@@ -107,35 +107,41 @@ private struct ConfigRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: config.settings.modelMode == .local ? "folder" : "shippingbox")
-                .foregroundStyle(.secondary)
-                .frame(width: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(config.displayName).font(.body.weight(.medium)).lineLimit(1)
-                    if model.activeConfigID == config.id { ActiveBadge() }
+            HStack(spacing: 12) {
+                Image(systemName: config.settings.modelMode == .local ? "folder" : "shippingbox")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(config.displayName).font(.body.weight(.medium)).lineLimit(1)
+                        if model.activeConfigID == config.id { ActiveBadge() }
+                    }
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
                 }
-                Text(subtitle).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { model.apply(config) }
+            .help(L10n.string("models.use"))
             Spacer()
-            Button(L10n.string("models.use")) { model.apply(config) }
-                .disabled(model.isRunning || model.activeConfigID == config.id)
             Button {
                 model.apply(config)
                 model.start()
             } label: {
-                Label(L10n.string("models.use_start"), systemImage: "play.fill")
+                Label(L10n.string("models.start"), systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
             .disabled(model.isRunning || model.isBusy)
             Button(action: onEdit) {
-                Image(systemName: "slider.horizontal.3")
+                Image(systemName: "pencil")
             }
             .buttonStyle(.borderless)
             .help(L10n.string("models.edit"))
             Menu {
+                Button(L10n.string("models.use")) { model.apply(config) }
+                    .disabled(model.activeConfigID == config.id)
                 Button(L10n.string("models.edit")) { onEdit() }
+                Divider()
                 Button(L10n.string("models.remove"), role: .destructive) { model.removeConfig(config) }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -193,29 +199,33 @@ private struct ConfigEditor: View {
     var onCancel: () -> Void
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                HStack {
-                    Text(L10n.string("config.name")).foregroundStyle(.secondary)
-                    TextField("", text: $config.name, prompt: Text(verbatim: config.displayName))
-                        .textFieldStyle(.roundedBorder)
-                }
-                .padding(12)
-                .background(.bar)
-                Divider()
-                SettingsForm(settings: $config.settings)
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                BrandMark()
+                Text(L10n.string(isNew ? "config.add.title" : "config.edit.title"))
+                    .font(.headline)
+                Spacer()
+                Button(L10n.string("config.cancel"), action: onCancel)
+                Button(L10n.string("config.save"), action: onSave)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
             }
-            .navigationTitle(L10n.string(isNew ? "config.add.title" : "config.edit.title"))
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(L10n.string("config.cancel"), action: onCancel)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(L10n.string("config.save"), action: onSave)
-                        .keyboardShortcut(.defaultAction)
-                }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(.bar)
+            Divider()
+            HStack(spacing: 8) {
+                Text(L10n.string("config.name")).foregroundStyle(.secondary)
+                TextField("", text: $config.name, prompt: Text(verbatim: config.displayName))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 340)
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            Divider()
+            SettingsTabs(settings: $config.settings)
         }
+        .frame(minWidth: 660, minHeight: 600)
     }
 }
 

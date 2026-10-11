@@ -108,6 +108,7 @@
 "models.active" = "使用中";
 "models.use" = "使用";
 "models.use_start" = "使用并启动";
+"models.start" = "启动";
 "models.remove" = "移除";
 "models.directories" = "模型目录";
 "models.add_directory" = "添加目录…";
@@ -129,6 +130,7 @@
 "config.edit.title" = "编辑配置";
 "config.save" = "保存";
 "config.cancel" = "取消";
+"footer.model" = "Hugging Face 上的 MLX / GGUF 模型 ID，或存放它的本地目录。";
 
 // 关闭窗口后的后台运行提示。
 "menu.show" = "显示窗口";
