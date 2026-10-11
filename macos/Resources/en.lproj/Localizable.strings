@@ -32,6 +32,7 @@
 "reasoning.default" = "Model default";
 "examples" = "Examples";
 "choose" = "Choose";
+"field.clear" = "Clear";
 "view.live" = "Live";
 "view.control" = "Control";
 "view.log" = "Log";

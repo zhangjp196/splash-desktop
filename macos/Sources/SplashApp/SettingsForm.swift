@@ -144,6 +144,17 @@ private struct ModelField: View {
                 TextField("owner/repo[:variant]", text: $modelID)
                     .textFieldStyle(.roundedBorder)
                     .disabled(disabled)
+                if !modelID.isEmpty {
+                    Button {
+                        modelID = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(L10n.string("field.clear"))
+                    .disabled(disabled)
+                }
                 if !catalog.isEmpty {
                     Menu(L10n.string("examples")) {
                         ForEach(catalog, id: \.self) { identifier in
@@ -173,6 +184,17 @@ private struct DirectoryField: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                if !path.isEmpty {
+                    Button {
+                        path = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(L10n.string("field.clear"))
+                    .disabled(disabled)
+                }
                 Button(L10n.string("choose")) { choose() }
                     .disabled(disabled)
             }

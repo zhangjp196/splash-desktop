@@ -32,6 +32,7 @@
 "reasoning.default" = "模型默认";
 "examples" = "示例";
 "choose" = "选择";
+"field.clear" = "清除";
 "view.live" = "实时";
 "view.control" = "控制";
 "view.log" = "日志";
