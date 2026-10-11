@@ -99,3 +99,27 @@
 "live.state_hit" = "State hits";
 "language.follow" = "Follow system";
 "settings.language" = "Interface language";
+
+// The models pane: recently used configurations and managed directories.
+"view.models" = "Models";
+"models.recent" = "Recently used";
+"models.directories" = "Model folders";
+"models.add_directory" = "Add folder…";
+"models.use" = "Use";
+"models.use_start" = "Use & Start";
+"models.remove" = "Remove";
+"models.reveal" = "Reveal in Finder";
+"models.set_target" = "Use as target";
+"models.set_draft" = "Use as draft";
+"models.empty.recent" = "Nothing served yet. Start a model and it will appear here.";
+"models.empty.dirs" = "No folders yet. Add a model folder to switch to it quickly.";
+"models.vision" = "Has a vision tower";
+"models.text_only" = "text only";
+"kind.splash" = "Splash package";
+"kind.unknown" = "Unknown";
+
+// Background running, when the window closes with the server up.
+"menu.show" = "Show Window";
+"background.alert.title" = "Splash keeps running";
+"background.alert.message" = "Closing the window leaves the server running in the menu bar. Use “Show Window” to reopen it; ⌘Q stops the server and quits.";
+"background.alert.ok" = "OK";

@@ -1,159 +1,168 @@
+import AppKit
 import SwiftUI
 
-/// The window: a header that always shows the state and the actions, and the
-/// views the app has. Live leads because the running numbers are what the
-/// window is opened for, then control, then the log. The chat is the server's
-/// own web page, opened in the browser.
+/// The window: a sidebar that switches the pane, a detail that shows it, and
+/// the server's state and controls pinned under the sidebar. The models pane
+/// leads, because choosing what to serve is what the window is opened for;
+/// the live numbers, the settings and the log follow.
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var tab = Tab.live
+    @State private var section: Section = .models
 
-    enum Tab: Hashable, CaseIterable {
-        case live, control, log
+    enum Section: String, CaseIterable, Identifiable {
+        case models, live, settings, log
+
+        var id: String { rawValue }
 
         var title: String {
             switch self {
+            case .models: return L10n.string("view.models")
             case .live: return L10n.string("view.live")
-            case .control: return L10n.string("view.control")
+            case .settings: return L10n.string("view.control")
             case .log: return L10n.string("view.log")
             }
         }
 
         var systemImage: String {
             switch self {
+            case .models: return "square.stack.3d.up"
             case .live: return "chart.line.uptrend.xyaxis"
-            case .control: return "slider.horizontal.3"
+            case .settings: return "slider.horizontal.3"
             case .log: return "terminal"
             }
         }
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Header()
-            Divider()
-            TabBar(selection: $tab)
-            Divider()
-            switch tab {
-            case .live: LivePane()
-            case .control: ControlPanelView()
-            case .log: LogPane()
+        NavigationSplitView {
+            Sidebar(selection: $section)
+                .navigationSplitViewColumnWidth(min: 196, ideal: 214, max: 280)
+        } detail: {
+            Group {
+                switch section {
+                case .models: ModelsPane()
+                case .live: LivePane()
+                case .settings: ControlPanelView()
+                case .log: LogPane()
+                }
             }
+            .navigationTitle(section.title)
+            .toolbar { ToolbarItems() }
         }
         .background(.background)
     }
 }
 
-/// The navigation band under the header: the three views, full width, so the
-/// window's shape is obvious and the header keeps only state and actions.
-private struct TabBar: View {
-    @Binding var selection: RootView.Tab
+/// The sidebar: the brand, the panes, and the server's state and controls, so
+/// the app can be driven without leaving the pane you are in.
+private struct Sidebar: View {
+    @EnvironmentObject private var model: AppModel
+    @Binding var selection: RootView.Section
 
     var body: some View {
-        Picker("", selection: $selection) {
-            ForEach(RootView.Tab.allCases, id: \.self) { tab in
-                Label(tab.title, systemImage: tab.systemImage).tag(tab)
+        List(selection: $selection) {
+            Section {
+                ForEach(RootView.Section.allCases) { section in
+                    Label(section.title, systemImage: section.systemImage).tag(section)
+                }
+            } header: {
+                HStack(spacing: 8) {
+                    BrandMark()
+                    Text("Splash").font(.headline)
+                }
+                .padding(.vertical, 4)
             }
         }
-        .labelStyle(.titleAndIcon)
-        .pickerStyle(.segmented)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            ServerControls()
+        }
+    }
+}
+
+/// The brand mark, shared by the sidebar.
+struct BrandMark: View {
+    var body: some View {
+        Image(systemName: "drop.fill")
+            .font(.system(size: 12, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 22, height: 22)
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.19, green: 0.42, blue: 0.97),
+                        Color(red: 0.09, green: 0.78, blue: 0.76),
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+    }
+}
+
+/// The running state and the primary actions, pinned under the sidebar.
+private struct ServerControls: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            StatusPill()
+            if model.isRunning {
+                HStack(spacing: 8) {
+                    Button(role: .destructive) {
+                        model.stop()
+                    } label: {
+                        Label(L10n.string("stop"), systemImage: "stop.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .disabled(model.phase == .stopping)
+                    Button {
+                        model.openInBrowser()
+                    } label: {
+                        Label(L10n.string("open.chat"), systemImage: "bubble.left.and.bubble.right.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .disabled(model.phase != .ready)
+                }
+            } else {
+                Button {
+                    model.start()
+                } label: {
+                    Label(L10n.string("start"), systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(!model.canStart)
+                .keyboardShortcut(.return, modifiers: .command)
+            }
+        }
+        .padding(12)
         .background(.bar)
     }
 }
 
-/// The brand row: a gradient mark, the running state as a pill, and the
-/// primary actions, on a bar of the window's own material. It carries no
-/// navigation, so the tab band below it is the only place the window changes
-/// what it shows.
-private struct Header: View {
+/// A capsule with the run state and the served context.
+struct StatusPill: View {
     @EnvironmentObject private var model: AppModel
 
-    private let brandGradient = LinearGradient(
-        colors: [
-            Color(red: 0.19, green: 0.42, blue: 0.97),
-            Color(red: 0.09, green: 0.78, blue: 0.76),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "drop.fill")
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 30, height: 30)
-                .background(brandGradient, in: RoundedRectangle(cornerRadius: 8))
-            Text("Splash").font(.title3.weight(.semibold))
-
-            statusPill
-            Spacer()
-
-            Menu {
-                ForEach(AppModel.InterfaceLanguage.allCases) { language in
-                    Button {
-                        model.language = language
-                        model.applyLanguage()
-                    } label: {
-                        if model.language == language {
-                            Label(languageLabel(language), systemImage: "checkmark")
-                        } else {
-                            Text(languageLabel(language))
-                        }
-                    }
-                }
-            } label: {
-                Image(systemName: "globe")
-            }
-            .menuStyle(.borderlessButton)
-            .frame(width: 26)
-            .help(L10n.string("settings.language"))
-
-            Button {
-                model.openInBrowser()
-            } label: {
-                Label(L10n.string("open.chat"), systemImage: "bubble.left.and.bubble.right.fill")
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(model.phase != .ready)
-            .help(L10n.string("open.in.browser"))
-
-            if model.isRunning {
-                Button(L10n.string("stop"), role: .destructive) { model.stop() }
-                    .controlSize(.large)
-                    .disabled(model.phase == .stopping)
-            } else {
-                Button(L10n.string("start"), action: model.start)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!model.canStart)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.bar)
-    }
-
-    private var statusPill: some View {
         HStack(spacing: 7) {
             Circle()
                 .fill(indicator)
                 .frame(width: 8, height: 8)
                 .shadow(color: indicator.opacity(0.6), radius: 3)
-            Text(model.statusText).font(.callout)
+            Text(model.statusText).font(.callout).lineLimit(1)
+            Spacer(minLength: 0)
             if let tokens = model.contextTokens, model.phase == .ready {
-                Text("·").foregroundStyle(.tertiary)
                 Text(L10n.format("context.tokens", tokens.formatted()))
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 11)
-        .padding(.vertical, 5)
+        .padding(.vertical, 6)
         .background(.quaternary.opacity(0.4), in: Capsule())
         .animation(.default, value: model.phase)
     }
@@ -165,6 +174,39 @@ private struct Header: View {
         case .failed: return .red
         case .idle: return .secondary
         }
+    }
+}
+
+/// The detail's toolbar: the interface language and the way to the chat.
+private struct ToolbarItems: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Menu {
+            ForEach(AppModel.InterfaceLanguage.allCases) { language in
+                Button {
+                    model.language = language
+                    model.applyLanguage()
+                } label: {
+                    if model.language == language {
+                        Label(languageLabel(language), systemImage: "checkmark")
+                    } else {
+                        Text(languageLabel(language))
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "globe")
+        }
+        .help(L10n.string("settings.language"))
+
+        Button {
+            model.openInBrowser()
+        } label: {
+            Label(L10n.string("open.chat"), systemImage: "bubble.left.and.bubble.right.fill")
+        }
+        .disabled(model.phase != .ready)
+        .help(L10n.string("open.in.browser"))
     }
 
     private func languageLabel(_ language: AppModel.InterfaceLanguage) -> String {

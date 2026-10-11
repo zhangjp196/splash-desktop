@@ -126,6 +126,11 @@ final class AppModel: ObservableObject {
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
 
+    // The model library: the configurations the app has served, and the
+    // directories it manages, persisted as JSON beside the settings.
+    @Published var recentCombos: [ModelCombo] = []
+    @Published var modelDirectories: [ModelDirectory] = []
+
     /// The interface language follows the system unless the user fixes it.
     enum InterfaceLanguage: String, CaseIterable, Identifiable {
         case followSystem, chinese, english
@@ -144,6 +149,7 @@ final class AppModel: ObservableObject {
     private var restoring = false
     private var pendingSave: Task<Void, Never>?
     private let store = SettingsStore()
+    private let libraryStore = LibraryStore()
     // A server the app found already running on the configured port (its PID
     // from the launcher's serve-<port>.lock), shown and stoppable like its own.
     var foreignPID: pid_t?
@@ -163,6 +169,11 @@ final class AppModel: ObservableObject {
         // The first launch records what the app opened with, so the settings
         // are on disk before the first edit rather than appearing from nowhere.
         if !stored { _ = saveSettings() }
+        recentCombos = libraryStore.loadCombos()
+        modelDirectories = libraryStore.loadDirectories()
+        Task { @MainActor in
+            await refreshDirectorySizes()
+        }
         // A server left over from a previous session is detected and taken
         // over asynchronously.
         Task { @MainActor in
@@ -263,6 +274,105 @@ final class AppModel: ObservableObject {
         scheduleSettingsSave()
     }
 
+    // MARK: Model library
+
+    private static let combosShown = 12
+
+    /// Record the configuration about to start, most recent first, so the
+    /// models pane can switch back to it in one click.
+    func recordCurrentCombo() {
+        switch modelMode {
+        case .upstream where modelID.trimmingCharacters(in: .whitespaces).isEmpty: return
+        case .local where modelDirectory.isEmpty: return
+        default: break
+        }
+        let combo = ModelCombo(
+            mode: modelMode.rawValue,
+            modelID: modelID,
+            modelDirectory: modelDirectory,
+            draftDirectory: draftDirectory,
+            languageOnly: languageOnly,
+            kvFormat: kvFormat
+        )
+        var combos = recentCombos.filter {
+            !($0.mode == combo.mode && $0.modelID == combo.modelID
+                && $0.modelDirectory == combo.modelDirectory
+                && $0.draftDirectory == combo.draftDirectory)
+        }
+        combos.insert(combo, at: 0)
+        if combos.count > Self.combosShown { combos.removeLast(combos.count - Self.combosShown) }
+        recentCombos = combos
+        libraryStore.saveCombos(combos)
+    }
+
+    /// Apply a remembered configuration to the form without starting it.
+    func apply(_ combo: ModelCombo) {
+        modelMode = combo.modeValue
+        modelID = combo.modelID
+        modelDirectory = combo.modelDirectory
+        draftDirectory = combo.draftDirectory
+        languageOnly = combo.languageOnly
+        if ServerSettings.kvFormats.contains(combo.kvFormat) { kvFormat = combo.kvFormat }
+        saveSettings()
+    }
+
+    func removeCombo(_ combo: ModelCombo) {
+        recentCombos.removeAll { $0.id == combo.id }
+        libraryStore.saveCombos(recentCombos)
+    }
+
+    /// Add a directory the app manages, or refresh one already listed.
+    func addModelDirectory(_ url: URL) {
+        let path = url.standardizedFileURL.path
+        let inspected = inspectModelDirectory(path)
+        modelDirectories.removeAll { $0.path == path }
+        modelDirectories.append(
+            ModelDirectory(path: path, kind: inspected.kind.rawValue,
+                           hasVision: inspected.hasVision, sizeBytes: nil)
+        )
+        modelDirectories.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        libraryStore.saveDirectories(modelDirectories)
+        if let directory = modelDirectories.first(where: { $0.path == path }) {
+            Task { @MainActor in await measure(directory) }
+        }
+    }
+
+    func removeModelDirectory(_ directory: ModelDirectory) {
+        modelDirectories.removeAll { $0.path == directory.path }
+        libraryStore.saveDirectories(modelDirectories)
+    }
+
+    func reveal(_ path: String) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    /// Use a directory as the local target, switching to the local mode.
+    func useAsTarget(_ directory: ModelDirectory) {
+        modelMode = .local
+        modelDirectory = directory.path
+        saveSettings()
+    }
+
+    /// Use a directory as the draft alongside a local target.
+    func useAsDraft(_ directory: ModelDirectory) {
+        draftDirectory = directory.path
+        saveSettings()
+    }
+
+    private func refreshDirectorySizes() async {
+        for directory in modelDirectories where directory.sizeBytes == nil {
+            await measure(directory)
+        }
+    }
+
+    private func measure(_ directory: ModelDirectory) async {
+        let path = directory.path
+        let size = await Task.detached { modelDirectorySize(path) }.value
+        guard let index = modelDirectories.firstIndex(where: { $0.path == path }) else { return }
+        modelDirectories[index].sizeBytes = size
+        libraryStore.saveDirectories(modelDirectories)
+    }
+
     // MARK: Derived state
 
     var isRunning: Bool {
@@ -322,6 +432,7 @@ final class AppModel: ObservableObject {
             return
         }
         log = ""
+        recordCurrentCombo()
         contextTokens = nil
         live = LiveStatus()
         stopping = false

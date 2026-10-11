@@ -99,3 +99,27 @@
 "live.state_hit" = "状态命中";
 "language.follow" = "跟随系统";
 "settings.language" = "界面语言";
+
+// 模型面板：最近使用与目录管理。
+"view.models" = "模型";
+"models.recent" = "最近使用";
+"models.directories" = "模型目录";
+"models.add_directory" = "添加目录…";
+"models.use" = "使用";
+"models.use_start" = "使用并启动";
+"models.remove" = "移除";
+"models.reveal" = "在访达中显示";
+"models.set_target" = "设为目标";
+"models.set_draft" = "设为 Draft";
+"models.empty.recent" = "还没有启动记录。启动一个模型后会出现在这里。";
+"models.empty.dirs" = "还没有目录。添加模型目录后可以快速切换。";
+"models.vision" = "含视觉塔";
+"models.text_only" = "仅文本";
+"kind.splash" = "Splash 包";
+"kind.unknown" = "未知";
+
+// 关闭窗口后的后台运行提示。
+"menu.show" = "显示窗口";
+"background.alert.title" = "Splash 正在后台运行";
+"background.alert.message" = "关闭窗口后服务仍在菜单栏继续运行。用「显示窗口」可以重新打开；⌘Q 会停止服务并退出。";
+"background.alert.ok" = "知道了";
