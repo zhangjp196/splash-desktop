@@ -121,16 +121,15 @@ final class AppModel: ObservableObject {
     @Published var apiKey = ""
     @Published var servedNames = ""
     @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
-    @Published var idleOffloadSeconds = ServerSettings.First.idleOffloadSeconds
+    @Published var idleOffloadRequests = ServerSettings.First.idleOffloadRequests
     @Published var residencySeconds = ServerSettings.First.residencySeconds
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
 
-    // The model library: the configurations the app has served, and the
-    // directories it manages, persisted as JSON beside the settings.
+    // The model library: the configurations the app has served, persisted as
+    // JSON beside the settings.
     @Published var configs: [ModelConfig] = []
     @Published var activeConfigID: UUID?
-    @Published var modelDirectories: [ModelDirectory] = []
 
     /// The interface language follows the system unless the user fixes it.
     enum InterfaceLanguage: String, CaseIterable, Identifiable {
@@ -172,16 +171,12 @@ final class AppModel: ObservableObject {
         if !stored { _ = saveSettings() }
         configs = libraryStore.loadConfigs()
         activeConfigID = libraryStore.loadActive()
-        modelDirectories = libraryStore.loadDirectories()
         if configs.isEmpty {
             let seed = ModelConfig(settings: settings)
             configs = [seed]
             activeConfigID = seed.id
             libraryStore.saveConfigs(configs)
             libraryStore.saveActive(seed.id)
-        }
-        Task { @MainActor in
-            await refreshDirectorySizes()
         }
         // A server left over from a previous session is detected and taken
         // over asynchronously.
@@ -216,7 +211,7 @@ final class AppModel: ObservableObject {
         settings.maxMemory = maxMemory
         settings.maxContext = maxContext
         settings.maxCacheDisk = maxCacheDisk
-        settings.idleOffloadSeconds = idleOffloadSeconds
+        settings.idleOffloadRequests = idleOffloadRequests
         settings.residencySeconds = residencySeconds
         settings.maxRequestSize = maxRequestSize
         settings.apiKey = apiKey
@@ -271,7 +266,7 @@ final class AppModel: ObservableObject {
         maxMemory = settings.maxMemory
         maxContext = settings.maxContext
         maxCacheDisk = settings.maxCacheDisk
-        idleOffloadSeconds = settings.idleOffloadSeconds
+        idleOffloadRequests = settings.idleOffloadRequests
         residencySeconds = settings.residencySeconds
         maxRequestSize = settings.maxRequestSize
         apiKey = settings.apiKey
@@ -323,58 +318,6 @@ final class AppModel: ObservableObject {
         defaults.modelDirectory = ""
         defaults.draftDirectory = ""
         return ModelConfig(settings: defaults)
-    }
-
-    /// Add a directory the app manages, or refresh one already listed.
-    func addModelDirectory(_ url: URL) {
-        let path = url.standardizedFileURL.path
-        let inspected = inspectModelDirectory(path)
-        modelDirectories.removeAll { $0.path == path }
-        modelDirectories.append(
-            ModelDirectory(path: path, kind: inspected.kind.rawValue,
-                           hasVision: inspected.hasVision, sizeBytes: nil)
-        )
-        modelDirectories.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        libraryStore.saveDirectories(modelDirectories)
-        if let directory = modelDirectories.first(where: { $0.path == path }) {
-            Task { @MainActor in await measure(directory) }
-        }
-    }
-
-    func removeModelDirectory(_ directory: ModelDirectory) {
-        modelDirectories.removeAll { $0.path == directory.path }
-        libraryStore.saveDirectories(modelDirectories)
-    }
-
-    func reveal(_ path: String) {
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
-    }
-
-    /// Use a directory as the local target, switching to the local mode.
-    func useAsTarget(_ directory: ModelDirectory) {
-        modelMode = .local
-        modelDirectory = directory.path
-        saveSettings()
-    }
-
-    /// Use a directory as the draft alongside a local target.
-    func useAsDraft(_ directory: ModelDirectory) {
-        draftDirectory = directory.path
-        saveSettings()
-    }
-
-    private func refreshDirectorySizes() async {
-        for directory in modelDirectories where directory.sizeBytes == nil {
-            await measure(directory)
-        }
-    }
-
-    private func measure(_ directory: ModelDirectory) async {
-        let path = directory.path
-        let size = await Task.detached { modelDirectorySize(path) }.value
-        guard let index = modelDirectories.firstIndex(where: { $0.path == path }) else { return }
-        modelDirectories[index].sizeBytes = size
-        libraryStore.saveDirectories(modelDirectories)
     }
 
     // MARK: Derived state
@@ -460,8 +403,8 @@ final class AppModel: ObservableObject {
             if !trimmed.isEmpty { arguments += ["--served-model-name", trimmed] }
         }
         if !maxCacheDisk.isEmpty { arguments += ["--max-cache-disk", maxCacheDisk] }
-        if let seconds = Int(idleOffloadSeconds), seconds > 0, seconds <= 86_400 {
-            arguments += ["--idle-offload-seconds", String(seconds)]
+        if let requests = Int(idleOffloadRequests), requests > 0, requests <= 1_000_000 {
+            arguments += ["--idle-offload-requests", String(requests)]
         }
         if let seconds = Int(residencySeconds), seconds >= 1, seconds <= 86_400 {
             arguments += ["--idle-release", String(seconds)]

@@ -128,7 +128,7 @@ void testServerCommandLines(const char *path) {
       {"idle_offload",
        [](NativeArguments &read) {
          read.maxCacheDiskBytes = 5 * kGiB;
-         read.idleOffloadSeconds = 30;
+         read.idleOffloadRequests = 30;
        }},
       {"decode_share",
        [](NativeArguments &read) {
@@ -154,7 +154,7 @@ void testServerCommandLines(const char *path) {
            read.kvFormat == meant.kvFormat && read.decodeShare == meant.decodeShare &&
            read.maxImagePatches == meant.maxImagePatches &&
            read.idleReleaseSeconds == meant.idleReleaseSeconds &&
-           read.idleOffloadSeconds == meant.idleOffloadSeconds &&
+           read.idleOffloadRequests == meant.idleOffloadRequests &&
            read.preventIdleSleep == meant.preventIdleSleep &&
            read.neuralEngine == meant.neuralEngine;
   };
@@ -204,9 +204,9 @@ void testRefusals() {
   for (const char *release : {"0", "-1", "30m", "inf"})
     refuses({"auto", "auto", "--idle-release", release},
             "--idle-release requires off or a positive number of seconds");
-  for (const char *offload : {"-1", "86401", "30m"})
-    refuses({"auto", "auto", "--idle-offload-seconds", offload},
-            "--idle-offload-seconds requires a value from 0 to 86400");
+  for (const char *offload : {"-1", "1000001", "30m"})
+    refuses({"auto", "auto", "--idle-offload-requests", offload},
+            "--idle-offload-requests requires a value from 0 to 1000000");
   refuses({"auto", "auto", "--idle-sleep", "never"},
           "--idle-sleep requires prevent or allow");
   refuses({"auto", "auto", "--ane", "gpu"}, "--ane requires on or off");

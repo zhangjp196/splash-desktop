@@ -20,9 +20,9 @@
 "field.max_memory" = "Max memory (e.g. 28G)";
 "field.max_context" = "Max context (e.g. 100K)";
 "field.max_cache_disk" = "Disk cache quota (0 = off, e.g. 16G)";
-"field.idle_offload" = "Offload to disk after idle seconds (needs the quota above)";
+"field.idle_offload" = "Offload to disk after this many requests (needs the quota above)";
 "field.residency" = "Release weights after idle seconds (LM Studio style)";
-"footer.idle" = "Offloading writes cached prefixes to the SSD tier, and releasing weights returns GPU memory while the server keeps serving. Both idle timers restart on every request.";
+"footer.idle" = "Offloading writes cached prefixes to the SSD tier as requests end, and releasing weights returns GPU memory while the server keeps serving. The residency idle timer restarts on every request.";
 "control.saved" = "Saved automatically";
 "control.defaults" = "Restore defaults";
 "field.api_key" = "API key";
@@ -31,8 +31,8 @@
 "field.reasoning_effort" = "Default reasoning effort";
 "reasoning.default" = "Model default";
 "examples" = "Examples";
-"choose" = "Choose";
 "field.clear" = "Clear";
+"field.browse" = "Browse…";
 "view.live" = "Live";
 "view.control" = "Control";
 "view.log" = "Log";
@@ -111,18 +111,9 @@
 "models.use_start" = "Use & Start";
 "models.start" = "Start";
 "models.remove" = "Remove";
-"models.directories" = "Model folders";
-"models.add_directory" = "Add folder…";
-"models.reveal" = "Reveal in Finder";
-"models.set_target" = "Use as target";
-"models.set_draft" = "Use as draft";
 "models.empty.configs" = "No configurations yet. Add one to choose a model.";
-"models.empty.dirs" = "No folders yet. Add a model folder to switch to it quickly.";
-"models.vision" = "Has a vision tower";
 "models.text_only" = "text only";
 "models.ane_off" = "ANE off";
-"kind.splash" = "Splash package";
-"kind.unknown" = "Unknown";
 
 // The configuration editor.
 "config.name" = "Name";

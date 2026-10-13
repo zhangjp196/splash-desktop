@@ -115,15 +115,15 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       result.persistentCacheRoot = std::filesystem::absolute(std::filesystem::path(value));
     } else if (option == "--idle-release") {
       result.idleReleaseSeconds = parseIdleRelease(value);
-    } else if (option == "--idle-offload-seconds") {
+    } else if (option == "--idle-offload-requests") {
       if (value == "0") {
-        result.idleOffloadSeconds = 0;
+        result.idleOffloadRequests = 0;
       } else {
-        uint32_t seconds = 0;
-        if (!parsePositive(value, seconds) || seconds > 86400)
+        uint32_t requests = 0;
+        if (!parsePositive(value, requests) || requests > 1000000)
           throw UsageError(
-              "--idle-offload-seconds requires a value from 0 to 86400");
-        result.idleOffloadSeconds = seconds;
+              "--idle-offload-requests requires a value from 0 to 1000000");
+        result.idleOffloadRequests = requests;
       }
     } else if (option == "--idle-sleep") {
       if (value != "prevent" && value != "allow")

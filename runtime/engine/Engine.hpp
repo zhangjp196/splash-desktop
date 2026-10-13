@@ -52,11 +52,11 @@ struct EngineConfig final {
   // The prefill checkpoint interval and the resource wait limit.
   uint32_t prefillCheckpointTokens = kPrefillCheckpointTokens;
   double resourceWaitTimeoutMilliseconds = kResourceWaitTimeoutMilliseconds;
-  // Idle cache offload: after this many idle seconds with the disk tier
-  // writable, cached KV pages and states demote to disk and release their
-  // Metal backing; the next request restores them from the tier. Zero (the
-  // default) disables it.
-  uint32_t idleOffloadSeconds = 0;
+  // Idle cache offload: after this many requests have ended, with the disk
+  // tier writable, cached KV pages and states demote to disk and release
+  // their Metal backing; the next request restores them from the tier. Zero
+  // (the default) disables it.
+  uint32_t idleOffloadRequests = 0;
   // Host growth admission, supplied by the runtime governor. Queried while
   // resident lanes drain after a suspension, and when a boundary's snapshot
   // is denied: while growth is paused, extents released for it cannot hold
@@ -173,7 +173,7 @@ struct EngineSnapshot final {
   uint64_t resourceResumptions = 0;
   // All prefill rows after preemption, including an unfinished prompt suffix.
   uint64_t resourceReplayTokens = 0;
-  // Idle offload to the disk tier (EngineConfig::idleOffloadSeconds).
+  // Idle offload to the disk tier (EngineConfig::idleOffloadRequests).
   uint64_t idleOffloadPasses = 0;
   uint64_t idleOffloadBytes = 0;
   // A persistent tier's newest restore points (WriteBehind).
@@ -537,7 +537,7 @@ private:
   void vacateLane(Request &request, bool keepContinuation);
   void release(Request &request);
   void sweepTerminal();
-  // One idle-offload pass; see EngineConfig::idleOffloadSeconds.
+  // One idle-offload pass; see EngineConfig::idleOffloadRequests.
   [[nodiscard]] bool checkIdleOffload(double now);
 
   EngineConfig config_;
@@ -579,8 +579,8 @@ private:
   // lane last released its memory, or the suspension itself met a limit
   // that only freed memory lifts, unlike a host pause.
   bool allocationFailed_ = false;
-  // Bookkeeping for the idle offload timer.
-  std::optional<double> idleSinceMilliseconds_;
+  // Bookkeeping for the idle offload: requests ended since the last pass.
+  uint64_t requestsSinceOffload_ = 0;
   double lastIdleOffloadMilliseconds_ = 0.0;
   EngineSnapshot counters_;
 };

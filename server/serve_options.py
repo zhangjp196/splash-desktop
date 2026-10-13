@@ -133,16 +133,16 @@ def parse_max_cache_disk(value):
 
 
 def parse_idle_offload(value):
-    """--idle-offload-seconds: 0 disables, 1–86400 is a whole number."""
+    """--idle-offload-requests: 0 disables, 1–1000000 is a whole number."""
     try:
-        seconds = int(value)
+        requests = int(value)
     except ValueError:
-        seconds = -1
-    if not 0 <= seconds <= 86400:
+        requests = -1
+    if not 0 <= requests <= 1000000:
         raise argparse.ArgumentTypeError(
-            "must be a whole number of seconds between 0 and 86400"
+            "must be a whole number of requests between 0 and 1000000"
         )
-    return seconds
+    return requests
 
 
 def parse_cache_dir(value):
@@ -430,15 +430,16 @@ SERVE_OPTIONS = (
         ),
     ),
     ServeOption(
-        "--idle-offload-seconds",
+        "--idle-offload-requests",
         "cache",
         dict(
             type=parse_idle_offload,
             default=0,
-            metavar="SECONDS",
-            help="after this many idle seconds, demote cached KV pages and states "
-            "to the SSD tier and release their Metal memory; the next request "
-            "restores them (default: 0, disabled; needs --max-cache-disk)",
+            metavar="REQUESTS",
+            help="after this many requests have ended, demote cached KV pages "
+            "and states to the SSD tier and release their Metal memory; the "
+            "next request restores them (default: 0, disabled; needs "
+            "--max-cache-disk)",
         ),
     ),
     ServeOption(

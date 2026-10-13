@@ -98,7 +98,7 @@ access.
 | `--max-context` | Auto | Set the context limit, e.g. `100K`. See [memory and context](#memory-and-context). |
 | `--kv-format` | `int8` | Target KV storage: `int8` or `bf16`. See [KV cache precision](#kv-cache-precision). |
 | `--idle-release` | `10m` | Time without a request before the engine unwires its memory and frees the weights; the next request restores them. `off` keeps both. See [weight loading](#weight-loading). |
-| `--idle-offload-seconds` | `0` | After this many idle seconds, demote cached KV pages and states to the SSD tier and release their Metal memory; the next request restores them. See [disk cache](#disk-cache). |
+| `--idle-offload-requests` | `0` | After this many requests have ended, demote cached KV pages and states to the SSD tier and release their Metal memory; the next request restores them. See [disk cache](#disk-cache). |
 | `--max-cache-disk` | `0` (off) | SSD quota for cached KV pages and states, e.g. `16G`; kept for the session, or across restarts with `--persistent-cache`. See [SSD cache](#ssd-cache). |
 | `--persistent-cache` | Off | Keep the SSD cache across restarts; needs `--max-cache-disk`. See [persistent cache](#persistent-cache). |
 | `--cache-dir` | `~/Library/Caches/Splash/prefix-cache` | Where `--persistent-cache` keeps its files; needs `--persistent-cache`. |
@@ -2091,13 +2091,13 @@ counters include:
   commands. A waiting request's match is kept across passes and extended only
   past what the cache changed.
 
-`--idle-offload-seconds N` demotes the cached KV pages and states to the tier
-after `N` idle seconds and releases their Metal backing, so a quiet server
-hands the memory back to the host; the next request restores what it needs
-through the ordinary tier restore path, so the cache is offloaded, not lost.
-It runs only while the tier is writable and no command is in flight, at most
-once a second, and does not change the context limit. `/status` reports
-`idle_offload.passes` and `idle_offload.bytes`.
+`--idle-offload-requests N` demotes the cached KV pages and states to the
+tier after `N` requests have ended and releases their Metal backing, so a
+busy server hands memory back to the host as it works; the next request
+restores what it needs through the ordinary tier restore path, so the cache
+is offloaded, not lost. It runs only while the tier is writable and no
+command is in flight, at most once a second, and does not change the context
+limit. `/status` reports `idle_offload.passes` and `idle_offload.bytes`.
 
 ### Native protocol
 
@@ -2403,8 +2403,8 @@ actions. Its settings live in SQLite at
 per setting, `SPLASH_SETTINGS_DB` points it elsewhere): the panel saves each
 edit after a short pause, the next launch opens on what the last one saved, and
 Restore Defaults returns the form to the values the first launch opened with
-(upstream model, port 8000, 8-bit KV, a 16G SSD cache quota and a 10 second
-idle offload and residency). A stored value the launcher would reject falls
+(upstream model, port 8000, 8-bit KV, a 16G SSD cache quota, a 10-request
+idle offload and a 10 second residency). A stored value the launcher would reject falls
 back to its first-launch default rather than starting a server that refuses to
 run. `swift run --selfcheck-settings` exercises the store and that round trip
 headlessly against a temporary database. The

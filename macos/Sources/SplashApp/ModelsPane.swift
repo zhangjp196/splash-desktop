@@ -1,33 +1,29 @@
-import AppKit
 import SwiftUI
 
 /// The models pane: the configurations the app can serve, added and edited
-/// here, and the folders it manages, so a local model is one pick away.
+/// here.
 struct ModelsPane: View {
     @EnvironmentObject private var model: AppModel
-    @State private var draft = ModelConfig(settings: ServerSettings.default)
-    @State private var editing = false
-    @State private var isNew = false
+    @State private var editing: EditingConfig?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 configsSection
-                directoriesSection
             }
             .padding(20)
             .frame(maxWidth: 880, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .sheet(isPresented: $editing) {
+        .sheet(item: $editing) { session in
             ConfigEditor(
-                config: $draft,
-                isNew: isNew,
-                onSave: {
-                    model.save(draft)
-                    editing = false
+                config: session.config,
+                isNew: session.isNew,
+                onSave: { edited in
+                    model.save(edited)
+                    editing = nil
                 },
-                onCancel: { editing = false }
+                onCancel: { editing = nil }
             )
             .frame(minWidth: 560, minHeight: 640)
         }
@@ -39,9 +35,7 @@ struct ModelsPane: View {
                 SectionHeader(L10n.string("models.configs"), systemImage: "slider.horizontal.3")
                 Spacer()
                 Button {
-                    draft = model.newConfig()
-                    isNew = true
-                    editing = true
+                    editing = EditingConfig(config: model.newConfig(), isNew: true)
                 } label: {
                     Label(L10n.string("models.add_config"), systemImage: "plus")
                 }
@@ -52,49 +46,12 @@ struct ModelsPane: View {
                 Card {
                     ForEach(model.configs) { config in
                         ConfigRow(config: config) {
-                            draft = config
-                            isNew = false
-                            editing = true
+                            editing = EditingConfig(config: config, isNew: false)
                         }
                         if config.id != model.configs.last?.id { Divider() }
                     }
                 }
             }
-        }
-    }
-
-    private var directoriesSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                SectionHeader(L10n.string("models.directories"), systemImage: "folder")
-                Spacer()
-                Button {
-                    addDirectories()
-                } label: {
-                    Label(L10n.string("models.add_directory"), systemImage: "plus")
-                }
-            }
-            if model.modelDirectories.isEmpty {
-                EmptyHint(L10n.string("models.empty.dirs"))
-            } else {
-                Card {
-                    ForEach(model.modelDirectories) { directory in
-                        DirectoryRow(directory: directory)
-                        if directory.id != model.modelDirectories.last?.id { Divider() }
-                    }
-                }
-            }
-        }
-    }
-
-    private func addDirectories() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = true
-        panel.prompt = L10n.string("models.add_directory")
-        if panel.runModal() == .OK {
-            for url in panel.urls { model.addModelDirectory(url) }
         }
     }
 }
@@ -192,11 +149,21 @@ private struct ActiveBadge: View {
 }
 
 /// The configuration editor: a name and the whole settings form, in a sheet.
+/// Each instance owns an independent draft, so editing one configuration
+/// never bleeds into another.
 private struct ConfigEditor: View {
-    @Binding var config: ModelConfig
     let isNew: Bool
-    var onSave: () -> Void
+    var onSave: (ModelConfig) -> Void
     var onCancel: () -> Void
+
+    @State private var draft: ModelConfig
+
+    init(config: ModelConfig, isNew: Bool, onSave: @escaping (ModelConfig) -> Void, onCancel: @escaping () -> Void) {
+        self.isNew = isNew
+        self.onSave = onSave
+        self.onCancel = onCancel
+        _draft = State(initialValue: config)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -206,7 +173,7 @@ private struct ConfigEditor: View {
                     .font(.headline)
                 Spacer()
                 Button(L10n.string("config.cancel"), action: onCancel)
-                Button(L10n.string("config.save"), action: onSave)
+                Button(L10n.string("config.save")) { onSave(draft) }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
             }
@@ -216,84 +183,24 @@ private struct ConfigEditor: View {
             Divider()
             HStack(spacing: 8) {
                 Text(L10n.string("config.name")).foregroundStyle(.secondary)
-                TextField("", text: $config.name, prompt: Text(verbatim: config.displayName))
+                TextField("", text: $draft.name, prompt: Text(verbatim: draft.displayName))
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 340)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             Divider()
-            SettingsTabs(settings: $config.settings)
+            SettingsTabs(settings: $draft.settings)
         }
         .frame(minWidth: 660, minHeight: 600)
     }
 }
 
-/// A managed model directory, with what it holds and the ways to use it.
-private struct DirectoryRow: View {
-    @EnvironmentObject private var model: AppModel
-    let directory: ModelDirectory
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: directory.kindValue == .gguf ? "shippingbox" : "cube.fill")
-                .foregroundStyle(.secondary)
-                .frame(width: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(directory.name).font(.body.weight(.medium)).lineLimit(1)
-                    KindBadge(kind: directory.kindValue)
-                    if directory.hasVision {
-                        Image(systemName: "eye").font(.caption2).foregroundStyle(.secondary)
-                            .help(L10n.string("models.vision"))
-                    }
-                }
-                Text(directory.path).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
-            }
-            Spacer()
-            Text(directory.sizeBytes.map(formatBytes) ?? "…")
-                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-            Menu {
-                Button(L10n.string("models.set_target")) { model.useAsTarget(directory) }
-                Button(L10n.string("models.set_draft")) { model.useAsDraft(directory) }
-                Divider()
-                Button(L10n.string("models.reveal")) { model.reveal(directory.path) }
-                Button(L10n.string("models.remove"), role: .destructive) {
-                    model.removeModelDirectory(directory)
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .menuStyle(.borderlessButton)
-            .frame(width: 24)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-    }
-}
-
-/// A small capsule naming a directory's format.
-private struct KindBadge: View {
-    let kind: ModelKind
-
-    var body: some View {
-        Text(kind.label)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 1)
-            .background(color.opacity(0.16), in: Capsule())
-            .foregroundStyle(color)
-    }
-
-    private var color: Color {
-        switch kind {
-        case .mlx: return .blue
-        case .gguf: return .purple
-        case .splash: return .orange
-        case .unknown: return .secondary
-        }
-    }
+/// An independent editing session for one configuration.
+private struct EditingConfig: Identifiable {
+    let id = UUID()
+    var config: ModelConfig
+    let isNew: Bool
 }
 
 /// A titled band above a card.

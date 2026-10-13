@@ -1621,8 +1621,8 @@ def _native_command(args):
         )
     if args.kv_format != "int8":
         command.extend(("--kv-format", args.kv_format))
-    if args.idle_offload_seconds:
-        command.extend(("--idle-offload-seconds", str(args.idle_offload_seconds)))
+    if args.idle_offload_requests:
+        command.extend(("--idle-offload-requests", str(args.idle_offload_requests)))
     if args.idle_release is not None:
         command.extend(
             ("--idle-release", serve_options.idle_release_text(args.idle_release))

@@ -357,14 +357,6 @@ std::optional<double> Engine::nextWakeupMilliseconds() const {
     if (!result || wakeup < *result)
       result = wakeup;
   }
-  // Wake in time for the idle offload, so a quiet server demotes to the disk
-  // tier instead of sleeping past its deadline.
-  if (config_.idleOffloadSeconds && idleSinceMilliseconds_ && idle()) {
-    const double deadline =
-        *idleSinceMilliseconds_ + double(config_.idleOffloadSeconds) * 1000.0;
-    if (!result || deadline < *result)
-      result = deadline;
-  }
   if (const std::optional<double> persist = writeBehind_.nextWakeup();
       persist && (!result || *persist < *result))
     result = persist;
@@ -1424,30 +1416,26 @@ bool Engine::reclaimIdleState(bool keepLane) noexcept {
   return true;
 }
 
-// After `idleOffloadSeconds` of true idleness with a writable disk tier,
-// demote everything reclaimable to disk and release its Metal backing. The
-// next request restores the prefixes it needs through the ordinary tier
-// restore path, so offloading never loses cache that fits the quota.
+// After `idleOffloadRequests` requests have ended, with the disk tier
+// writable, demote everything reclaimable to disk and release its Metal
+// backing. The next request restores the prefixes it needs through the
+// ordinary tier restore path, so offloading never loses cache that fits the
+// quota.
 bool Engine::checkIdleOffload(double now) {
-  if (!config_.idleOffloadSeconds || !cache_.diskTierWritable()) {
-    idleSinceMilliseconds_.reset();
+  if (!config_.idleOffloadRequests || !cache_.diskTierWritable())
     return false;
-  }
-  if (!idle()) {
-    idleSinceMilliseconds_.reset();
+  if (requestsSinceOffload_ < config_.idleOffloadRequests)
     return false;
-  }
-  if (!idleSinceMilliseconds_)
-    idleSinceMilliseconds_ = now;
-  const double deadline =
-      *idleSinceMilliseconds_ + double(config_.idleOffloadSeconds) * 1000.0;
-  if (now < deadline)
+  // The pass takes only what no request holds, and only between commands,
+  // like the memory reclaims it runs: while one is in flight it would race
+  // the pages and buffers it touches.
+  if (pending_)
     return false;
   // A full quota would otherwise make the pass write nothing while still
-  // waking every tick; at most one pass a second.
+  // running on every request; at most one pass a second.
   if (now - lastIdleOffloadMilliseconds_ < 1000.0)
     return false;
-  idleSinceMilliseconds_.reset();
+  requestsSinceOffload_ = 0;
   uint64_t released = 0;
   while (const uint64_t bytes =
              model_.reclaimIdleState(false, model::IdleMemory::BuffersThenCaches))
@@ -1831,6 +1819,8 @@ void Engine::vacateLane(Request &active, bool keepContinuation) {
 void Engine::release(Request &active) {
   active.resourceWait = {};
   active.maskRequestedMilliseconds.reset();
+  // Every end counts toward the next idle offload pass.
+  ++requestsSinceOffload_;
   if (active.lane || scheduler_.suspended(active.request.id)) {
     // A resident lane gives its memory back: what failed for want of it may
     // fit now, so the recovery drain ends and the next attempt finds out.

@@ -46,15 +46,15 @@ struct SettingsTabs: View {
                 ModelField(modelID: $settings.modelID, catalog: Runtime.catalog, disabled: disabled)
             case .local:
                 DirectoryField(
-                    title: L10n.string("field.target"),
-                    path: $settings.modelDirectory,
+                    label: L10n.string("field.target"),
                     prompt: L10n.string("field.target.prompt"),
+                    path: $settings.modelDirectory,
                     disabled: disabled
                 )
                 DirectoryField(
-                    title: L10n.string("field.draft"),
-                    path: $settings.draftDirectory,
+                    label: L10n.string("field.draft"),
                     prompt: L10n.string("field.draft.prompt"),
+                    path: $settings.draftDirectory,
                     disabled: disabled
                 )
             }
@@ -95,7 +95,7 @@ struct SettingsTabs: View {
 
     @ViewBuilder private var idleSection: some View {
         Section {
-            TextField(L10n.string("field.idle_offload"), text: $settings.idleOffloadSeconds)
+            TextField(L10n.string("field.idle_offload"), text: $settings.idleOffloadRequests)
                 .disabled(disabled)
             TextField(L10n.string("field.residency"), text: $settings.residencySeconds)
                 .disabled(disabled)
@@ -169,49 +169,45 @@ private struct ModelField: View {
     }
 }
 
-/// A read-only path with a Choose button; the panel asks for a directory.
+/// A directory path field with a browse button (NSOpenPanel) and a clear button.
 private struct DirectoryField: View {
-    let title: String
-    @Binding var path: String
+    let label: String
     let prompt: String
-    var disabled = false
+    @Binding var path: String
+    let disabled: Bool
 
     var body: some View {
-        LabeledContent(title) {
-            HStack {
-                Text(path.isEmpty ? prompt : path)
-                    .foregroundStyle(path.isEmpty ? .secondary : .primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if !path.isEmpty {
-                    Button {
-                        path = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .help(L10n.string("field.clear"))
-                    .disabled(disabled)
+        HStack(spacing: 6) {
+            TextField(label, text: $path, prompt: Text(prompt))
+                .textFieldStyle(.roundedBorder)
+                .disabled(disabled)
+            Button(L10n.string("field.browse")) {
+                selectFolder()
+            }
+            .disabled(disabled)
+            if !path.isEmpty {
+                Button {
+                    path = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
                 }
-                Button(L10n.string("choose")) { choose() }
-                    .disabled(disabled)
+                .buttonStyle(.borderless)
+                .help(L10n.string("field.clear"))
+                .disabled(disabled)
             }
         }
     }
 
-    private func choose() {
+    private func selectFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = L10n.string("choose")
-        if !path.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
-        }
+        panel.prompt = L10n.string("field.browse")
         if panel.runModal() == .OK, let url = panel.url {
             path = url.path
         }
     }
 }
+

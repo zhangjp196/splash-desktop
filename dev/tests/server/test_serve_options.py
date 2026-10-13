@@ -70,10 +70,10 @@ OPTIONS = {
         {"600": 600.0, "90s": 90.0, "30M": 1800.0, "1.5h": 5400.0, "off": math.inf},
         ("0", "-1m", "inf", "nan", "10x", "m", "never"),
     ),
-    "--idle-offload-seconds": values(
-        "--idle-offload-seconds",
-        {"0": 0, "10": 10, "86400": 86400},
-        ("-1", "86401", "1.5", "many"),
+    "--idle-offload-requests": values(
+        "--idle-offload-requests",
+        {"0": 0, "10": 10, "1000000": 1000000},
+        ("-1", "1000001", "1.5", "many"),
     ),
     "--max-cache-disk": values(
         "--max-cache-disk",

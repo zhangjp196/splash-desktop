@@ -49,7 +49,7 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.maxMemory = "28G"
     edited.maxContext = "100K"
     edited.maxCacheDisk = "0"
-    edited.idleOffloadSeconds = "30"
+    edited.idleOffloadRequests = "30"
     edited.residencySeconds = "45"
     edited.maxRequestSize = "128M"
     edited.apiKey = "selfcheck-key"

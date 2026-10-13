@@ -769,7 +769,7 @@ def main_args(**overrides):
             "max_context": None,
             "max_memory": None,
             "idle_release": None,
-            "idle_offload_seconds": 0,
+            "idle_offload_requests": 0,
             "max_cache_disk": 0,
             "persistent_cache": False,
             "cache_dir": None,

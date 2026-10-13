@@ -14,7 +14,7 @@ struct ServerSettings: Codable, Equatable {
         // The SSD cache tier is on by default, so the idle offload below has
         // somewhere to write; 0 is how the user turns it off.
         static let maxCacheDisk = "16G"
-        static let idleOffloadSeconds = "10"
+        static let idleOffloadRequests = "10"
         static let residencySeconds = "10"
     }
 
@@ -34,7 +34,7 @@ struct ServerSettings: Codable, Equatable {
     var maxMemory = ""
     var maxContext = ""
     var maxCacheDisk = First.maxCacheDisk
-    var idleOffloadSeconds = First.idleOffloadSeconds
+    var idleOffloadRequests = First.idleOffloadRequests
     var residencySeconds = First.residencySeconds
     var maxRequestSize = ""
     var apiKey = ""
@@ -70,7 +70,7 @@ struct ServerSettings: Codable, Equatable {
             ("maxMemory", maxMemory),
             ("maxContext", maxContext),
             ("maxCacheDisk", maxCacheDisk),
-            ("idleOffloadSeconds", idleOffloadSeconds),
+            ("idleOffloadRequests", idleOffloadRequests),
             ("residencySeconds", residencySeconds),
             ("maxRequestSize", maxRequestSize),
             ("apiKey", apiKey),
@@ -98,9 +98,9 @@ struct ServerSettings: Codable, Equatable {
         if let value = rows["maxMemory"] { maxMemory = value }
         if let value = rows["maxContext"] { maxContext = value }
         if let value = rows["maxCacheDisk"] { maxCacheDisk = value }
-        if let value = rows["idleOffloadSeconds"],
-           Self.number(value, in: 0...86_400) != nil {
-            idleOffloadSeconds = value
+        if let value = rows["idleOffloadRequests"],
+           Self.number(value, in: 0...1_000_000) != nil {
+            idleOffloadRequests = value
         }
         if let value = rows["residencySeconds"],
            Self.number(value, in: 1...86_400) != nil {
