@@ -1,10 +1,11 @@
 # Splash
 
-[![CI](https://github.com/incoai/splash/actions/workflows/ci.yml/badge.svg)](https://github.com/incoai/splash/actions/workflows/ci.yml)
+[![CI](https://github.com/zhangjp196/splash-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/zhangjp196/splash-desktop/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Apple%20silicon-black.svg)](#quick-start)
+[![Platform](https://img.shields.io/badge/platform-Apple%20silicon-black.svg)](#desktop-app)
 
-**A local inference engine for Apple silicon, built around the model.**
+**A local inference engine for Apple silicon, built around the model — with a
+desktop app to run it.**
 
 Splash runs coding agents and OpenAI or Anthropic compatible applications on
 one Mac. It combines [DFlash 2](https://inco.ai/blog/dflash2/) speculative
@@ -12,11 +13,46 @@ decoding, specialized Metal kernels, and automatic memory planning, with
 vision, tool calling, and a built-in chat page.
 It reuses cached prefixes and batches concurrent requests automatically.
 
-## Quick start
+## Desktop app
 
-Apple M3 or newer, macOS 26.4 or later, and [Homebrew](https://brew.sh).
-The 4-bit examples need at least 36 GB of unified memory (48 GB recommended);
-24 GB Macs can use [smaller GGUF variants](#models).
+The easiest way to run Splash is the macOS app: one self-contained
+installation that carries the engine, the server, and the runtime, so neither
+installing it nor its first run needs anything but the model you choose.
+
+1. Download the newest `Splash-<version>.dmg` from the
+   [Releases](https://github.com/zhangjp196/splash-desktop/releases) page and
+   drag Splash to Applications.
+2. Open it. The build is unsigned, so the first time you may need to
+   right-click and choose Open.
+3. In the **Models** pane, pick a configuration and press **Start**. The
+   first run downloads the model and its DFlash2 draft and serves on
+   `127.0.0.1:8000`; later starts reuse the downloads.
+4. Open <http://127.0.0.1:8000> in your browser, or point a coding agent at
+   the server.
+
+The window is a sidebar of **Models**, **Live**, and **Log**, with the run
+state and Start and Stop pinned beneath it:
+
+- **Models** — the configurations you have saved, each holding the whole set
+  of server settings: add, edit, and switch between them, or aim one at a
+  model folder on your disk.
+- **Live** — a live panel of decode and prefill rates, request counts, Metal
+  memory, and the caches.
+- **Log** — the server's log.
+
+Closing the window leaves the app and a running server in the menu bar;
+⌘Q stops the server and quits. The labels and the chat page follow the
+system language; English and Simplified Chinese are bundled.
+
+Apple M3 or newer, macOS 26.4 or later. The 4-bit examples need at least
+36 GB of unified memory (48 GB recommended); 24 GB Macs can use
+[smaller GGUF variants](#models).
+[App and disk image details](DEVELOPMENT.md#macos-app-and-disk-image)
+
+## Command line
+
+To run the engine from the terminal, install it with
+[Homebrew](https://brew.sh):
 
 ```bash
 brew install incoai/tap/splash
@@ -168,9 +204,7 @@ ship precompiled, with no Xcode or local tuning required.
 
 ## More
 
-- [macOS app](DEVELOPMENT.md#macos-app-and-disk-image): a DMG with a control
-  panel, a live status panel, and the chat page opened in your browser.
 - [Development](DEVELOPMENT.md): configuration, API, internals, building, and testing.
-- [Issues and feedback](https://github.com/incoai/splash/issues)
+- [Issues and feedback](https://github.com/zhangjp196/splash-desktop/issues)
 - [Apache-2.0](LICENSE). GGUF kernels include MIT-licensed material from
   llama.cpp; see [third-party notices](THIRD_PARTY_NOTICES). Model weights keep their own licenses.
