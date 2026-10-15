@@ -19,10 +19,8 @@
 "help.neural_engine" = "Prefill the dense FFN on the Neural Engine when it is faster (Qwen3.8-27B). Turn off to pass --disable-ane.";
 "field.max_memory" = "Max memory (e.g. 28G)";
 "field.max_context" = "Max context (e.g. 100K)";
-"field.max_cache_disk" = "Disk cache quota (0 = off, e.g. 16G)";
-"field.idle_offload" = "Offload to disk after this many requests (needs the quota above)";
 "field.residency" = "Release weights after idle seconds (LM Studio style)";
-"footer.idle" = "Offloading writes cached prefixes to the SSD tier as requests end, and releasing weights returns GPU memory while the server keeps serving. The residency idle timer restarts on every request.";
+"footer.idle" = "Releasing weights after idle returns GPU memory while the server keeps serving; the cached prefixes spill to disk at the same idle moment, and the next request restores them. Both are automatic, and the idle timer restarts on every request.";
 "control.saved" = "Saved automatically";
 "control.defaults" = "Restore defaults";
 "field.api_key" = "API key";

@@ -52,11 +52,6 @@ struct EngineConfig final {
   // The prefill checkpoint interval and the resource wait limit.
   uint32_t prefillCheckpointTokens = kPrefillCheckpointTokens;
   double resourceWaitTimeoutMilliseconds = kResourceWaitTimeoutMilliseconds;
-  // Idle cache offload: after this many requests have ended, with the disk
-  // tier writable, cached KV pages and states demote to disk and release
-  // their Metal backing; the next request restores them from the tier. Zero
-  // (the default) disables it.
-  uint32_t idleOffloadRequests = 0;
   // Host growth admission, supplied by the runtime governor. Queried while
   // resident lanes drain after a suspension, and when a boundary's state
   // buffers are refused: while growth is paused, extents released for them
@@ -184,7 +179,7 @@ struct EngineSnapshot final {
   uint64_t resourceResumptions = 0;
   // All prefill rows after preemption, including an unfinished prompt suffix.
   uint64_t resourceReplayTokens = 0;
-  // Idle offload to the disk tier (EngineConfig::idleOffloadRequests).
+  // Idle offload to the disk tier (Engine::offloadIdleCache).
   uint64_t idleOffloadPasses = 0;
   uint64_t idleOffloadBytes = 0;
   // A persistent tier's newest restore points (WriteBehind).
@@ -228,6 +223,13 @@ public:
   [[nodiscard]] bool idle() const noexcept {
     return requests_.empty() && !pending_;
   }
+  // Offloads the idle cache: with a writable disk tier and no request held,
+  // demotes cached KV pages and states to disk and releases their Metal
+  // backing, so the next request restores what it needs from the tier. Runs
+  // on the same idle release as the weights (NativeRuntime::releaseIdleWeights),
+  // so no option sets it apart; true when a pass ran. Never runs while a
+  // command is in flight.
+  [[nodiscard]] bool offloadIdleCache(double nowMilliseconds);
   [[nodiscard]] std::optional<double> nextWakeupMilliseconds() const;
   [[nodiscard]] EngineSnapshot snapshot() const;
   [[nodiscard]] ResourceWaitSnapshot resourceWaitSnapshot(double nowMilliseconds) const;
@@ -667,8 +669,6 @@ private:
   void vacateLane(Request &request, bool keepContinuation);
   void release(Request &request);
   void sweepTerminal();
-  // One idle-offload pass; see EngineConfig::idleOffloadRequests.
-  [[nodiscard]] bool checkIdleOffload(double now);
 
   EngineConfig config_;
   Cache &cache_;
@@ -709,8 +709,8 @@ private:
   // lane last released its memory, or the suspension itself met a limit
   // that only freed memory lifts, unlike a host pause.
   bool allocationFailed_ = false;
-  // Bookkeeping for the idle offload: requests ended since the last pass.
-  uint64_t requestsSinceOffload_ = 0;
+  // When the last idle-offload pass started, so a pass the quota or a busy
+  // tier leaves with nothing written does not run on every control tick.
   double lastIdleOffloadMilliseconds_ = 0.0;
   EngineSnapshot counters_;
 };

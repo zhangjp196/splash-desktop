@@ -127,11 +127,17 @@ bool NativeRuntime::flushRestorePoints() {
 }
 
 void NativeRuntime::releaseIdleWeights() {
-  if (config_.monotonicMilliseconds() - idleSinceMilliseconds_ >=
-          1000.0 * idleReleaseSeconds_ &&
-      releaseWeights())
+  const double now = config_.monotonicMilliseconds();
+  if (now - idleSinceMilliseconds_ < 1000.0 * idleReleaseSeconds_)
+    return;
+  if (releaseWeights())
     logLine("Weights released after ", idleReleaseSeconds_,
             " s without a request; the next request restores them");
+  // The cache follows the weights to the disk tier on the same idle release:
+  // every idle prefix is written to disk and its Metal backing released, so
+  // an idle engine holds little and the next request restores what it needs
+  // from the tier. Nothing configures the spill apart; it is automatic.
+  static_cast<void>(core_.offloadIdleCache(now));
 }
 
 bool NativeRuntime::releaseWeights() {

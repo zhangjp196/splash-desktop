@@ -138,16 +138,6 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       result.cacheRoot = std::filesystem::absolute(std::filesystem::path(value));
     } else if (option == "--idle-release") {
       result.idleReleaseSeconds = parseIdleRelease(value);
-    } else if (option == "--idle-offload-requests") {
-      if (value == "0") {
-        result.idleOffloadRequests = 0;
-      } else {
-        uint32_t requests = 0;
-        if (!parsePositive(value, requests) || requests > 1000000)
-          throw UsageError(
-              "--idle-offload-requests requires a value from 0 to 1000000");
-        result.idleOffloadRequests = requests;
-      }
     } else if (option == "--idle-sleep") {
       if (value != "prevent" && value != "allow")
         throw UsageError("--idle-sleep requires prevent or allow");

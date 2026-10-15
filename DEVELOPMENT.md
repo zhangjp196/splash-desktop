@@ -104,7 +104,6 @@ access.
 | `--kv-format` | `int8` | Target KV storage: `int8` or `bf16`. See [KV cache precision](#kv-cache-precision). |
 | `--state-format` | `fp32` | Recurrent state storage: `fp32` or `bf16`. See [state precision](#state-precision). |
 | `--idle-release` | `10m` | Time without a request before the engine unwires its memory and frees the weights; the next request restores them. `off` keeps both, though `POST /v1/memory/release` still frees the weights. See [weight loading](#weight-loading). |
-| `--idle-offload-requests` | `0` | After this many requests have ended, demote cached KV pages and states to the SSD tier and release their Metal memory; the next request restores them. See [disk cache](#disk-cache). |
 | `--max-cache-disk` | `auto` | SSD quota for cached KV pages and states: `auto` follows the volume's free space up to 32 GiB, a size such as `16G` sets the quota, `0` turns the cache off. Kept for the session, or across restarts with `--persistent-cache`. See [SSD cache](#ssd-cache). |
 | `--max-cache-disk-writes` | `0` (no limit) | The most the SSD cache writes a day, e.g. `200G`. See [SSD cache](#ssd-cache). |
 | `--persistent-cache` | Off | Keep the SSD cache across restarts. See [persistent cache](#persistent-cache). |
@@ -2535,11 +2534,12 @@ counters include:
   commands. A waiting request's match is kept across passes and extended only
   past what the cache changed.
 
-`--idle-offload-requests N` demotes the cached KV pages and states to the
-tier after `N` requests have ended and releases their Metal backing, so a
-busy server hands memory back to the host as it works; the next request
-restores what it needs through the ordinary tier restore path, so the cache
-is offloaded, not lost. It runs only while the tier is writable and no
+The cache spills to the tier when the engine goes idle, on the same release
+as the weights (`--idle-release`): every idle KV leaf and state is written to
+the tier and its Metal backing released, so an idle server hands memory back
+to the host without losing the cached prefixes, and the next request restores
+what it needs through the ordinary tier restore path. Nothing configures the
+spill apart; it is automatic. It runs only while the tier is writable and no
 command is in flight, at most once a second, and does not change the context
 limit. `/status` reports `idle_offload.passes` and `idle_offload.bytes`.
 
@@ -2883,8 +2883,8 @@ actions. Its settings live in SQLite at
 per setting, `SPLASH_SETTINGS_DB` points it elsewhere): the panel saves each
 edit after a short pause, the next launch opens on what the last one saved, and
 Restore Defaults returns the form to the values the first launch opened with
-(upstream model, port 8000, 8-bit KV, a 16G SSD cache quota, a 10-request
-idle offload and a 10 second residency). A stored value the launcher would reject falls
+(upstream model, port 8000, 8-bit KV and a 10 second residency; the SSD cache
+quota and the idle spill are automatic, with no field of their own). A stored value the launcher would reject falls
 back to its first-launch default rather than starting a server that refuses to
 run. `swift run --selfcheck-settings` exercises the store and that round trip
 headlessly against a temporary database. The
@@ -2896,10 +2896,10 @@ section offers three modes — a Splash package (its draft is built in), an
 upstream MLX or GGUF model (the installer pairs its draft), or a local
 directory per [local model directories](#local-model-directories) — and the
 remaining sections group the rest by what it decides: the server's port, KV
-format, text-only mode, API key and model aliases; the memory ceiling,
-context length and SSD cache quota; what happens while idle (offloading cached
-prefixes to the SSD tier, and releasing weights back to the GPU the way LM
-Studio unloads a model); and the per-request size and default reasoning
+format, text-only mode, API key and model aliases; the memory ceiling and
+context length; what happens while idle (releasing weights back to the GPU the
+way LM Studio unloads a model, which also spills the cached prefixes to the
+SSD tier); and the per-request size and default reasoning
 effort. The bundle is built
 with Xcode's Swift toolchain, the placeholder icon
 is generated at package time, and neither the app nor the DMG is code-signed:

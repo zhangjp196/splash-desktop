@@ -11,10 +11,9 @@ struct ServerSettings: Codable, Equatable {
         static let modelID = "mlx-community/Qwen3.8-27B-4bit"
         static let port = 8000
         static let kvFormat = "int8"
-        // The SSD cache tier is on by default, so the idle offload below has
-        // somewhere to write; 0 is how the user turns it off.
-        static let maxCacheDisk = "16G"
-        static let idleOffloadRequests = "10"
+        // The SSD cache and its quota are automatic (the engine's own default)
+        // and the idle spill follows the residency below, so neither is
+        // configured here.
         static let residencySeconds = "10"
     }
 
@@ -33,8 +32,6 @@ struct ServerSettings: Codable, Equatable {
     var neuralEngine = true
     var maxMemory = ""
     var maxContext = ""
-    var maxCacheDisk = First.maxCacheDisk
-    var idleOffloadRequests = First.idleOffloadRequests
     var residencySeconds = First.residencySeconds
     var maxRequestSize = ""
     var apiKey = ""
@@ -69,8 +66,6 @@ struct ServerSettings: Codable, Equatable {
             ("neuralEngine", neuralEngine ? "1" : "0"),
             ("maxMemory", maxMemory),
             ("maxContext", maxContext),
-            ("maxCacheDisk", maxCacheDisk),
-            ("idleOffloadRequests", idleOffloadRequests),
             ("residencySeconds", residencySeconds),
             ("maxRequestSize", maxRequestSize),
             ("apiKey", apiKey),
@@ -97,11 +92,6 @@ struct ServerSettings: Codable, Equatable {
         if let value = rows["neuralEngine"] { neuralEngine = value == "1" }
         if let value = rows["maxMemory"] { maxMemory = value }
         if let value = rows["maxContext"] { maxContext = value }
-        if let value = rows["maxCacheDisk"] { maxCacheDisk = value }
-        if let value = rows["idleOffloadRequests"],
-           Self.number(value, in: 0...1_000_000) != nil {
-            idleOffloadRequests = value
-        }
         if let value = rows["residencySeconds"],
            Self.number(value, in: 1...86_400) != nil {
             residencySeconds = value

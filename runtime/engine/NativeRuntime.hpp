@@ -83,8 +83,9 @@ public:
   // At a clean stop (Engine::flushRestorePoints). False until no restore
   // point is left, and once the engine has failed.
   bool flushRestorePoints();
-  // Releases the weights once the engine has held no request for the idle
-  // release since it became ready. Runs between commands, in the control pass.
+  // Releases the weights, and offloads the cache to the disk tier, once the
+  // engine has held no request for the idle release since it became ready.
+  // Runs between commands, in the control pass.
   void releaseIdleWeights();
   void setCompletionNotifier(std::function<void()> notifier) {
     core_.setCompletionNotifier(std::move(notifier));

@@ -171,7 +171,6 @@ bool Engine::tick(double now) {
   model_.checkHealth();
   nextHealthCheckMilliseconds_ = now + kHealthCheckIntervalMilliseconds;
   bool progressed = scheduler_.expireDeadlines(now);
-  progressed = checkIdleOffload(now) || progressed;
   if (now >= drainEndMilliseconds_)
     drainEndMilliseconds_ = 0.0;
   if (cache_.pollTransfers()) {
@@ -1684,15 +1683,13 @@ bool Engine::reclaimIdleState(bool keepLane) noexcept {
   return true;
 }
 
-// After `idleOffloadRequests` requests have ended, with the disk tier
-// writable, demote everything reclaimable to disk and release its Metal
+// On the idle release the weights follow, with the disk tier writable and no
+// request held, demote everything reclaimable to disk and release its Metal
 // backing. The next request restores the prefixes it needs through the
 // ordinary tier restore path, so offloading never loses cache that fits the
 // quota.
-bool Engine::checkIdleOffload(double now) {
-  if (!config_.idleOffloadRequests || !cache_.diskTierWritable())
-    return false;
-  if (requestsSinceOffload_ < config_.idleOffloadRequests)
+bool Engine::offloadIdleCache(double now) {
+  if (!cache_.diskTierWritable() || !idle())
     return false;
   // The pass takes only what no request holds, and only between commands,
   // like the memory reclaims it runs: while one is in flight it would race
@@ -1700,10 +1697,9 @@ bool Engine::checkIdleOffload(double now) {
   if (pending_)
     return false;
   // A full quota would otherwise make the pass write nothing while still
-  // running on every request; at most one pass a second.
+  // running on every control tick; at most one pass a second.
   if (now - lastIdleOffloadMilliseconds_ < 1000.0)
     return false;
-  requestsSinceOffload_ = 0;
   uint64_t released = 0;
   while (const uint64_t bytes =
              model_.reclaimIdleState(false, model::IdleMemory::BuffersThenCaches))
@@ -2110,8 +2106,6 @@ void Engine::vacateLane(Request &active, bool keepContinuation) {
 void Engine::release(Request &active) {
   active.resourceWait = {};
   active.maskRequestedMilliseconds.reset();
-  // Every end counts toward the next idle offload pass.
-  ++requestsSinceOffload_;
   if (active.lane || scheduler_.suspended(active.request.id)) {
     // A resident lane gives its memory back: what failed for want of it may
     // fit now, so the recovery drain ends and the next attempt finds out.

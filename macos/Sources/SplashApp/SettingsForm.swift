@@ -88,15 +88,11 @@ struct SettingsTabs: View {
                 .disabled(disabled)
             TextField(L10n.string("field.max_context"), text: $settings.maxContext)
                 .disabled(disabled)
-            TextField(L10n.string("field.max_cache_disk"), text: $settings.maxCacheDisk)
-                .disabled(disabled)
         }
     }
 
     @ViewBuilder private var idleSection: some View {
         Section {
-            TextField(L10n.string("field.idle_offload"), text: $settings.idleOffloadRequests)
-                .disabled(disabled)
             TextField(L10n.string("field.residency"), text: $settings.residencySeconds)
                 .disabled(disabled)
         } footer: {

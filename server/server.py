@@ -1689,8 +1689,6 @@ def _native_command(args, relaunch_context=None):
         command.extend(("--kv-format", args.kv_format))
     if args.state_format != "fp32":
         command.extend(("--state-format", args.state_format))
-    if args.idle_offload_requests:
-        command.extend(("--idle-offload-requests", str(args.idle_offload_requests)))
     if args.idle_release is not None:
         command.extend(
             ("--idle-release", serve_options.idle_release_text(args.idle_release))

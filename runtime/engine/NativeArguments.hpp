@@ -44,11 +44,6 @@ struct NativeArguments final {
   ops::GdnStateFormat stateFormat = ops::GdnStateFormat::Float32;
   double decodeShare = EngineConfig{}.decodeShare;
   uint32_t maxImagePatches = ops::kMaximumImagePatches;
-  // --idle-offload-requests: after this many requests have ended, with a
-  // writable disk tier, cached KV pages and states demote to disk and
-  // release their Metal backing; the next request restores them from the
-  // tier. Zero disables it.
-  uint32_t idleOffloadRequests = 0;
   // --idle-release SECONDS|off, infinite for off.
   double idleReleaseSeconds = RuntimeResourcesConfig{}.idleReleaseSeconds;
   // --idle-sleep prevent|allow: whether the engine keeps the Mac from sleeping

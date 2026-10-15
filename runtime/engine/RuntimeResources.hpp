@@ -122,8 +122,9 @@ struct RuntimeResourcesConfig {
   // How long the engine keeps its memory without work (--idle-release): every
   // buffer stays wired that long after the last command (the backend's
   // residency keep-alive), and the weights' memory is freed once that long
-  // passes without a request (NativeRuntime::releaseIdleWeights). Infinite
-  // keeps both while the engine runs.
+  // passes without a request, the cache written to the disk tier with them
+  // (NativeRuntime::releaseIdleWeights). Infinite keeps both while the
+  // engine runs.
   double idleReleaseSeconds = metal::kResidencyKeepAliveSeconds;
   // Reclaimable host memory, sampled at every Metal operation during startup
   // and by the governor afterwards.

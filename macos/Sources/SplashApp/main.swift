@@ -48,8 +48,6 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.neuralEngine = false
     edited.maxMemory = "28G"
     edited.maxContext = "100K"
-    edited.maxCacheDisk = "0"
-    edited.idleOffloadRequests = "30"
     edited.residencySeconds = "45"
     edited.maxRequestSize = "128M"
     edited.apiKey = "selfcheck-key"
@@ -88,7 +86,6 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         passed = passed
             && restored.settings == ServerSettings.default
             && store.load() == ServerSettings.default
-            && restored.maxCacheDisk == ServerSettings.First.maxCacheDisk
     }
 
     discard()

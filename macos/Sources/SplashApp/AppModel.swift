@@ -120,8 +120,6 @@ final class AppModel: ObservableObject {
     @Published var neuralEngine = true
     @Published var apiKey = ""
     @Published var servedNames = ""
-    @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
-    @Published var idleOffloadRequests = ServerSettings.First.idleOffloadRequests
     @Published var residencySeconds = ServerSettings.First.residencySeconds
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
@@ -210,8 +208,6 @@ final class AppModel: ObservableObject {
         settings.neuralEngine = neuralEngine
         settings.maxMemory = maxMemory
         settings.maxContext = maxContext
-        settings.maxCacheDisk = maxCacheDisk
-        settings.idleOffloadRequests = idleOffloadRequests
         settings.residencySeconds = residencySeconds
         settings.maxRequestSize = maxRequestSize
         settings.apiKey = apiKey
@@ -265,8 +261,6 @@ final class AppModel: ObservableObject {
         neuralEngine = settings.neuralEngine
         maxMemory = settings.maxMemory
         maxContext = settings.maxContext
-        maxCacheDisk = settings.maxCacheDisk
-        idleOffloadRequests = settings.idleOffloadRequests
         residencySeconds = settings.residencySeconds
         maxRequestSize = settings.maxRequestSize
         apiKey = settings.apiKey
@@ -402,10 +396,8 @@ final class AppModel: ObservableObject {
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += ["--served-model-name", trimmed] }
         }
-        if !maxCacheDisk.isEmpty { arguments += ["--max-cache-disk", maxCacheDisk] }
-        if let requests = Int(idleOffloadRequests), requests > 0, requests <= 1_000_000 {
-            arguments += ["--idle-offload-requests", String(requests)]
-        }
+        // The SSD cache quota is the server's own automatic default and the
+        // idle spill follows --idle-release, so neither is passed here.
         if let seconds = Int(residencySeconds), seconds >= 1, seconds <= 86_400 {
             arguments += ["--idle-release", String(seconds)]
         }

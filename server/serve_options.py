@@ -146,19 +146,6 @@ def parse_max_cache_disk_writes(value):
     return size
 
 
-def parse_idle_offload(value):
-    """--idle-offload-requests: 0 disables, 1–1000000 is a whole number."""
-    try:
-        requests = int(value)
-    except ValueError:
-        requests = -1
-    if not 0 <= requests <= 1000000:
-        raise argparse.ArgumentTypeError(
-            "must be a whole number of requests between 0 and 1000000"
-        )
-    return requests
-
-
 def parse_cache_dir(value):
     if not value.strip():
         raise argparse.ArgumentTypeError("must name a directory")
@@ -475,19 +462,6 @@ SERVE_OPTIONS = (
             help="the most the SSD cache writes a day, e.g. 200G; the state a "
             "conversation resumes from and KV pages pass it (default: 0, no "
             "limit)",
-        ),
-    ),
-    ServeOption(
-        "--idle-offload-requests",
-        "cache",
-        dict(
-            type=parse_idle_offload,
-            default=0,
-            metavar="REQUESTS",
-            help="after this many requests have ended, demote cached KV pages "
-            "and states to the SSD tier and release their Metal memory; the "
-            "next request restores them (default: 0, disabled; needs "
-            "--max-cache-disk)",
         ),
     ),
     ServeOption(

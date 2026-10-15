@@ -19,10 +19,8 @@
 "help.neural_engine" = "在更快时用神经引擎做稠密 FFN 预填充（Qwen3.8-27B）。关闭会传入 --disable-ane。";
 "field.max_memory" = "最大内存（如 28G）";
 "field.max_context" = "最大上下文（如 100K）";
-"field.max_cache_disk" = "磁盘缓存配额（0 关闭，如 16G）";
-"field.idle_offload" = "每多少个请求后落盘到磁盘（需上面的配额）";
 "field.residency" = "空闲释放权重秒数（LM Studio 风格）";
-"footer.idle" = "落盘会把缓存的上下文前缀写入固态盘，释放权重会把显存还给系统而服务继续可用。落盘按请求次数触发，释放权重的空闲计时在每次请求后重新开始。";
+"footer.idle" = "空闲达到该秒数后会释放权重，把显存还给系统而服务继续可用；同一时刻缓存的上下文前缀会自动写入固态盘，下次请求再从磁盘恢复。两者都是自动的，空闲计时在每次请求后重新开始。";
 "control.saved" = "已自动保存";
 "control.defaults" = "恢复默认";
 "field.api_key" = "API 密钥";
