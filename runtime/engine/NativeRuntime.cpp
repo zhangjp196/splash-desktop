@@ -21,11 +21,6 @@ uint64_t systemUnixMicros() noexcept {
       std::chrono::duration_cast<std::chrono::microseconds>(now).count());
 }
 
-double awakeMilliseconds() noexcept {
-  const auto now = AwakeClock::now().time_since_epoch();
-  return std::chrono::duration<double, std::milli>(now).count();
-}
-
 NativeRuntime::NativeRuntime(NativeLoopConfig config, double idleReleaseSeconds,
                              engine::Cache &cache, model::Model &model,
                              ByteSink output, StatusProvider statusProvider,
@@ -132,13 +127,18 @@ bool NativeRuntime::flushRestorePoints() {
 }
 
 void NativeRuntime::releaseIdleWeights() {
-  if (config_.weights->released() || !core_.idle() ||
-      config_.monotonicMilliseconds() - idleSinceMilliseconds_ <
-          1000.0 * idleReleaseSeconds_)
-    return;
+  if (config_.monotonicMilliseconds() - idleSinceMilliseconds_ >=
+          1000.0 * idleReleaseSeconds_ &&
+      releaseWeights())
+    logLine("Weights released after ", idleReleaseSeconds_,
+            " s without a request; the next request restores them");
+}
+
+bool NativeRuntime::releaseWeights() {
+  if (config_.weights->released() || restoreStarted_ || !core_.idle())
+    return false;
   config_.weights->release();
-  logLine("Weights released after ", idleReleaseSeconds_,
-          " s without a request; the next request restores them");
+  return true;
 }
 
 bool NativeRuntime::restoreWeights() {
@@ -260,6 +260,8 @@ bool NativeRuntime::handle(protocol::ClientMessage &message) {
           return handleCancel(typed);
         } else if constexpr (std::is_same_v<T, protocol::MaskResponseFrame>) {
           return handleMask(typed);
+        } else if constexpr (std::is_same_v<T, protocol::ReleaseRequestFrame>) {
+          return handleRelease(typed);
         } else {
           return handleStatus(typed);
         }
@@ -304,6 +306,8 @@ bool NativeRuntime::handleRequest(protocol::RequestFrame &request) {
     engineRequest.sampling = request.sampling;
     engineRequest.constraint = request.constraint;
     engineRequest.flags = request.flags & kRequestFlagBits;
+    engineRequest.thinkingBudget = request.thinkingBudget;
+    engineRequest.cacheSalt = request.cacheSalt;
     engineRequest.returnProgress =
         request.flags & protocol::kReturnProgressFlag;
     engineRequest.deadlineMilliseconds =
@@ -356,6 +360,18 @@ bool NativeRuntime::handleStatus(const protocol::StatusRequestFrame &status) {
   if (json.empty())
     throw std::runtime_error("empty status document");
   return send(protocol::StatusJsonEvent{status.correlationId, std::move(json)});
+}
+
+// The weights go back now, as at the end of the idle release, when the engine
+// holds no request and no restore is under way, with the idle release on or
+// off; otherwise nothing changes. The answer is the status document either way,
+// whose weights section tells the caller which: `released` and not `restoring`
+// when they are given back, as a restore leaves them `released` until its last
+// image is written back.
+bool NativeRuntime::handleRelease(const protocol::ReleaseRequestFrame &release) {
+  if (releaseWeights())
+    logLine("Weights released on request; the next request restores them");
+  return handleStatus(protocol::StatusRequestFrame{release.correlationId});
 }
 
 bool NativeRuntime::handleMaskIssue(protocol::ProtocolIssue issue) {
@@ -522,7 +538,9 @@ void NativeRuntime::maskRequested(uint64_t requestId,
 
 void NativeRuntime::completed(uint64_t requestId, EngineFinishReason reason,
                               uint32_t promptTokens, uint32_t completionTokens,
-                              std::span<const float> optionLogits) {
+                              uint32_t deduplicatedTokens,
+                              std::span<const float> optionLogits,
+                              const SpeculativeCounts &speculation) {
   RequestTelemetry &telemetry = telemetry_.at(requestId);
   double now = config_.monotonicMilliseconds();
   // A request that ends before it starts counts from its arrival.
@@ -534,7 +552,8 @@ void NativeRuntime::completed(uint64_t requestId, EngineFinishReason reason,
       durationMicros(started, first),
       telemetry.firstTokenMilliseconds ? durationMicros(first, now) : 0,
       durationMicros(telemetry.arrivedMilliseconds, now),
-      std::vector<float>(optionLogits.begin(), optionLogits.end())});
+      std::vector<float>(optionLogits.begin(), optionLogits.end()),
+      deduplicatedTokens, speculation});
   ended(requestId, now);
 }
 

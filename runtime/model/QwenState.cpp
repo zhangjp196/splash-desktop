@@ -130,6 +130,24 @@ QwenGdnCell::~QwenGdnCell() {
   tracker_->bytes.fetch_sub(actualAllocatedBytes_, std::memory_order_relaxed);
 }
 
+QwenStateReservation::QwenStateReservation(std::shared_ptr<QwenBufferPool> pool,
+                                           QwenCachedBuffers buffers)
+    : pool_(std::move(pool)), buffers_(std::move(buffers)) {
+  if (!pool_ || !buffers_.gdn || !buffers_.window)
+    throw std::invalid_argument("state reservation buffers are empty");
+}
+
+QwenStateReservation::~QwenStateReservation() {
+  if (buffers_.gdn)
+    pool_->give(std::move(buffers_));
+}
+
+const QwenCachedBuffers &QwenStateReservation::buffers() const {
+  if (!buffers_.gdn)
+    throw std::logic_error("a sealed state reservation holds no buffers");
+  return buffers_;
+}
+
 QwenCompositeState::QwenCompositeState(std::shared_ptr<QwenBufferPool> pool,
                                        QwenCachedBuffers buffers,
                                        CompositeStateLayout layout,
@@ -150,7 +168,9 @@ QwenCompositeState::QwenCompositeState(CompositeStateLayout layout,
 
 std::unique_ptr<StateOffload>
 QwenCompositeState::offload(std::function<void()> completion) const {
-  if (!canOffload()) return {};
+  // The caller asked the write budget; the write needs what a copy in use
+  // does.
+  if (!canOffload(true)) return {};
   return write(file_, staging_,
                stateSpans(buffers_.gdn->buffers(), buffers_.window->buffer()),
                layout_, lengths_, std::move(completion));
@@ -187,7 +207,8 @@ std::unique_ptr<StateOffload> QwenCompositeState::write(
 
 std::unique_ptr<StateOffload>
 QwenCompositeState::persist(std::function<void()> completion) const {
-  if (!canOffload())
+  // As for offload().
+  if (!canOffload(true))
     return {};
   auto disk = file_->acquire();
   if (!disk)
@@ -197,7 +218,7 @@ QwenCompositeState::persist(std::function<void()> completion) const {
   const auto spans = stateSpans(buffers_.gdn->buffers(), buffers_.window->buffer());
   auto operation = file_->write(std::move(disk), {spans.begin(), spans.end()},
                                 std::move(completion));
-  // As for write(): only a failed write of its own closes the file.
+  // As for write(): nothing stops the file between the check and the write.
   if (!operation)
     throw std::logic_error("the state file closed with no state write in flight");
   return std::make_unique<FileOffload>(operation, std::move(copy), nullptr);
@@ -209,10 +230,8 @@ void QwenCompositeState::label(std::vector<std::byte> label) const {
 }
 
 QwenCompositeState::~QwenCompositeState() {
-  if (!pool_ || !pool_->open)
-    return;
-  pool_->cells.push_back(std::move(buffers_.gdn));
-  pool_->windows.push_back(std::move(buffers_.window));
+  if (pool_)
+    pool_->give(std::move(buffers_));
 }
 
 QwenStateStorage::QwenStateStorage(metal::MetalBackend &backend,
@@ -287,7 +306,7 @@ QwenStateStorage::tryActivateLane(uint32_t index, uint64_t requestId, uint64_t e
       !admission)
     return admission;
   current.cells = std::move(buffers);
-  current.metadata = {requestId, 0, {}};
+  current.metadata = {requestId, 0, {}, 0};
   return {};
 }
 
@@ -314,6 +333,15 @@ void QwenStateStorage::clearForColdStart(uint32_t index) {
   if (target.metadata.lengths != QwenLogicalLengths{})
     throw std::logic_error("a cold start begins at logical length zero");
   clear(current(index).stateBase, "cold-start GDN state");
+}
+
+void QwenStateStorage::clearDraftRings(uint32_t index) {
+  const Lane &target = lane(index);
+  requireAssigned(target);
+  for (const DFlashDraftRingLayer &layer : target.cells.draft->layers()) {
+    clear(layer.keys, "draft ring keys");
+    clear(layer.values, "draft ring values");
+  }
 }
 
 uint64_t QwenStateStorage::releaseOneIdle(bool keepLane) noexcept {
@@ -369,8 +397,17 @@ void QwenStateStorage::updateLengths(uint32_t index,
 
 void QwenStateStorage::swapParity(uint32_t index) {
   Lane &current = lane(index);
-  requireAssigned(current);
+  requireCommitted(current);
   current.metadata.activeParity ^= 1;
+}
+
+void QwenStateStorage::swapDecodeParity(uint32_t index, uint32_t retainedRows) {
+  Lane &current = lane(index);
+  requireAssigned(current);
+  if (!retainedRows || retainedRows > ExecutionLimits::targetVerifyRows)
+    throw std::invalid_argument("a decode step retains one to all of its rows");
+  current.metadata.activeParity ^= 1;
+  current.metadata.pendingRows = retainedRows;
 }
 
 std::shared_ptr<const QwenCompositeState>
@@ -380,25 +417,53 @@ QwenStateStorage::snapshot(uint32_t index) {
 
 std::shared_ptr<const QwenCompositeState>
 QwenStateStorage::snapshot(uint32_t index, QwenLogicalLengths lengths) {
-  const GdnParityBuffers &gdn = current(index);
+  // Before anything is allocated; copyState() and seal() check again.
+  requireCommitted(lane(index));
   validateLengths(lengths, true);
+  const std::shared_ptr<QwenStateReservation> reservation = reserve();
+  if (!reservation)
+    return nullptr;
+  copyState(index, *reservation);
+  return seal(*reservation, lengths);
+}
+
+std::shared_ptr<QwenStateReservation> QwenStateStorage::reserve() {
   Buffers buffers;
   if (!acquire(1, false, "qwen-state-cache", buffers))
     return nullptr;
-  QwenCachedBuffers cached{std::move(buffers.gdn[0]), std::move(buffers.window)};
-  copyExact(cached.gdn->buffers().stateBase, gdn.stateBase,
+  return std::shared_ptr<QwenStateReservation>(new QwenStateReservation(
+      pool_, {std::move(buffers.gdn[0]), std::move(buffers.window)}));
+}
+
+void QwenStateStorage::copyState(uint32_t index, QwenStateReservation &reservation) const {
+  requireCommitted(lane(index));
+  copyExact(reservation.buffers().gdn->buffers().stateBase, current(index).stateBase,
             "cached GDN state");
-  copyExact(cached.window->buffer(), window(index), "cached context window");
+  copyWindow(index, reservation);
+}
+
+void QwenStateStorage::copyWindow(uint32_t index, QwenStateReservation &reservation) const {
+  copyExact(reservation.buffers().window->buffer(), window(index), "cached context window");
+}
+
+std::shared_ptr<const QwenCompositeState>
+QwenStateStorage::seal(QwenStateReservation &reservation, QwenLogicalLengths lengths) const {
+  if (reservation.pool_ != pool_)
+    throw std::invalid_argument("a state reservation of another storage");
+  validateLengths(lengths, true);
+  // A reservation sealed before holds no buffers, which the state refuses.
   return std::shared_ptr<const QwenCompositeState>(new QwenCompositeState(
-      pool_, std::move(cached), layout_, lengths, file_, staging_));
+      pool_, std::exchange(reservation.buffers_, {}), layout_, lengths, file_, staging_));
 }
 
 std::unique_ptr<StateOffload>
 QwenStateStorage::snapshotToDisk(uint32_t index, std::function<void()> completion) {
   const Lane &source = lane(index);
-  requireAssigned(source);
+  requireCommitted(source);
   validateLengths(source.metadata.lengths, true);
-  if (!canSnapshotToDisk())
+  // The caller asked the write budget; the write needs what a copy in use
+  // does.
+  if (!canSnapshotToDisk(true))
     return {};
   return QwenCompositeState::write(file_, staging_,
                                    stateSpans(current(index), window(index)),
@@ -484,7 +549,7 @@ std::unique_ptr<StateRestore> QwenStateStorage::beginRestore(
   if (!typed || typed->layout_ != layout_)
     throw std::invalid_argument("incompatible Qwen composite state");
   validateLengths(typed->lengths_, true);
-  requireAssigned(lane(index));
+  requireCommitted(lane(index));
   if (!typed->disk_) {
     restore(index, *typed, restoreDraftState);
     committed();
@@ -558,6 +623,12 @@ void QwenStateStorage::requireAssigned(const Lane &current) {
   if (!current.metadata.assigned()) {
     throw std::logic_error("Qwen lane is not assigned");
   }
+}
+
+void QwenStateStorage::requireCommitted(const Lane &current) {
+  requireAssigned(current);
+  if (current.metadata.pendingRows)
+    throw std::logic_error("Qwen lane state has decoded rows pending");
 }
 
 } // namespace splash::model

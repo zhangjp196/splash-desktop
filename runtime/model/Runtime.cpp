@@ -5,6 +5,7 @@
 #include "model/RuntimeArenas.hpp"
 
 #include "metal/CommandGraph.hpp"
+#include "metal/abi/GDN.h"
 #include "ops/AneFfn.hpp"
 #include "ops/Linear.hpp"
 #include "ops/PagedAttention.hpp"
@@ -51,7 +52,7 @@ public:
 
   DeferredMetalTicket(CommandTicket ticket, Completion completion,
                       bool representativePrefillTiming = true)
-      : ticket_(std::move(ticket)), completion_(std::move(completion)),
+      : completion_(std::move(completion)), ticket_(std::move(ticket)),
         representativePrefillTiming_(representativePrefillTiming) {}
 
   bool ready() const noexcept override { return ticket_.ready(); }
@@ -80,8 +81,11 @@ public:
   }
 
 private:
-  CommandTicket ticket_;
+  // Before the ticket, which goes first: a ticket dropped unconsumed waits for
+  // its command before the completion lets go of what the command writes,
+  // such as the state reservations of its items.
   Completion completion_;
+  CommandTicket ticket_;
   double wallMilliseconds_ = 0.0;
   bool representativePrefillTiming_;
 };
@@ -251,6 +255,15 @@ struct Runtime::Impl {
     // RequestFlag bits.
     uint32_t flags = 0;
     std::optional<uint32_t> pendingToken;
+    // While the request thinks under a budget (ModelRequest::thinkingBudget),
+    // that budget with the thinking tokens it may still select and, once
+    // they ran out, the tokens of its end it selected; none once thinking
+    // ended.
+    struct Thinking final {
+      ThinkingBudget budget;
+      uint32_t endSelected = 0;
+    };
+    std::optional<Thinking> thinking;
     // A constrained request's final prompt row, held from its prompt's end
     // until its first token is selected under its first mask, suspensions
     // included. Composite cache state never stores it; every cache hit
@@ -280,6 +293,10 @@ struct Runtime::Impl {
     // What its activation took from a cached state: the images that end
     // there were left out (ModelRequest::restoredTokens).
     uint32_t restoredTokens = 0;
+    // A step of it found a row that is not finite (ModelStepResult::failure):
+    // its lane's draft rings may hold such rows, so the lane returns them
+    // cleared (QwenStateStorage::clearDraftRings).
+    bool resultInvalid = false;
   };
 
   struct DecodeLaneResult final {
@@ -288,6 +305,9 @@ struct Runtime::Impl {
     uint32_t accepted = 0;
     uint32_t currentAnchor = 0;
     uint32_t maximumRetained = 0;
+    // The draft proposals the lane's thinking end replaced, which its
+    // speculation counts leave out.
+    uint32_t endDrafts = 0;
     // Why the lane's selection is unusable (invalidSelection), found before
     // any lane commits.
     std::string failure;
@@ -349,7 +369,8 @@ struct Runtime::Impl {
   explicit Impl(RuntimeContext value)
       : backend(value.backend),
         model(value.model),
-        geometry(RuntimeGeometry::from(value.model, value.kvPages.layout().format)),
+        geometry(RuntimeGeometry::from(value.model, value.kvPages.layout().format,
+                                       value.stateStorage.layout().target.format)),
         operators(value.operators),
         kvPages(value.kvPages),
         states(value.stateStorage),
@@ -362,7 +383,7 @@ struct Runtime::Impl {
                         value.model.target)),
         draftModel(value.model.draft, value.backend, operators),
         aneFfn(value.aneFfn) {
-    if (states.layout() != model.stateLayout() ||
+    if (states.layout() != model.stateLayout(states.layout().target.format) ||
         kvPages.layout() != model.targetKvLayout(kvPages.layout().format)) {
       throw std::invalid_argument(
           "model runtime resources do not match the loaded model");
@@ -377,15 +398,19 @@ struct Runtime::Impl {
   // Warmup selects greedily, so the first sampled, penalized or constrained
   // request would compile the policy's kernels inside its TTFT and stall the
   // engine meanwhile; compile them now. A sampled, penalized and constrained
-  // lane and a greedy one reach every kernel the first-token and verify
-  // selections dispatch.
+  // lane whose thinking budget ran out and a greedy one reach every kernel
+  // the first-token and verify selections and the drafts they verify
+  // dispatch.
   void preparePolicyPipelines() const {
-    const ops::SamplingPolicy sampled{.topK = 0,
-                                      .temperature = 1.0F,
-                                      .topP = 0.95F,
-                                      .constrained = true,
-                                      .penalties = {1.1F, 0.5F, 0.5F},
-                                      .minP = 0.05F};
+    const std::array<uint32_t, 1> end{};
+    const ops::SamplingPolicy sampled{
+        .topK = 0,
+        .temperature = 1.0F,
+        .topP = 0.95F,
+        .constrained = true,
+        .penalties = {1.1F, 0.5F, 0.5F},
+        .minP = 0.05F,
+        .thinkingCutoff = ops::ThinkingCutoff{.end = end}};
     const std::array<ops::SamplingPolicy, 2> policies{sampled, {}};
     const std::array<uint32_t, 2> stateLanes{0, 1};
     const ops::PenaltyTable penalties{penaltyTable, stateLanes};
@@ -393,6 +418,9 @@ struct Runtime::Impl {
     sampling.addInitial(graph, policies, samplingBuffers(2), 0,
                         geometry.target.stopTokens[0],
                         geometry.target.stopTokens[1], penalties);
+    sampling.addThinkingDrafts(
+        graph, policies,
+        decodeArena->batchSlice(DecodeTensor::ProposedTokens, 2));
     sampling.addVerify(graph, policies, samplingBuffers(2),
                        geometry.target.stopTokens[0],
                        geometry.target.stopTokens[1], penalties);
@@ -503,13 +531,15 @@ struct Runtime::Impl {
   // the rows kept for reuse past the cache's bytes: the state returned owns
   // them. Boundaries deeper inside an image keep only the embedding cache.
   std::shared_ptr<const CompositeState>
-  holdStraddledRows(const Request &entry, std::shared_ptr<const CompositeState> state) {
+  holdStraddledRows(const Request &entry, uint64_t boundary,
+                    std::shared_ptr<const CompositeState> state) {
     std::erase_if(stateHolds, [](const std::weak_ptr<const HeldState> &hold) {
       return hold.expired();
     });
-    const uint64_t boundary = states.metadata(entry.stateLane).lengths.targetTokens;
     for (const ImageState &image : entry.images) {
-      // The chunk that ended at the boundary encoded the image it reached.
+      // The command that reached the boundary encoded the image, and a
+      // command's states are held before it releases the rows of the images
+      // it finished.
       if (image.span.offset >= boundary || image.span.end() <= boundary)
         continue;
       if (image.span.end() - boundary >= kv::kPageTokens)
@@ -537,6 +567,14 @@ struct Runtime::Impl {
     embeddingCache.erase(entry);
     embeddingCacheBytes -= bytes;
     return bytes;
+  }
+
+  // A resident request returns its lane's buffers to the pool.
+  void releaseLane(Request &entry) {
+    if (entry.resultInvalid)
+      states.clearDraftRings(entry.stateLane);
+    states.releaseLane(entry.stateLane, entry.id);
+    pageTableBindings[entry.stateLane] = {};
   }
 
   // A request lets go of its images; the encoded ones stay in the cache.
@@ -866,11 +904,35 @@ struct Runtime::Impl {
             entry.sampling.frequencyPenalty};
   }
 
+  // A constrained request's grammar admits the end of its thinking only where
+  // the thinking text may end, such as between whole characters. Until the
+  // end starts, it waits for a row whose mask admits its first token, and
+  // the request thinks past its budget meanwhile: a few tokens, such as the
+  // rest of a character the budget's last token began. The end's other
+  // tokens are text, which the grammar admits after its first.
+  static bool thinkingEndWaits(const Request &entry) noexcept {
+    return entry.constraint == ConstraintMode::TokenMask &&
+           !entry.thinking->endSelected;
+  }
+
+  // A selection's rows select the request's next tokens in order, so with n
+  // thinking tokens left, its row n starts the budget's end, and once none
+  // are left, its row 0 goes on with the end's tokens not yet selected; an
+  // end that waits (thinkingEndWaits) starts at the first of those rows
+  // whose mask admits it.
   static ops::SamplingPolicy samplingPolicy(const Request &entry) noexcept {
+    std::optional<ops::ThinkingCutoff> cutoff;
+    if (entry.thinking) {
+      const ThinkingBudget &budget = entry.thinking->budget;
+      cutoff = ops::ThinkingCutoff{
+          budget.tokens,
+          std::span(budget.end).subspan(entry.thinking->endSelected),
+          budget.alsoEnds, thinkingEndWaits(entry)};
+    }
     return {entry.sampling.topK, entry.sampling.temperature,
             entry.sampling.topP, entry.constraint == ConstraintMode::TokenMask,
             (entry.flags & RequestIgnoreEndOfSequence) != 0,
-            samplingPenalties(entry), entry.sampling.minP};
+            samplingPenalties(entry), entry.sampling.minP, cutoff};
   }
 
   ops::SamplingBuffers samplingBuffers(uint32_t lanes) const {
@@ -916,26 +978,60 @@ struct Runtime::Impl {
   // The one place a token the target selected becomes the pending anchor:
   // tokens are one step's selections in order, the new anchor last. The
   // command that selected them has completed, and the next one that reads
-  // the lane's words is encoded after this.
+  // the lane's words is encoded after this. Each token counts against the
+  // thinking budget until one ends thinking, and once the budget ran out,
+  // it is the end's next token, or while the end waits (thinkingEndWaits),
+  // a thinking token past the budget; the cutoff (samplingPolicy) never lets
+  // thinking run past it otherwise.
   void commitSelected(Request &entry, std::span<const uint32_t> tokens) {
     if (tokens.empty())
       throw std::logic_error("no selected token to commit");
     if (samplingPenalties(entry).active())
       ops::Sampling::countPenaltyTokens(penaltyWords(entry.stateLane), tokens);
+    for (const uint32_t token : tokens) {
+      if (!entry.thinking)
+        break;
+      ThinkingBudget &budget = entry.thinking->budget;
+      if (token == budget.end.back() || token == budget.alsoEnds)
+        entry.thinking.reset();
+      else if (budget.tokens)
+        --budget.tokens;
+      else if (token == budget.end[entry.thinking->endSelected])
+        ++entry.thinking->endSelected;
+      else if (!thinkingEndWaits(entry))
+        throw std::logic_error("thinking went past its budget");
+    }
     entry.pendingToken = tokens.back();
   }
 
   // A selection outside the vocabulary is the sampling kernels' sentinel for a
-  // non-finite logit row: a numerical outcome of this request, which it reports
-  // as its lane failure (ModelStepResult::failure) so the batch survives.
-  [[nodiscard]] std::string invalidSelection(std::span<const uint32_t> tokens) const {
-    const auto found = std::find_if(tokens.begin(), tokens.end(), [&](uint32_t token) {
+  // logit row with no selectable token, its admitted logits all NaN or -inf: a
+  // numerical outcome of this request, which it reports as its lane failure
+  // (ModelStepResult::failure) so the batch survives. The message counts the
+  // row's non-finite logits, which the lane's completed command left in its
+  // logits rows (row k selected token k).
+  [[nodiscard]] std::string invalidSelection(std::span<const uint32_t> tokens,
+                                             uint32_t lane) const {
+    const auto found = std::ranges::find_if(tokens, [&](uint32_t token) {
       return token >= geometry.target.vocabularySize;
     });
     if (found == tokens.end())
       return {};
-    return "target selected out-of-vocabulary token " + std::to_string(*found) +
-           " from a non-finite logit row";
+    const uint32_t vocabulary = geometry.target.vocabularySize;
+    const std::span<const float> row(
+        contents<float>(decodeArena->get(lane, DecodeTensor::Logits),
+                        "unselectable logits") +
+            uint64_t(found - tokens.begin()) * vocabulary,
+        vocabulary);
+    uint32_t nan = 0, positive = 0, negative = 0;
+    for (const float logit : row) {
+      nan += std::isnan(logit);
+      positive += logit == std::numeric_limits<float>::infinity();
+      negative += logit == -std::numeric_limits<float>::infinity();
+    }
+    return "target logits had no selectable token: " + std::to_string(nan) +
+           " NaN, " + std::to_string(positive) + " +inf and " +
+           std::to_string(negative) + " -inf of " + std::to_string(vocabulary);
   }
 
   // A lane of an initial selection, whose final prompt row is at row 0 of
@@ -1037,9 +1133,11 @@ struct Runtime::Impl {
         const uint32_t token = initialToken(selection.lane);
         // A failed selection leaves no anchor: the engine ends the request
         // before any output, and the other lanes go on.
-        result.failure = invalidSelection({&token, 1});
-        if (!result.failure.empty())
+        result.failure = invalidSelection({&token, 1}, selection.lane);
+        if (!result.failure.empty()) {
+          entry.resultInvalid = true;
           continue;
+        }
         commitSelected(entry, {&token, 1});
         entry.maskWords.clear();
         entry.finalTargetHidden.clear();
@@ -1060,6 +1158,18 @@ struct Runtime::Impl {
         static_cast<uint32_t>(pages.size()));
   }
 
+  // A state a lane's prefill command captures
+  // (ModelBatchItem::stateCaptures): the buffers it is written to, which the
+  // command's items hold, its row among the lane's rows, whether it lies at
+  // the command's end, where the completion copies the lane's state rather
+  // than the command writing it, and the lengths it is sealed with.
+  struct RaggedStateCapture final {
+    QwenStateReservation *reservation = nullptr;
+    uint32_t row = 0;
+    bool atEnd = false;
+    QwenLogicalLengths lengths;
+  };
+
   struct RaggedPrefillSequence final {
     Request *entry = nullptr;
     const ModelBatchItem *item = nullptr;
@@ -1072,6 +1182,7 @@ struct Runtime::Impl {
     ChunkedPrefillParams chunk;
     MetalBuffer pageTable;
     DispatchDraftCapturePlan captures;
+    std::vector<RaggedStateCapture> stateCaptures;
   };
 
   struct RaggedPrefillBatch final {
@@ -1084,6 +1195,55 @@ struct Runtime::Impl {
                          uint32_t rows, uint32_t width) const {
     return backend.view(tensor, bytesFor<uint16_t>(uint64_t{begin} * width),
                         bytesFor<uint16_t>(uint64_t{rows} * width));
+  }
+
+  // The states a lane's command captures, ascending in (logicalPosition,
+  // logicalPosition + tokenCount]. Each one's lengths fold the command's
+  // draft captures below it into the lane's, as a command ending there would
+  // commit them, and must be a cached state's: page-aligned with the whole
+  // draft window, which a plan that does not give one fails here, before
+  // anything is submitted.
+  std::vector<RaggedStateCapture>
+  stateCaptures(const ModelBatchItem &item, const DispatchDraftCapturePlan &draftCaptures,
+                const QwenLogicalLengths &lengths) const {
+    std::vector<RaggedStateCapture> result;
+    result.reserve(item.stateCaptures.size());
+    const uint64_t end = item.logicalPosition + item.tokenCount;
+    uint64_t previous = item.logicalPosition;
+    for (const StateCapture &capture : item.stateCaptures) {
+      auto *reservation = dynamic_cast<QwenStateReservation *>(capture.reservation.get());
+      if (!reservation || capture.tokens <= previous || capture.tokens > end)
+        throw std::invalid_argument("invalid prefill state capture");
+      QwenLogicalLengths captured = lengths;
+      captured.targetTokens = capture.tokens;
+      for (const DispatchDraftCaptureSpan &span : draftCaptures)
+        if (span.absoluteBegin < capture.tokens)
+          captured = advanceDraftContext(captured, capture.tokens, span.absoluteBegin,
+                                         std::min(span.absoluteEnd, capture.tokens),
+                                         span.resetDraftState, true);
+      states.validateLengths(captured, true);
+      result.push_back({reservation, static_cast<uint32_t>(capture.tokens - item.logicalPosition),
+                        capture.tokens == end, captured});
+      previous = capture.tokens;
+    }
+    return result;
+  }
+
+  // The states a lane's committed command captured, in order: one at the
+  // command's end takes the lane's new cell and window, as snapshot() does,
+  // and the others the command wrote. Each holds its straddled image rows
+  // before the command releases the rows of the images it finished.
+  std::vector<std::shared_ptr<const CompositeState>>
+  sealStates(const Request &entry, std::span<const RaggedStateCapture> captures) {
+    std::vector<std::shared_ptr<const CompositeState>> sealed;
+    sealed.reserve(captures.size());
+    for (const RaggedStateCapture &capture : captures) {
+      if (capture.atEnd)
+        states.copyState(entry.stateLane, *capture.reservation);
+      sealed.push_back(holdStraddledRows(entry, capture.lengths.targetTokens,
+                                         states.seal(*capture.reservation, capture.lengths)));
+    }
+    return sealed;
   }
 
   RaggedPrefillBatch
@@ -1107,12 +1267,17 @@ struct Runtime::Impl {
           metadata.lengths.targetTokens != item.logicalPosition) {
         throw std::logic_error("ragged prefill state length is not exact");
       }
+      // The chunk reads the lane's state from its current cell, which a
+      // decode step leaves without the rows it retained.
+      if (metadata.pendingRows)
+        throw std::logic_error("ragged prefill lane has decoded rows pending");
       if (item.logicalPosition == 0)
         states.clearForColdStart(entry.stateLane);
       if (item.tokenCount > kPrefillRows - batch.rows) {
         throw std::invalid_argument("ragged prefill exceeds actual-row budget");
       }
       auto captures = activeDraftCaptures(entry, item);
+      std::vector<RaggedStateCapture> captured = stateCaptures(item, captures, metadata.lengths);
       const uint32_t capturedRows = captureRows(captures);
       const uint32_t attentionStride =
           ((item.tokenCount + kTileRows - 1) / kTileRows) * kTileRows;
@@ -1123,7 +1288,7 @@ struct Runtime::Impl {
       batch.sequences.push_back({&entry, &item, lane, batch.rows,
                                  attentionStride, queryOffset, kvOffset,
                                  batch.capturedRows, chunk, std::move(pageTable),
-                                 std::move(captures)});
+                                 std::move(captures), std::move(captured)});
       entries[lane] = &entry;
       batch.rows += item.tokenCount;
       batch.capturedRows += capturedRows;
@@ -1187,12 +1352,17 @@ struct Runtime::Impl {
                                  states.draft(lane), rebuild.rows, rebuild.begin);
   }
 
+  // A state captured inside a command takes the context rows the command
+  // captures below its boundary into its window, which holds the lane's
+  // older rows (prefillAsync); the lane's window then goes on to rows that
+  // overwrite them. A state at the command's end takes the lane's window.
   void addRaggedDraftContext(CommandGraph &graph,
                              const RaggedPrefillBatch &batch) {
     if (!batch.capturedRows)
       return;
     std::array<DFlashPrefillSpan, kLaneCount * 2> spans{};
     uint32_t spanCount = 0;
+    std::vector<DFlashWindowCapture> windowCaptures;
     for (const RaggedPrefillSequence &sequence : batch.sequences) {
       for (const DispatchDraftCaptureSpan &capture : sequence.captures) {
         DFlashPrefillSpan &span = spans.at(spanCount++);
@@ -1202,13 +1372,41 @@ struct Runtime::Impl {
         span.ring = states.draft(sequence.entry->stateLane);
         span.window = states.window(sequence.entry->stateLane);
       }
+      for (const RaggedStateCapture &state : sequence.stateCaptures) {
+        if (state.atEnd)
+          continue;
+        const uint64_t boundary = state.lengths.targetTokens;
+        for (const DispatchDraftCaptureSpan &draft : sequence.captures)
+          if (draft.absoluteBegin < boundary)
+            windowCaptures.push_back(
+                {sequence.captureBegin + draft.compactDestinationRow,
+                 static_cast<uint32_t>(std::min<uint64_t>(draft.absoluteEnd, boundary) -
+                                       draft.absoluteBegin),
+                 draft.absoluteBegin, state.reservation->buffers().window->buffer()});
+      }
     }
     draftModel.addContextPrefill(graph, draftPrefillBuffers(*prefillArena), batch.capturedRows,
-                                 std::span(spans).first(spanCount));
+                                 std::span(spans).first(spanCount), windowCaptures);
   }
 
-  // Returns each lane's draft captures, indexed like `entries`.
-  std::array<DispatchDraftCapturePlan, kLaneCount>
+  // What a ragged prefill command leaves its completion, by lane, indexed
+  // like `entries`: its draft captures, the states it captures, and the last
+  // row of the target's final hidden it computed, which no later work in the
+  // command writes.
+  struct RaggedPrefillOutputs final {
+    std::array<DispatchDraftCapturePlan, kLaneCount> captures{};
+    std::array<std::vector<RaggedStateCapture>, kLaneCount> stateCaptures{};
+    std::array<MetalBuffer, kLaneCount> lastRows{};
+  };
+
+  // Whether every value of a BF16 row is finite.
+  static bool finiteRow(const MetalBuffer &row) {
+    const uint16_t *bits = contents<uint16_t>(row, "final prefill row");
+    return std::none_of(bits, bits + row.sizeBytes() / sizeof(uint16_t),
+                        [](uint16_t value) { return (value & 0x7F80) == 0x7F80; });
+  }
+
+  RaggedPrefillOutputs
   encodeRaggedPrefillGraph(CommandGraph &graph,
                            std::span<const ModelBatchItem> items,
                            std::array<Request *, kLaneCount> &entries) {
@@ -1244,6 +1442,8 @@ struct Runtime::Impl {
     std::vector<MetalBuffer> convolutionOut(stateBindingCount);
     std::vector<MetalBuffer> recurrentIn(stateBindingCount);
     std::vector<MetalBuffer> recurrentOut(stateBindingCount);
+    // Each lane's states inside its rows, in their reservations' cells.
+    std::array<std::vector<QwenTargetStateCapture>, kLaneCount> stateCaptures;
     for (uint32_t lane = 0; lane < batch.sequences.size(); ++lane) {
       const RaggedPrefillSequence &sequence = batch.sequences[lane];
       QwenTargetPrefillSequence &destination = modelSequences[lane];
@@ -1272,6 +1472,13 @@ struct Runtime::Impl {
         recurrentIn[stateBegin + layer] = in.recurrentLayers[layer];
         recurrentOut[stateBegin + layer] = out.recurrentLayers[layer];
       }
+      for (const RaggedStateCapture &capture : sequence.stateCaptures) {
+        if (capture.atEnd)
+          continue;
+        const GdnParityBuffers &cell = capture.reservation->buffers().gdn->buffers();
+        stateCaptures[lane].push_back({capture.row, cell.convolutionLayers, cell.recurrentLayers});
+      }
+      destination.stateCaptures = stateCaptures[lane];
       destination.captureCount = sequence.captures.size();
       for (uint32_t index = 0; index < sequence.captures.size(); ++index) {
         const DispatchDraftCaptureSpan &capture = sequence.captures[index];
@@ -1323,10 +1530,15 @@ struct Runtime::Impl {
           graph, std::span(selections).first(selectionCount),
           static_cast<uint32_t>(batch.sequences.size()));
     }
-    std::array<DispatchDraftCapturePlan, kLaneCount> captures{};
-    for (const RaggedPrefillSequence &sequence : batch.sequences)
-      captures[sequence.lane] = sequence.captures;
-    return captures;
+    RaggedPrefillOutputs outputs;
+    for (const RaggedPrefillSequence &sequence : batch.sequences) {
+      outputs.captures[sequence.lane] = sequence.captures;
+      outputs.stateCaptures[sequence.lane] = sequence.stateCaptures;
+      outputs.lastRows[sequence.lane] =
+          prefillU16(finalHidden, sequence.rowBegin + sequence.item->tokenCount - 1, 1,
+                     geometry.target.hiddenSize);
+    }
+    return outputs;
   }
 
   void prepareDecodeLane(Request &entry, const ModelBatchItem &item,
@@ -1447,6 +1659,8 @@ struct Runtime::Impl {
          d(DecodeTensor::SamplingUniforms), d(DecodeTensor::ProposedTokens),
          d(DecodeTensor::ProposalProbs)},
         std::span(anchors).first(lanes), std::span(policies).first(lanes));
+    sampling.addThinkingDrafts(graph, std::span(policies).first(lanes),
+                               d(DecodeTensor::ProposedTokens));
   }
 
   void encodeTargetVerifyBatchForward(CommandGraph &graph,
@@ -1463,13 +1677,8 @@ struct Runtime::Impl {
     };
 
     std::array<ChunkedPrefillParams, kLaneCount> chunks{};
-    const uint32_t gdnLayers = geometry.target.stateLayout.layers;
     const uint32_t attentionLayers =
         geometry.target.kvLayout.attentionLayers;
-    std::vector<MetalBuffer> gdnPacked(gdnLayers);
-    std::vector<MetalBuffer> gdnMixed(gdnLayers);
-    std::vector<MetalBuffer> gdnDecay(gdnLayers);
-    std::vector<MetalBuffer> gdnBeta(gdnLayers);
     std::vector<MetalBuffer> chunkKeys(attentionLayers);
     std::vector<MetalBuffer> chunkValues(attentionLayers);
     QwenTargetVerifyBuffers buffers;
@@ -1492,10 +1701,8 @@ struct Runtime::Impl {
     buffers.finalHidden = d(DecodeTensor::FinalHidden);
     buffers.logits = d(DecodeTensor::Logits);
     buffers.denseGateScratch = decodeArena->gateScratch();
-    buffers.gdnPacked = gdnPacked;
-    buffers.gdnMixed = gdnMixed;
-    buffers.gdnDecay = gdnDecay;
-    buffers.gdnBeta = gdnBeta;
+    buffers.gdnPacked = d(DecodeTensor::GdnPacked);
+    buffers.gdnTape = decodeArena->batchSlice(DecodeTensor::GdnTape, kLaneCount);
     buffers.chunkKeys = chunkKeys;
     buffers.chunkValues = chunkValues;
     buffers.moe = decodeArena->moeScratch(storage);
@@ -1510,15 +1717,12 @@ struct Runtime::Impl {
       buffers.currentGdnStates[lane] = states.current(entry.stateLane).stateBase;
       buffers.nextGdnStates[lane] = states.next(entry.stateLane).stateBase;
     }
-    for (uint32_t layer = 0; layer < gdnLayers; ++layer) {
-      gdnPacked[layer] = decodeArena->gdnBatchSlice(
-          DecodeTensor::VerifyPackedBase, layer, storage);
-      gdnMixed[layer] = decodeArena->gdnBatchSlice(
-          DecodeTensor::VerifyMixedBase, layer, storage);
-      gdnDecay[layer] = decodeArena->gdnBatchSlice(
-          DecodeTensor::VerifyDecayBase, layer, storage);
-      gdnBeta[layer] = decodeArena->gdnBatchSlice(
-          DecodeTensor::VerifyBetaBase, layer, storage);
+    for (uint32_t lane = 0; lane < lanes; ++lane) {
+      const uint32_t stateLane = entries[lane]->stateLane;
+      const QwenLaneMetadata &metadata = states.metadata(stateLane);
+      buffers.gdnTapeLanes[lane] = {decodeArena->gdnTapeSlot(stateLane, metadata.activeParity),
+                                    decodeArena->gdnTapeSlot(stateLane, metadata.activeParity ^ 1),
+                                    metadata.pendingRows};
     }
     for (uint32_t layer = 0; layer < attentionLayers; ++layer) {
       chunkKeys[layer] = decodeArena->attentionBatchSlice(
@@ -1629,31 +1833,6 @@ struct Runtime::Impl {
         decodeArena->batchSlice(DecodeTensor::InputTokens, lanes), lanes);
   }
 
-  void encodeBatchGdnCommit(CommandGraph &graph,
-                            std::span<Request *const> lanes) {
-    if (lanes.empty() || lanes.size() > kLaneCount)
-      throw std::invalid_argument("invalid GDN commit batch");
-    const uint32_t width = static_cast<uint32_t>(lanes.size());
-    std::array<MetalBuffer, kLaneCount> currentStates;
-    std::array<MetalBuffer, kLaneCount> nextStates;
-    for (uint32_t lane = 0; lane < kLaneCount; ++lane) {
-      Request *entry = lanes[std::min(lane, width - 1)];
-      if (!entry)
-        throw std::invalid_argument("empty GDN commit lane");
-      currentStates[lane] = states.current(entry->stateLane).stateBase;
-      nextStates[lane] = states.next(entry->stateLane).stateBase;
-    }
-    targetModel.addStateCommit(
-        graph,
-        {decodeArena->gdnStorage(DecodeTensor::VerifyPackedBase),
-         decodeArena->gdnStorage(DecodeTensor::VerifyMixedBase),
-         decodeArena->gdnStorage(DecodeTensor::VerifyDecayBase),
-         decodeArena->gdnStorage(DecodeTensor::VerifyBetaBase), currentStates,
-         nextStates,
-         decodeArena->batchSlice(DecodeTensor::RetainedCount, width)},
-        width);
-  }
-
   // A stop token or the last budgeted token needs no target work of its own:
   // the next cycle would only echo it as output. Emitting it as soon as it is
   // selected saves that cycle; the engine is told it has no KV row.
@@ -1690,7 +1869,8 @@ struct Runtime::Impl {
       // token, so every retained token is checked.
       const uint32_t *targetTokens = contents<uint32_t>(
           d(DecodeTensor::OutputTokens), "target output tokens");
-      laneResult.failure = invalidSelection({targetTokens, laneResult.retained});
+      laneResult.failure =
+          invalidSelection({targetTokens, laneResult.retained}, lane);
     }
 
     std::vector<ModelStepResult> results;
@@ -1701,6 +1881,7 @@ struct Runtime::Impl {
       if (!laneResult.failure.empty()) {
         // The cycle's state and tokens are not committed; the engine ends
         // the request.
+        entry.resultInvalid = true;
         entry.maskWords.clear();
         entry.verifyMaskInFlight = false;
         results.push_back({.requestId = entry.id,
@@ -1716,7 +1897,7 @@ struct Runtime::Impl {
       output.insert(output.end(), targetTokens,
                     targetTokens + (laneResult.retained - 1));
 
-      states.swapParity(entry.stateLane);
+      states.swapDecodeParity(entry.stateLane, laneResult.retained);
       const uint64_t nextLength =
           items[lane].logicalPosition + laneResult.retained;
       states.updateLengths(
@@ -1728,13 +1909,17 @@ struct Runtime::Impl {
       commitSelected(entry, {targetTokens, laneResult.retained});
       entry.maskWords.clear();
       entry.verifyMaskInFlight = false;
+      // The end replaced the first proposals, which acceptance keeps as far
+      // as the lane retains them; the draft proposed the others.
+      const uint32_t accepted =
+          std::min(laneResult.accepted, laneResult.retained - 1);
       results.push_back({entry.id,
                          0,
                          std::move(output),
                          false,
                          DecodeStage::Regular,
-                         kDraftProposalTokens,
-                         std::min(laneResult.accepted, laneResult.retained - 1)});
+                         kDraftProposalTokens - laneResult.endDrafts,
+                         accepted - std::min(accepted, laneResult.endDrafts)});
       ModelStepResult &result = results.back();
       if (entry.generatedTokens < entry.maxNewTokens)
         emitTerminalAnchor(entry, result);
@@ -1840,7 +2025,6 @@ struct Runtime::Impl {
                                               {entries.data(), lanes_.size()});
           impl_.encodeBatchAcceptance(commit, {entries.data(), lanes_.size()},
                                       {maximumRetained.data(), lanes_.size()});
-          impl_.encodeBatchGdnCommit(commit, {entries.data(), lanes_.size()});
           impl_.encodeDraftStateCommitBatch(
               commit, {entries.data(), lanes_.size()}, items_);
           submit(commit);
@@ -1953,6 +2137,35 @@ void Runtime::beginColdRequest(const ModelRequest &request,
   }
 }
 
+std::vector<uint8_t> Runtime::pendingGdnRows(uint64_t requestId) const {
+  const Impl::Request &entry = impl_->request(requestId);
+  if (!entry.resident)
+    throw std::logic_error("request is not resident");
+  const QwenLaneMetadata &metadata = impl_->states.metadata(entry.stateLane);
+  const ops::GdnShape shape = impl_->geometry.target.gdnShape();
+  const uint32_t kvWidth = (shape.keyHeads + shape.valueHeads) * shape.headDimension;
+  // Each field holds one row after another; the offset and row bytes of each.
+  const std::array<std::pair<uint64_t, uint64_t>, 4> fields{{
+      {0, uint64_t{shape.convolutionDimension} * 2},
+      {gdn_tape_kv_offset(shape.convolutionDimension), uint64_t{kvWidth} * 2},
+      {gdn_tape_decay_offset(shape.convolutionDimension, kvWidth), uint64_t{shape.valueHeads} * 4},
+      {gdn_tape_beta_offset(shape.convolutionDimension, kvWidth, shape.valueHeads),
+       uint64_t{shape.valueHeads} * 2},
+  }};
+  // The latest step's slot is the one the lane's next step folds from.
+  const uint8_t *slot =
+      contents<const uint8_t>(impl_->decodeArena->batchSlice(DecodeTensor::GdnTape, kLaneCount),
+                              "GDN tape") +
+      impl_->decodeArena->gdnTapeSlot(entry.stateLane, metadata.activeParity);
+  std::vector<uint8_t> rows;
+  for (uint32_t layer = 0; layer < impl_->geometry.target.stateLayout.layers; ++layer) {
+    const uint8_t *tape = slot + layer * ops::gdnTapeLayerBytes(shape);
+    for (const auto &[offset, rowBytes] : fields)
+      rows.insert(rows.end(), tape + offset, tape + offset + metadata.pendingRows * rowBytes);
+  }
+  return rows;
+}
+
 StateAdmission Runtime::begin(const ModelRequest &request) {
   Impl::VisionRollback rollback{*impl_, impl_->vision};
   StateAdmission admission = admitIdleLane(
@@ -1966,8 +2179,7 @@ void Runtime::suspend(uint64_t requestId) {
   if (!entry.resident || entry.verifyMaskInFlight) {
     throw std::logic_error("Qwen request cannot be suspended");
   }
-  impl_->states.releaseLane(entry.stateLane, requestId);
-  impl_->pageTableBindings[entry.stateLane] = {};
+  impl_->releaseLane(entry);
   impl_->releaseImages(entry);
   entry.draftContextPlan.reset();
   entry.draftRebuild.reset();
@@ -2015,6 +2227,8 @@ StateAdmission Runtime::beginAt(const ModelRequest &request, uint32_t stateLane)
   entry.sampling = request.sampling;
   entry.constraint = request.constraint;
   entry.flags = request.flags;
+  if (request.thinkingBudget)
+    entry.thinking = Impl::Request::Thinking{*request.thinkingBudget};
   entry.scoreTokens.assign(request.scoreTokens.begin(),
                            request.scoreTokens.end());
   std::vector<Impl::ImageState> images;
@@ -2131,7 +2345,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
       draws[lane] = impl_->request(items[lane].requestId).rngCounter;
     impl_->aneFfn->begin();
   }
-  const auto captures = impl_->encodeRaggedPrefillGraph(graph, items, entries);
+  const auto outputs = impl_->encodeRaggedPrefillGraph(graph, items, entries);
   const bool encodesImages = std::any_of(
       entries.begin(), entries.begin() + items.size(), [](const auto *entry) {
         return std::any_of(entry->images.begin(), entry->images.end(),
@@ -2139,20 +2353,32 @@ Runtime::prefillAsync(const BatchPlan &plan,
                              return image.rows && image.rows->encoding;
                            });
       });
+  // A state captured inside the command starts from the lane's context
+  // window as the command finds it, whose older rows the command's own rows
+  // overwrite. It is copied once, before the command runs: a rerun (below)
+  // would find the window the failed run wrote.
+  for (uint32_t lane = 0; lane < items.size(); ++lane)
+    for (const Impl::RaggedStateCapture &capture : outputs.stateCaptures[lane])
+      if (!capture.atEnd)
+        impl_->states.copyWindow(entries[lane]->stateLane, *capture.reservation);
+  // The completion's items hold the states' reservations until the ticket
+  // has waited for every run of the command.
   std::vector<ModelBatchItem> copiedItems(items.begin(), items.end());
   CommandTicket command =
       impl_->aneFfn ? impl_->aneFfn->commit(graph, std::move(completion))
                     : impl_->backend.submitCommandAsync(graph.command(), std::move(completion));
   Impl *impl = impl_.get();
-  auto finish = [impl, entries, captures, draws,
+  auto finish = [impl, entries, outputs, draws,
                  items = std::move(copiedItems)](CommandTiming &timing) mutable {
     // A chunk whose Neural Engine work failed holds no usable outputs, and
     // the split has stopped: the GPU runs the chunk again alone, which
     // computes what it would have the first time. Nothing of the chunk is
     // committed before the code below: state parity, lengths, the selected
-    // token and the image rows' state. The rerun writes the same KV and draft
-    // rows; a restored lane's rebuild may read window slots the failed run
-    // filled with its own rows, but each belongs to a position the rerun
+    // token, the states it captures and the image rows' state. The rerun
+    // writes the same KV and draft rows, and the same cells and window rows of
+    // the states it captures, whose older window rows were copied before the
+    // first run; a restored lane's rebuild may read window slots the failed
+    // run filled with its own rows, but each belongs to a position the rerun
     // captures again, and that capture overwrites the ring slot after the
     // rebuild; clearForColdStart clears the current state again, which
     // neither command writes; synchronizedPageTable writes nothing at the
@@ -2172,25 +2398,14 @@ Runtime::prefillAsync(const BatchPlan &plan,
       timing.wallSeconds += rerun.wallSeconds;
       ++impl->counters.aneFfnReruns;
     }
-    for (uint32_t lane = 0; lane < items.size(); ++lane) {
-      const uint64_t chunkEnd = items[lane].logicalPosition + items[lane].tokenCount;
-      for (Impl::ImageState &image : entries[lane]->images) {
-        if (!image.rows)
-          continue;
-        Impl::ImageRows &rows = *image.rows;
-        if (rows.encoding) {
-          rows.encoding = false;
-          rows.encoded = true;
-          rows.pixels = MetalBuffer{};
-        }
-        // Its last row is injected: the cache owns the rows from now on, so
-        // reclaim can free them while the request decodes.
-        if (image.span.end() <= chunkEnd) {
-          impl->retain(image.rows);
-          image.rows.reset();
-        }
-      }
-    }
+    // A row that is not finite, of the chunk or of the state it computed
+    // from, reaches the lane's last row through the recurrent state, and
+    // through attention on a GPU whose tile weighs non-finite keys and values
+    // (some families' tiles give them zero weight, for every reader). Such a
+    // lane commits nothing of the chunk.
+    std::array<bool, kLaneCount> finite{};
+    for (uint32_t lane = 0; lane < items.size(); ++lane)
+      finite[lane] = Impl::finiteRow(outputs.lastRows[lane]);
 
     std::vector<ModelStepResult> results;
     results.reserve(items.size());
@@ -2198,15 +2413,24 @@ Runtime::prefillAsync(const BatchPlan &plan,
       Impl::Request &entry = *entries[lane];
       const ModelBatchItem &item = items[lane];
       const uint64_t nextLength = item.logicalPosition + item.tokenCount;
+      if (!finite[lane]) {
+        // The chunk's state is not committed; the engine ends the request.
+        entry.resultInvalid = true;
+        results.push_back({.requestId = entry.id,
+                           .consumedPromptTokens = item.tokenCount,
+                           .failure = "target prefill row is not finite"});
+        continue;
+      }
       // The anchor this chunk selects when it completes a generation prompt.
       std::optional<uint32_t> selected;
       if (nextLength == entry.promptTokens && !entry.replayingGeneration &&
           entry.scoreTokens.empty() && entry.constraint == ConstraintMode::None) {
         selected = impl->initialToken(lane);
-        if (std::string failure = impl->invalidSelection({&*selected, 1});
+        if (std::string failure = impl->invalidSelection({&*selected, 1}, lane);
             !failure.empty()) {
           // The chunk's state is not committed; the engine ends the
           // request.
+          entry.resultInvalid = true;
           results.push_back({.requestId = entry.id,
                              .consumedPromptTokens = item.tokenCount,
                              .failure = std::move(failure)});
@@ -2217,7 +2441,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
       entry.draftRebuild.reset();
       QwenLogicalLengths lengths = impl->states.metadata(entry.stateLane).lengths;
       lengths.targetTokens = nextLength;
-      for (const DispatchDraftCaptureSpan &capture : captures[lane]) {
+      for (const DispatchDraftCaptureSpan &capture : outputs.captures[lane]) {
         lengths = Impl::advanceDraftContext(lengths, nextLength,
                                             capture.absoluteBegin,
                                             capture.absoluteEnd,
@@ -2230,7 +2454,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
       }
       impl->counters.targetPrefillRows += item.tokenCount;
       impl->counters.draftContextRowsAvoided +=
-          item.tokenCount - Impl::captureRows(captures[lane]);
+          item.tokenCount - Impl::captureRows(outputs.captures[lane]);
       impl->states.updateLengths(entry.stateLane, lengths);
       entry.promptComplete = nextLength == entry.promptTokens;
       ModelStepResult result{entry.id, item.tokenCount, {}, false,
@@ -2252,6 +2476,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
               // before cache publication or output and the batch survives.
               result.scoreLogits.clear();
               result.failure = "score logit is not finite";
+              entry.resultInvalid = true;
               break;
             }
             result.scoreLogits.push_back(logit);
@@ -2259,7 +2484,10 @@ Runtime::prefillAsync(const BatchPlan &plan,
           result.finished = true;
         } else if (selected) {
           impl->commitSelected(entry, {&*selected, 1});
-          impl->emitTerminalAnchor(entry, result);
+          // Unless it ends the request, the first token waits for the first
+          // decode cycle; the engine sends it to the client now.
+          if (!impl->emitTerminalAnchor(entry, result))
+            result.firstToken = entry.pendingToken;
         } else {
           // The first token waits for the request's first mask. A replay
           // never gets here: it keeps its stage, and a request that holds
@@ -2271,7 +2499,43 @@ Runtime::prefillAsync(const BatchPlan &plan,
       }
       if (entry.promptComplete)
         entry.replayingGeneration = false;
+      if (result.failure.empty())
+        result.capturedStates = impl->sealStates(entry, outputs.stateCaptures[lane]);
       results.push_back(std::move(result));
+    }
+
+    // The images of the lanes whose rows are finite are encoded, and an
+    // image whose last row is injected goes to the cache, after the states
+    // above took the rows they hold.
+    for (uint32_t lane = 0; lane < items.size(); ++lane) {
+      if (!finite[lane])
+        continue;
+      const uint64_t chunkEnd = items[lane].logicalPosition + items[lane].tokenCount;
+      for (Impl::ImageState &image : entries[lane]->images) {
+        if (!image.rows)
+          continue;
+        Impl::ImageRows &rows = *image.rows;
+        if (rows.encoding) {
+          rows.encoding = false;
+          rows.encoded = true;
+          rows.pixels = MetalBuffer{};
+        }
+        // Its last row is injected: the cache owns the rows from now on, so
+        // reclaim can free them while the request decodes.
+        if (image.span.end() <= chunkEnd) {
+          impl->retain(image.rows);
+          image.rows.reset();
+        }
+      }
+    }
+    // The images the command encoded for those lanes alone stay to be
+    // encoded again by their next use.
+    for (uint32_t lane = 0; lane < items.size(); ++lane) {
+      if (finite[lane])
+        continue;
+      for (Impl::ImageState &image : entries[lane]->images)
+        if (image.rows && image.rows->encoding)
+          image.rows->encoding = false;
     }
     impl->counters.lastPrefillWallSeconds = timing.wallSeconds;
     impl->counters.totalPrefillWallSeconds += timing.wallSeconds;
@@ -2342,6 +2606,8 @@ Runtime::decodeAsync(const BatchPlan &plan,
     laneResult.request = &entry;
     laneResult.currentAnchor = *entry.pendingToken;
     laneResult.maximumRetained = std::min(remaining, kDecodeRows);
+    if (const auto cutoff = Impl::samplingPolicy(entry).thinkingCutoff)
+      laneResult.endDrafts = cutoff->replacedProposals();
 
     impl_->prepareDecodeLane(entry, item, lane);
     requests[lane] = &entry;
@@ -2375,7 +2641,6 @@ Runtime::decodeAsync(const BatchPlan &plan,
   impl_->encodeTargetVerifyBatchPolicy(commandGraph, entries);
   impl_->encodeBatchAcceptance(commandGraph, entries,
                                {maximumRetained.data(), width});
-  impl_->encodeBatchGdnCommit(commandGraph, entries);
   impl_->encodeDraftStateCommitBatch(commandGraph, entries, items);
 
   std::vector<ModelBatchItem> copiedItems(items.begin(), items.end());
@@ -2397,20 +2662,29 @@ uint32_t Runtime::residentLane(uint64_t requestId) {
   return entry.stateLane;
 }
 
+std::shared_ptr<StateReservation> Runtime::reserveState(uint64_t requestId, uint32_t tokens) {
+  static_cast<void>(residentLane(requestId));
+  if (!tokens || tokens % kv::kPageTokens)
+    throw std::invalid_argument("a state boundary is page-aligned");
+  return impl_->states.reserve();
+}
+
 std::shared_ptr<const CompositeState> Runtime::snapshot(uint64_t requestId) {
-  std::shared_ptr<const CompositeState> state =
-      impl_->states.snapshot(residentLane(requestId));
+  const uint32_t lane = residentLane(requestId);
+  std::shared_ptr<const CompositeState> state = impl_->states.snapshot(lane);
   if (!state)
     return state;
-  return impl_->holdStraddledRows(impl_->request(requestId), std::move(state));
+  return impl_->holdStraddledRows(impl_->request(requestId),
+                                  impl_->states.metadata(lane).lengths.targetTokens,
+                                  std::move(state));
 }
 
 uint64_t Runtime::snapshotBytes() const noexcept {
   return impl_->states.layout().cachedBytes();
 }
 
-bool Runtime::canSnapshotToDisk() const noexcept {
-  return impl_->states.canSnapshotToDisk();
+bool Runtime::canSnapshotToDisk(bool inUse) const noexcept {
+  return impl_->states.canSnapshotToDisk(inUse);
 }
 
 std::unique_ptr<StateOffload>
@@ -2472,17 +2746,15 @@ void Runtime::end(uint64_t requestId) {
   if (found == impl_->requests.end())
     return;
   impl_->releaseImages(found->second);
-  if (found->second.resident) {
-    impl_->states.releaseLane(found->second.stateLane, requestId);
-    impl_->pageTableBindings[found->second.stateLane] = {};
-  }
+  if (found->second.resident)
+    impl_->releaseLane(found->second);
   impl_->requests.erase(found);
 }
 
 namespace {
 
-// A warmup step whose lane failed (a non-finite logit row) fails the warmup
-// there, with the lane's reason.
+// A warmup step whose lane failed (a row or logit that is not finite) fails
+// the warmup there, with the lane's reason.
 void requireLanesSucceeded(std::span<const ModelStepResult> results) {
   for (const ModelStepResult &result : results)
     if (!result.failure.empty())
@@ -2756,17 +3028,20 @@ std::vector<ops::SwiGluProjections> aneFfnLayers(const LoadedModel &model) {
 void withPrefillArena(
     MetalBackend &backend, const LoadedModel &model, const ops::ExecutionPlans &operators, kv::Format format,
     const std::function<void(const ops::PrefillFfnBuffers &, const std::array<MetalBuffer, 2> &)> &use) {
-  const PrefillArena arena(backend, RuntimeGeometry::from(model, format), operators);
+  // A prefill arena holds no state cell, so either state format sizes it.
+  const PrefillArena arena(backend, RuntimeGeometry::from(model, format, ops::GdnStateFormat::Float32),
+                           operators);
   const QwenTargetPrefillBuffers buffers = prefillBuffers(arena);
   use(buffers.ffn(), buffers.hidden);
 }
 
 ModelMemoryPlan plannedRuntimeMemory(const LoadedModel &model,
                                      const ops::ExecutionPlans &operators,
-                                     kv::Format format) {
+                                     kv::Format kvFormat,
+                                     ops::GdnStateFormat stateFormat) {
   requireCompatibleModel(model);
-  const RuntimeGeometry geometry = RuntimeGeometry::from(model, format);
-  return {model.stateLayout().laneBytes(),
+  const RuntimeGeometry geometry = RuntimeGeometry::from(model, kvFormat, stateFormat);
+  return {model.stateLayout(stateFormat).laneBytes(),
           plannedPrefillBytes(geometry, operators),
           plannedDecodeBytes(geometry, operators)};
 }

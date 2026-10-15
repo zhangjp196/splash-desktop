@@ -22,6 +22,9 @@ struct MoeShape final {
   // The format of most routed expert weights, which picks the expert tile on
   // Apple9 (moeGgufTile).
   uint32_t expertFormat = GGUF_FMT_COUNT;
+  // Whether every routed and shared expert weight is in a format the
+  // register tile takes (quant_register_format).
+  bool registerFormats = true;
 
   [[nodiscard]] constexpr bool valid() const noexcept {
     return hiddenSize && hiddenSize % 256 == 0 && experts && experts <= SPLASH_MOE_EXPERT_SLOTS &&
@@ -154,8 +157,9 @@ enum class MoeGgufTile : uint8_t { Staged, Register };
 // IQ3_XXS experts, and the IQ2, IQ3_XXS and IQ1 formats alone, 4-21% faster
 // staged at B1-B4, where Q4_K/Q5_K, Q2_K and IQ4_XS experts take 3-34% longer.
 [[nodiscard]] inline MoeGgufTile moeGgufTile(GpuFamilyClass family, MoeShape shape) noexcept {
-  return family == GpuFamilyClass::Apple9 && !apple9StagesFormat(shape.expertFormat) ? MoeGgufTile::Register
-                                                                                      : MoeGgufTile::Staged;
+  return family == GpuFamilyClass::Apple9 && shape.registerFormats && !apple9StagesFormat(shape.expertFormat)
+             ? MoeGgufTile::Register
+             : MoeGgufTile::Staged;
 }
 
 // The rows of a GGUF prefill plan's tiles on the device's `tile`: 8 on the
@@ -198,6 +202,16 @@ public:
   [[nodiscard]] uint32_t maximumTiles() const noexcept { return maximumTiles_; }
   [[nodiscard]] const MoeWorkspace &workspace() const noexcept {
     return workspace_;
+  }
+  // Whether every expert's tile reads the plan's rows in place, so no gather
+  // runs (MoeGroupParams::in_place): rows that fill one 8-row tile on the
+  // staged tile, a one-lane decode step or an 8-row prefill chunk. An 8-row
+  // tile runs the 8-row matmul whatever rows it holds, so only the gather's
+  // copy and dispatch go. Plans of more rows keep grouped tiles, which run
+  // each expert on its routed rows alone.
+  [[nodiscard]] bool rowsInPlace() const noexcept {
+    return config_.expertTile == MoeExpertTile::M8 && rows_ == tileRows() &&
+           config_.ggufTile == MoeGgufTile::Staged;
   }
 
 private:

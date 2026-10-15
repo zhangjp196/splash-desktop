@@ -27,12 +27,13 @@ constexpr std::array<uint8_t, 4> kMagic{'S', 'P', 'L', 'H'};
 constexpr uint64_t kCancelFixedBytes = 8;
 constexpr uint64_t kMaskResponseFixedBytes = 20;
 constexpr uint64_t kStatusRequestFixedBytes = 8;
+constexpr uint64_t kReleaseRequestFixedBytes = 8;
 constexpr uint64_t kReadyFixedBytes = 9;
 constexpr uint64_t kStartFixedBytes = 16;
 constexpr uint64_t kPromptProgressFixedBytes = 20;
 constexpr uint64_t kTokensFixedBytes = 16;
 constexpr uint64_t kMaskRequestFixedBytes = 24;
-constexpr uint64_t kDoneFixedBytes = 45;
+constexpr uint64_t kDoneFixedBytes = 61;
 constexpr uint64_t kErrorFixedBytes = 18;
 constexpr uint64_t kStatusJsonFixedBytes = 8;
 
@@ -87,6 +88,8 @@ std::optional<PayloadBounds> payloadBounds(FrameType type,
     return bounded(kMaskResponseFixedBytes, maximum);
   case FrameType::StatusRequest:
     return bounded(kStatusRequestFixedBytes, kStatusRequestFixedBytes);
+  case FrameType::ReleaseRequest:
+    return bounded(kReleaseRequestFixedBytes, kReleaseRequestFixedBytes);
   default:
     // The engine never receives an event.
     return std::nullopt;
@@ -125,6 +128,7 @@ bool clientFrameType(uint16_t raw, FrameType &type) {
   case FrameType::Cancel:
   case FrameType::MaskResponse:
   case FrameType::StatusRequest:
+  case FrameType::ReleaseRequest:
     type = static_cast<FrameType>(raw);
     return true;
   default:
@@ -361,6 +365,21 @@ std::optional<ProtocolIssue> validateRequest(const RequestFrame &request,
       return invalid(IssueCode::InvalidSampling,
                      "score requests require greedy default sampling");
     }
+    if (request.thinkingBudget) {
+      return invalid(IssueCode::InvalidCount,
+                     "score requests take no thinking budget");
+    }
+  }
+  if (request.thinkingBudget) {
+    const std::vector<uint32_t> &end = request.thinkingBudget->end;
+    if (end.empty() || end.size() > kMaximumThinkingEndTokens) {
+      return invalid(IssueCode::InvalidCount,
+                     "thinking end token count must be in [1, " +
+                         std::to_string(kMaximumThinkingEndTokens) + "]");
+    }
+    // Thinking ends where its end does, and nowhere inside it.
+    if (const char *reason = request.thinkingBudget->unusable())
+      return invalid(IssueCode::InvalidCount, reason);
   }
   // A grammar decides where constrained output ends.
   if ((request.flags & RequestIgnoreEndOfSequence) &&
@@ -483,6 +502,14 @@ std::optional<ProtocolIssue> validateDone(const DoneEvent &event) {
     return invalidEvent(IssueCode::InvalidEnumValue, event.requestId,
                         "done finish reason is invalid");
   }
+  const engine::SpeculativeCounts &speculation = event.speculation;
+  // Each cycle verified at least one drafted token and accepted at most all.
+  if (speculation.acceptedDraftTokens > speculation.draftedTokens ||
+      speculation.cycles > speculation.draftedTokens ||
+      (speculation.draftedTokens != 0 && speculation.cycles == 0)) {
+    return invalidEvent(IssueCode::InvalidCount, event.requestId,
+                        "done speculative counts are inconsistent");
+  }
   if (!event.optionLogits.empty()) {
     if (event.optionLogits.size() < ExecutionLimits::minimumScoreOptions ||
         event.optionLogits.size() > ExecutionLimits::maximumScoreOptions) {
@@ -490,7 +517,8 @@ std::optional<ProtocolIssue> validateDone(const DoneEvent &event) {
                           "done option logit count must be in [2, 255]");
     }
     if (event.reason != EngineFinishReason::Stop ||
-        event.completionTokens != 0 || event.decodeMicros != 0) {
+        event.completionTokens != 0 || event.decodeMicros != 0 ||
+        speculation.draftedTokens != 0) {
       return invalidEvent(IssueCode::InvalidCount, event.requestId,
                           "scored done events must stop and carry no "
                           "completion or decode activity");
@@ -614,6 +642,10 @@ EncodedEvent encodeDone(const DoneEvent &event) {
   writer.u64(event.prefillMicros);
   writer.u64(event.decodeMicros);
   writer.u64(event.wallMicros);
+  writer.u32(event.deduplicatedTokens);
+  writer.u32(event.speculation.draftedTokens);
+  writer.u32(event.speculation.acceptedDraftTokens);
+  writer.u32(event.speculation.cycles);
   writer.u32(static_cast<uint32_t>(event.optionLogits.size()));
   for (float logit : event.optionLogits)
     writer.f32(logit);
@@ -657,6 +689,8 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
   uint32_t promptCount = 0;
   uint32_t imageSpanCount = 0;
   uint32_t scoreCount = 0;
+  uint32_t thinkingEndCount = 0;
+  ThinkingBudget thinking;
   if (!reader.u64(request.requestId) || !reader.u8(priority) ||
       !reader.u8(constraint) ||
       !reader.u64(request.absoluteDeadlineUnixMicros) ||
@@ -672,13 +706,25 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
       !reader.f32(request.sampling.minP) ||
       !reader.u64(request.sampling.seed) || !reader.u32(scoreCount) ||
       !reader.u32(request.generationPromptTokens) ||
-      !reader.u32(request.flags)) {
+      !reader.u32(request.flags) || !reader.u64(request.cacheSalt.lo) ||
+      !reader.u64(request.cacheSalt.hi) || !reader.u32(thinking.tokens) ||
+      !reader.u32(thinkingEndCount) || !reader.u32(thinking.alsoEnds)) {
     return failure<ClientMessage>(
         makeIssue(FailureClass::ProtocolFatal, IssueCode::InvalidPayloadLength,
                   0, "request fixed payload is truncated"));
   }
   request.priority = static_cast<RequestPriority>(priority);
   request.constraint = static_cast<ConstraintMode>(constraint);
+  if (thinking.tokens == kNoThinkingBudget &&
+      (thinkingEndCount || thinking.alsoEnds))
+    return failure<ClientMessage>(
+        requestIssue(IssueCode::InvalidCount, request.requestId,
+                     "thinking end tokens need a thinking budget"));
+  if (thinkingEndCount > kMaximumThinkingEndTokens) {
+    return failure<ClientMessage>(
+        requestIssue(IssueCode::InvalidCount, request.requestId,
+                     "thinking end token count exceeds its limit"));
+  }
   if (scoreCount > ExecutionLimits::maximumScoreOptions) {
     return failure<ClientMessage>(
         requestIssue(IssueCode::InvalidCount, request.requestId,
@@ -712,17 +758,21 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
     }
   }
   const size_t pixelsOffset = payload.size() - reader.remaining();
-  uint64_t scoreBytes = 0;
-  if (!checkedMultiply(scoreCount, sizeof(uint32_t), scoreBytes) ||
-      reader.remaining() != pixelBytes + scoreBytes ||
+  const uint64_t wordBytes =
+      (uint64_t{scoreCount} + thinkingEndCount) * sizeof(uint32_t);
+  if (reader.remaining() != pixelBytes + wordBytes ||
       !reader.skip(pixelBytes) ||
-      !reader.words(scoreCount, request.scoreTokens)) {
+      !reader.words(scoreCount, request.scoreTokens) ||
+      !reader.words(thinkingEndCount, thinking.end)) {
     return failure<ClientMessage>(
         requestIssue(IssueCode::InvalidPayloadLength, request.requestId,
-                     "image pixel or score payload does not match its counts"));
+                     "image pixel, score or thinking end payload does not "
+                     "match its counts"));
   }
+  if (thinking.tokens != kNoThinkingBudget)
+    request.thinkingBudget = std::move(thinking);
   // The pixels are most of a large frame, so they stay in its buffer: the
-  // score words behind them are read, and moving the pixels to its front
+  // words behind them are read, and moving the pixels to its front
   // allocates nothing.
   if (pixelBytes) {
     payload.resize(pixelsOffset + pixelBytes);
@@ -790,6 +840,17 @@ ProtocolResult<ClientMessage> decodeStatusRequest(const Frame &frame) {
   return success(ClientMessage{request});
 }
 
+ProtocolResult<ClientMessage> decodeReleaseRequest(const Frame &frame) {
+  Reader reader(frame.payload);
+  ReleaseRequestFrame request;
+  if (!reader.u64(request.correlationId) || reader.remaining()) {
+    return failure<ClientMessage>(
+        makeIssue(FailureClass::ProtocolFatal, IssueCode::InvalidPayloadLength,
+                  0, "release request payload has an invalid length"));
+  }
+  return success(ClientMessage{request});
+}
+
 std::string_view frameTypeName(FrameType type) {
   switch (type) {
   case FrameType::Request:
@@ -800,6 +861,8 @@ std::string_view frameTypeName(FrameType type) {
     return "mask_response";
   case FrameType::StatusRequest:
     return "status_request";
+  case FrameType::ReleaseRequest:
+    return "release_request";
   case FrameType::Ready:
     return "ready";
   case FrameType::PromptProgress:
@@ -931,6 +994,8 @@ ProtocolResult<ClientMessage> decodeFrame(Frame &&frame,
       return decodeMaskResponse(frame, limits);
     case FrameType::StatusRequest:
       return decodeStatusRequest(frame);
+    case FrameType::ReleaseRequest:
+      return decodeReleaseRequest(frame);
     default:
       break;
     }
