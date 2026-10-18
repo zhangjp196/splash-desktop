@@ -226,8 +226,8 @@ public:
   // Offloads the idle cache: with a writable disk tier and no request held,
   // demotes cached KV pages and states to disk and releases their Metal
   // backing, so the next request restores what it needs from the tier. Runs
-  // on the same idle release as the weights (NativeRuntime::releaseIdleWeights),
-  // so no option sets it apart; true when a pass ran. Never runs while a
+  // on the idle spill's own timer (NativeRuntime::spillIdleCache), apart from
+  // the weights' idle release; true when a pass ran. Never runs while a
   // command is in flight.
   [[nodiscard]] bool offloadIdleCache(double nowMilliseconds);
   [[nodiscard]] std::optional<double> nextWakeupMilliseconds() const;

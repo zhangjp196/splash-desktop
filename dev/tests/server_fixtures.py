@@ -788,6 +788,7 @@ def main_args(**overrides):
             "max_context": None,
             "max_memory": None,
             "idle_release": None,
+            "cache_idle_spill": None,
             "max_cache_disk": None,
             "max_cache_disk_writes": 0,
             "persistent_cache": False,

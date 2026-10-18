@@ -118,6 +118,15 @@ std::string runtimeStatusJson(
       core.cacheHits + core.coldMisses
           ? double(core.cacheHits) / double(core.cacheHits + core.coldMisses)
           : 0.0;
+  // The token-level reading `hit_rate` cannot give: it counts requests
+  // (`hits + cold_misses`), so a request reusing 32 tokens with one reusing
+  // 40,000 weigh the same. This is the share of the tokens requests reused
+  // that came back from the disk tier (KV transfers completed), each restore
+  // being one page, which is what says whether the disk cache is earning its
+  // quota.
+  const uint64_t kvDiskHitTokens = resources.kvTier.restores * kv::kPageTokens;
+  const double kvDiskHitRate =
+      core.reusedTokens ? double(kvDiskHitTokens) / double(core.reusedTokens) : 0.0;
 
   const kv::Format kvFormat = cacheIdentity.kvLayout.format;
 
@@ -250,7 +259,8 @@ std::string runtimeStatusJson(
       << ",\"hits\":" << core.cacheHits
       << ",\"cold_misses\":" << core.coldMisses << ",\"hit_rate\":" << hitRate
       << ",\"kv_hit_tokens\":" << lookup.kvHitTokens
-      << ",\"kv_disk_hit_tokens\":" << resources.kvTier.restores * kv::kPageTokens
+      << ",\"kv_disk_hit_tokens\":" << kvDiskHitTokens
+      << ",\"kv_disk_hit_rate\":" << kvDiskHitRate
       << ",\"lost_state_misses\":" << lookup.lostStateMisses
       << ",\"reused_tokens\":" << core.reusedTokens
       << ",\"deduplicated_kv_tokens\":" << core.deduplicatedKvTokens

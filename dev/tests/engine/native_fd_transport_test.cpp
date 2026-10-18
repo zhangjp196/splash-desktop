@@ -26,6 +26,7 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -89,7 +90,8 @@ struct Harness final {
        .metrics = &metrics,
        .weights = &weights,
        .weightAdmission = test::admitAll},
-      metal::kResidencyKeepAliveSeconds, resources, executor, transport.outputSink(),
+      metal::kResidencyKeepAliveSeconds, std::numeric_limits<double>::infinity(),
+      resources, executor, transport.outputSink(),
       [this] { return status(); }, protocol::ProtocolLimits{}};
 };
 
@@ -120,7 +122,8 @@ struct PersistentHarness final {
        .metrics = &metrics,
        .weights = &weights,
        .weightAdmission = test::admitAll},
-      metal::kResidencyKeepAliveSeconds, resources, executor, transport.outputSink(),
+      metal::kResidencyKeepAliveSeconds, std::numeric_limits<double>::infinity(),
+      resources, executor, transport.outputSink(),
       test::readyStatusJson, protocol::ProtocolLimits{}};
 };
 
@@ -353,7 +356,8 @@ void testLoopWakesForAnEngineDeadline() {
        .metrics = &metrics,
        .weights = &weights,
        .weightAdmission = test::admitAll},
-      metal::kResidencyKeepAliveSeconds, resources, executor,
+      metal::kResidencyKeepAliveSeconds, std::numeric_limits<double>::infinity(),
+      resources, executor,
       [&](std::span<const uint8_t> bytes) {
         for (const auto &event : protocol::peer::decodeEvents(bytes)) {
           if (const auto *error = std::get_if<protocol::ErrorEvent>(&event)) {

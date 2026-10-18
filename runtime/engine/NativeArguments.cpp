@@ -67,7 +67,8 @@ double parseIdleRelease(std::string_view value) {
     return std::numeric_limits<double>::infinity();
   double result = 0.0;
   if (!parseFinite(value, result) || result <= 0.0)
-    throw UsageError("--idle-release requires off or a positive number of seconds");
+    throw UsageError("an idle release or spill requires off or a positive "
+                     "number of seconds");
   return result;
 }
 
@@ -138,6 +139,8 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       result.cacheRoot = std::filesystem::absolute(std::filesystem::path(value));
     } else if (option == "--idle-release") {
       result.idleReleaseSeconds = parseIdleRelease(value);
+    } else if (option == "--cache-idle-spill") {
+      result.cacheIdleSpillSeconds = parseIdleRelease(value);
     } else if (option == "--idle-sleep") {
       if (value != "prevent" && value != "allow")
         throw UsageError("--idle-sleep requires prevent or allow");

@@ -46,6 +46,9 @@ struct NativeArguments final {
   uint32_t maxImagePatches = ops::kMaximumImagePatches;
   // --idle-release SECONDS|off, infinite for off.
   double idleReleaseSeconds = RuntimeResourcesConfig{}.idleReleaseSeconds;
+  // --cache-idle-spill SECONDS|off, infinite for off. Its own timer, so the
+  // weights may stay while the cache spills.
+  double cacheIdleSpillSeconds = RuntimeResourcesConfig{}.cacheIdleSpillSeconds;
   // --idle-sleep prevent|allow: whether the engine keeps the Mac from sleeping
   // automatically while it holds a request.
   bool preventIdleSleep = true;

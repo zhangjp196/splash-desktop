@@ -1156,7 +1156,26 @@ bool Cache::superseded(uint64_t block) const {
     if (holdsOrdinaryState(child) && ++branches > 1)
       return false;
   }
-  return branches == 1;
+  // The branch's own shallowest state is its anchor (anchorsBranch): the
+  // conversation that goes on from here is not the only one a lookup stops
+  // at the block, and the one that stops is the one only this state serves.
+  return branches == 1 && !anchorsBranch(block);
+}
+
+bool Cache::anchorsBranch(uint64_t block) const {
+  // Walking up from the block, the first ordinary state above it is a
+  // shallower point of the same branch and anchors that branch instead. An
+  // ordinary state above a branch point serves another conversation's prefix,
+  // or a shorter shared one, and says nothing about this branch.
+  const KvCache::Chain chain = kv_.chain(block);
+  for (size_t index = chain.blocks.size(); index > 1; --index) {
+    const uint64_t ancestor = chain.blocks[index - 2];
+    if (kv_.children(ancestor).size() > 1)
+      break;
+    if (states_.ordinary(ancestor))
+      return false;
+  }
+  return true;
 }
 
 bool Cache::holdsOrdinaryState(uint64_t block) const {

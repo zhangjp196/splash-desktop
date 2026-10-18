@@ -264,7 +264,10 @@ public:
   // KV write does. Nothing starts while a restore waits, and the pages take
   // a small share of the tier's writes. A point is unneeded once it is gone
   // or an ordinary state on its only branch below supersedes it: its
-  // conversation went on from there. One larger than what the tier may hold
+  // conversation went on from there. The branch's own shallowest state is
+  // never superseded (anchorsBranch): a conversation that shares the prefix
+  // up to it and goes on differently resumes from it, so it is the point
+  // only that state serves. One larger than what the tier may hold
   // now (its limit), or given up to make room for itself, is refused, and so
   // is every point once a file stopped taking writes.
   [[nodiscard]] PersistStatus persist(uint64_t block);
@@ -671,6 +674,11 @@ private:
   void labelKv(uint64_t block, const std::shared_ptr<KvDiskSlot> &slot);
   // Ordinary states below the block sit on exactly one of its branches.
   [[nodiscard]] bool superseded(uint64_t block) const;
+  // The block's state is the shallowest of its branch: a conversation that
+  // shares the prefix up to it and diverges there resumes from it, so no
+  // ordinary state deeper on the branch supersedes it. An ordinary state
+  // shallower on the same branch, or above the branch point, anchors instead.
+  [[nodiscard]] bool anchorsBranch(uint64_t block) const;
   // An ordinary state at the block or anywhere below it.
   [[nodiscard]] bool holdsOrdinaryState(uint64_t block) const;
   void startRestore(uint64_t block);

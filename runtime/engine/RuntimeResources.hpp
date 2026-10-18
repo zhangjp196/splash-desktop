@@ -122,10 +122,18 @@ struct RuntimeResourcesConfig {
   // How long the engine keeps its memory without work (--idle-release): every
   // buffer stays wired that long after the last command (the backend's
   // residency keep-alive), and the weights' memory is freed once that long
-  // passes without a request, the cache written to the disk tier with them
-  // (NativeRuntime::releaseIdleWeights). Infinite keeps both while the
-  // engine runs.
+  // passes without a request (NativeRuntime::releaseIdleWeights). Infinite
+  // keeps the weights while the engine runs.
   double idleReleaseSeconds = metal::kResidencyKeepAliveSeconds;
+  // How long the engine keeps its cache without work (--cache-idle-spill):
+  // the cached prefixes of an engine that has held no request that long are
+  // written to the disk tier and their Metal backing released
+  // (NativeRuntime::spillIdleCache), so an idle engine holds little and the
+  // next request restores what it needs from the tier. Its own timer, apart
+  // from the weights': a user away from the keyboard need not keep the whole
+  // cache wired for the sake of a weight load. Infinite never spills, and
+  // nothing spills without a writable disk tier.
+  double cacheIdleSpillSeconds = 30.0;
   // Reclaimable host memory, sampled at every Metal operation during startup
   // and by the governor afterwards.
   MemoryGovernor::HostMemoryProvider hostMemory = queryHostMemory;

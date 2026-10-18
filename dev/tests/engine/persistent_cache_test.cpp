@@ -598,8 +598,10 @@ void testDurablePointsStayInRam() {
 }
 
 // A point its conversation went on from is not kept, nor one that is gone or
-// only a checkpoint. A point two conversations went on from is kept, and so
-// is one only a checkpoint follows.
+// only a checkpoint; the branch's own shallowest state is, whatever lies
+// deeper on it, because a conversation that shares the prefix up to it and
+// diverges there resumes from that one. A point two conversations went on
+// from is kept, and so is one only a checkpoint follows.
 void testOnlyTheNewestPointsAreKept() {
   const std::vector<uint32_t> prompt = promptOf(1000, 4);
   Process process(true);
@@ -607,11 +609,13 @@ void testOnlyTheNewestPointsAreKept() {
   process.publish(blocks[1]);
   process.publish(blocks[2], true);
   process.publish(blocks[3]);
-  require(process.cache.persist(blocks[1]) == PersistStatus::Unneeded &&
-              process.cache.persist(blocks[2]) == PersistStatus::Unneeded &&
+  require(process.cache.persist(blocks[1]) == PersistStatus::Started,
+          "the branch's shallowest point was not kept");
+  const uint32_t written = process.tier.demotions;
+  require(process.cache.persist(blocks[2]) == PersistStatus::Unneeded &&
               process.cache.persist(blocks[3] + 100) == PersistStatus::Unneeded &&
-              !process.tier.demotions,
-          "a superseded point, a checkpoint or a gone point was written");
+              process.tier.demotions == written,
+          "a checkpoint or a gone point was written");
   std::vector<uint32_t> branch(prompt.begin(), prompt.begin() + 2 * KvCache::pageTokens);
   const std::vector<uint32_t> own = promptOf(5000, 2);
   branch.insert(branch.end(), own.begin(), own.end());
@@ -625,6 +629,41 @@ void testOnlyTheNewestPointsAreKept() {
   followed.publish(chain[3], true);
   require(followed.cache.persist(chain[1]) == PersistStatus::Started,
           "a point only a checkpoint follows was not kept");
+}
+
+// A conversation that shares a prefix and diverges there resumes from the
+// first conversation's shallowest state: its newest point, deeper on the same
+// branch, does not supersede it, so the point only the sharing conversation
+// stops at comes back to the next process too.
+void testASharedPrefixResumesFromItsAnchorPoint() {
+  const std::vector<uint32_t> prefix = promptOf(1000, 3);
+  Process earlier(true);
+  const std::vector<uint64_t> shared = earlier.cachePrompt(1, prefix);
+  earlier.publish(shared[2]);
+  std::vector<uint32_t> own = prefix;
+  for (uint32_t row = 0; row < KvCache::pageTokens; ++row)
+    own.push_back(700 + row);
+  const std::vector<uint64_t> deeper = earlier.cachePrompt(2, own);
+  earlier.publish(deeper[3]);
+  require(deeper[2] == shared[2], "the shared prefix did not keep its own blocks");
+  require(earlier.cache.persist(shared[2]) == PersistStatus::Started,
+          "the anchor of a branch was not kept");
+  earlier.tier.complete();
+  require(earlier.cache.pollTransfers() &&
+              earlier.cache.persist(deeper[3]) == PersistStatus::Started,
+          "the anchor's write did not land, or the newest point was not kept beside it");
+  earlier.writeEverything();
+  Process next(true);
+  const CacheAdoption adoption = next.adopt(earlier.kvLabels(), earlier.stateLabels());
+  require(adoption.blocks == 4 && adoption.states == 2 && adoption.dropped == 0,
+          "the next process did not take back the anchor and the newest point");
+  std::vector<uint32_t> other = prefix;
+  for (uint32_t row = 0; row < KvCache::pageTokens; ++row)
+    other.push_back(4000 + row);
+  const CacheLookup lookup = next.cache.lookup(other, {});
+  require(lookup.state && lookup.state->kvBlock() == shared[2] &&
+              lookup.resumeBoundary() == 3 * KvCache::pageTokens && !lookup.lostState,
+          "a conversation sharing the prefix did not resume from its anchor");
 }
 
 // Nothing is written while a restore waits: the tier serves the request
@@ -655,8 +694,9 @@ void testRestoresGoFirst() {
   process.cache.endRequest(2);
 }
 
-// A point is written once it has waited the delay, unless its conversation
-// went on from it meanwhile; a short point never is. At a clean stop every
+// A point is written once it has waited the delay, and a short point never
+// is; a point its conversation went on from is not either, but the branch's
+// own shallowest one always is, whatever follows it. At a clean stop every
 // waiting point is written, the newest first.
 void testPointsWaitTheirTurn() {
   constexpr double kDelay = WriteBehind::kDelayMilliseconds;
@@ -678,9 +718,14 @@ void testPointsWaitTheirTurn() {
               writes.snapshot().durable == 1 && !writes.snapshot().waiting,
           "the point did not become durable once its writes landed");
 
-  // The conversation goes on before its point falls due.
+  // The conversation goes on before its point falls due. The branch's own
+  // shallowest point is kept whatever follows it, the point the conversation
+  // went on from between it and the newest is given up, and the newest is
+  // written after them.
   std::vector<uint32_t> longer = promptOf(3000, 2);
   const std::vector<uint64_t> turn = process.cachePrompt(3, longer);
+  process.publish(turn[0]);
+  writes.published(turn[0], WriteBehind::kMinimumTokens, 2 * kDelay);
   process.publish(turn[1]);
   writes.published(turn[1], WriteBehind::kMinimumTokens, 2 * kDelay);
   const std::vector<uint32_t> more = promptOf(4000, 1);
@@ -688,23 +733,27 @@ void testPointsWaitTheirTurn() {
   const uint64_t next = process.cachePrompt(4, longer)[2];
   process.publish(next);
   writes.published(next, WriteBehind::kMinimumTokens, 2 * kDelay + 1);
-  require(writes.run(3 * kDelay) && writes.snapshot().unneeded == 1 &&
-              writes.snapshot().waiting == 1 && process.tier.demotions == 2,
-          "a point its conversation went on from was written");
+  require(!writes.run(3 * kDelay) && !writes.snapshot().unneeded &&
+              writes.snapshot().waiting == 3,
+          "the branch's shallowest point was given up, or the points after it were written first");
+  process.tier.complete();
+  require(process.cache.pollTransfers() && writes.run(3 * kDelay) &&
+              writes.snapshot().unneeded == 1 && writes.snapshot().waiting == 1,
+          "the point the conversation went on from was not given up, or the newest was not written");
 
   // A clean stop takes the newest point first, before it is due.
   const std::vector<uint64_t> newest = process.cachePrompt(5, promptOf(6000, 1));
   process.publish(newest[0]);
   writes.published(newest[0], WriteBehind::kMinimumTokens, 3 * kDelay);
   process.shelf->ready = false;
-  require(!writes.flush() && process.tier.demotions == 3,
+  require(!writes.flush() && process.tier.demotions == 4,
           "the clean stop did not start with the newest point");
   process.tier.complete();
   process.shelf->ready = true;
   require(process.cache.pollTransfers() && !writes.flush(),
           "the clean stop did not go on to the next point");
   process.tier.complete();
-  require(process.cache.pollTransfers() && writes.flush() && writes.snapshot().durable == 3 &&
+  require(process.cache.pollTransfers() && writes.flush() && writes.snapshot().durable == 4 &&
               !writes.snapshot().waiting,
           "the clean stop did not leave every point durable");
 }
@@ -816,6 +865,7 @@ int main() {
     testPersistingStateStaysInRam();
     testDurablePointsStayInRam();
     testOnlyTheNewestPointsAreKept();
+    testASharedPrefixResumesFromItsAnchorPoint();
     testRestoresGoFirst();
     testPointsWaitTheirTurn();
     testWritesKeepToTheWriteBudget();

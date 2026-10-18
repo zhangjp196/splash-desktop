@@ -31,6 +31,7 @@ std::string MemoryStatusReporter::update(const ResourceWaitSnapshot &wait,
 
 bool MemoryControl::run(MemoryPressure pressure) {
   loop_.releaseIdleWeights();
+  loop_.spillIdleCache();
   governor_.setPressure(pressure);
   const double now = loop_.monotonicMilliseconds();
   // Requests held back by a refusal wait for memory too, the refused one

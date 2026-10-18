@@ -200,7 +200,8 @@ public:
         resources_(pool_, nullptr, nullptr),
         executor_(throwingStep),
         loop_(
-            loopConfig(), metal::kResidencyKeepAliveSeconds, resources_, executor_,
+            loopConfig(), metal::kResidencyKeepAliveSeconds,
+            std::numeric_limits<double>::infinity(), resources_, executor_,
             [this, failReadyWrite](std::span<const uint8_t> bytes) {
               if (failReadyWrite) {
                 throw std::runtime_error("injected output failure");

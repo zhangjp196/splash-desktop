@@ -1693,6 +1693,13 @@ def _native_command(args, relaunch_context=None):
         command.extend(
             ("--idle-release", serve_options.idle_release_text(args.idle_release))
         )
+    if args.cache_idle_spill is not None:
+        command.extend(
+            (
+                "--cache-idle-spill",
+                serve_options.idle_release_text(args.cache_idle_spill),
+            )
+        )
     if args.disable_ane:
         command.extend(("--ane", "off"))
     if args.decode_share is not None:

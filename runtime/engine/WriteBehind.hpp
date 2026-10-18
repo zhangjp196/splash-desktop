@@ -25,15 +25,24 @@ struct WriteBehindSnapshot final {
 // deep is made durable (Cache::persist) once it has waited
 // kDelayMilliseconds, unless its conversation has gone on from it by then:
 // a point that is newest only briefly, like a step of a tool loop, costs no
-// write, and a shorter one recomputes in less time than its state takes to
-// write. Points become durable one at a time, in the order they were
+// write. The shallowest point of a branch is durable whatever follows it
+// (Cache::superseded): a conversation that shares the prefix up to it and
+// diverges there resumes from it. kMinimumTokens is set by the tier's quota, not by the write: a
+// point costs its state (153 MiB for 27B, 64 MiB for 35B) plus the KV of
+// its chain, and the state dominates at shallow depths, so the floor is
+// where a point's KV stops being a rounding error beside its state. What
+// the floor decides is only whether a conversation shallower than it is
+// restorable at all: every conversation keeps its newest point on the
+// floor's other side. 512 tokens is about 1.7 s of prefill to save for
+// some 217 MiB of a quota that now clears 128 GiB, against never saving
+// it. Points become durable one at a time, in the order they were
 // published. Like every write of the tier these draw on its write budget,
 // when one is set (model::DiskBudget): a point waits while the budget holds
 // its state back, which is written before its chain.
 class WriteBehind final {
 public:
   static constexpr double kDelayMilliseconds = 10'000.0;
-  static constexpr uint32_t kMinimumTokens = 2048;
+  static constexpr uint32_t kMinimumTokens = 512;
 
   explicit WriteBehind(Cache &cache);
   WriteBehind(const WriteBehind &) = delete;

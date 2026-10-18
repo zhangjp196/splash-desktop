@@ -22,6 +22,8 @@ disk_bf16 | --max-cache-disk 5G --kv-format bf16 | auto auto 5368709120 --kv-for
 state_bf16 | --state-format bf16 | auto auto --state-format bf16
 idle_release | --idle-release 30m | auto auto --idle-release 1800.0
 idle_release_off | --idle-release off | auto auto --idle-release off
+cache_idle_spill | --cache-idle-spill 90 | auto auto --cache-idle-spill 90.0
+cache_idle_spill_off | --cache-idle-spill off | auto auto --cache-idle-spill off
 decode_share | --max-cache-disk 5G --decode-share 0 | auto auto 5368709120 --decode-share 0.0
 image_patches | --max-image-pixels 1048576 | auto auto --max-image-patches 4096
 image_patches_rounded | --max-image-pixels 1000000 | auto auto --max-image-patches 3904

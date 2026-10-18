@@ -22,10 +22,12 @@ uint64_t systemUnixMicros() noexcept {
 }
 
 NativeRuntime::NativeRuntime(NativeLoopConfig config, double idleReleaseSeconds,
-                             engine::Cache &cache, model::Model &model,
-                             ByteSink output, StatusProvider statusProvider,
+                             double cacheIdleSpillSeconds, engine::Cache &cache,
+                             model::Model &model, ByteSink output,
+                             StatusProvider statusProvider,
                              protocol::ProtocolLimits limits)
     : config_(std::move(config)), idleReleaseSeconds_(idleReleaseSeconds),
+      cacheIdleSpillSeconds_(cacheIdleSpillSeconds),
       output_(std::move(output)),
       statusProvider_(std::move(statusProvider)), limits_(limits),
       parser_(limits_), core_(config_.engine, cache, model, *this) {
@@ -35,6 +37,8 @@ NativeRuntime::NativeRuntime(NativeLoopConfig config, double idleReleaseSeconds,
     throw std::invalid_argument("the native engine loop lacks a component it needs");
   if (!(idleReleaseSeconds_ > 0.0))
     throw std::invalid_argument("the idle release must be positive");
+  if (!(cacheIdleSpillSeconds_ > 0.0))
+    throw std::invalid_argument("the idle spill must be positive");
   if (auto issue = protocol::validateLimits(limits_))
     throw std::invalid_argument(issue->describe());
   idleSinceMilliseconds_ = config_.monotonicMilliseconds();
@@ -133,10 +137,19 @@ void NativeRuntime::releaseIdleWeights() {
   if (releaseWeights())
     logLine("Weights released after ", idleReleaseSeconds_,
             " s without a request; the next request restores them");
-  // The cache follows the weights to the disk tier on the same idle release:
-  // every idle prefix is written to disk and its Metal backing released, so
-  // an idle engine holds little and the next request restores what it needs
-  // from the tier. Nothing configures the spill apart; it is automatic.
+}
+
+void NativeRuntime::spillIdleCache() {
+  const double now = config_.monotonicMilliseconds();
+  // Its own timer, so keeping the weights (--idle-release off) does not keep
+  // the whole cache wired for the sake of a weight load, and infinite
+  // (--cache-idle-spill off) never spills. The pass writes every idle prefix
+  // to the tier and releases its Metal backing; the next request restores
+  // what it needs from there. Engine::offloadIdleCache decides the rest:
+  // nothing without a writable tier, while a request is held, or while a
+  // command is in flight.
+  if (now - idleSinceMilliseconds_ < 1000.0 * cacheIdleSpillSeconds_)
+    return;
   static_cast<void>(core_.offloadIdleCache(now));
 }
 

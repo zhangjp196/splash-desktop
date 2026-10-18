@@ -4,6 +4,7 @@
 #include "TestEngine.hpp"
 #include "TestExecutor.hpp"
 #include "TestKvPool.hpp"
+#include "TestKvTier.hpp"
 #include "TestMetalMemory.hpp"
 #include "TestStatus.hpp"
 #include "engine/Cache.hpp"
@@ -91,17 +92,22 @@ struct PoolShape {
 // config is completed with the engine's (test::engineConfig), and the
 // fixture's metrics and weights, each weight allocation admitted
 // (test::admitAll), where the test gave none; the weights' idle release is
-// production's unless the test gives one. Its unix clock stands
+// production's unless the test gives one, and the idle spill is off unless a
+// test asks for one, with the tier it writes through. Its unix clock stands
 // still and its awake clock reads `monotonic`, advanced by `clockStep` on
 // every read.
 struct LoopFixture {
   explicit LoopFixture(NativeLoopConfig config = {}, PoolShape shape = {},
                        protocol::ProtocolLimits limits = {},
-                       double idleReleaseSeconds = metal::kResidencyKeepAliveSeconds)
+                       double idleReleaseSeconds = metal::kResidencyKeepAliveSeconds,
+                       double cacheIdleSpillSeconds =
+                           std::numeric_limits<double>::infinity(),
+                       engine::KvTier *kvTier = nullptr)
       : storage(shape.pages, 4096, shape.extentPages),
-        pool(storage, shape.runwayPages), cache(pool, nullptr, nullptr),
+        pool(storage, shape.runwayPages), cache(pool, kvTier, nullptr),
         loop(
-            clocked(std::move(config)), idleReleaseSeconds, cache, executor,
+            clocked(std::move(config)), idleReleaseSeconds, cacheIdleSpillSeconds,
+            cache, executor,
             [this](std::span<const uint8_t> bytes) {
               if (writeFailure)
                 throw *writeFailure;
@@ -770,9 +776,10 @@ void testLoopNeedsItsComponents() {
                             .weights = lacking == 1 ? nullptr : &weights,
                             .weightAdmission = lacking == 2 ? nullptr : test::admitAll};
     rejects([&] {
-      engine::NativeRuntime(std::move(config), metal::kResidencyKeepAliveSeconds, cache,
-                            executor, [](std::span<const uint8_t>) {},
-                            test::readyStatusJson, protocol::ProtocolLimits{});
+      engine::NativeRuntime(std::move(config), metal::kResidencyKeepAliveSeconds,
+                            std::numeric_limits<double>::infinity(), cache, executor,
+                            [](std::span<const uint8_t>) {}, test::readyStatusJson,
+                            protocol::ProtocolLimits{});
     }, "the native engine loop lacks a component it needs",
             "a loop without its metrics, its weights or their admission was built");
   }
@@ -1918,6 +1925,70 @@ void testIdleReleaseOffReleasesOnlyOnRequest() {
   }
 }
 
+// The idle spill keeps its own timer (--cache-idle-spill), apart from the
+// weights' release: an idle engine writes its cached prefixes to the disk
+// tier once the spill's seconds pass without a request, whether or not the
+// weights went, and never with the spill off. Nothing spills while a request
+// is held, however long the engine sat idle before it.
+void testIdleSpillKeepsItsOwnTimer() {
+  constexpr double kSpillSeconds = 2.0;
+  constexpr double spill = 1000.0 * kSpillSeconds;
+  test::TestKvTier tier;
+  engine::NativeLoopConfig config;
+  config.engine.maxContext = 1024;
+  // The weights stay for good: whatever the spill does is its own timer.
+  LoopFixture fixture(config, {}, {}, std::numeric_limits<double>::infinity(),
+                      kSpillSeconds, &tier);
+  engine::NativeRuntime &loop = fixture.loop;
+  loop.announceReady();
+  // A request's cached prefix is what the spill writes.
+  require(loop.receive(protocol::peer::serialize(request(1))) && loop.snapshot().completed == 0,
+          "a request failed");
+  runUntilIdle(loop);
+  require(loop.snapshot().completed == 1, "the request did not complete");
+
+  // Before the spill's seconds pass, nothing is written.
+  loop.spillIdleCache();
+  require(tier.demotions == 0 && loop.snapshot().idleOffloadPasses == 0,
+          "the cache spilled before the idle spill passed");
+
+  // A held request keeps it off, past the spill's seconds.
+  fixture.monotonic += spill;
+  require(loop.receive(protocol::peer::serialize(request(2))),
+          "a second request was refused");
+  loop.spillIdleCache();
+  require(tier.demotions == 0 && loop.snapshot().idleOffloadPasses == 0,
+          "the cache spilled with a request held");
+  runUntilIdle(loop);
+
+  // Idle past the spill again, with the weights still in memory, it writes.
+  fixture.monotonic += spill;
+  loop.spillIdleCache();
+  require(tier.demotions > 0 && loop.snapshot().idleOffloadPasses > 0 &&
+              !fixture.weights.released(),
+          "the idle spill did not write the cache with the weights kept");
+
+  // Off never spills, however long the engine sits idle.
+  test::TestKvTier offTier;
+  LoopFixture offFixture(config, {}, {}, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::infinity(), &offTier);
+  offFixture.loop.announceReady();
+  require(offFixture.loop.receive(protocol::peer::serialize(request(1))),
+          "a request failed with the spill off");
+  runUntilIdle(offFixture.loop);
+  offFixture.monotonic += 1e9;
+  offFixture.loop.spillIdleCache();
+  require(offTier.demotions == 0 && offFixture.loop.snapshot().idleOffloadPasses == 0,
+          "the cache spilled with the idle spill off");
+
+  // A spill that is not positive is refused.
+  for (double seconds : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN()}) {
+    rejects([&] { LoopFixture refused(config, {}, {}, 1.0, seconds); },
+            "the idle spill must be positive",
+            "an idle spill that is not positive was accepted");
+  }
+}
+
 // A release request gives the weights back now, as the idle release does, when
 // the engine holds no request and no restore is under way, and otherwise leaves
 // them as they are. Either way its answer reports what the engine did: released
@@ -2070,6 +2141,7 @@ int main() {
     testIdleReleaseRestoresTheSplitLast();
     testRefusedRestoreWaitsForMemory();
     testIdleReleaseOffReleasesOnlyOnRequest();
+    testIdleSpillKeepsItsOwnTimer();
     testReleaseRequestGivesTheWeightsBackWhenIdle();
     testHoldingRequestsSpansFirstToLastRequest();
     testMemoryStatusReporterLogsTransitionsOnly();

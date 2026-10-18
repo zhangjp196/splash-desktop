@@ -35,8 +35,14 @@ struct DiskVolume final {
 // exists, lives on; empty when it cannot be measured.
 [[nodiscard]] std::optional<DiskVolume> volumeOf(const std::filesystem::path &path);
 
-// The most --max-cache-disk auto lets the tier hold.
-inline constexpr uint64_t kAutomaticCacheDiskBytes = uint64_t{32} << 30;
+// The most --max-cache-disk auto lets the tier hold. On a volume with room
+// the term that binds is this, not `diskLimitBytes`'s quarter: a dense
+// model's KV costs about 128 KiB a token (a 27B's 64 layers of 4 KV heads at
+// head_dim 256, int8), so 32 GiB held about one full-context conversation
+// and the tier turned over before a session could be restored from it. The
+// 28 GB a persistent point of that model's full context takes is what the
+// cap has to clear, several times over, to keep a working set of them.
+inline constexpr uint64_t kAutomaticCacheDiskBytes = uint64_t{128} << 30;
 
 // What a disk tier leaves free on its volume: 10 GiB, or 5% of a volume
 // smaller than 200 GiB.

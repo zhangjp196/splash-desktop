@@ -21,7 +21,7 @@ from .protocol import MAX_THINKING_END_TOKENS
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 MAX_CONTEXT_TOKENS = 262144
 DEFAULT_MAX_REQUEST_BYTES = 128 * 1024 * 1024
-DEFAULT_QUEUE_SIZE = 32
+DEFAULT_QUEUE_SIZE = 16
 # The port both commands serve on unless --port names another, or for the
 # launcher SPLASH_PORT does.
 DEFAULT_PORT = 8000
@@ -187,7 +187,7 @@ def parse_request_timeout(value):
 
 
 def parse_idle_release(value):
-    """--idle-release in seconds, math.inf for off."""
+    """--idle-release or --cache-idle-spill in seconds, math.inf for off."""
     if value.strip().lower() == "off":
         return math.inf
     if (seconds := _duration_seconds(value)) is None:
@@ -198,7 +198,8 @@ def parse_idle_release(value):
 
 
 def idle_release_text(seconds):
-    """--idle-release as the server's and the engine's command lines spell it."""
+    """--idle-release, or --cache-idle-spill, as the server's and the engine's
+    command lines spell it."""
     return "off" if math.isinf(seconds) else str(seconds)
 
 
@@ -209,7 +210,7 @@ def parse_queue_size(value):
         size = 0
     if size <= 0:
         raise argparse.ArgumentTypeError(
-            "must be a positive number of requests such as 32"
+            "must be a positive number of requests such as 16"
         )
     return size
 
@@ -435,8 +436,23 @@ SERVE_OPTIONS = (
             metavar="DURATION",
             help="time without a request before the engine unwires its memory and "
             "frees the weights: seconds, or with an s, m or h suffix, e.g. 30m "
-            "(default: 10m); off keeps both, though POST /v1/memory/release "
-            "still frees the weights",
+            "(default: 10m); off keeps them, though POST /v1/memory/release "
+            "still frees the weights. The cached prefixes spill on their own "
+            "timer, --cache-idle-spill",
+        ),
+        text=idle_release_text,
+    ),
+    ServeOption(
+        "--cache-idle-spill",
+        "cache",
+        dict(
+            type=parse_idle_release,
+            default=None,
+            metavar="DURATION",
+            help="time without a request before the engine writes the cached "
+            "prefixes to disk and releases their memory: seconds, or with an s, "
+            "m or h suffix, e.g. 2m (default: 30); off keeps them. Its own "
+            "timer, apart from --idle-release's, which moves only the weights",
         ),
         text=idle_release_text,
     ),
@@ -448,7 +464,7 @@ SERVE_OPTIONS = (
             default=None,
             metavar="SIZE",
             help="SSD quota for cached KV pages and states: auto follows the "
-            "volume's free space up to 32G, 0 disables, or a size such as 16G "
+            "volume's free space up to 128G, 0 disables, or a size such as 16G "
             "(default: auto)",
         ),
     ),

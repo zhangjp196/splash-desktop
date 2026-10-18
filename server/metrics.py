@@ -104,6 +104,7 @@ PROMETHEUS_SERIES = {
     "splash_cache_hits_total": ("cache", "hits"),
     "splash_cache_cold_misses_total": ("cache", "cold_misses"),
     "splash_cache_reused_tokens_total": ("cache", "reused_tokens"),
+    "splash_cache_kv_disk_hit_rate": ("cache", "kv_disk_hit_rate"),
     "splash_cache_deduplicated_kv_tokens_total": ("cache", "deduplicated_kv_tokens"),
     "splash_cache_lazy_junctions_total": ("cache", "lazy_junctions"),
     "splash_target_prefill_rows_total": (

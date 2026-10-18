@@ -103,8 +103,9 @@ access.
 | `--max-context` | Auto | Set the context limit, e.g. `100K`. See [memory and context](#memory-and-context). |
 | `--kv-format` | `int8` | Target KV storage: `int8` or `bf16`. See [KV cache precision](#kv-cache-precision). |
 | `--state-format` | `fp32` | Recurrent state storage: `fp32` or `bf16`. See [state precision](#state-precision). |
-| `--idle-release` | `10m` | Time without a request before the engine unwires its memory and frees the weights; the next request restores them. `off` keeps both, though `POST /v1/memory/release` still frees the weights. See [weight loading](#weight-loading). |
-| `--max-cache-disk` | `auto` | SSD quota for cached KV pages and states: `auto` follows the volume's free space up to 32 GiB, a size such as `16G` sets the quota, `0` turns the cache off. Kept for the session, or across restarts with `--persistent-cache`. See [SSD cache](#ssd-cache). |
+| `--idle-release` | `10m` | Time without a request before the engine unwires its memory and frees the weights; the next request restores them. `off` keeps the weights, though `POST /v1/memory/release` still frees them. See [weight loading](#weight-loading). |
+| `--cache-idle-spill` | `30` | Time without a request before the engine writes the cached prefixes to disk and releases their memory; the next request restores what it needs from there. Its own timer, so `--idle-release off` may keep the weights while the cache still spills; `off` keeps the cache in memory. See [SSD cache](#ssd-cache). |
+| `--max-cache-disk` | `auto` | SSD quota for cached KV pages and states: `auto` follows the volume's free space up to 128 GiB, a size such as `16G` sets the quota, `0` turns the cache off. Kept for the session, or across restarts with `--persistent-cache`. See [SSD cache](#ssd-cache). |
 | `--max-cache-disk-writes` | `0` (no limit) | The most the SSD cache writes a day, e.g. `200G`. See [SSD cache](#ssd-cache). |
 | `--persistent-cache` | Off | Keep the SSD cache across restarts. See [persistent cache](#persistent-cache). |
 | `--cache-dir` | `~/Library/Caches/Splash/prefix-cache` | Where `--persistent-cache` keeps its files; needs `--persistent-cache`. |
@@ -116,7 +117,7 @@ access.
 | `--max-request-size` | `128M` | Largest HTTP request body. See [request limits](#request-limits-and-timeouts). |
 | `--max-image-pixels` | `4194304` | Maximum resized pixels per image. An image's vision scratch grows with its patches (pixels / 256), to about 600 MiB at the default. |
 | `--request-timeout` | None | Time a request may take from its arrival; a request's own `timeout` can only shorten it. |
-| `--queue-size` | `32` | Requests admitted at once, running or waiting; more get 503 with `Retry-After`. |
+| `--queue-size` | `16` | Requests admitted at once, running or waiting; more get 503 with `Retry-After`. |
 | `--decode-share` | `0.5` | Decode time owed per unit of prefill time while other requests generate. Higher keeps their output faster during a long prompt and slows that prompt; `0` alternates one command each. |
 | `--disable-ane` | Off | Prefill on the GPU alone. By default a dense model's long prompts also use the Neural Engine when that is faster. See [Neural Engine prefill](#neural-engine-prefill). |
 | `--allow-idle-sleep` | Off | Let the Mac sleep automatically while requests run; by default it stays awake until they finish (the display may still sleep). |
@@ -128,9 +129,11 @@ the same. Token counts (`--max-context`) are a whole number, or one with a `K`
 suffix of 1024 tokens: `100K` is 102,400 tokens. `--max-memory`, `--max-context` and `--max-cache-disk`
 also take `auto`, their default, `--max-cache-disk 0` turns the SSD cache off,
 and `--max-cache-disk-writes 0`, its default, sets no write budget. Durations
-(`--idle-release`, `--request-timeout`) are seconds, or a number with an `s`,
-`m` or `h` suffix, such as `90s`, `30m` or `1.5h`; `--idle-release off` turns
-the timer off, and only `POST /v1/memory/release` then frees the weights.
+(`--idle-release`, `--cache-idle-spill`, `--request-timeout`) are seconds, or a
+number with an `s`, `m` or `h` suffix, such as `90s`, `30m` or `1.5h`;
+`--idle-release off` turns the weights' timer off, and only
+`POST /v1/memory/release` then frees the weights, while `--cache-idle-spill off`
+turns the cache's own timer off and keeps the cached prefixes in memory.
 
 ### Network and authentication
 
@@ -253,8 +256,13 @@ suspension. It does not raise the context limit.
 
 `--max-cache-disk` sizes it. The default, `auto`, holds at most a quarter of
 what its volume has beyond the space it keeps free (10 GiB, or 5% of a volume
-smaller than 200 GiB), its own files counted, and at most 32 GiB. Free space is
-what `df` reports, without the purgeable space the Finder counts. The engine
+smaller than 200 GiB), its own files counted, and at most 128 GiB. The cap is a
+working set, not a drive's worth: a dense model's KV costs about 128 KiB a
+token (a 27B: 64 layers, 4 KV heads, head_dim 256, int8), so a 57K-token
+conversation is 7.3 GiB of KV beside 153 MiB of state, and the old 32 GiB cap
+held three or four of those: a handful of conversations was enough to turn a
+session over before it could be restored from. Free space is what `df` reports,
+without the purgeable space the Finder counts. The engine
 measures it twice a second and whenever a write finds the volume full: as other
 files fill the volume the cache shrinks, giving up its oldest copies the way a
 full quota does, and it grows back as they go, so several servers on one volume
@@ -342,14 +350,26 @@ root when the persistent cache is turned off goes too; one under another
 named as a namespace, 32 hex digits, counts as a cache: nothing else under the
 root is touched.
 
-Each conversation's newest restore point at least 2048 tokens deep is written
+Each conversation's newest restore point at least 512 tokens deep is written
 10 s after publication, unless the conversation has gone past it; its RAM copy
-stays. With a write budget set, a point waits while the budget is spent,
+stays. The shallowest point of its branch is written too, whatever follows it:
+a deeper state supersedes a point only because its conversation went on from
+there, and a conversation that shares the prefix up to the shallowest point and
+goes on differently stops at it, so that is the one point only that state
+serves. A branch keeps two points then, its shallowest and its newest, 153 MiB
+each for 27B. 512, not 2048, because the floor is a quota decision and the quota now
+clears a working set: what the floor decides is only whether a conversation
+shallower than it is restorable at all, since every deeper one keeps its newest
+point either way, and a point's state (153 MiB for 27B) dominates its chain at
+those depths, so the two floors cost the same order of quota and 512 buys back
+about 1.7 s of prefill that 2048 leaves to be recomputed. With a write budget
+set, a point waits while the budget is spent,
 nothing of it written; once the budget admits its state, the state is written
 and then the pages of its chain. A point larger than what the cache may hold
 now, its quota or what the volume leaves it, is not written. A full quota
 keeps restore points whole: it drops copies no point needs first, then the
-oldest point.
+oldest point; recency decides, so what goes first is the oldest, often a
+branch's shallowest.
 
 A start takes back every recorded point whose chain is whole. A clean stop
 writes the waiting points (newest first, up to 6 s, whatever the write budget)
@@ -406,7 +426,7 @@ are not moved.
 | `~/Library/Application Support/Splash` | The data directory of a packaged install: `models/`, the installed models' links into the Hugging Face cache and the metadata derived from GGUFs; `runtime/`, the locks of running servers; and `thinking.key`, which encrypts the Messages reasoning a response hides. A source checkout keeps the first two in `install/models` and `build/runtime`. |
 | Hugging Face cache (`HF_HUB_CACHE`, by default `~/.cache/huggingface/hub`) | Model and draft downloads, with Splash's pins under `refs/splash` ([revisions](#revisions)). |
 | `~/Library/Caches/Splash/prefix-cache` (`--cache-dir`) | The [persistent cache](#persistent-cache), with `--persistent-cache` only, within the [SSD cache](#ssd-cache)'s limit. Every start removes the caches there that nobody used for 14 days. |
-| `$TMPDIR/splash-cache-*` | The [SSD cache](#ssd-cache)'s files, on by default, without `--persistent-cache`, or when another process holds the persistent cache's directory or it cannot be used: one of KV pages and one of states, together at most about the SSD cache's limit, which follows the volume's free space up to 32 GiB unless `--max-cache-disk` sets it. Each is unlinked as it is created, so no directory lists it and macOS's storage settings count it as System Data, and its space returns when the engine exits, even after a crash. `--cache-dir` does not move them; they follow `TMPDIR`. |
+| `$TMPDIR/splash-cache-*` | The [SSD cache](#ssd-cache)'s files, on by default, without `--persistent-cache`, or when another process holds the persistent cache's directory or it cannot be used: one of KV pages and one of states, together at most about the SSD cache's limit, which follows the volume's free space up to 128 GiB unless `--max-cache-disk` sets it. Each is unlinked as it is created, so no directory lists it and macOS's storage settings count it as System Data, and its space returns when the engine exits, even after a crash. `--cache-dir` does not move them; they follow `TMPDIR`. |
 | `~/Library/Logs/Splash/crash` | [Crash traces](#failures-and-crash-traces), with `SPLASH_CRASH_TRACE=1` only. |
 | Pi's `models.json` (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`) and the Hermes profile (`~/.hermes/profiles/splash`, or `splash-<port>`) | The settings `splash pi` and `splash hermes` write ([agent launchers](#agent-launchers)). Every agent keeps its sessions in its own home; `splash claude`, `codex` and `opencode` pass their settings at launch and write none. |
 
@@ -1973,11 +1993,11 @@ the residual kernel's tile on the weight planes advanced past the inputs the
 view leaves unread. The Neural Engine runs the rest as one W8A8 program,
 Hadamard-rotated int8 activations and per-row int8 weights
 (`runtime/ane/Program.mm`): a chunk takes the smallest of
-its functions that holds it, one every 128 rows from 512 to 2048, all reading
+its functions that holds it, one every 128 rows from 128 to 2048, all reading
 and writing one set of surfaces sized for 2048 rows. The ANE service holds
 memory for a loaded program's intermediate values, which its functions share:
-13 programs of one function each held it 13 times (3.25 GB at the M6's share,
-against 0.67 GB for the one program). The GPU requantizes the
+a program per function held it once for each (13 such programs held 3.25 GB at
+the M6's share, against 0.67 GB for the one program). The GPU requantizes the
 ANE's weights from the block planes one layer ahead into double-buffered
 IOSurfaces and adds the ANE's partial down projection to its own. Shared
 events order each evaluation between the GPU's packing and that join inside
@@ -2051,7 +2071,7 @@ Qwen3.8-27B that takes 8 of the 34 units on an M5 Max, 14-15 on an M5 Pro and
 gains 5% on the GPU alone. A start calibrates the split once for a Mac, a
 model, a macOS version, an engine build and the most units its memory plan
 holds, and remembers what it found (`remembered-*` in the cache directory
-below): the units, the least chunk and the GPU alone's layer at 512 and 2048
+below): the units, the least chunk and the GPU alone's layer at 128 and 2048
 rows, or that no split gains enough. Later starts take it untimed: they build
 the split, check it as below and serve, in 0.6 s on an M5 Max, 0.9 s on an M5
 Pro and 1.4 s on an M6. Across many starts over hours of prefill on those three
@@ -2067,7 +2087,7 @@ against the leading rows of a full chunk on the GPU alone, which computes every
 row alike whatever the chunk's rows. The outputs must be finite and differ from
 the GPU's by at most 10% of what the ANE adds over the GPU's part; int8 leaves
 2.5-2.8% on Qwen3.8-27B. A start that calibrates then times the GPU's FFN layer
-alone at 512 and 2048 rows and the split layer of every function as above, and
+alone at 128 and 2048 rows and the split layer of every function as above, and
 splits the chunks from the least rows from which every larger chunk's split
 layer takes at most 2% longer than the GPU's at the chunk's rows. Every row
 count is checked, since a batch's chunk sums its lanes' rows: an evaluation
@@ -2125,7 +2145,7 @@ next idle release once the ANE has reported every evaluation, and keeps it
 unloaded. The split's logits differ from the GPU's alone (KL about 1e-4 to 7e-4
 on Qwen3.8-27B); `splash serve --disable-ane` keeps the FFN on the GPU, and
 `backend-benchmark --ane-ffn-share` runs a given share over chunks of
-`--ane-ffn-minimum-rows` rows or more (512 by default), which
+`--ane-ffn-minimum-rows` rows or more (128 by default, `ops/AneFfn.hpp`), which
 `backend_regression` pins to its first round's. `make test-engine-cpu` runs
 `ane-ffn-calibration`, the fit, the choice, the least chunk, a calibration's
 line of text and the breaker on timings it is given, also under the sanitizers,
@@ -2526,22 +2546,33 @@ filesystem metadata and physical SSD write amplification. State transfers appear
 under `state` (`disk_bytes`, `offloads`, `disk_hits`, `disk_promotions`). Cache
 counters include:
 
+- `hit_rate`: requests that resumed from a cached prefix over all that
+  looked one up (`cacheHits + coldMisses`), a request-level reading: one
+  reusing 32 tokens weighs as much as one reusing 40,000.
 - `kv_disk_hit_tokens`: tokens restored by completed KV transfers. Shared
   transfers count once, including those completed before cancellation or a
   resource retry.
+- `kv_disk_hit_rate`: those tokens over `reused_tokens`, the share of what
+  requests resumed from that the disk held rather than RAM. The token-level
+  reading `hit_rate` cannot give, and the one that says whether the disk
+  cache earns its quota; a state the disk lost where its KV survived shows
+  up in `lost_state_misses` and in this rate.
 - `lost_state_misses`: lookups that matched KV where a reusable state used to be.
 - `probe_hashed_blocks`: KV pages hashed to rank waiting requests between
   commands. A waiting request's match is kept across passes and extended only
   past what the cache changed.
 
-The cache spills to the tier when the engine goes idle, on the same release
-as the weights (`--idle-release`): every idle KV leaf and state is written to
-the tier and its Metal backing released, so an idle server hands memory back
-to the host without losing the cached prefixes, and the next request restores
-what it needs through the ordinary tier restore path. Nothing configures the
-spill apart; it is automatic. It runs only while the tier is writable and no
-command is in flight, at most once a second, and does not change the context
-limit. `/status` reports `idle_offload.passes` and `idle_offload.bytes`.
+The cache spills to the tier when the engine goes idle, on its own timer
+(`--cache-idle-spill`, 30 s without a request): every idle KV leaf and state is
+written to the tier and its Metal backing released, so an idle server hands
+memory back to the host without losing the cached prefixes, and the next
+request restores what it needs through the ordinary tier restore path. Its own
+timer and not the weights' (`--idle-release`): a user away from the keyboard
+should not keep the whole cache wired for the sake of a weight load, and a
+server that keeps its weights (`--idle-release off`) still gives the cache
+back. It runs only while the tier is writable and no command is in flight, at
+most once a second, and does not change the context limit. `/status` reports
+`idle_offload.passes` and `idle_offload.bytes`.
 
 ### Native protocol
 
@@ -2743,7 +2774,7 @@ the other. Per model, `release-check`:
   identical (`EXPECT_OUTPUT_CHANGE=1` allows changed outputs with acceptance
   within 0.02), and so must the bytes of the weight images both load
   (`dev/benchmarks/weights.py`); decode and prefill GPU time, with the cold
-  prefills of short prompts (480 to 2016 tokens, one chunk each) when both
+  prefills of short prompts (128 to 2016 tokens, one chunk each) when both
   builds' benchmarks run them, may regress by at most the larger of 2% and
   twice the run's own ABBA spread, a spread above 5% fails as inconclusive,
   and this build's
@@ -2883,8 +2914,10 @@ actions. Its settings live in SQLite at
 per setting, `SPLASH_SETTINGS_DB` points it elsewhere): the panel saves each
 edit after a short pause, the next launch opens on what the last one saved, and
 Restore Defaults returns the form to the values the first launch opened with
-(upstream model, port 8000, 8-bit KV and a 10 second residency; the SSD cache
-quota and the idle spill are automatic, with no field of their own). A stored value the launcher would reject falls
+(upstream model, port 8000, 8-bit KV, a 16-request admission limit, a 10
+second residency and a persistent cache with a 50 GB a day write budget; the
+quota itself is automatic and empty means the engine's own, as the quota
+field's label says). A stored value the launcher would reject falls
 back to its first-launch default rather than starting a server that refuses to
 run. `swift run --selfcheck-settings` exercises the store and that round trip
 headlessly against a temporary database. The
@@ -2896,10 +2929,12 @@ section offers three modes — a Splash package (its draft is built in), an
 upstream MLX or GGUF model (the installer pairs its draft), or a local
 directory per [local model directories](#local-model-directories) — and the
 remaining sections group the rest by what it decides: the server's port, KV
-format, text-only mode, API key and model aliases; the memory ceiling and
+format, text-only mode, API key and model aliases; the admission limit of
+requests running or waiting at once; the memory ceiling and
 context length; what happens while idle (releasing weights back to the GPU the
-way LM Studio unloads a model, which also spills the cached prefixes to the
-SSD tier); and the per-request size and default reasoning
+way LM Studio unloads a model) and the cache section beside it (keeping the
+SSD cache across restarts, its quota, and the day's write budget); and the
+per-request size and default reasoning
 effort. The bundle is built
 with Xcode's Swift toolchain, the placeholder icon
 is generated at package time, and neither the app nor the DMG is code-signed:

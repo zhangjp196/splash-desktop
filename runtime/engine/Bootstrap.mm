@@ -344,7 +344,8 @@ std::unique_ptr<RuntimeBootstrap> RuntimeBootstrap::start(
     // The parser and engine consume the same resolved ceiling. In automatic
     // mode it cannot be known until resource planning has measured the device.
     nativeLoop = std::make_unique<NativeRuntime>(
-        config.nativeLoop, config.resources.idleReleaseSeconds, resources->cache(),
+        config.nativeLoop, config.resources.idleReleaseSeconds,
+        config.resources.cacheIdleSpillSeconds, resources->cache(),
         *modelRuntime, std::move(output), std::move(statusProvider),
         protocolLimitsFor(config.resources.model.capabilities,
                           config.nativeLoop.engine.maxContext));

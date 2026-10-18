@@ -81,6 +81,11 @@ OPTIONS = {
         {"600": 600.0, "90s": 90.0, "30M": 1800.0, "1.5h": 5400.0, "off": math.inf},
         ("0", "-1m", "inf", "nan", "10x", "m", "never"),
     ),
+    "--cache-idle-spill": values(
+        "--cache-idle-spill",
+        {"30": 30.0, "2m": 120.0, "1.5h": 5400.0, "off": math.inf},
+        ("0", "-1m", "inf", "nan", "10x", "m", "never"),
+    ),
     "--max-cache-disk": values(
         "--max-cache-disk",
         {"auto": None, "0": 0, "5G": 5 * 1024**3},

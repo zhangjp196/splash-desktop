@@ -137,14 +137,14 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | Option | Purpose |
 | --- | --- |
 | `--max-memory 28G` | Cap Metal memory use. |
-| `--idle-release off` | Keep the model in memory while idle (default: release after 10m). |
+| `--idle-release off` | Keep the model in memory while idle (default: release after 10m). The cache still spills to disk after 30s; `--cache-idle-spill off` keeps it too. |
 | `--max-context 100K` | Set the context limit. |
 | `--language-only` | Skip vision; serve text only. |
 | `--kv-format bf16` | Use BF16 KV cache. Default: 8-bit (INT8). |
 | `--state-format bf16` | Use BF16 recurrent states, half the size. Default: FP32. |
 | `--disable-ane` | Prefill on the GPU alone. Default: the 27B also uses the Neural Engine. |
-| `--max-cache-disk 16G` | Cap the SSD cache (default: auto, up to 32 GiB; `0` turns it off). |
-| `--persistent-cache` | Keep the SSD cache across restarts. Off by default. |
+| `--max-cache-disk 16G` | Cap the SSD cache (default: auto, up to 128 GiB; `0` turns it off). |
+| `--persistent-cache` | Keep the SSD cache across restarts. Off in `splash serve`; the app turns it on. |
 
 Use `--max-memory` to leave room for other applications.
 The server listens on localhost without authentication by default. For LAN

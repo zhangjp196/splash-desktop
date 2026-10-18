@@ -76,7 +76,8 @@ void testCleanRuntimeStatus(const char *goldenPath) {
   engine.completed = 2;
   engine.cacheHits = 1;
   engine.coldMisses = 2;
-  engine.reusedTokens = 64;
+  // The reused tokens behind the disk reuse rate: 96 of 128 came from disk.
+  engine.reusedTokens = 128;
   engine.deduplicatedKvTokens = 96;
   engine.junctionMaterializations = 1;
   engine.checkpointPublications = 3;
@@ -228,6 +229,7 @@ void testCleanRuntimeStatus(const char *goldenPath) {
   require(golden && json + '\n' == expected,
           std::string(goldenPath) + " is not the status document, which is now:\n" + json);
   require(json.find("\"kv_disk_hit_tokens\":96") != std::string::npos &&
+              json.find("\"kv_disk_hit_rate\":0.75") != std::string::npos &&
               json.find("\"kv_restores\":3") != std::string::npos,
           "disk token accounting must include transfers completed before admission retries");
   require(json.find("\"read_bytes\":12345") != std::string::npos &&

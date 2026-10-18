@@ -57,11 +57,13 @@ public:
   using ByteSink = std::function<void(std::span<const uint8_t>)>;
   using StatusProvider = std::function<std::string()>;
 
-  // idleReleaseSeconds is the engine's idle release
-  // (RuntimeResourcesConfig::idleReleaseSeconds): positive, and infinite
-  // where the weights stay.
+  // idleReleaseSeconds is the engine's idle release, cacheIdleSpillSeconds
+  // its idle spill (RuntimeResourcesConfig::idleReleaseSeconds and
+  // ::cacheIdleSpillSeconds): each positive, the first infinite where the
+  // weights stay, the second where the cache never spills.
   NativeRuntime(NativeLoopConfig config, double idleReleaseSeconds,
-                engine::Cache &cache, model::Model &model, ByteSink output,
+                double cacheIdleSpillSeconds, engine::Cache &cache,
+                model::Model &model, ByteSink output,
                 StatusProvider statusProvider, protocol::ProtocolLimits limits);
 
   // Processes every complete frame in bytes. False means the connection
@@ -83,10 +85,15 @@ public:
   // At a clean stop (Engine::flushRestorePoints). False until no restore
   // point is left, and once the engine has failed.
   bool flushRestorePoints();
-  // Releases the weights, and offloads the cache to the disk tier, once the
-  // engine has held no request for the idle release since it became ready.
-  // Runs between commands, in the control pass.
+  // Releases the weights once the engine has held no request for the idle
+  // release since it became ready. Runs between commands, in the control
+  // pass.
   void releaseIdleWeights();
+  // Offloads the cache to the disk tier once the engine has held no request
+  // for the idle spill, its own timer: it fires whether or not the weights
+  // went, so a user away from the keyboard does not keep the whole cache
+  // wired for the sake of a weight load. Runs between commands.
+  void spillIdleCache();
   void setCompletionNotifier(std::function<void()> notifier) {
     core_.setCompletionNotifier(std::move(notifier));
   }
@@ -192,6 +199,7 @@ private:
 
   NativeLoopConfig config_;
   double idleReleaseSeconds_;
+  double cacheIdleSpillSeconds_;
   ByteSink output_;
   StatusProvider statusProvider_;
   protocol::ProtocolLimits limits_;

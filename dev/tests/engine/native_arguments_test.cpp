@@ -138,6 +138,12 @@ void testServerCommandLines(const char *path) {
        [](NativeArguments &read) {
          read.idleReleaseSeconds = std::numeric_limits<double>::infinity();
        }},
+      {"cache_idle_spill",
+       [](NativeArguments &read) { read.cacheIdleSpillSeconds = 90.0; }},
+      {"cache_idle_spill_off",
+       [](NativeArguments &read) {
+         read.cacheIdleSpillSeconds = std::numeric_limits<double>::infinity();
+       }},
       {"decode_share",
        [](NativeArguments &read) {
          read.maxCacheDisk = {.bytes = 5 * kGiB};
@@ -174,6 +180,7 @@ void testServerCommandLines(const char *path) {
            read.decodeShare == meant.decodeShare &&
            read.maxImagePatches == meant.maxImagePatches &&
            read.idleReleaseSeconds == meant.idleReleaseSeconds &&
+           read.cacheIdleSpillSeconds == meant.cacheIdleSpillSeconds &&
            read.preventIdleSleep == meant.preventIdleSleep &&
            read.neuralEngine == meant.neuralEngine;
   };
@@ -225,7 +232,10 @@ void testRefusals() {
   // The server passes seconds: a duration's unit is its to resolve.
   for (const char *release : {"0", "-1", "30m", "inf"})
     refuses({"auto", "auto", "--idle-release", release},
-            "--idle-release requires off or a positive number of seconds");
+            "an idle release or spill requires off or a positive number of seconds");
+  for (const char *spill : {"0", "-1", "2m", "inf"})
+    refuses({"auto", "auto", "--cache-idle-spill", spill},
+            "an idle release or spill requires off or a positive number of seconds");
   refuses({"auto", "auto", "--idle-sleep", "never"},
           "--idle-sleep requires prevent or allow");
   refuses({"auto", "auto", "--ane", "gpu"}, "--ane requires on or off");
