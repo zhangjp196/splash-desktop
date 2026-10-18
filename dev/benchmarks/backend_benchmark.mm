@@ -804,7 +804,7 @@ int main(int argc, char **argv) {
                    "  SHARE: the prefill FFN's Neural Engine share in [0, 1) "
                    "to run instead of calibrating one (0: GPU alone)\n"
                    "  ROWS: the least rows of a chunk that share takes "
-                   "(default: 512)\n"
+                   "(default: 128, the least function of the split's program)\n"
                    "  TOKENS: the context the engine serves, as serve's "
                    "--max-context (default: what memory holds)\n";
       return 2;
@@ -1194,14 +1194,14 @@ int main(int argc, char **argv) {
       }
     }
 
-    // Cold prefills of one chunk of these rows, around where the prefill
-    // FFN's Neural Engine split starts and where its program's functions step
-    // (ops::AneFfn): a prompt of these tokens runs as one chunk, which
-    // captures its replay point, the last 32-token page boundary before its
-    // last token, inside it. Each prompt is unique and runs on an empty
-    // cache.
+    // Cold prefills of one chunk of these rows, from below the least chunk the
+    // prefill FFN's Neural Engine split takes (ops::AneFfn::kMinimumRows, then
+    // every function's rows) up to the prefill budget: a prompt of these tokens
+    // runs as one chunk, which captures its replay point, the last 32-token
+    // page boundary before its last token, inside it. Each prompt is unique and
+    // runs on an empty cache.
     if (selected.shortPrompts) {
-      constexpr std::array<uint32_t, 8> shortRows{480, 512, 544, 640, 672, 1024, 1536, 2016};
+      constexpr std::array<uint32_t, 11> shortRows{128, 256, 384, 480, 512, 544, 640, 672, 1024, 1536, 2016};
       for (uint32_t sample = 0; sample < samples; ++sample) {
         for (uint32_t rows : shortRows) {
           evictAllCache(resources->cache());

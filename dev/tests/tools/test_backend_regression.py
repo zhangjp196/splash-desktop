@@ -343,7 +343,7 @@ class BackendRegressionTests(unittest.TestCase):
         and serves context tokens. With a
         share it has the Neural Engine split: it reports that share and
         minimum_rows as calibrated, or runs the share --ane-ffn-share gives
-        and the rows --ane-ffn-minimum-rows gives, else 512, unless
+        and the rows --ane-ffn-minimum-rows gives, else 128 (ops/AneFfn.hpp kMinimumRows), unless
         honours_share is false, and logs what it was given."""
         checkout = root / name
         (checkout / "build/engine-tests").mkdir(parents=True)
@@ -382,7 +382,7 @@ class BackendRegressionTests(unittest.TestCase):
             + ("float(given) if given else " if honours_share else "")
             + f"{share!r}\n"
             + "document['ane_ffn_minimum_rows'] = 0 if not document['ane_ffn_share'] "
-            + ("else int(rows) if rows else 512 if given " if honours_share else "")
+            + ("else int(rows) if rows else 128 if given " if honours_share else "")
             + f"else {minimum_rows!r}\n"
             if share is not None
             else ""

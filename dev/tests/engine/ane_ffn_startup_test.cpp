@@ -70,15 +70,15 @@ std::string grouped(uint32_t tokens) {
 // An M5 Max's timings of Qwen3.8-27B's 34 units, which choose 8 of them.
 Timings measured() { return {{14.0 / 34, 11.699, 23.484}, {27.0 / 34, 5.033, 44.683}, 18.990}; }
 
-// The chunks of a split timed over its functions of 2048 down to 512 rows: the GPU alone 5 ms at 512 rows and 20 at
-// 2048, each function's split layer 0.8 of the GPU's at its rows but function 2048's at `most` ms and function 640's
-// at 5.5, which splits its chunks from 553 rows (ane_ffn_calibration_test).
+// The chunks of a split timed over its functions of 2048 down to the program's least (ops::AneFfn::kMinimumRows rows):
+// the GPU alone 5 ms at 512 rows and 20 at 2048, each function's split layer 0.8 of the GPU's at its rows but function
+// 2048's at `most` ms and function 640's at 5.5, which splits its chunks from 553 rows (ane_ffn_calibration_test).
 ChunkTimings timedChunks(double most) {
-  const auto gpu = [](uint32_t rows) { return 5.0 + (rows - 512) * 15.0 / 1536; };
+  const auto gpu = [](uint32_t rows) { return 5.0 + (static_cast<double>(rows) - 512.0) * 15.0 / 1536; };
   ChunkTimings chunks;
   chunks.gpu = {{{512, gpu(512)}, {2048, gpu(2048)}}};
-  for (uint32_t rows = 2048; rows >= 512; rows -= 128)
-    chunks.functions.push_back({rows == 512 ? 512 : rows - 127, rows,
+  for (uint32_t rows = 2048; rows >= ops::AneFfn::kMinimumRows; rows -= 128)
+    chunks.functions.push_back({rows == ops::AneFfn::kMinimumRows ? ops::AneFfn::kMinimumRows : rows - 127, rows,
                                 rows == 2048 ? most : rows == 640 ? 5.5 : 0.8 * gpu(rows)});
   return chunks;
 }
@@ -557,7 +557,9 @@ void testRemembered() {
               has(started.log, "The GPU runs the prefill FFN alone: no Neural Engine split beat it by enough when "
                                "this Mac calibrated it"),
           "a remembered calibration of no split did not leave the GPU alone: " + started.log);
-  for (const Calibration &unusable : {Calibration{34, 700, gpu}, Calibration{9, 511, gpu}, Calibration{9, 2049, gpu}}) {
+  for (const Calibration &unusable : {Calibration{34, 700, gpu},
+                                      Calibration{9, ops::AneFfn::kMinimumRows - 1, gpu},
+                                      Calibration{9, ops::AneFfn::kMaximumRows + 1, gpu}}) {
     fake = {};
     fake.stored = unusable;
     started = start(fake);
@@ -576,14 +578,16 @@ void testGivenShare() {
   require(started.start.outcome.kind == Kind::Split && !fake.timings && fake.prepared == std::pair(7u, false) &&
               !fake.recalled && !fake.remembered && started.start.plan &&
               started.start.plan->breakdown().aneFfnBytes == fake.bytes(7) &&
-              has(started.log, "Neural Engine FFN split at the given share 0.21 for chunks of 512 rows or more, 2.5% "
-                               "from the GPU alone on the Neural Engine's part"),
+              has(started.log, "Neural Engine FFN split at the given share 0.21 for chunks of " +
+                                   std::to_string(ops::AneFfn::kMinimumRows) +
+                                   " rows or more, 2.5% from the GPU alone on the Neural Engine's part"),
           "the given share did not run as given: " + started.log);
   started = start(fake, {.given = AneFfnSetting::Given{0.2, 832}});
   require(started.start.outcome.kind == Kind::Split && has(started.log, "for chunks of 832 rows or more"),
           "the given least chunk did not run as given: " + started.log);
   for (const AneFfnSetting::Given given : {AneFfnSetting::Given{0.0}, AneFfnSetting::Given{1.0},
-                                           AneFfnSetting::Given{0.2, 511}, AneFfnSetting::Given{0.2, 2049}})
+                                           AneFfnSetting::Given{0.2, ops::AneFfn::kMinimumRows - 1},
+                                           AneFfnSetting::Given{0.2, ops::AneFfn::kMaximumRows + 1}})
     rejects([&] { static_cast<void>(start(fake, {.given = given})); }, "ANE FFN",
             "a given split of share " + std::to_string(given.share) + " from " + std::to_string(given.minimumRows) +
                 " rows ran");

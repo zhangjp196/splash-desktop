@@ -538,7 +538,8 @@ void split(MetalBackend &backend, const Linear &linear, const Model &model, cons
   if (split->share() != 0.5) fail(model.name + ": runs share " + std::to_string(split->share()));
   if (split->splits(AneFfn::kMinimumRows - 1) || !split->splits(AneFfn::kMinimumRows) ||
       !split->splits(AneFfn::kMaximumRows) || split->splits(AneFfn::kMaximumRows + 1))
-    fail(model.name + ": the split takes other chunks than those of 512 to 2048 rows");
+    fail(model.name + ": the split takes other chunks than those of " + std::to_string(AneFfn::kMinimumRows) + " to " +
+         std::to_string(AneFfn::kMaximumRows) + " rows");
   // The plan takes whole pages of each of its four buffers, of which Metal may report less.
   const uint64_t planned = AneFfn::plannedBytes(model.layers, kAneUnits), allocated = split->allocatedBytes();
   if (allocated > planned || planned - allocated >= 4 * kHostPageBytes)
@@ -556,7 +557,7 @@ void split(MetalBackend &backend, const Linear &linear, const Model &model, cons
            "% RMS from the GPU alone" + (got.usable ? "" : ", unusable: " + split->reason()));
   }
   section("split: " + model.name + " layers at share 0.5 from layers gone before it runs, its planned memory, "
-          "chunks of 2048, 512 and 700 rows");
+          "chunks of 2048, " + std::to_string(AneFfn::kMinimumRows) + " and 700 rows");
 
   // A least chunk of more rows leaves the smaller ones to the GPU; one of rows no function holds is refused.
   split->setMinimumRows(640);
@@ -849,8 +850,8 @@ void split(MetalBackend &backend) {
 }
 
 // ---------------------------------------------------------------- faults
-// Each fault of an evaluation at layer 0, 1 and 2 of chunks of 512, 700 and 2048 rows stops the split (stops()); an
-// evaluation that signals the event below its value leaves it there.
+// Each fault of an evaluation at layer 0, 1 and 2 of chunks of AneFfn::kMinimumRows, 700 and AneFfn::kMaximumRows rows
+// stops the split (stops()); an evaluation that signals the event below its value leaves it there.
 void faults(MetalBackend &backend) {
   using Faults = ane::ProgramInstrumentation::Faults;
   const Linear linear(backend.capabilities());
@@ -876,7 +877,8 @@ void faults(MetalBackend &backend) {
       for (const uint32_t count : {AneFfn::kMinimumRows, 700u, AneFfn::kMaximumRows})
         stops(backend, linear, model, buffers, kind.arm(layer + 1),
               std::string(kind.name) + " at layer " + std::to_string(layer), count, kind.reason);
-    section(std::string("faults: ") + kind.name + " at each layer of chunks of 512, 700 and 2048 rows");
+    section(std::string("faults: ") + kind.name + " at each layer of chunks of " +
+            std::to_string(AneFfn::kMinimumRows) + ", 700 and " + std::to_string(AneFfn::kMaximumRows) + " rows");
   }
 
   // A program that does not load again after the idle release.

@@ -39,8 +39,12 @@ class AneFfn final {
 public:
   // A chunk runs on the smallest of the program's functions that holds it,
   // one every kProgramStep rows from kMinimumRows to the prefill budget,
-  // since an evaluation costs the ANE its function's rows.
-  static constexpr uint32_t kMinimumRows = 512, kProgramStep = 128, kMaximumRows = SPLASH_PREFILL_TOKEN_BUDGET;
+  // since an evaluation costs the ANE its function's rows: a chunk below
+  // the least function pads up to it. kMinimumRows is therefore also the
+  // least chunk the split can take, and it is low enough to pay: a 480-row
+  // chunk of Qwen3.8-27B's dense FFN on a 40-core M3 Max takes 1.6 s with
+  // the split against 2.2 s on the GPU alone.
+  static constexpr uint32_t kMinimumRows = 128, kProgramStep = 128, kMaximumRows = SPLASH_PREFILL_TOKEN_BUDGET;
   static_assert(kMaximumRows >= kMinimumRows && (kMaximumRows - kMinimumRows) % kProgramStep == 0,
                 "the functions cover the chunks the split takes");
 

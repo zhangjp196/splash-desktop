@@ -142,19 +142,19 @@ void testNearestUnits() {
 }
 
 // The GPU alone's layer on the line through 5 ms at 512 rows and 20 at 2048.
-double gpuAt(uint32_t rows) { return 5.0 + (rows - 512) * 15.0 / 1536; }
+double gpuAt(uint32_t rows) { return 5.0 + (static_cast<double>(rows) - 512.0) * 15.0 / 1536; }
 
-// The timings of functions every 128 rows from 512 to 2048, from the most rows down, each running the chunks above
-// the one below it (the least, those of 512 rows): each function's split layer at `ratio` of the GPU's at its own
-// rows, but where `split` says otherwise.
+// The timings of functions every 128 rows from the program's least (128 rows, ops/AneFfn.hpp) to 2048, from the most
+// rows down, each running the chunks above the one below it (the least, those of 128 rows): each function's split
+// layer at `ratio` of the GPU's at its own rows, but where `split` says otherwise.
 ChunkTimings functions(double ratio, const std::vector<std::pair<uint32_t, double>> &split = {}) {
   ChunkTimings timings;
   timings.gpu = {{{512, gpuAt(512)}, {2048, gpuAt(2048)}}};
-  for (uint32_t rows = 2048; rows >= 512; rows -= 128) {
+  for (uint32_t rows = 2048; rows >= 128; rows -= 128) {
     double milliseconds = ratio * gpuAt(rows);
     for (const auto &[function, given] : split)
       if (function == rows) milliseconds = given;
-    timings.functions.push_back({rows == 512 ? 512 : rows - 127, rows, milliseconds});
+    timings.functions.push_back({rows == 128 ? 128 : rows - 127, rows, milliseconds});
   }
   return timings;
 }
@@ -162,7 +162,7 @@ ChunkTimings functions(double ratio, const std::vector<std::pair<uint32_t, doubl
 // A chunk splits while its function's split layer takes at most 2% longer than the GPU alone at the chunk's rows,
 // each row count checked; the least chunk is the one from which every larger one splits.
 void testMinimumRows() {
-  require(minimumRows(functions(0.5)) == 512u, "a split of every function twice as fast held back a chunk");
+  require(minimumRows(functions(0.5)) == 128u, "a split of every function twice as fast held back a chunk");
   require(!minimumRows(functions(0.8, {{2048, 21.0}})), "a split slower at the most rows split a chunk");
   // Function 640 at 5.5 ms: a batch of a 512-row chunk and another lane's row, 513 rows, runs it slower than the GPU
   // alone (5.01 ms); its chunks split from 553 rows (1.02 x 5.40 ms), and not from 552 (1.02 x 5.39).
