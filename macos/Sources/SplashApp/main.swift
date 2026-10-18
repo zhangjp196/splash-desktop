@@ -49,10 +49,14 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.maxMemory = "28G"
     edited.maxContext = "100K"
     edited.residencySeconds = "45"
+    edited.persistentCache = false
+    edited.maxCacheDisk = "64G"
+    edited.maxCacheDiskWrites = "200G"
     edited.maxRequestSize = "128M"
     edited.apiKey = "selfcheck-key"
     edited.servedNames = "one, two"
     edited.reasoningEffort = "high"
+    edited.maxConcurrency = 24
     passed = store.save(edited) && store.load() == edited
 
     var replaced = edited
@@ -65,12 +69,25 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     broken.kvFormat = "fp8"
     broken.reasoningEffort = "extreme"
     broken.port = 70_000
+    broken.maxConcurrency = 0
     _ = store.save(broken)
     let repaired = store.load()
     passed = passed
         && repaired.kvFormat == ServerSettings.First.kvFormat
         && repaired.reasoningEffort == ""
         && repaired.port == ServerSettings.First.port
+        && repaired.maxConcurrency == ServerSettings.First.maxConcurrency
+
+    // A configuration stored before a setting existed still decodes: a missing
+    // key keeps its first-launch value instead of dropping the user's saved
+    // configurations.
+    let legacy = Data(#"{"modelMode":"upstream","modelID":"legacy/model"}"#.utf8)
+    let decoded = try? JSONDecoder().decode(ServerSettings.self, from: legacy)
+    passed = passed
+        && decoded?.modelID == "legacy/model"
+        && decoded?.maxConcurrency == ServerSettings.First.maxConcurrency
+        && decoded?.persistentCache == ServerSettings.First.persistentCache
+        && decoded?.maxCacheDiskWrites == ServerSettings.First.maxCacheDiskWrites
 
     // The model: what one launch saves is what the next one opens on, and the
     // defaults button returns it to the state the app first opened with. The

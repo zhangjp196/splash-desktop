@@ -154,11 +154,20 @@ struct LivePane: View {
             MetricCard(title: L10n.string("live.hit_rate"), value: percent(live.cacheHitRate),
                        systemImage: "target", tint: .green,
                        progress: live.cacheHitRate),
-            MetricCard(title: L10n.string("live.kv_disk_hit"), value: tokens(live.kvDiskHitTokens),
-                       systemImage: "arrow.down.circle", tint: .teal),
-            MetricCard(title: L10n.string("live.state_hit"), value: tokens(live.stateHitTokens),
+            MetricCard(title: L10n.string("live.kv_disk_hit"), value: percent(live.kvDiskHitRate),
+                       caption: diskReuseCaption(live),
+                       systemImage: "arrow.down.circle", tint: .teal,
+                       progress: live.kvDiskHitRate),
+            MetricCard(title: L10n.string("live.state_hit"), value: number(live.stateDiskHits),
                        systemImage: "arrow.triangle.2.circlepath", tint: .blue),
         ]
+    }
+
+    /// "96 of 128 tokens": the counts behind the disk reuse rate, so a rate
+    /// read alone does not hide how much was reused at all.
+    private func diskReuseCaption(_ live: LiveStatus) -> String {
+        guard let reused = live.reusedTokens, reused > 0 else { return "" }
+        return L10n.format("live.caption.share", number(live.kvDiskHitTokens), number(reused))
     }
     /// A used-of-total pair as a fraction and a caption, either of which is nil
     /// when the total is unknown so nothing renders a misleading bar.
@@ -171,6 +180,11 @@ struct LivePane: View {
     }
 
     private func tokens(_ value: Int?) -> String {
+        number(value)
+    }
+
+    /// A count with grouping separators, or a dash when the status left it out.
+    private func number(_ value: Int?) -> String {
         value.map { $0.formatted() } ?? "—"
     }
 

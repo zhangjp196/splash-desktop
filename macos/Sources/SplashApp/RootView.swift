@@ -29,6 +29,11 @@ struct RootView: View {
             case .log: return "terminal"
             }
         }
+
+        /// The panes as the sidebar's groups show them: what is served, then
+        /// how it is running.
+        static let serving: [Section] = [.models]
+        static let monitoring: [Section] = [.live, .log]
     }
 
     var body: some View {
@@ -57,20 +62,34 @@ private struct Sidebar: View {
     @Binding var selection: RootView.Section
 
     var body: some View {
-        List(selection: $selection) {
-            Section {
-                ForEach(RootView.Section.allCases) { section in
-                    Label(section.title, systemImage: section.systemImage).tag(section)
-                }
-            } header: {
-                HStack(spacing: 8) {
-                    BrandMark()
-                    Text("Splash").font(.headline)
-                }
-                .padding(.vertical, 4)
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                BrandMark()
+                Text("Splash").font(.headline)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+
+            List(selection: $selection) {
+                Section {
+                    ForEach(RootView.Section.serving) { section in
+                        Label(section.title, systemImage: section.systemImage).tag(section)
+                    }
+                } header: {
+                    Text(L10n.string("sidebar.serve"))
+                }
+                Section {
+                    ForEach(RootView.Section.monitoring) { section in
+                        Label(section.title, systemImage: section.systemImage).tag(section)
+                    }
+                } header: {
+                    Text(L10n.string("sidebar.monitor"))
+                }
+            }
+            .listStyle(.sidebar)
         }
-        .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             ServerControls()
         }

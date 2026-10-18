@@ -5,7 +5,9 @@
 "section.server" = "Server";
 "section.memory" = "Memory";
 "section.idle" = "When idle";
+"section.cache" = "Cache";
 "section.request" = "Requests and access";
+"section.schedule" = "Scheduling";
 "field.target" = "Target folder";
 "field.target.prompt" = "an MLX 4-bit or GGUF directory";
 "field.draft" = "Draft folder";
@@ -17,10 +19,16 @@
 "kv.bf16" = "BF16";
 "field.neural_engine" = "Use Neural Engine (ANE)";
 "help.neural_engine" = "Prefill the dense FFN on the Neural Engine when it is faster (Qwen3.8-27B). Turn off to pass --disable-ane.";
+"help.max_concurrency" = "Requests admitted at once, running or waiting; more get 503.";
 "field.max_memory" = "Max memory (e.g. 28G)";
 "field.max_context" = "Max context (e.g. 100K)";
+"field.max_concurrency" = "Max concurrency";
 "field.residency" = "Release weights after idle seconds (LM Studio style)";
-"footer.idle" = "Releasing weights after idle returns GPU memory while the server keeps serving; the cached prefixes spill to disk at the same idle moment, and the next request restores them. Both are automatic, and the idle timer restarts on every request.";
+"footer.idle" = "Releasing weights after idle returns GPU memory while the server keeps serving; the next request restores them. The idle timer restarts on every request.";
+"field.persistent_cache" = "Keep cached prefixes across restarts";
+"field.cache_quota" = "SSD cache quota (e.g. 64G, or 0 to turn it off)";
+"field.cache_writes" = "Daily SSD write budget (e.g. 50G)";
+"footer.cache" = "The SSD cache holds the prefixes and states a conversation resumes from, so a restart, an upgrade or a crash does not start it over. Its quota follows the volume's free space up to 128 GiB unless a size is set here. The write budget paces writing against the drive's life: past it, the cache keeps the states conversations resume from and gives up the rest. The server itself writes without a budget unless one is set here.";
 "control.saved" = "Saved automatically";
 "control.defaults" = "Restore defaults";
 "field.api_key" = "API key";
@@ -93,11 +101,15 @@
 "live.peak_memory" = "Peak address space";
 "live.disk_cache" = "Disk cache";
 "live.caption.idle_offload" = "%d idle offloads · %@";
-"live.hit_rate" = "Cache hit rate";
-"live.kv_disk_hit" = "KV disk hits";
+"live.hit_rate" = "Request cache hit rate";
+"live.kv_disk_hit" = "KV reuse from disk";
 "live.state_hit" = "State hits";
 "language.follow" = "Follow system";
 "settings.language" = "Interface language";
+
+// The sidebar: its two groups, then one entry per pane.
+"sidebar.serve" = "Serve";
+"sidebar.monitor" = "Monitor";
 
 // The models pane: configurations and managed directories.
 "view.models" = "Models";
@@ -109,9 +121,12 @@
 "models.use_start" = "Use & Start";
 "models.start" = "Start";
 "models.remove" = "Remove";
+"models.remove.title" = "Remove configuration?";
+"models.remove.message" = "“%@” will be removed from the app. Model files on disk are not deleted.";
 "models.empty.configs" = "No configurations yet. Add one to choose a model.";
 "models.text_only" = "text only";
 "models.ane_off" = "ANE off";
+"models.concurrency" = "%d concurrent";
 
 // The configuration editor.
 "config.name" = "Name";

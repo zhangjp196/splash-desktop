@@ -5,6 +5,7 @@ import SwiftUI
 struct ModelsPane: View {
     @EnvironmentObject private var model: AppModel
     @State private var editing: EditingConfig?
+    @State private var pendingRemoval: ModelConfig?
 
     var body: some View {
         ScrollView {
@@ -27,6 +28,19 @@ struct ModelsPane: View {
             )
             .frame(minWidth: 560, minHeight: 640)
         }
+        .alert(
+            L10n.string("models.remove.title"),
+            isPresented: Binding(
+                get: { pendingRemoval != nil },
+                set: { if !$0 { pendingRemoval = nil } }
+            ),
+            presenting: pendingRemoval
+        ) { config in
+            Button(L10n.string("config.cancel"), role: .cancel) { pendingRemoval = nil }
+            Button(L10n.string("models.remove"), role: .destructive) { model.removeConfig(config) }
+        } message: { config in
+            Text(verbatim: L10n.format("models.remove.message", config.displayName))
+        }
     }
 
     private var configsSection: some View {
@@ -43,12 +57,13 @@ struct ModelsPane: View {
             if model.configs.isEmpty {
                 EmptyHint(L10n.string("models.empty.configs"))
             } else {
-                Card {
+                VStack(spacing: 10) {
                     ForEach(model.configs) { config in
-                        ConfigRow(config: config) {
-                            editing = EditingConfig(config: config, isNew: false)
-                        }
-                        if config.id != model.configs.last?.id { Divider() }
+                        ConfigRow(
+                            config: config,
+                            onEdit: { editing = EditingConfig(config: config, isNew: false) },
+                            onRemove: { pendingRemoval = config }
+                        )
                     }
                 }
             }
@@ -56,31 +71,41 @@ struct ModelsPane: View {
     }
 }
 
-/// A saved configuration, with the ways to use it and edit it.
+/// A saved configuration, as a card: what it serves, how the server runs it,
+/// and the ways to use, edit and remove it.
 private struct ConfigRow: View {
     @EnvironmentObject private var model: AppModel
     let config: ModelConfig
     var onEdit: () -> Void
+    var onRemove: () -> Void
+
+    private var isActive: Bool { model.activeConfigID == config.id }
 
     var body: some View {
         HStack(spacing: 12) {
             HStack(spacing: 12) {
                 Image(systemName: config.settings.modelMode == .local ? "folder" : "shippingbox")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 22)
-                VStack(alignment: .leading, spacing: 2) {
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 32, height: 32)
+                    .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
+                VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(config.displayName).font(.body.weight(.medium)).lineLimit(1)
-                        if model.activeConfigID == config.id { ActiveBadge() }
+                        if isActive { ActiveBadge() }
                     }
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
+                    HStack(spacing: 5) {
+                        ForEach(chips, id: \.self) { chip in
+                            Chip(text: chip)
+                        }
+                    }
+                    .lineLimit(1)
                 }
             }
             .contentShape(Rectangle())
             .onTapGesture { model.apply(config) }
             .help(L10n.string("models.use"))
-            Spacer()
+            Spacer(minLength: 8)
             Button {
                 model.apply(config)
                 model.start()
@@ -96,25 +121,37 @@ private struct ConfigRow: View {
             .help(L10n.string("models.edit"))
             Menu {
                 Button(L10n.string("models.use")) { model.apply(config) }
-                    .disabled(model.activeConfigID == config.id)
+                    .disabled(isActive)
                 Button(L10n.string("models.edit")) { onEdit() }
                 Divider()
-                Button(L10n.string("models.remove"), role: .destructive) { model.removeConfig(config) }
+                Button(L10n.string("models.remove"), role: .destructive) { onRemove() }
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
             .menuStyle(.borderlessButton)
             .frame(width: 24)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background {
+            RoundedRectangle(cornerRadius: 12).fill(.quaternary.opacity(0.25))
+            if isActive {
+                RoundedRectangle(cornerRadius: 12).fill(Color.green.opacity(0.10))
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(isActive ? Color.green.opacity(0.5) : Color.secondary.opacity(0.25))
+        )
         .contextMenu {
             Button(L10n.string("models.edit")) { onEdit() }
-            Button(L10n.string("models.remove"), role: .destructive) { model.removeConfig(config) }
+            Button(L10n.string("models.remove"), role: .destructive) { onRemove() }
         }
     }
 
-    private var subtitle: String {
+    /// One short capsule per characteristic, so the row reads at a glance
+    /// rather than as a run-on subtitle.
+    private var chips: [String] {
         var parts: [String] = []
         switch config.settings.modelMode {
         case .upstream:
@@ -132,7 +169,24 @@ private struct ConfigRow: View {
         parts.append(config.settings.kvFormat.uppercased())
         if !config.settings.neuralEngine { parts.append(L10n.string("models.ane_off")) }
         if config.settings.languageOnly { parts.append(L10n.string("models.text_only")) }
-        return parts.joined(separator: " · ")
+        parts.append(L10n.format("models.concurrency", config.settings.maxConcurrency))
+        return parts
+    }
+}
+
+/// One characteristic of a configuration, as a small capsule.
+private struct Chip: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(.quaternary.opacity(0.5), in: Capsule())
     }
 }
 
@@ -215,17 +269,6 @@ private struct SectionHeader: View {
 
     var body: some View {
         Label(title, systemImage: systemImage).font(.headline)
-    }
-}
-
-/// A rounded card the rows sit in.
-private struct Card<Content: View>: View {
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        VStack(spacing: 0) { content }
-            .background(.quaternary.opacity(0.28), in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator.opacity(0.6)))
     }
 }
 

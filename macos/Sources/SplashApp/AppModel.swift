@@ -25,7 +25,14 @@ struct LiveStatus: Equatable {
     var peakPhysicalBytes: UInt64?
     var cacheHitRate: Double?
     var kvDiskHitTokens: Int?
-    var stateHitTokens: Int?
+    /// The share of the tokens requests reused that came back from the disk
+    /// tier: `kv_disk_hit_rate`, the token-level reading `hit_rate` cannot
+    /// give, since it counts requests.
+    var kvDiskHitRate: Double?
+    /// What requests resumed from, the denominator of the rate above.
+    var reusedTokens: Int?
+    /// States a lookup found on the disk tier (`state.disk_hits`).
+    var stateDiskHits: Int?
     var waiting = 0
     var waitingMemory = 0
     var waitingConcurrency = 0
@@ -121,8 +128,12 @@ final class AppModel: ObservableObject {
     @Published var apiKey = ""
     @Published var servedNames = ""
     @Published var residencySeconds = ServerSettings.First.residencySeconds
+    @Published var persistentCache = ServerSettings.First.persistentCache
+    @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
+    @Published var maxCacheDiskWrites = ServerSettings.First.maxCacheDiskWrites
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
+    @Published var maxConcurrency = ServerSettings.First.maxConcurrency
 
     // The model library: the configurations the app has served, persisted as
     // JSON beside the settings.
@@ -209,10 +220,14 @@ final class AppModel: ObservableObject {
         settings.maxMemory = maxMemory
         settings.maxContext = maxContext
         settings.residencySeconds = residencySeconds
+        settings.persistentCache = persistentCache
+        settings.maxCacheDisk = maxCacheDisk
+        settings.maxCacheDiskWrites = maxCacheDiskWrites
         settings.maxRequestSize = maxRequestSize
         settings.apiKey = apiKey
         settings.servedNames = servedNames
         settings.reasoningEffort = reasoningEffort
+        settings.maxConcurrency = maxConcurrency
         return settings
     }
 
@@ -262,10 +277,14 @@ final class AppModel: ObservableObject {
         maxMemory = settings.maxMemory
         maxContext = settings.maxContext
         residencySeconds = settings.residencySeconds
+        persistentCache = settings.persistentCache
+        maxCacheDisk = settings.maxCacheDisk
+        maxCacheDiskWrites = settings.maxCacheDiskWrites
         maxRequestSize = settings.maxRequestSize
         apiKey = settings.apiKey
         servedNames = settings.servedNames
         reasoningEffort = settings.reasoningEffort
+        maxConcurrency = settings.maxConcurrency
     }
 
     /// Every edited field calls this, so one place decides when to write.
@@ -386,6 +405,9 @@ final class AppModel: ObservableObject {
             if !draft.isEmpty { arguments += ["--draft-model", draft] }
         }
         arguments += ["--port", String(port)]
+        // The panel owns the admission limit: it equals the server's own
+        // default until edited, so passing it keeps the two in step.
+        arguments += ["--queue-size", String(maxConcurrency)]
         if languageOnly { arguments.append("--language-only") }
         if !maxMemory.isEmpty { arguments += ["--max-memory", maxMemory] }
         if !maxContext.isEmpty { arguments += ["--max-context", maxContext] }
@@ -396,8 +418,18 @@ final class AppModel: ObservableObject {
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += ["--served-model-name", trimmed] }
         }
-        // The SSD cache quota is the server's own automatic default and the
-        // idle spill follows --idle-release, so neither is passed here.
+        // The SSD cache: persistent by default, its quota the server's own
+        // automatic one unless the panel set a size, and a daily write budget
+        // that paces it against the drive's life. The engine's idle spill is
+        // its own timer now and needs no argument. A quota of `0` turns the
+        // cache off, and the server refuses --persistent-cache beside it.
+        let cacheQuota = maxCacheDisk.trimmingCharacters(in: .whitespaces)
+        if persistentCache && cacheQuota != "0" { arguments.append("--persistent-cache") }
+        if !cacheQuota.isEmpty { arguments += ["--max-cache-disk", cacheQuota] }
+        let cacheWrites = maxCacheDiskWrites.trimmingCharacters(in: .whitespaces)
+        if !cacheWrites.isEmpty {
+            arguments += ["--max-cache-disk-writes", cacheWrites]
+        }
         if let seconds = Int(residencySeconds), seconds >= 1, seconds <= 86_400 {
             arguments += ["--idle-release", String(seconds)]
         }
@@ -630,7 +662,11 @@ final class AppModel: ObservableObject {
         if let cache = object["cache"] as? [String: Any] {
             status.cacheHitRate = cache["hit_rate"] as? Double
             status.kvDiskHitTokens = cache["kv_disk_hit_tokens"] as? Int
-            status.stateHitTokens = cache["state_hit_tokens"] as? Int
+            status.kvDiskHitRate = cache["kv_disk_hit_rate"] as? Double
+            status.reusedTokens = cache["reused_tokens"] as? Int
+        }
+        if let state = object["state"] as? [String: Any] {
+            status.stateDiskHits = state["disk_hits"] as? Int
         }
         if let admission = object["admission"] as? [String: Any] {
             status.waiting = admission["waiting"] as? Int ?? 0

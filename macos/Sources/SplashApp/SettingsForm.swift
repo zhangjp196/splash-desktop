@@ -1,32 +1,67 @@
 import AppKit
 import SwiftUI
 
-/// The configuration's settings, split across tabs like a preferences
-/// window: what model, how the server serves it, memory, idle behaviour and
-/// what a request may carry. Bound to a configuration the models pane edits.
+/// The configuration's settings, grouped in a rail the editor switches
+/// between: what model, how the server serves it, admission, memory, idle
+/// behaviour and what a request may carry. Bound to a configuration the
+/// models pane edits.
 struct SettingsTabs: View {
     @Binding var settings: ServerSettings
     var disabled = false
+    @State private var section: Pane? = .model
 
-    var body: some View {
-        TabView {
-            tab { modelSection }
-                .tabItem { Label(L10n.string("section.model"), systemImage: "cube.box") }
-            tab { serverSection }
-                .tabItem { Label(L10n.string("section.server"), systemImage: "network") }
-            tab { memorySection }
-                .tabItem { Label(L10n.string("section.memory"), systemImage: "memorychip") }
-            tab { idleSection }
-                .tabItem { Label(L10n.string("section.idle"), systemImage: "leaf") }
-            tab { requestsSection }
-                .tabItem { Label(L10n.string("section.request"), systemImage: "text.bubble") }
+    /// The form's groups. The admission limit sits under Scheduling with the
+    /// rest of how requests are taken, rather than hidden among the server's
+    /// transport options.
+    private enum Pane: String, CaseIterable, Identifiable {
+        case model, server, schedule, memory, idle, cache, request
+
+        var id: String { rawValue }
+
+        var title: String { L10n.string("section.\(rawValue)") }
+
+        var systemImage: String {
+            switch self {
+            case .model: return "cube.box"
+            case .server: return "network"
+            case .schedule: return "speedometer"
+            case .memory: return "memorychip"
+            case .idle: return "leaf"
+            case .cache: return "internaldrive"
+            case .request: return "text.bubble"
+            }
         }
     }
 
-    private func tab<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        Form { content() }
-            .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
+    var body: some View {
+        HStack(spacing: 0) {
+            List(selection: $section) {
+                ForEach(Pane.allCases) { item in
+                    Label(item.title, systemImage: item.systemImage).tag(item)
+                }
+            }
+            .listStyle(.sidebar)
+            .frame(width: 176)
+
+            Divider()
+
+            Form { current }
+                .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    @ViewBuilder private var current: some View {
+        switch section ?? .model {
+        case .model: modelSection
+        case .server: serverSection
+        case .schedule: scheduleSection
+        case .memory: memorySection
+        case .idle: idleSection
+        case .cache: cacheSection
+        case .request: requestsSection
+        }
     }
 
     // MARK: Sections
@@ -82,6 +117,15 @@ struct SettingsTabs: View {
         }
     }
 
+    @ViewBuilder private var scheduleSection: some View {
+        Section {
+            TextField(L10n.string("field.max_concurrency"), value: $settings.maxConcurrency, format: .number)
+                .disabled(disabled)
+        } footer: {
+            Text(verbatim: L10n.string("help.max_concurrency"))
+        }
+    }
+
     @ViewBuilder private var memorySection: some View {
         Section {
             TextField(L10n.string("field.max_memory"), text: $settings.maxMemory)
@@ -97,6 +141,19 @@ struct SettingsTabs: View {
                 .disabled(disabled)
         } footer: {
             Text(verbatim: L10n.string("footer.idle"))
+        }
+    }
+
+    @ViewBuilder private var cacheSection: some View {
+        Section {
+            Toggle(L10n.string("field.persistent_cache"), isOn: $settings.persistentCache)
+                .disabled(disabled)
+            TextField(L10n.string("field.cache_quota"), text: $settings.maxCacheDisk)
+                .disabled(disabled)
+            TextField(L10n.string("field.cache_writes"), text: $settings.maxCacheDiskWrites)
+                .disabled(disabled)
+        } footer: {
+            Text(verbatim: L10n.string("footer.cache"))
         }
     }
 

@@ -5,7 +5,9 @@
 "section.server" = "服务";
 "section.memory" = "内存";
 "section.idle" = "空闲时";
+"section.cache" = "缓存";
 "section.request" = "请求与访问";
+"section.schedule" = "调度";
 "field.target" = "目标文件夹";
 "field.target.prompt" = "MLX 4-bit 或 GGUF 目录";
 "field.draft" = "Draft 文件夹";
@@ -17,10 +19,16 @@
 "kv.bf16" = "BF16";
 "field.neural_engine" = "使用神经引擎（ANE）";
 "help.neural_engine" = "在更快时用神经引擎做稠密 FFN 预填充（Qwen3.8-27B）。关闭会传入 --disable-ane。";
+"help.max_concurrency" = "同时受理的请求数（运行中或排队中），超出则返回 503。";
 "field.max_memory" = "最大内存（如 28G）";
 "field.max_context" = "最大上下文（如 100K）";
+"field.max_concurrency" = "最大并发";
 "field.residency" = "空闲释放权重秒数（LM Studio 风格）";
-"footer.idle" = "空闲达到该秒数后会释放权重，把显存还给系统而服务继续可用；同一时刻缓存的上下文前缀会自动写入固态盘，下次请求再从磁盘恢复。两者都是自动的，空闲计时在每次请求后重新开始。";
+"footer.idle" = "空闲达到该秒数后会释放权重，把显存还给系统而服务继续可用，下次请求再恢复；空闲计时在每次请求后重新开始。";
+"field.persistent_cache" = "跨重启保留缓存前缀";
+"field.cache_quota" = "SSD 缓存配额（如 64G，0 关闭缓存）";
+"field.cache_writes" = "SSD 每日写入预算（如 50G）";
+"footer.cache" = "SSD 缓存保存会话可续算的前缀与状态，重启、升级或崩溃后都不必从头重算。配额默认跟随卷空闲空间，上限 128 GiB；也可在此指定大小。写入预算把写入摊到驱动器寿命上：超出后仍会写入会话续算所需的状态，其余放弃。服务端本身不设写入预算，除非在此指定。";
 "control.saved" = "已自动保存";
 "control.defaults" = "恢复默认";
 "field.api_key" = "API 密钥";
@@ -93,11 +101,15 @@
 "live.peak_memory" = "地址空间峰值";
 "live.disk_cache" = "磁盘缓存";
 "live.caption.idle_offload" = "%d 次空闲落盘 · %@";
-"live.hit_rate" = "缓存命中率";
-"live.kv_disk_hit" = "KV 磁盘命中";
+"live.hit_rate" = "请求级缓存命中率";
+"live.kv_disk_hit" = "KV 复用来自磁盘";
 "live.state_hit" = "状态命中";
 "language.follow" = "跟随系统";
 "settings.language" = "界面语言";
+
+// 侧栏：两个分组，然后每个面板一项。
+"sidebar.serve" = "服务";
+"sidebar.monitor" = "监控";
 
 // 模型面板：配置与目录管理。
 "view.models" = "模型";
@@ -109,9 +121,12 @@
 "models.use_start" = "使用并启动";
 "models.start" = "启动";
 "models.remove" = "移除";
+"models.remove.title" = "移除配置？";
+"models.remove.message" = "「%@」会从 App 中移除；磁盘上的模型文件不会被删除。";
 "models.empty.configs" = "还没有配置。添加一个来选模型。";
 "models.text_only" = "仅文本";
 "models.ane_off" = "ANE 关";
+"models.concurrency" = "并发 %d";
 
 // 配置编辑器。
 "config.name" = "名称";
