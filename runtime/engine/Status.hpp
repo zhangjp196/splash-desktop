@@ -5,6 +5,7 @@
 #include "metal/MetalBackend.hpp"
 #include "engine/MemoryGovernor.hpp"
 #include "engine/MemoryAudit.hpp"
+#include "engine/FanState.hpp"
 #include "engine/ThermalState.hpp"
 
 #include <algorithm>
@@ -289,6 +290,7 @@ struct AneFfnSnapshot {
     const MemoryGovernorSnapshot &memoryGovernor, bool metalHealthy,
     std::string metalFailureReason, const ResourceWaitSnapshot &resourceWait,
     const NativeLoopTiming &loop, const WeightsSnapshot &weights,
-    const AneFfnSnapshot &aneFfn, ThermalState thermalState);
+    const AneFfnSnapshot &aneFfn, ThermalState thermalState,
+    const FanState &fanState);
 
 } // namespace splash::engine

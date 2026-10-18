@@ -728,6 +728,35 @@ class NativeBackend:
         self._cache_status(snapshot, restarts)
         return snapshot
 
+    def set_prefill_duty(self, duty_percent, timeout=5.0):
+        """Change a running engine's prefill duty; returns its status.
+
+        The `throttle.duty_percent` of the returned snapshot is the duty the
+        engine took: it clamps to what a configuration may ask for, and the
+        engine holds the new duty from its next prefill command on.
+        """
+        with self.lock:
+            if self.closing:
+                raise APIError(503, "server is shutting down", "server_shutdown")
+        restarts = self.runtime.restart_count
+        try:
+            event = self.runtime.set_prefill_duty(duty_percent, timeout=timeout)
+        except TimeoutError:
+            raise APIError(
+                503,
+                f"the engine did not answer within {timeout:g} s; retry shortly",
+                "engine_busy",
+            ) from None
+        except (
+            engine_runtime.EngineUnhealthy,
+            engine_runtime.ProtocolFatal,
+            engine_runtime.RuntimeClosed,
+        ) as error:
+            raise self.refusal() or self._api_error(error) from None
+        snapshot = self._decode_status_event(event)
+        self._cache_status(snapshot, restarts)
+        return snapshot
+
     def submit(self, job):
         state = None
 

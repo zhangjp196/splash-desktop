@@ -97,7 +97,7 @@ struct SplashApp: App {
     @StateObject private var model = AppModel.shared
 
     var body: some Scene {
-        WindowGroup("Splash", id: "main") {
+        WindowGroup("Splash Desktop", id: "main") {
             RootView()
                 .environmentObject(model)
                 .frame(minWidth: 860, minHeight: 620)

@@ -43,6 +43,9 @@ struct NativeArguments final {
   kv::Format kvFormat = kv::Format::Int8;
   ops::GdnStateFormat stateFormat = ops::GdnStateFormat::Float32;
   double decodeShare = EngineConfig{}.decodeShare;
+  // --prefill-duty PERCENT: the share of wall time prefill may keep the GPU
+  // busy, 100 for no pacing at all.
+  double prefillDutyPercent = EngineConfig{}.prefillDutyPercent;
   uint32_t maxImagePatches = ops::kMaximumImagePatches;
   // --idle-release SECONDS|off, infinite for off.
   double idleReleaseSeconds = RuntimeResourcesConfig{}.idleReleaseSeconds;

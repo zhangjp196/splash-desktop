@@ -281,6 +281,9 @@ bool NativeRuntime::handle(protocol::ClientMessage &message) {
           return handleMask(typed);
         } else if constexpr (std::is_same_v<T, protocol::ReleaseRequestFrame>) {
           return handleRelease(typed);
+        } else if constexpr (std::is_same_v<T,
+                                            protocol::PrefillDutyRequestFrame>) {
+          return handlePrefillDuty(typed);
         } else {
           return handleStatus(typed);
         }
@@ -391,6 +394,16 @@ bool NativeRuntime::handleRelease(const protocol::ReleaseRequestFrame &release) 
   if (releaseWeights())
     logLine("Weights released on request; the next request restores them");
   return handleStatus(protocol::StatusRequestFrame{release.correlationId});
+}
+
+// A running engine's duty changes in place: the frame is a wish and the status
+// document is the truth, so it is not answered. The engine clamps the value and
+// ignores one that is not finite; the line names the duty it holds afterwards.
+bool NativeRuntime::handlePrefillDuty(
+    const protocol::PrefillDutyRequestFrame &request) {
+  logLine("Prefill duty set to ", std::fixed, std::setprecision(1),
+          core_.setPrefillDutyPercent(request.dutyPercent), " percent");
+  return true;
 }
 
 bool NativeRuntime::handleMaskIssue(protocol::ProtocolIssue issue) {

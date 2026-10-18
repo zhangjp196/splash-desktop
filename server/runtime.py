@@ -700,6 +700,26 @@ class MultiplexedRuntime:
         assert waiter.result is not None
         return waiter.result
 
+    def set_prefill_duty(
+        self, duty_percent: float, timeout: float = 5.0
+    ) -> wire.StatusJsonEvent:
+        """Change a running engine's prefill duty, as --prefill-duty does at
+        startup, and answer with the status that reads it back. The duty frame
+        itself is not answered; the status request written after it on the same
+        stream is, and the engine applies the frames it reads in order, so the
+        ``throttle`` section of that status is the duty the engine took (it
+        clamps what a configuration may not ask for)."""
+        if not math.isfinite(duty_percent):
+            raise ValueError("prefill duty must be finite")
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeClosed("runtime is closed")
+            generation = self._generation
+            self._require_generation_ready_locked(generation)
+        encoded = wire.serialize_message(wire.PrefillDutyRequestFrame(duty_percent))
+        self._write_bytes(encoded, generation, deadline=time.monotonic() + timeout)
+        return self._status(timeout, generation, False)
+
     def close(self) -> None:
         with self._state_lock:
             if self._closed:

@@ -133,11 +133,12 @@ public:
     }
 
     // The control pass the transport runs at a command-free point: it
-    // samples the thermal state, keeps the disk tier within what its volume
-    // leaves it (Cache::keepDiskLimit), and runs the memory control pass
-    // (MemoryControl::run).
+    // samples the thermal state and the Mac's fans, keeps the disk tier within
+    // what its volume leaves it (Cache::keepDiskLimit), and runs the memory
+    // control pass (MemoryControl::run).
     [[nodiscard]] bool controlPass(MemoryPressure pressure) {
         sampleThermalState();
+        sampleFans();
         resources_->cache().keepDiskLimit();
         return memoryControl_.run(pressure);
     }
@@ -152,11 +153,17 @@ private:
                      std::unique_ptr<NativeRuntime> nativeLoop,
                      RuntimeBootstrapReport report);
 
-    // Records the thermal state macOS reports for the status document, and
-    // logs a change: nothing else tells why serving slowed down. The control
-    // pass is the loop's regular tick, so a polled state needs no observer
-    // of its own.
+    // Records the thermal state macOS reports for the status document, logs a
+    // change, and tells the engine how much of its prefill duty to keep in
+    // that state: nothing else tells why serving slowed down, and a Mac under
+    // a paced prefill is what the pacing is for. The control pass is the
+    // loop's regular tick, so a polled state needs no observer of its own.
     void sampleThermalState();
+    // Records the fans and temperatures the SMC reports for the status
+    // document, and logs the fans changing speed: that is what a person
+    // hears. Reads of the SMC need no privilege, and a Mac whose SMC cannot
+    // be read still serves.
+    void sampleFans();
 
     // Reverse destruction order is loop -> modelRuntime -> resources.
     std::unique_ptr<RuntimeResources> resources_;
@@ -165,6 +172,7 @@ private:
     MemoryControl memoryControl_;
     RuntimeBootstrapReport report_;
     ThermalStateReporter thermalState_;
+    FanStateReporter fanState_;
 };
 
 }  // namespace splash::engine

@@ -40,6 +40,7 @@
 "field.clear" = "清除";
 "field.browse" = "浏览…";
 "view.live" = "实时";
+"view.thermal" = "散热";
 "view.control" = "控制";
 "view.log" = "日志";
 "menu.open" = "在浏览器中打开对话";
@@ -59,7 +60,7 @@
 "menu.stop" = "停止服务";
 "menu.copy_api" = "复制 API 地址";
 "menu.start" = "启动服务";
-"menu.quit" = "退出 Splash";
+"menu.quit" = "退出 Splash Desktop";
 "error.no_runtime" = "未找到运行时";
 "error.exited" = "服务以状态 %d 退出";
 "error.server_did_not_stop" = "服务未停止，正在终止。";
@@ -139,6 +140,48 @@
 
 // 关闭窗口后的后台运行提示。
 "menu.show" = "显示窗口";
-"background.alert.title" = "Splash 正在后台运行";
+"background.alert.title" = "Splash Desktop 正在后台运行";
 "background.alert.message" = "关闭窗口后服务仍在菜单栏继续运行。用「显示窗口」可以重新打开；⌘Q 会停止服务并退出。";
 "background.alert.ok" = "知道了";
+
+// The thermal page: the heat the Mac reports, read-only, and the one control
+// that trades prompt preprocessing speed for quiet.
+"thermal.ladder.title" = "散热与噪音";
+"thermal.auto" = "系统默认";
+"thermal.performance" = "性能";
+"thermal.balanced" = "平衡";
+"thermal.moderate" = "适中";
+"thermal.quiet" = "安静";
+"thermal.rung.help" = "预填充最多占用 %d%% 的时间。";
+"thermal.cost.full" = "提示词全速预处理，风扇由 macOS 自行决定。";
+"thermal.cost.paced" = "提示词预处理约慢 %.1f 倍。";
+"thermal.duty.held" = "引擎当前 %d%%";
+"thermal.applies" = "立即生效，无需重启引擎。";
+"thermal.next_start" = "服务器未运行，将在下次启动生效。";
+"thermal.fans" = "风扇";
+"thermal.fan" = "风扇 %d";
+"thermal.fan.caption" = "%d–%d RPM";
+"thermal.caption.rpm" = "RPM";
+"thermal.no_fans" = "本机没有风扇";
+"thermal.unavailable" = "无读数";
+"thermal.sensors" = "温度";
+"thermal.sensor.hottest" = "最高";
+"thermal.pacing" = "预填充节流";
+"thermal.duty" = "预填充占时";
+"thermal.duty.caption" = "占墙钟时间的比例";
+"thermal.scale" = "热压让步";
+"thermal.scale.caption" = "1.00 表示不让步";
+"thermal.waits" = "节流等待";
+"thermal.waits.caption" = "累计等待 %@";
+"thermal.waits.none" = "尚未发生等待";
+"thermal.empty.title" = "没有服务器";
+"thermal.empty.description" = "风扇与温度取自运行中的引擎；启动服务器后可见。";
+"thermal.error.status" = "引擎返回 %d";
+
+
+// The live board's heat section, the thermal page's three numbers at a glance.
+"live.thermal" = "散热";
+"live.fans" = "最高风扇转速";
+"live.hottest" = "最高温度";
+"live.duty" = "预填充占时";
+"live.caption.rpm" = "RPM";

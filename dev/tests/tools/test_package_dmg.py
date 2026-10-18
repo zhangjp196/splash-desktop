@@ -103,14 +103,17 @@ class PackageDmgTest(unittest.TestCase):
             runtime, "1.1.0", self.root / "dist", stand_in_binary(self.root)
         )
         contents = app / "Contents"
-        self.assertTrue((contents / "MacOS/Splash").is_file())
-        self.assertTrue((contents / "Resources/Splash.icns").is_file())
+        self.assertEqual(app.name, "Splash Desktop.app")
+        self.assertTrue((contents / "MacOS/SplashDesktop").is_file())
+        self.assertTrue((contents / "Resources/SplashDesktop.icns").is_file())
         self.assertTrue((contents / "Resources/runtime/install/launcher.py").is_file())
         resources = contents / "Resources"
         self.assertTrue((resources / "en.lproj/Localizable.strings").is_file())
         self.assertTrue((resources / "zh-Hans.lproj/Localizable.strings").is_file())
         plist = plistlib.loads((contents / "Info.plist").read_bytes())
-        self.assertEqual(plist["CFBundleExecutable"], "Splash")
+        self.assertEqual(plist["CFBundleName"], "Splash Desktop")
+        self.assertEqual(plist["CFBundleDisplayName"], "Splash Desktop")
+        self.assertEqual(plist["CFBundleExecutable"], "SplashDesktop")
         self.assertIn("zh-Hans", plist["CFBundleLocalizations"])
 
     def test_overlay_source_uses_this_checkouts_python(self):

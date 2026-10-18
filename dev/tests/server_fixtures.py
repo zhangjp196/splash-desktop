@@ -411,6 +411,12 @@ class FakeRuntime:
         self.status_event = native_peer.status_event()
         self.release_event = native_peer.status_event(weights=RELEASED_WEIGHTS)
         self.release_calls = 0
+        # Each set_prefill_duty call records the duty asked for, and answers a
+        # status whose throttle section says the duty the engine took: the one
+        # asked for unless the test sets duty_taken, which is how an engine
+        # that clamps is stood in for.
+        self.duty_calls = []
+        self.duty_taken = None
         self.threads = []
 
     @property
@@ -433,6 +439,20 @@ class FakeRuntime:
         if not self.ready:
             raise engine_runtime.EngineUnhealthy("native process is not ready")
         return self.release_event
+
+    def set_prefill_duty(self, duty_percent, timeout=5.0):
+        self.duty_calls.append(duty_percent)
+        if not self.ready:
+            raise engine_runtime.EngineUnhealthy("native process is not ready")
+        taken = duty_percent if self.duty_taken is None else self.duty_taken
+        return native_peer.status_event(
+            throttle={
+                "duty_percent": taken,
+                "thermal_scale": 1.0,
+                "paced_waits": 0,
+                "paced_wait_ms": 0.0,
+            }
+        )
 
     def submit(self, request, *, on_event=None, on_complete=None):
         if self.pending_count >= self.pending_limit:
@@ -809,6 +829,8 @@ def main_args(**overrides):
             "binary": "splash",
             "kv_format": "int8",
             "state_format": "fp32",
+            "thermal_policy": serve_options.DEFAULT_THERMAL_POLICY,
+            "prefill_duty": None,
             **overrides,
         }
     )

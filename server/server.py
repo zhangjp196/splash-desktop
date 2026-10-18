@@ -216,6 +216,7 @@ POST_ROUTES = {
     "/v1/memory/release": PostRoute(
         "_post_memory_release", OPENAI_ERRORS, fieldless=True
     ),
+    "/v1/thermal": PostRoute("_post_thermal", OPENAI_ERRORS),
 }
 
 
@@ -821,6 +822,43 @@ class FrontendHandler(BaseHTTPRequestHandler):
             ),
             log=False,
         )
+
+    def _post_thermal(self, body, deadline):
+        """Set the heat-and-noise rung of the running engine: the share of the
+        wall time prefill may keep the GPU busy, applied without restarting it.
+        The answer names the duty the engine took, which is what its next
+        status reports too."""
+        requested = body.get("prefill_duty_percent") if isinstance(body, dict) else None
+        if requested is None:
+            self._safe_error(
+                APIError(
+                    400,
+                    "prefill_duty_percent is required",
+                    "invalid_request_error",
+                )
+            )
+            return
+        unknown = sorted(set(body) - {"prefill_duty_percent"})
+        if unknown:
+            self._safe_error(
+                APIError(
+                    400,
+                    "this endpoint takes only prefill_duty_percent; got "
+                    + ", ".join(unknown),
+                    "invalid_request_error",
+                )
+            )
+            return
+        try:
+            duty = serve_options.prefill_duty(requested)
+        except ValueError as error:
+            self._safe_error(
+                APIError(400, f"prefill_duty_percent {error}", "invalid_request_error")
+            )
+            return
+        snapshot = self.app.backend.set_prefill_duty(duty)
+        throttle = snapshot.get("throttle") or {}
+        self._json(200, {"prefill_duty_percent": throttle.get("duty_percent", duty)})
 
     def _post_systemone(self, body, deadline):
         answers = {}
@@ -1702,8 +1740,11 @@ def _native_command(args, relaunch_context=None):
         )
     if args.disable_ane:
         command.extend(("--ane", "off"))
+    policy = serve_options.thermal_policy(args)
     if args.decode_share is not None:
         command.extend(("--decode-share", str(args.decode_share)))
+    if policy.prefill_duty != serve_options.DEFAULT_PREFILL_DUTY:
+        command.extend(("--prefill-duty", str(policy.prefill_duty)))
     if args.max_image_pixels != image_input.MAX_PIXELS:
         command.extend(
             ("--max-image-patches", str(image_input.max_patches(args.max_image_pixels)))

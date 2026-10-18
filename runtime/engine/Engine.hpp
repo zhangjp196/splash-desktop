@@ -3,10 +3,13 @@
 #include "ops/Vision.hpp"
 #include "engine/Cache.hpp"
 #include "engine/MemoryGovernor.hpp"
+#include "engine/PrefillPacer.hpp"
 #include "engine/Scheduler.hpp"
 #include "engine/Types.hpp"
 #include "engine/WriteBehind.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -49,6 +52,13 @@ struct EngineConfig final {
   // its solo rate through a long prefill, which meanwhile takes 1.5x as long;
   // zero alternates one command of each kind.
   double decodeShare = 0.5;
+  // The share of wall time a prefill command may keep the GPU busy, in
+  // percent (PrefillPacer). At 60 a prompt's prefill takes about 1.7x as
+  // long, in gaps between commands that let the Mac cool, while decoding
+  // keeps its speed. 100 is the engine's behavior without pacing, and the
+  // value a Mac that must be quiet only as far as its own thermal state
+  // says gets left with whatever the state scales it to.
+  double prefillDutyPercent = 100.0;
   // The prefill checkpoint interval and the resource wait limit.
   uint32_t prefillCheckpointTokens = kPrefillCheckpointTokens;
   double resourceWaitTimeoutMilliseconds = kResourceWaitTimeoutMilliseconds;
@@ -139,6 +149,18 @@ struct ActiveRequestSnapshot final {
   double ageMilliseconds = 0.0;
 };
 
+// The prefill throttle, for /status: what prefill may use of the wall time,
+// what the Mac's thermal state scaled that to, and what the pacer held back.
+// A machine at 100 percent reports waits of none, which is what it did.
+struct PrefillThrottleSnapshot final {
+  double dutyPercent = 100.0;
+  double thermalScale = 1.0;
+  // Spells a hold began: one prefill waited for the pacer, however many lanes
+  // it held.
+  uint64_t pacedWaits = 0;
+  double pacedWaitMilliseconds = 0.0;
+};
+
 struct EngineSnapshot final {
   SchedulerSnapshot scheduler;
   // Requests not yet finalized, in submission (id) order.
@@ -184,6 +206,8 @@ struct EngineSnapshot final {
   uint64_t idleOffloadBytes = 0;
   // A persistent tier's newest restore points (WriteBehind).
   WriteBehindSnapshot writeBehind;
+  // The prefill throttle's configuration and what it held back.
+  PrefillThrottleSnapshot throttle;
 };
 
 // KV blocks define prefix identity; composite recurrent state is attached
@@ -216,6 +240,26 @@ public:
   void setCompletionNotifier(std::function<void()> notifier);
 
   [[nodiscard]] bool tick(double nowMilliseconds);
+  // Scales the prefill duty while pacing is on, from the Mac's thermal state:
+  // the caller (the native bootstrap, which samples it) maps the state to
+  // 0.75, 0.5 and 0.25 as the state rises, and 1 for nominal or while no
+  // pacing is configured. It never makes pacing faster than configured.
+  void setThermalScale(double scale) noexcept { prefillPacer_.setThermalScale(scale); }
+  // --prefill-duty at runtime, from a PrefillDutyRequest frame: the share of
+  // wall time prefill may run, clamped to what a configuration may ask for.
+  // A value that is not finite is ignored, so a malformed frame never leaves
+  // the engine without a duty. Returns the duty the engine holds afterwards,
+  // which is what the caller reads back from the next status.
+  double setPrefillDutyPercent(double percent) noexcept {
+    if (std::isfinite(percent))
+      config_.prefillDutyPercent =
+          std::clamp(percent, kMinimumPrefillDutyPercent, 100.0);
+    prefillPacer_.configure(config_.prefillDutyPercent);
+    return config_.prefillDutyPercent;
+  }
+  // Whether pacing can hold prefill back at all, for the caller that samples
+  // the thermal state: without it there is no reason to.
+  [[nodiscard]] bool pacesPrefill() const noexcept { return prefillPacer_.active(); }
   [[nodiscard]] bool commandInFlight() const noexcept {
     return pending_.has_value();
   }
@@ -676,6 +720,9 @@ private:
   model::Model &model_;
   EngineEventSink &events_;
   Scheduler scheduler_;
+  // Paces prefill commands (EngineConfig::prefillDutyPercent), so a Mac that
+  // is loud under a long prefill runs quieter between them.
+  PrefillPacer prefillPacer_;
   std::unordered_map<uint64_t, Request> requests_;
   // Pressure preempted work, a lane is still resident, and memory is still
   // short (growth is paused or allocationFailed_), up to the drain's end.

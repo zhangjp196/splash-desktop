@@ -269,6 +269,7 @@ ENGINE_CPP_SOURCES := \
 	runtime/engine/FdTransport.cpp \
 	runtime/engine/MemoryAudit.cpp \
 	runtime/engine/Status.cpp \
+	runtime/engine/FanState.cpp \
 	runtime/model/WeightStore.cpp \
 	runtime/model/GgufFile.cpp \
 	runtime/model/GgufImage.cpp \

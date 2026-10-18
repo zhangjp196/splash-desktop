@@ -12,6 +12,7 @@ _REQUEST = struct.Struct("<QBBQQIIIffIffffQIIIQQIII")
 _IMAGE_SPAN = struct.Struct("<IIIIQQ")
 _MASK_RESPONSE = struct.Struct("<QQI")
 _ID = struct.Struct("<Q")
+_F32 = struct.Struct("<f")
 
 
 def request_frame(**overrides) -> wire.RequestFrame:
@@ -213,6 +214,8 @@ def decode_client_frame(frame_type: int, payload: bytes) -> wire.ClientMessage:
             return wire.StatusRequestFrame(*_ID.unpack(payload))
         case wire.FrameType.RELEASE_REQUEST:
             return wire.ReleaseRequestFrame(*_ID.unpack(payload))
+        case wire.FrameType.PREFILL_DUTY_REQUEST:
+            return wire.PrefillDutyRequestFrame(*_F32.unpack(payload))
     raise ValueError(f"frame type {frame_type:#06x} is not a client frame")
 
 

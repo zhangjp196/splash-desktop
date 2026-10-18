@@ -51,6 +51,59 @@ void appendBatch(std::ostringstream &out,
       << ",\"tokens_per_second\":" << batch.tokensPerSecond << '}';
 }
 
+// JSON holds a rounded number: a sensor's hundredth of a degree, or a fan's
+// fraction of a revolution, is noise.
+double rounded(double value, double scale) noexcept {
+  return std::round(value * scale) / scale;
+}
+
+// One per-fan field as a JSON array, in the order the machine numbers its
+// fans, so the arrays of one fan line up by index.
+template <typename Field>
+void appendFanArray(std::ostringstream &out, const FanState &fans, Field field,
+                    double scale) {
+  out << '[';
+  for (size_t index = 0; index < fans.fans.size(); ++index) {
+    if (index)
+      out << ',';
+    out << rounded(fans.fans[index].*field, scale);
+  }
+  out << ']';
+}
+
+// The fans and the temperatures the Mac's SMC reports, and the hottest of
+// them. A Mac with no fans reports an empty list, and one whose SMC could not
+// be read reports available false: the engine serves either way.
+void appendFans(std::ostringstream &out, const FanState &fans) {
+  out << "{\"available\":" << boolean(fans.available) << ",\"speeds_rpm\":";
+  appendFanArray(out, fans, &FanReading::rotationsPerMinute, 1.0);
+  out << ",\"minimum_rpm\":";
+  appendFanArray(out, fans, &FanReading::minimumRotationsPerMinute, 1.0);
+  out << ",\"maximum_rpm\":";
+  appendFanArray(out, fans, &FanReading::maximumRotationsPerMinute, 1.0);
+  out << ",\"target_rpm\":";
+  appendFanArray(out, fans, &FanReading::targetRotationsPerMinute, 1.0);
+  out << ",\"modes\":";
+  appendFanArray(out, fans, &FanReading::mode, 1.0);
+  out << ",\"temperatures\":[";
+  for (size_t index = 0; index < fans.temperatures.size(); ++index) {
+    if (index)
+      out << ',';
+    out << "{\"sensor\":" << json::quote(fans.temperatures[index].key)
+        << ",\"celsius\":" << rounded(fans.temperatures[index].celsius, 10.0) << '}';
+  }
+  out << "],\"hottest_sensor\":" << json::quote(fans.hottestKey)
+      << ",\"hottest_celsius\":" << rounded(fans.hottestCelsius, 10.0) << '}';
+}
+
+// What prefill may use of the wall time, and what pacing held back.
+void appendThrottle(std::ostringstream &out, const PrefillThrottleSnapshot &throttle) {
+  out << "{\"duty_percent\":" << throttle.dutyPercent
+      << ",\"thermal_scale\":" << throttle.thermalScale
+      << ",\"paced_waits\":" << throttle.pacedWaits
+      << ",\"paced_wait_ms\":" << rounded(throttle.pacedWaitMilliseconds, 10.0) << '}';
+}
+
 const char *phaseName(engine::Phase phase) noexcept {
   switch (phase) {
   case engine::Phase::Queued: return "queued";
@@ -96,7 +149,8 @@ std::string runtimeStatusJson(
     const MemoryGovernorSnapshot &memoryGovernor, bool metalHealthy,
     std::string metalFailureReason, const ResourceWaitSnapshot &resourceWait,
     const NativeLoopTiming &loop, const WeightsSnapshot &weights,
-    const AneFfnSnapshot &aneFfn, ThermalState thermalState) {
+    const AneFfnSnapshot &aneFfn, ThermalState thermalState,
+    const FanState &fanState) {
   const auto &resources = core.resources;
   const auto &scheduler = core.scheduler;
   const auto &pool = resources.pool;
@@ -136,8 +190,12 @@ std::string runtimeStatusJson(
       << ",\"maximum_context_tokens\":" << core.maximumContextTokens
       << ",\"memory_pressure\":"
       << json::quote(memoryPressureName(memoryGovernor.pressure))
-      << ",\"thermal_state\":" << json::quote(thermalStateName(thermalState))
-      << ",\"admission\":{\"waiting\":"
+      << ",\"thermal_state\":" << json::quote(thermalStateName(thermalState));
+  out << ",\"throttle\":";
+  appendThrottle(out, core.throttle);
+  out << ",\"fans\":";
+  appendFans(out, fanState);
+  out << ",\"admission\":{\"waiting\":"
       << resourceWait.memory + resourceWait.concurrency
       << ",\"waiting_memory\":" << resourceWait.memory
       << ",\"waiting_concurrency\":" << resourceWait.concurrency

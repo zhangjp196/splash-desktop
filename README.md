@@ -19,9 +19,11 @@ The easiest way to run Splash is the macOS app: one self-contained
 installation that carries the engine, the server, and the runtime, so neither
 installing it nor its first run needs anything but the model you choose.
 
-1. Download the newest `Splash-<version>.dmg` from the
+1. Download the newest `Splash-Desktop-<version>.dmg` from the
    [Releases](https://github.com/zhangjp196/splash-desktop/releases) page and
-   drag Splash to Applications.
+   drag Splash Desktop to Applications. The app used to be called Splash: if
+   `/Applications/Splash.app` is there from an older disk image, delete it, so
+   the two do not sit side by side.
 2. Open it. The build is unsigned, so the first time you may need to
    right-click and choose Open.
 3. In the **Models** pane, pick a configuration and press **Start**. The
@@ -30,14 +32,20 @@ installing it nor its first run needs anything but the model you choose.
 4. Open <http://127.0.0.1:8000> in your browser, or point a coding agent at
    the server.
 
-The window is a sidebar of **Models**, **Live**, and **Log**, with the run
-state and Start and Stop pinned beneath it:
+The window is a sidebar of **Models**, **Live**, **Thermal**, and **Log**, with
+the run state and Start and Stop pinned beneath it:
 
 - **Models** — the configurations you have saved, each holding the whole set
   of server settings: add, edit, and switch between them, or aim one at a
   model folder on your disk.
 - **Live** — a live panel of decode and prefill rates, request counts, Metal
   memory, and the caches.
+- **Thermal** — how hard the Mac may work and how loud it gets: five rungs,
+  from **System default** (which sets nothing and leaves the fans to macOS)
+  through Performance 90, Balanced 75 and Moderate 50 to Quiet 30 percent of
+  the wall time, applied to a running server at once, above the fans and
+  temperatures the engine reads from the SMC. The rung is the app's own
+  preference rather than part of a model configuration.
 - **Log** — the server's log.
 
 Closing the window leaves the app and a running server in the menu bar;
@@ -145,6 +153,7 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | `--disable-ane` | Prefill on the GPU alone. Default: the 27B also uses the Neural Engine. |
 | `--max-cache-disk 16G` | Cap the SSD cache (default: auto, up to 128 GiB; `0` turns it off). |
 | `--persistent-cache` | Keep the SSD cache across restarts. Off in `splash serve`; the app turns it on. |
+| `--thermal-policy quiet` | Make prefill quieter: it keeps the GPU busy 30 percent of the wall time (`moderate` 50, `balanced` 75, `performance` 90), so prompts take longer and the fans answer less. The default, `auto`, paces nothing and leaves the Mac's own thermal management in charge. A running server's rung changes through `POST /v1/thermal`. |
 
 Use `--max-memory` to leave room for other applications.
 The server listens on localhost without authentication by default. For LAN

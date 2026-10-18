@@ -28,6 +28,7 @@ constexpr uint64_t kCancelFixedBytes = 8;
 constexpr uint64_t kMaskResponseFixedBytes = 20;
 constexpr uint64_t kStatusRequestFixedBytes = 8;
 constexpr uint64_t kReleaseRequestFixedBytes = 8;
+constexpr uint64_t kPrefillDutyRequestFixedBytes = 4;
 constexpr uint64_t kReadyFixedBytes = 9;
 constexpr uint64_t kStartFixedBytes = 16;
 constexpr uint64_t kPromptProgressFixedBytes = 20;
@@ -90,6 +91,8 @@ std::optional<PayloadBounds> payloadBounds(FrameType type,
     return bounded(kStatusRequestFixedBytes, kStatusRequestFixedBytes);
   case FrameType::ReleaseRequest:
     return bounded(kReleaseRequestFixedBytes, kReleaseRequestFixedBytes);
+  case FrameType::PrefillDutyRequest:
+    return bounded(kPrefillDutyRequestFixedBytes, kPrefillDutyRequestFixedBytes);
   default:
     // The engine never receives an event.
     return std::nullopt;
@@ -129,6 +132,7 @@ bool clientFrameType(uint16_t raw, FrameType &type) {
   case FrameType::MaskResponse:
   case FrameType::StatusRequest:
   case FrameType::ReleaseRequest:
+  case FrameType::PrefillDutyRequest:
     type = static_cast<FrameType>(raw);
     return true;
   default:
@@ -851,6 +855,17 @@ ProtocolResult<ClientMessage> decodeReleaseRequest(const Frame &frame) {
   return success(ClientMessage{request});
 }
 
+ProtocolResult<ClientMessage> decodePrefillDutyRequest(const Frame &frame) {
+  Reader reader(frame.payload);
+  PrefillDutyRequestFrame request;
+  if (!reader.f32(request.dutyPercent) || reader.remaining()) {
+    return failure<ClientMessage>(
+        makeIssue(FailureClass::ProtocolFatal, IssueCode::InvalidPayloadLength,
+                  0, "prefill duty request payload has an invalid length"));
+  }
+  return success(ClientMessage{request});
+}
+
 std::string_view frameTypeName(FrameType type) {
   switch (type) {
   case FrameType::Request:
@@ -863,6 +878,8 @@ std::string_view frameTypeName(FrameType type) {
     return "status_request";
   case FrameType::ReleaseRequest:
     return "release_request";
+  case FrameType::PrefillDutyRequest:
+    return "prefill_duty_request";
   case FrameType::Ready:
     return "ready";
   case FrameType::PromptProgress:
@@ -996,6 +1013,8 @@ ProtocolResult<ClientMessage> decodeFrame(Frame &&frame,
       return decodeStatusRequest(frame);
     case FrameType::ReleaseRequest:
       return decodeReleaseRequest(frame);
+    case FrameType::PrefillDutyRequest:
+      return decodePrefillDutyRequest(frame);
     default:
       break;
     }

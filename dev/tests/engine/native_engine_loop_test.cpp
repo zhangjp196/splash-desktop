@@ -2100,6 +2100,39 @@ void testMemoryStatusReporterLogsTransitionsOnly() {
           "requests held behind a refusal were reported as no wait");
 }
 
+// A running engine's duty changes in place, over the wire, without a restart:
+// the frame is the app's heat-and-noise rung, and the engine clamps what a
+// configuration may not ask for and ignores a value that is not a number. The
+// frame is not answered; the status the loop reports is what it took.
+void testPrefillDutyRequestChangesTheRunningEngine() {
+  engine::NativeLoopConfig config;
+  config.engine.maxContext = 1024;
+  LoopFixture fixture(config, {.pages = 64});
+  engine::NativeRuntime &loop = fixture.loop;
+  require(loop.statusSnapshot().throttle.dutyPercent == 100.0,
+          "an engine without a duty did not start without pacing");
+  const auto setDuty = [&](float percent) {
+    return loop.receive(
+        protocol::peer::serialize(protocol::PrefillDutyRequestFrame{percent}));
+  };
+  for (const double duty : {80.0, 60.0, 40.0, 25.0}) {
+    require(setDuty(static_cast<float>(duty)),
+            "the engine refused a prefill duty frame");
+    require(loop.statusSnapshot().throttle.dutyPercent == duty,
+            "the engine did not take the duty it was sent");
+  }
+  // A duty a configuration may not ask for is clamped to the floor and the
+  // ceiling, and one that is not a number leaves the duty as it was.
+  require(setDuty(5.0F) && loop.statusSnapshot().throttle.dutyPercent == 10.0,
+          "a duty below the floor was not raised to it");
+  require(setDuty(120.0F) && loop.statusSnapshot().throttle.dutyPercent == 100.0,
+          "a duty above the ceiling was not lowered to it");
+  require(setDuty(40.0F) &&
+              setDuty(std::numeric_limits<float>::quiet_NaN()) &&
+              loop.statusSnapshot().throttle.dutyPercent == 40.0,
+          "a duty that is not a number changed the duty");
+}
+
 } // namespace
 
 int main() {
@@ -2143,6 +2176,7 @@ int main() {
     testIdleReleaseOffReleasesOnlyOnRequest();
     testIdleSpillKeepsItsOwnTimer();
     testReleaseRequestGivesTheWeightsBackWhenIdle();
+    testPrefillDutyRequestChangesTheRunningEngine();
     testHoldingRequestsSpansFirstToLastRequest();
     testMemoryStatusReporterLogsTransitionsOnly();
     std::cout << "native engine loop tests passed\n";

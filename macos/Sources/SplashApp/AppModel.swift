@@ -44,6 +44,28 @@ struct LiveStatus: Equatable {
     var restarts = 0
     var capacityFailures = 0
     var metalFailures = 0
+    /// The engine's fans as `/status` reports them, read-only: what the Mac is
+    /// doing about the heat, which is what the thermal rungs trade against.
+    var fansAvailable = false
+    var fanSpeeds: [Int] = []
+    var fanMinimums: [Int] = []
+    var fanMaximums: [Int] = []
+    /// The sensors the engine read, as it reported them, hottest first.
+    var temperatures: [TemperatureReading] = []
+    /// The prefill pacer: the duty the engine holds, the backoff the Mac's
+    /// thermal state applies to it, and what the pacing has cost in waits.
+    var dutyPercent: Double?
+    var thermalScale: Double?
+    var pacedWaits: Int?
+    var pacedWaitMilliseconds: Double?
+}
+
+/// One temperature sensor's reading: the engine reads them from the SMC, so
+/// they are what the fans themselves answer to.
+struct TemperatureReading: Equatable, Identifiable {
+    var sensor: String
+    var celsius: Double
+    var id: String { sensor }
 }
 
 /// One `/status` fetch and the model id `/v1/models` reports, both decoded in
@@ -150,6 +172,19 @@ final class AppModel: ObservableObject {
 
     private static let languageKey = "splash.interface-language"
 
+    /// How loud the Mac may get while it serves: the server's own ladder
+    /// (server/serve_options.py THERMAL_POLICIES), kept as one preference of
+    /// the app rather than as part of a model configuration, because how loud
+    /// a Mac may get is a property of the Mac. A server the app starts is
+    /// given the rung, and a running engine's duty is changed through
+    /// /v1/thermal, so a change applies without a restart.
+    @Published var thermalRung: ThermalRung = .auto
+    /// What the engine answered a change with that it would not take, shown on
+    /// the thermal page until the next change goes through.
+    @Published var thermalError: String?
+
+    private static let thermalKey = "splash.thermal-rung"
+
     private var process: Process?
     private var poll: Task<Void, Never>?
     private var stopping = false
@@ -171,6 +206,10 @@ final class AppModel: ObservableObject {
         if let raw = UserDefaults.standard.string(forKey: Self.languageKey),
            let stored = InterfaceLanguage(rawValue: raw) {
             language = stored
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.thermalKey),
+           let stored = ThermalRung(rawValue: raw) {
+            thermalRung = stored
         }
         applyLanguage()
         let stored = store.hasStoredSettings
@@ -291,6 +330,63 @@ final class AppModel: ObservableObject {
     func settingsEdited() {
         guard !restoring else { return }
         scheduleSettingsSave()
+    }
+
+    // MARK: Heat and noise
+
+    /// The duty the running engine holds, once /status has reported one.
+    var engineDutyPercent: Double? { live.updated ? live.dutyPercent : nil }
+
+    /// The rung the engine holds, when it holds one of the ladder's: nil while
+    /// no server runs, and for a duty between rungs, as a server started
+    /// outside the app with --prefill-duty leaves.
+    var engineRung: ThermalRung? { engineDutyPercent.flatMap(ThermalRung.init(duty:)) }
+
+    /// Choose a rung: remember it for the next start, and take a running
+    /// engine's duty to it now.
+    func setThermalRung(_ rung: ThermalRung) {
+        thermalRung = rung
+        UserDefaults.standard.set(rung.rawValue, forKey: Self.thermalKey)
+        thermalError = nil
+        Task { @MainActor [weak self] in
+            await self?.pushThermalDuty(rung.duty)
+        }
+    }
+
+    /// Changes the duty of the running engine in place, through /v1/thermal.
+    /// Nothing to do while no server is ready: the rung is the next start's
+    /// too, which is what its command line carries.
+    private func pushThermalDuty(_ duty: Double) async {
+        guard isRunning, phase == .ready,
+              let url = URL(string: "http://127.0.0.1:\(port)/v1/thermal") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["prefill_duty_percent": duty]
+        )
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                thermalError = refusalMessage(data)
+                    ?? L10n.format("thermal.error.status", http.statusCode)
+            }
+        } catch {
+            thermalError = error.localizedDescription
+        }
+    }
+
+    /// The server's own words for a refusal, when it wrote any.
+    private func refusalMessage(_ data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = object["error"] as? [String: Any],
+              let message = error["message"] as? String
+        else { return nil }
+        return message
     }
 
     // MARK: Model configurations
@@ -436,6 +532,13 @@ final class AppModel: ObservableObject {
         if !maxRequestSize.isEmpty { arguments += ["--max-request-size", maxRequestSize] }
         if !reasoningEffort.isEmpty {
             arguments += ["--default-reasoning-effort", reasoningEffort]
+        }
+        // How loud the Mac may get: the top rung passes nothing, leaving the
+        // Mac's own thermal management in charge, which is the server's
+        // default too. A change made while the server runs goes to the engine
+        // through /v1/thermal instead.
+        if thermalRung != .auto {
+            arguments += ["--thermal-policy", thermalRung.rawValue]
         }
 
         let process = Process()
@@ -681,6 +784,27 @@ final class AppModel: ObservableObject {
         if let offload = object["idle_offload"] as? [String: Any] {
             status.idleOffloadPasses = offload["passes"] as? Int ?? 0
             status.idleOffloadBytes = offload["bytes"] as? UInt64
+        }
+        if let fans = object["fans"] as? [String: Any] {
+            status.fansAvailable = fans["available"] as? Bool ?? false
+            status.fanSpeeds = fans["speeds_rpm"] as? [Int] ?? []
+            status.fanMinimums = fans["minimum_rpm"] as? [Int] ?? []
+            status.fanMaximums = fans["maximum_rpm"] as? [Int] ?? []
+            let readings = fans["temperatures"] as? [[String: Any]] ?? []
+            status.temperatures = readings
+                .compactMap { entry in
+                    guard let sensor = entry["sensor"] as? String,
+                          let celsius = entry["celsius"] as? Double
+                    else { return nil }
+                    return TemperatureReading(sensor: sensor, celsius: celsius)
+                }
+                .sorted { $0.celsius > $1.celsius }
+        }
+        if let throttle = object["throttle"] as? [String: Any] {
+            status.dutyPercent = throttle["duty_percent"] as? Double
+            status.thermalScale = throttle["thermal_scale"] as? Double
+            status.pacedWaits = throttle["paced_waits"] as? Int
+            status.pacedWaitMilliseconds = throttle["paced_wait_ms"] as? Double
         }
         status.updated = true
         live = status

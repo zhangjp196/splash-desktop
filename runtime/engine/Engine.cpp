@@ -68,6 +68,10 @@ Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
     throw std::invalid_argument("the engine needs the governor's growth pause and serving mark");
   if (!std::isfinite(config_.decodeShare) || config_.decodeShare < 0.0)
     throw std::invalid_argument("decode share must be nonnegative and finite");
+  if (!std::isfinite(config_.prefillDutyPercent) ||
+      config_.prefillDutyPercent < 0.0 || config_.prefillDutyPercent > 100.0)
+    throw std::invalid_argument("prefill duty must be a percentage");
+  prefillPacer_.configure(config_.prefillDutyPercent);
 }
 
 void Engine::submit(EngineRequest value) {
@@ -272,6 +276,16 @@ bool Engine::tick(double now) {
       excluded.push_back(id);
   }
   while (auto plan = scheduler_.next(excluded)) {
+    // A prefill command the pacer has no credit for waits for the next turn.
+    // It is the one that pins the GPU for seconds and heats the Mac with it,
+    // while the lanes that decode run regardless; excluding its lanes plans
+    // the rest of the work, exactly as a lane waiting for memory is left out
+    // above. A Mac at 100 percent never reaches this.
+    if (plan->kind == WorkKind::Prefill && !prefillPacer_.allows(now)) {
+      for (const BatchItem &item : plan->items)
+        excluded.push_back(item.requestId);
+      continue;
+    }
     std::vector<ModelBatchItem> items;
     std::vector<std::vector<Capture>> captures;
     switch (prepare(*plan, items, captures, now)) {
@@ -405,6 +419,10 @@ EngineSnapshot Engine::snapshot() const {
          .maxNewTokens = active.request.maxNewTokens});
   }
   std::ranges::sort(result.activeRequests, {}, &ActiveRequestSnapshot::id);
+  result.throttle.dutyPercent = prefillPacer_.dutyPercent();
+  result.throttle.thermalScale = prefillPacer_.thermalScale();
+  result.throttle.pacedWaits = prefillPacer_.pacedWaits();
+  result.throttle.pacedWaitMilliseconds = prefillPacer_.pacedWaitMilliseconds();
   return result;
 }
 
@@ -1866,6 +1884,11 @@ void Engine::apply(const BatchPlan &plan, std::span<const std::vector<Capture>> 
   if (results.size() != plan.items.size()) {
     throw std::logic_error("model result count changed");
   }
+  // A prefill's own GPU time is what the next one waits out (PrefillPacer):
+  // a command that kept the GPU for 1600 ms at a duty of 60 percent is
+  // followed by about a second in which prefill does not start.
+  if (plan.kind == WorkKind::Prefill)
+    prefillPacer_.record(now, wallMilliseconds);
   std::vector<StepResult> schedulerResults;
   schedulerResults.reserve(results.size());
   uint32_t inputTokens = 0;

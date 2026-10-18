@@ -101,6 +101,10 @@ public:
   void observePrefill(uint32_t rows, double wallMilliseconds) {
     core_.observePrefill(rows, wallMilliseconds);
   }
+  // The prefill throttle, which the bootstrap drives from the thermal state it
+  // samples (Engine::setThermalScale, Engine::pacesPrefill).
+  void setThermalScale(double scale) noexcept { core_.setThermalScale(scale); }
+  [[nodiscard]] bool pacesPrefill() const noexcept { return core_.pacesPrefill(); }
 
   void announceReady();
 
@@ -166,6 +170,7 @@ private:
   bool handleMask(const protocol::MaskResponseFrame &mask);
   bool handleStatus(const protocol::StatusRequestFrame &status);
   bool handleRelease(const protocol::ReleaseRequestFrame &release);
+  bool handlePrefillDuty(const protocol::PrefillDutyRequestFrame &request);
   bool handleMaskIssue(protocol::ProtocolIssue issue);
   bool handleIssue(protocol::ProtocolIssue issue);
   void requestError(uint64_t requestId, std::string code, std::string message,

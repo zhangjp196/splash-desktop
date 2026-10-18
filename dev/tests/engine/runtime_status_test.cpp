@@ -137,6 +137,27 @@ void testCleanRuntimeStatus(const char *goldenPath) {
   engine.resources.kvTier.copies = 64;
   engine.resources.adoption = {2, 96, 4096, 1};
   engine.writeBehind = {1, 5, 3, 0};
+  // A Mac serving a quiet policy while a fair thermal state scaled the duty
+  // down: 60 percent of the wall time, three quarters of that, held back three
+  // times for about a second and a quarter.
+  engine.throttle = {60.0, 0.75, 3, 1234.5};
+
+  FanState fans;
+  fans.available = true;
+  fans.fans = {{.rotationsPerMinute = 1342.0,
+                .minimumRotationsPerMinute = 1350.0,
+                .maximumRotationsPerMinute = 5349.0,
+                .targetRotationsPerMinute = 1350.0,
+                .mode = 3},
+               {.rotationsPerMinute = 3196.5,
+                .minimumRotationsPerMinute = 1458.0,
+                .maximumRotationsPerMinute = 5777.0,
+                .targetRotationsPerMinute = 3200.0,
+                .mode = 3}};
+  fans.temperatures = {{.key = "Tp05", .celsius = 63.2},
+                       {.key = "Tg0D", .celsius = 51.7}};
+  fans.hottestCelsius = 63.2;
+  fans.hottestKey = "Tp05";
 
   WarmupReport warmup;
   warmup.maximumPrefill = WarmupStepStatus::Complete;
@@ -223,7 +244,7 @@ void testCleanRuntimeStatus(const char *goldenPath) {
   const std::string json = runtimeStatusJson(
       memoryPlan, engine, metal, warmup, audit(memoryPlan), metrics, executorTelemetry,
       identity, governor, true, {}, wait, NativeLoopTiming{1843.25}, {600.0, false, false, 2, 1}, aneFfn,
-      ThermalState::Fair);
+      ThermalState::Fair, fans);
   std::ifstream golden(goldenPath);
   const std::string expected{std::istreambuf_iterator<char>(golden), {}};
   require(golden && json + '\n' == expected,
@@ -266,11 +287,11 @@ void testCleanRuntimeStatus(const char *goldenPath) {
   bf16Identity.kvLayout = kv::Layout{16, 4, 256, kv::Format::BFloat16};
   const auto bf16Status = runtimeStatusJson(memoryPlan, engine, metal, warmup, audit(memoryPlan),
                         metrics, executorTelemetry, bf16Identity, governor, true,
-                        {}, {}, {}, {}, {}, {});
+                        {}, {}, {}, {}, {}, {}, {});
   require(bf16Status.find("\"format\":\"bf16\"") != std::string::npos &&
               bf16Status.find("\"scale_type\":\"none\"") != std::string::npos,
           "BF16 cache identity advertised INT8 storage");
-  require(json.find("\"schema_version\":6") != std::string::npos &&
+  require(json.find("\"schema_version\":7") != std::string::npos &&
               json.find("\"ready\":true") != std::string::npos,
           "status readiness/schema is wrong");
   require(json.find("\"ready\":true,\"maximum_context_tokens\":102400,") !=
@@ -294,7 +315,7 @@ void testCleanRuntimeStatus(const char *goldenPath) {
 
   const std::string unmeasured =
       runtimeStatusJson(memoryPlan, engine, metal, warmup, audit(memoryPlan),
-                        metrics, {}, identity, governor, true, {}, {}, {}, {}, {}, {});
+                        metrics, {}, identity, governor, true, {}, {}, {}, {}, {}, {}, {});
   require(unmeasured.find("\"model_timing\":{\"scope\":\"model_lifetime\","
                           "\"prefill\":{\"last_gpu_ms\":0,\"last_wall_ms\":0,"
                           "\"total_gpu_ms\":0,\"total_wall_ms\":0},"
@@ -395,7 +416,7 @@ void testCurrentReadinessAndSimultaneousPeak() {
   memory.devicePeakAllocatedBytes = 22 * kGiB;
   auto status = [&] {
     return runtimeStatusJson(memoryPlan, {}, memory, warmup, audit(memoryPlan),
-                             {}, {}, {}, governor, true, {}, {}, {}, {}, {}, {});
+                             {}, {}, {}, governor, true, {}, {}, {}, {}, {}, {}, {});
   };
   const std::string healthy = status();
   require(healthy.find("\"ready\":true") != std::string::npos &&
@@ -446,7 +467,7 @@ void testWarmupStepsReportMeasurementTruth() {
   governor.hostReserveBytes = 2 * kGiB;
   auto status = [&] {
     return runtimeStatusJson(memoryPlan, {}, {}, warmup, audit(memoryPlan),
-                             {}, {}, {}, governor, true, {}, {}, {}, {}, {}, {});
+                             {}, {}, {}, governor, true, {}, {}, {}, {}, {}, {}, {});
   };
   require(status().find("\"memory_limited_steps\":[]") != std::string::npos,
           "fully measured warmup listed a memory-limited step");
@@ -502,7 +523,7 @@ void testMemoryPressureTelemetry() {
   governor.hostGrowthAllowed = false;
   auto status = [&] {
     return runtimeStatusJson(memoryPlan, {}, {}, {}, {}, {}, {}, {}, governor, true, {},
-                             {}, {}, {}, {}, {});
+                             {}, {}, {}, {}, {}, {});
   };
   const std::string hostLimited = status();
   require(hostLimited.find("\"memory_pressure\":\"critical\"") !=
@@ -531,7 +552,7 @@ void testResourceWaitDiagnostics() {
                             .oldestWaitMilliseconds = 1250.0, .draining = true};
   const auto memoryPlan = plan();
   const std::string json = runtimeStatusJson(
-      memoryPlan, {}, {}, {}, {}, {}, {}, {}, {}, true, {}, wait, {}, {}, {}, {});
+      memoryPlan, {}, {}, {}, {}, {}, {}, {}, {}, true, {}, wait, {}, {}, {}, {}, {});
   require(json.find("\"admission\":{\"waiting\":3,\"waiting_memory\":2,"
                     "\"waiting_concurrency\":1,\"held_behind_refusal\":4,\"restoring\":1,"
                     "\"suspended\":1,\"draining\":true,"
@@ -540,9 +561,9 @@ void testResourceWaitDiagnostics() {
           "resource wait summary is missing or inaccurate");
   const std::string ticked = runtimeStatusJson(
       memoryPlan, {}, {}, {}, {}, {}, {}, {}, {}, true, {}, wait,
-      NativeLoopTiming{1843.25}, {}, {}, {});
+      NativeLoopTiming{1843.25}, {}, {}, {}, {});
   require(ticked.find("\"loop\":{\"max_tick_ms\":1843.25}") != std::string::npos &&
-              ticked.find("\"schema_version\":6") != std::string::npos,
+              ticked.find("\"schema_version\":7") != std::string::npos,
           "the loop's longest tick is missing, or changed the status schema");
 }
 
@@ -553,7 +574,7 @@ void testWeightsStatus() {
   const auto memoryPlan = plan();
   const auto status = [&](WeightsSnapshot weights) {
     return runtimeStatusJson(memoryPlan, {}, {}, {}, {}, {}, {}, {}, {}, true, {}, {}, {},
-                             weights, {}, {});
+                             weights, {}, {}, {});
   };
   require(status({600.0, true, false, 2, 1})
                   .find("\"weights\":{\"idle_release_seconds\":600,\"released\":true,"
@@ -582,7 +603,7 @@ void testAneFfnStatus() {
     model::ModelTelemetry telemetry;
     telemetry.aneFfnReruns = reruns;
     return runtimeStatusJson(memoryPlan, {}, {}, {}, {}, {}, telemetry, {}, {}, true, {}, {}, {},
-                             {}, split, {});
+                             {}, split, {}, {});
   };
   require(status({.reason = "as given"}, 0)
                   .find("\"ane_ffn\":{\"state\":\"off\",\"share\":0,\"minimum_rows\":0,"
@@ -618,7 +639,7 @@ void testThermalStateStatus() {
   const auto memoryPlan = plan();
   const auto status = [&](ThermalState state) {
     return runtimeStatusJson(memoryPlan, {}, {}, {}, {}, {}, {}, {}, {}, true, {}, {}, {},
-                             {}, {}, state);
+                             {}, {}, state, {});
   };
   for (const auto &[state, name] :
        {std::pair{ThermalState::Nominal, "nominal"}, std::pair{ThermalState::Fair, "fair"},
@@ -626,7 +647,7 @@ void testThermalStateStatus() {
         std::pair{ThermalState::Critical, "critical"}}) {
     const std::string json = status(state);
     require(json.find("\"memory_pressure\":\"normal\",\"thermal_state\":\"" +
-                      std::string(name) + "\",\"admission\":") != std::string::npos,
+                      std::string(name) + "\",") != std::string::npos,
             std::string("the thermal state ") + name + " is missing or misspelled");
     require(json.find("\"ready\":true") != std::string::npos,
             std::string("the thermal state ") + name + " made the engine unready");

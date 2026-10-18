@@ -228,6 +228,7 @@ const std::vector<std::pair<std::string, ClientMessage>> &clientMessages() {
        MaskResponseFrame{91, 7, {0xffffffffU, 0, 0xa5a5a5a5U}}},
       {"status_request", StatusRequestFrame{808}},
       {"release_request", ReleaseRequestFrame{808}},
+      {"prefill_duty_request", PrefillDutyRequestFrame{60.0F}},
   };
   return messages;
 }

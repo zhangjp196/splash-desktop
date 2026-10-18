@@ -15,11 +15,11 @@ from dataclasses import dataclass, fields
 from enum import IntEnum, IntFlag
 from typing import TypeAlias
 
-PROTOCOL_VERSION = 10
+PROTOCOL_VERSION = 11
 # A frame is its header, the magic, the protocol version, the frame type and
 # the payload length, then the payload.
 FRAME_HEADER_BYTES = 16
-STATUS_SCHEMA_VERSION = 6
+STATUS_SCHEMA_VERSION = 7
 # Score-only requests carry 2..255 distinct option token ids and produce no
 # generated tokens; a successful score DoneEvent returns one raw
 # final-position logit per requested token, in request order.
@@ -52,6 +52,7 @@ _CANCEL = struct.Struct("<Q")
 _MASK_RESPONSE = struct.Struct("<QQI")
 _STATUS_REQUEST = struct.Struct("<Q")
 _RELEASE_REQUEST = struct.Struct("<Q")
+_PREFILL_DUTY_REQUEST = struct.Struct("<f")
 _READY = struct.Struct("<IIB")
 _START = struct.Struct("<QII")
 _PROMPT_PROGRESS = struct.Struct("<QIQ")
@@ -74,6 +75,7 @@ assert _START.size == 16
 assert _DONE.size == 61
 assert _ERROR.size == 18
 assert _STATUS_JSON.size == 8
+assert _PREFILL_DUTY_REQUEST.size == 4
 
 REQUEST_FIXED_BYTES = _REQUEST.size
 IMAGE_SPAN_BYTES = _IMAGE_SPAN.size
@@ -85,6 +87,7 @@ class FrameType(IntEnum):
     MASK_RESPONSE = 0x0003
     STATUS_REQUEST = 0x0004
     RELEASE_REQUEST = 0x0005
+    PREFILL_DUTY_REQUEST = 0x0006
 
     READY = 0x0100
     START = 0x0101
@@ -316,6 +319,15 @@ class ReleaseRequestFrame:
 
 
 @dataclass(slots=True, frozen=True)
+class PrefillDutyRequestFrame:
+    """Change a running engine's prefill duty, as --prefill-duty does at
+    startup: the share of wall time prefill may run. The engine clamps it and
+    answers nothing; the next status document's throttle section is the truth."""
+
+    duty_percent: float
+
+
+@dataclass(slots=True, frozen=True)
 class ReadyEvent:
     max_concurrent_requests: int
     max_context_tokens: int
@@ -412,6 +424,7 @@ ClientMessage: TypeAlias = (
     | MaskResponseFrame
     | StatusRequestFrame
     | ReleaseRequestFrame
+    | PrefillDutyRequestFrame
 )
 EngineEvent: TypeAlias = (
     ReadyEvent
@@ -562,6 +575,8 @@ def _payload_bounds(frame_type: FrameType) -> tuple[int, int]:
             bounds = (_STATUS_REQUEST.size, _STATUS_REQUEST.size)
         case FrameType.RELEASE_REQUEST:
             bounds = (_RELEASE_REQUEST.size, _RELEASE_REQUEST.size)
+        case FrameType.PREFILL_DUTY_REQUEST:
+            bounds = (_PREFILL_DUTY_REQUEST.size, _PREFILL_DUTY_REQUEST.size)
         case FrameType.READY:
             bounds = (_READY.size, _READY.size)
         case FrameType.PROMPT_PROGRESS:
@@ -904,6 +919,26 @@ def _release_request_frame(request: ReleaseRequestFrame) -> bytearray:
     return frame
 
 
+def _prefill_duty_request_frame(request: PrefillDutyRequestFrame) -> bytearray:
+    try:
+        duty_percent = float(request.duty_percent)
+    except (TypeError, ValueError) as error:
+        _fail(
+            FailureClass.PROTOCOL_FATAL,
+            IssueCode.INVALID_SAMPLING,
+            f"prefill duty is not a number: {error}",
+        )
+    if not math.isfinite(duty_percent):
+        _fail(
+            FailureClass.PROTOCOL_FATAL,
+            IssueCode.INVALID_SAMPLING,
+            "prefill duty must be finite",
+        )
+    frame = _frame(FrameType.PREFILL_DUTY_REQUEST, _PREFILL_DUTY_REQUEST.size)
+    _PREFILL_DUTY_REQUEST.pack_into(frame, FRAME_HEADER_BYTES, duty_percent)
+    return frame
+
+
 def serialize_message(message: ClientMessage) -> bytearray:
     """Validate and serialize one client message as a whole frame, built in
     one buffer: a request's image pixels are copied once."""
@@ -918,6 +953,8 @@ def serialize_message(message: ClientMessage) -> bytearray:
             return _status_request_frame(message)
         if isinstance(message, ReleaseRequestFrame):
             return _release_request_frame(message)
+        if isinstance(message, PrefillDutyRequestFrame):
+            return _prefill_duty_request_frame(message)
     except MemoryError as error:
         raise ProtocolError(
             _allocation_issue("allocation failed while serializing a client frame")

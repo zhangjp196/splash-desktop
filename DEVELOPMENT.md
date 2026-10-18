@@ -118,6 +118,8 @@ access.
 | `--max-image-pixels` | `4194304` | Maximum resized pixels per image. An image's vision scratch grows with its patches (pixels / 256), to about 600 MiB at the default. |
 | `--request-timeout` | None | Time a request may take from its arrival; a request's own `timeout` can only shorten it. |
 | `--queue-size` | `16` | Requests admitted at once, running or waiting; more get 503 with `Retry-After`. |
+| `--thermal-policy` | `auto` | How hard prefill may drive the Mac: `performance` 90, `balanced` 75, `moderate` 50 or `quiet` 30 percent of the wall time; `auto`, the default, paces nothing and leaves the fans to macOS. Prefill is what heats a Mac; decoding keeps its speed at every rung. See [heat and noise](#heat-and-noise). |
+| `--prefill-duty` | The rung's | The same share in percent, 10 to 100, whatever the rung says; a running engine's duty changes through `POST /v1/thermal`. |
 | `--decode-share` | `0.5` | Decode time owed per unit of prefill time while other requests generate. Higher keeps their output faster during a long prompt and slows that prompt; `0` alternates one command each. |
 | `--disable-ane` | Off | Prefill on the GPU alone. By default a dense model's long prompts also use the Neural Engine when that is faster. See [Neural Engine prefill](#neural-engine-prefill). |
 | `--allow-idle-sleep` | Off | Let the Mac sleep automatically while requests run; by default it stays awake until they finish (the display may still sleep). |
@@ -619,6 +621,7 @@ Messages requires it.
 | `POST /tokenize`, `/apply-template` | A text's tokens, or a conversation's rendered prompt, without inference |
 | `POST /v1/judgments`, `/v1/systemone` | Scores over fixed answers ([judgment contracts](#judgment-contracts)) |
 | `POST /v1/memory/release` | Gives the weights back now, as the idle release does, when no request is in service; the next request restores them ([explicit release](#explicit-weights-release)). It takes no body (or `{}`); `200` with `{"released": true, "weights": …}`, `409 engine_busy` while the engine serves a request or restores its weights, `503 engine_busy` when the engine does not answer within 5 s, and `503 engine_recovering` or `server_shutdown` while the engine restarts or the server stops |
+| `POST /v1/thermal` | Sets the [heat-and-noise rung](#heat-and-noise) of the running engine, without restarting it. The body is `{"prefill_duty_percent": N}`, a percentage from 10 to 100; `200` with `{"prefill_duty_percent": N}`, the duty the engine took, which its next `throttle` status reports too; `400 invalid_request_error` for a missing, out-of-range or unknown field, and `503 engine_busy` when the engine does not answer within 5 s |
 | `GET /status`, `/metrics` | JSON status and Prometheus metrics ([status](#status-readiness-and-metrics)) |
 | `GET /health` | 200 while the server answers; public |
 | `GET /ready` | 200 while the engine is ready, else 503; public |
@@ -1148,6 +1151,49 @@ entropy concentration, `1 - H(p) / log(K)`, not an estimate of correctness.
 Score answers are probability-weighted level indices. Measure accuracy and
 calibrate on representative held-out data before using decision thresholds.
 
+### Heat and noise
+
+Prefill is the one command that pins the GPU, and the Neural Engine beside it,
+for seconds at a time: it is what heats a Mac and what its fans answer. Decoding
+is short and keeps its speed either way. `--thermal-policy` therefore bounds the
+share of the wall time prefill may run, and a lower rung is quieter at the cost
+of a prompt taking about 100/duty as long:
+
+| Rung | `--prefill-duty` |
+| --- | --- |
+| `auto` (default) | 100, and nothing is passed |
+| `performance` | 90 |
+| `balanced` | 75 |
+| `moderate` | 50 |
+| `quiet` | 30 |
+
+`auto` is not a choice of its own: it sends no duty at all, so the engine paces
+nothing and the Mac's own thermal management decides the fans.
+
+`--prefill-duty` sets any percentage from 10 to 100 whatever the rung says. A
+sustained stream runs at the duty; a Mac that has been quiet, by decoding or by
+being idle, has a full cycle of credit to spend on the next prompt, so its first
+stretch runs at full speed. Under a rung below 100 the engine also backs off
+further while macOS reports a thermal state above `nominal`: `fair` scales the
+duty by 0.75, `serious` by 0.5, and `critical` stops prefill until the Mac cools
+(see [thermal state](#status-readiness-and-metrics)).
+
+`POST /v1/thermal` changes a running engine's duty in place — no restart, no
+context lost — and answers the duty the engine took. The server writes the
+`prefill_duty_request` frame and then a status request on the same stream; the
+engine applies the frames it reads in order, so the `throttle` section of that
+status is the truth, not the wish. The desktop app's **Thermal** page is this
+control over the same ladder, with the fans and temperatures the engine reads
+from the SMC beside it.
+
+Measurements on an M3 Max (Qwen3.8-27B, 8K-token prompts, three rounds): at a
+duty of 60 percent prefill ran at 205 rows/s against 321 unpaced, the same 24 414
+rows took 119 s against 76 s, and the fans peaked at 2428/2626 RPM against
+3186/3437 — 24 percent quieter. The chip's hottest sensor peaked *higher*
+(101.6 °C against 94.8 °C): the same energy over less time per second, for
+longer, and the fans answer power rather than the total. Pacing buys quiet, not
+coolness; a quieter Mac means a lower rung.
+
 ### Status, readiness and metrics
 
 `GET /status` returns instance identity and the effective context limit as JSON.
@@ -1168,6 +1214,9 @@ Proxy consumers can use these fields; additional fields may be added:
 | `loop.max_tick_ms` | Longest control pass and engine step of the native loop. A reader thread keeps reading requests meanwhile, so a request frame whose write stalls 5 s after it started fails the engine only when the process stopped reading; while requests are pending the server asks for status every 10 s and fails an engine whose loop does not answer within 30 s. |
 | `maximum_context_tokens` | Declared context limit; available memory may limit admission |
 | `thermal_state` | The Mac's thermal state as macOS reports it: `nominal`, `fair`, `serious` or `critical`. As the Mac heats, its CPU and GPU clocks drop and prefill and decode slow down, on some Macs already at `fair`; readiness ignores it. The engine samples it twice a second and logs each change (`Thermal state: fair → serious`) |
+| `throttle.duty_percent`, `thermal_scale`, `paced_waits`, `paced_wait_ms` | [Heat and noise](#heat-and-noise): the share of the wall time prefill may keep the GPU busy, what the thermal state leaves of it (1 when there is none), the prefill commands the pacing has held back since engine start, and the wall time they waited |
+| `fans.available`, `speeds_rpm`, `minimum_rpm`, `maximum_rpm`, `target_rpm`, `modes` | What the fans report, which the engine reads from the SMC without root: whether this Mac reports any, and one entry per fan — its speed now, the range it may run in, the speed it is heading for, and its mode as the SMC reports it |
+| `fans.temperatures`, `hottest_sensor`, `hottest_celsius` | The temperature sensors the engine read, each as `{"sensor": "Tp0b", "celsius": 55.3}`, and the hottest of them |
 | `vision`, `input_modalities` | Whether image and PDF input is accepted; `false` and `["text"]` after `--language-only` |
 | `chat_template.later_system` | `native`, `patched` or `unsupported`: how system messages after the first render (per name for named templates) |
 | `transport.recovering`, `transport.stopped`, `transport.error` | The engine is restarting, or Splash stopped restarting it after repeated failures; `error` names its failure, the last failed restart, or why restarts stopped |
@@ -2893,7 +2942,7 @@ runs the bundled launcher without a compiler or separate Python installation.
 
 ### macOS app and disk image
 
-`make package-dmg` packages a self-contained `Splash-<version>.dmg`: the
+`make package-dmg` packages a self-contained `Splash-Desktop-<version>.dmg`: the
 native SwiftUI control panel (`macos/`) with the runtime archive embedded
 under `Contents/Resources/runtime`, so installing the app needs no other
 download and neither does first run (only the chosen model does):
@@ -2903,13 +2952,26 @@ make package RELEASE_VERSION=1.0.0
 make package-dmg RELEASE_VERSION=1.0.0     # needs the archive above
 ```
 
+The app is called Splash Desktop: the bundle is `Splash Desktop.app`, the
+executable inside it is `SplashDesktop`, and the volume is
+`Splash Desktop <version>`. Its bundle identifier is still `ai.inco.splash`,
+so an update installs beside an older `Splash.app` rather than over it, and
+everything the runtime addresses by name — the `splash` command, the engine,
+the archive, the tap, the data directory and the settings database — is
+unchanged; delete the old app once the new one is in place.
+
 The app owns no model or engine code: it locates the embedded runtime,
 launches `install/launcher.py serve`, shows its log and a live panel of
 `/status` metrics (decode/prefill rates, request counts, Metal memory, caches
 and admission waits), and keeps a menu bar item to start and stop it. The
 window opens on the live panel, with control and the log behind it in the tab
 band under the header; the header itself carries only the state and the
-actions. Its settings live in SQLite at
+actions. Its thermal page holds the [heat-and-noise rung](#heat-and-noise) of
+the Mac itself rather than of a model: the choice is remembered in
+`UserDefaults` (as the interface language is), passes `--thermal-policy` to a
+server it starts, and reaches a running engine at once through
+`POST /v1/thermal`; beside it the page shows the fans and temperatures the
+engine reads. Its settings live in SQLite at
 `~/Library/Application Support/ai.inco.splash/settings.db` (one key/value row
 per setting, `SPLASH_SETTINGS_DB` points it elsewhere): the panel saves each
 edit after a short pause, the next launch opens on what the last one saved, and
@@ -2939,7 +3001,7 @@ effort. The bundle is built
 with Xcode's Swift toolchain, the placeholder icon
 is generated at package time, and neither the app nor the DMG is code-signed:
 it is for local installation, and distributing it requires signing and
-notarization. `make package-app` builds just `dist/Splash.app` (no DMG), and
+notarization. `make package-app` builds just `dist/Splash Desktop.app` (no DMG), and
 `RUNTIME_DIR=<directory>` overrides the archive with a staged runtime
 directory, for a source checkout without one. `SOURCE_OVERLAY=1` embeds this
 checkout's `install/` and `server/` instead of the archive's, so a published

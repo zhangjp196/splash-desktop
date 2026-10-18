@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build Splash.app from a staged runtime and package it into a disk image.
+"""Build Splash Desktop.app from a staged runtime and package it into a disk image.
 
 The app is a thin SwiftUI control panel; the runtime it drives is the
 directory `make package` stages (install/, server/, engine/, python/ and
@@ -25,7 +25,13 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-APP_NAME = "Splash"
+# What the user sees: the app bundle, its display name and the volume.
+APP_NAME = "Splash Desktop"
+# What the system sees: the executable inside the bundle. The bundle
+# identifier stays ai.inco.splash, so an update installs beside the old app
+# rather than over it, and every path the runtime uses — the data directory,
+# the launch command — is unchanged.
+PRODUCT_NAME = "SplashDesktop"
 BUNDLE_ID = "ai.inco.splash"
 # The engine refuses older systems; the app follows it.
 MIN_MACOS = "26.4"
@@ -119,10 +125,10 @@ def icon_pixels(size: int) -> bytes:
 
 
 def build_icon(workdir: Path) -> Path:
-    """A Splash.icns beside the iconset, from the generated master."""
+    """A SplashDesktop.icns beside the iconset, from the generated master."""
     master = workdir / "icon-1024.png"
     _write_png(master, 1024, icon_pixels(1024))
-    iconset = workdir / "Splash.iconset"
+    iconset = workdir / f"{PRODUCT_NAME}.iconset"
     iconset.mkdir(parents=True, exist_ok=True)
     for size in ICON_SIZES:
         for scale in (1, 2):
@@ -144,7 +150,7 @@ def build_icon(workdir: Path) -> Path:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-    icns = workdir / "Splash.icns"
+    icns = workdir / f"{PRODUCT_NAME}.icns"
     run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)])
     return icns
 
@@ -160,8 +166,8 @@ def info_plist(version: str) -> str:
     <key>CFBundleName</key><string>{APP_NAME}</string>
     <key>CFBundleDisplayName</key><string>{APP_NAME}</string>
     <key>CFBundleIdentifier</key><string>{BUNDLE_ID}</string>
-    <key>CFBundleExecutable</key><string>{APP_NAME}</string>
-    <key>CFBundleIconFile</key><string>{APP_NAME}</string>
+    <key>CFBundleExecutable</key><string>{PRODUCT_NAME}</string>
+    <key>CFBundleIconFile</key><string>{PRODUCT_NAME}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>{version}</string>
     <key>CFBundleVersion</key><string>{version}</string>
@@ -193,11 +199,11 @@ def build_app(
     resources = contents / "Resources"
     macos.mkdir(parents=True)
     resources.mkdir(parents=True)
-    shutil.copy2(swift_binary, macos / APP_NAME)
+    shutil.copy2(swift_binary, macos / PRODUCT_NAME)
     (contents / "Info.plist").write_text(info_plist(version))
     with tempfile.TemporaryDirectory() as temporary:
         icon = build_icon(Path(temporary))
-        shutil.copy2(icon, resources / f"{APP_NAME}.icns")
+        shutil.copy2(icon, resources / f"{PRODUCT_NAME}.icns")
     # The interface follows the system language through these tables.
     localizations = ROOT / MACOS_BUILD / "Resources"
     if localizations.is_dir():
@@ -243,7 +249,7 @@ def overlay_engine(runtime: Path) -> None:
 
 def build_swift(package: Path) -> Path:
     run(["swift", "build", "--package-path", package, "-c", "release"])
-    binary = package / ".build/release" / APP_NAME
+    binary = package / ".build/release" / PRODUCT_NAME
     if not binary.is_file():
         raise SystemExit(f"swift build produced no {binary}")
     return binary
@@ -278,7 +284,7 @@ def resolve_runtime(args) -> tuple[Path, tempfile.TemporaryDirectory | None]:
 
 
 def create_dmg(app: Path, version: str, destination: Path) -> Path:
-    dmg = destination / f"Splash-{version}.dmg"
+    dmg = destination / f"Splash-Desktop-{version}.dmg"
     dmg.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="splash-dmg-") as temporary:
         stage = Path(temporary)
@@ -334,7 +340,7 @@ def main(argv=None):
         if args.overlay_engine:
             overlay_engine(runtime)
         binary = (
-            MACOS_BUILD / ".build/release" / APP_NAME
+            MACOS_BUILD / ".build/release" / PRODUCT_NAME
             if args.no_build
             else build_swift(ROOT / MACOS_BUILD)
         )

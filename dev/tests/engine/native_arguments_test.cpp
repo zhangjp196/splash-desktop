@@ -149,6 +149,22 @@ void testServerCommandLines(const char *path) {
          read.maxCacheDisk = {.bytes = 5 * kGiB};
          read.decodeShare = 0.0;
        }},
+      // The thermal ladder is the server's, not the engine's: what reaches the
+      // engine is a duty, and only when it differs from the rung without
+      // pacing, which is also the engine's own default.
+      {"prefill_auto", [](NativeArguments &) {}},
+      {"prefill_performance",
+       [](NativeArguments &read) { read.prefillDutyPercent = 90.0; }},
+      {"prefill_balanced",
+       [](NativeArguments &read) { read.prefillDutyPercent = 75.0; }},
+      {"prefill_moderate",
+       [](NativeArguments &read) { read.prefillDutyPercent = 50.0; }},
+      {"prefill_quiet",
+       [](NativeArguments &read) { read.prefillDutyPercent = 30.0; }},
+      {"prefill_policy_duty",
+       [](NativeArguments &read) { read.prefillDutyPercent = 80.0; }},
+      {"prefill_duty_alone",
+       [](NativeArguments &read) { read.prefillDutyPercent = 25.0; }},
       {"image_patches", [](NativeArguments &read) { read.maxImagePatches = 4096; }},
       {"image_patches_rounded",
        [](NativeArguments &read) { read.maxImagePatches = 3904; }},
@@ -178,6 +194,7 @@ void testServerCommandLines(const char *path) {
            read.persistentCache == meant.persistentCache && read.cacheRoot == meant.cacheRoot &&
            read.kvFormat == meant.kvFormat && read.stateFormat == meant.stateFormat &&
            read.decodeShare == meant.decodeShare &&
+           read.prefillDutyPercent == meant.prefillDutyPercent &&
            read.maxImagePatches == meant.maxImagePatches &&
            read.idleReleaseSeconds == meant.idleReleaseSeconds &&
            read.cacheIdleSpillSeconds == meant.cacheIdleSpillSeconds &&

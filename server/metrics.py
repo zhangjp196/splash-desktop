@@ -186,7 +186,30 @@ PROMETHEUS_SERIES = {
     "splash_metal_failures_total": ("metrics", "metal_failures"),
     "splash_response_store_entries": ("response_store", "entries"),
     "splash_response_store_bytes": ("response_store", "bytes"),
+    "splash_prefill_duty_percent": ("throttle", "duty_percent"),
+    "splash_prefill_thermal_scale": ("throttle", "thermal_scale"),
+    "splash_prefill_paced_waits_total": ("throttle", "paced_waits"),
+    "splash_prefill_paced_wait_milliseconds": ("throttle", "paced_wait_ms"),
 }
+
+
+def prometheus_fans(status):
+    """The Mac's fans and temperatures, one series per fan and per sensor.
+
+    A Mac with no fans, or one whose SMC did not answer, contributes nothing:
+    a scrape says what the machine reports, not what it might.
+    """
+    fans = status.get("fans") or {}
+    lines = []
+    for index, speed in enumerate(fans.get("speeds_rpm") or []):
+        if is_finite_number(speed):
+            lines.append(f'splash_fan_rpm{{fan="{index}"}} {speed}')
+    for temperature in fans.get("temperatures") or []:
+        sensor = temperature.get("sensor")
+        celsius = temperature.get("celsius")
+        if sensor and is_finite_number(celsius):
+            lines.append(f'splash_temperature_celsius{{sensor="{sensor}"}} {celsius}')
+    return lines
 
 
 def prometheus_metrics(status):
@@ -219,6 +242,7 @@ def prometheus_metrics(status):
         lines.append(
             f'splash_thermal_state{{state="{state}"}} {1 if thermal == state else 0}'
         )
+    lines.extend(prometheus_fans(status))
     gated = status.get("disk", {}).get("writes_gated")
     for state in ("no", "budget", "closed"):
         lines.append(

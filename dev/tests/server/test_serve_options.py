@@ -136,6 +136,16 @@ OPTIONS = {
         {"0": 0.0, "0.25": 0.25, "2": 2.0},
         ("-0.5", "inf", "nan", "half"),
     ),
+    "--thermal-policy": values(
+        "--thermal-policy",
+        {policy: policy for policy in serve_options.THERMAL_POLICIES},
+        ("", "silent", "QUIET", "quiet "),
+    ),
+    "--prefill-duty": values(
+        "--prefill-duty",
+        {"10": 10.0, "60": 60.0, "99.5": 99.5, "100": 100.0},
+        ("9", "0", "-1", "101", "inf", "nan", "half"),
+    ),
     "--allowed-host": values(
         "--allowed-host", {"proxy.example": "proxy.example"}, (), repeatable=True
     ),

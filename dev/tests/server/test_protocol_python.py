@@ -122,6 +122,7 @@ def client_messages():
         ),
         "status_request": p.StatusRequestFrame(808),
         "release_request": p.ReleaseRequestFrame(808),
+        "prefill_duty_request": p.PrefillDutyRequestFrame(60.0),
     }
 
 

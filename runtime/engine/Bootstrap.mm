@@ -136,13 +136,26 @@ std::string RuntimeBootstrap::statusJson(const RuntimeMetricsSnapshot &metrics,
       resources_->cacheIdentity(), resources_->memoryGovernor().snapshot(),
       healthy, healthy ? std::string{} : backend.unhealthyReason(),
       nativeLoop_->resourceWaitSnapshot(), loop, nativeLoop_->weightsSnapshot(),
-      resources_->aneFfnSnapshot(), thermalState_.state());
+      resources_->aneFfnSnapshot(), thermalState_.state(), fanState_.state());
 }
 
 void RuntimeBootstrap::sampleThermalState() {
-  const std::string transition = thermalState_.update(queryThermalState());
+  const ThermalState state = queryThermalState();
+  const std::string transition = thermalState_.update(state);
   if (!transition.empty())
     logLine(transition);
+  // Pacing prefill is what answers a Mac that is hot, so the state decides how
+  // much of the configured duty to keep. A Mac with no pacing runs at its
+  // configured speed whatever the state reports, which is its behavior without
+  // this engine having a throttle at all.
+  if (nativeLoop_->pacesPrefill())
+    nativeLoop_->setThermalScale(prefillThermalScale(state));
+}
+
+void RuntimeBootstrap::sampleFans() {
+  const std::string change = fanState_.update(readFanState());
+  if (!change.empty())
+    logLine(change);
 }
 
 RuntimeBootstrapReport RuntimeBootstrap::requireWarmupAndAnnounce(

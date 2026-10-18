@@ -10,7 +10,7 @@ struct RootView: View {
     @State private var section: Section = .models
 
     enum Section: String, CaseIterable, Identifiable {
-        case models, live, log
+        case models, live, thermal, log
 
         var id: String { rawValue }
 
@@ -18,6 +18,7 @@ struct RootView: View {
             switch self {
             case .models: return L10n.string("view.models")
             case .live: return L10n.string("view.live")
+            case .thermal: return L10n.string("view.thermal")
             case .log: return L10n.string("view.log")
             }
         }
@@ -26,6 +27,7 @@ struct RootView: View {
             switch self {
             case .models: return "square.stack.3d.up"
             case .live: return "chart.line.uptrend.xyaxis"
+            case .thermal: return "fan.fill"
             case .log: return "terminal"
             }
         }
@@ -33,7 +35,7 @@ struct RootView: View {
         /// The panes as the sidebar's groups show them: what is served, then
         /// how it is running.
         static let serving: [Section] = [.models]
-        static let monitoring: [Section] = [.live, .log]
+        static let monitoring: [Section] = [.live, .thermal, .log]
     }
 
     var body: some View {
@@ -45,6 +47,7 @@ struct RootView: View {
                 switch section {
                 case .models: ModelsPane()
                 case .live: LivePane()
+                case .thermal: ThermalPane()
                 case .log: LogPane()
                 }
             }
@@ -65,7 +68,7 @@ private struct Sidebar: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 BrandMark()
-                Text("Splash").font(.headline)
+                Text("Splash Desktop").font(.headline)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 14)

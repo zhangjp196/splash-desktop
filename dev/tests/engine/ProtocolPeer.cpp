@@ -144,6 +144,11 @@ FrameType write(Writer &out, const ReleaseRequestFrame &request) {
   return FrameType::ReleaseRequest;
 }
 
+FrameType write(Writer &out, const PrefillDutyRequestFrame &request) {
+  out.f32(request.dutyPercent);
+  return FrameType::PrefillDutyRequest;
+}
+
 struct Header {
   FrameType type;
   uint64_t payloadBytes;

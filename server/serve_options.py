@@ -11,7 +11,7 @@ import math
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import images, origins
@@ -22,6 +22,44 @@ REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 MAX_CONTEXT_TOKENS = 262144
 DEFAULT_MAX_REQUEST_BYTES = 128 * 1024 * 1024
 DEFAULT_QUEUE_SIZE = 16
+# The lowest duty the engine takes: below it even a short prompt would take
+# longer than a person waits (kMinimumPrefillDutyPercent).
+MINIMUM_PREFILL_DUTY = 10
+DEFAULT_THERMAL_POLICY = "auto"
+
+
+@dataclass(frozen=True)
+class ThermalPolicy:
+    """What a --thermal-policy asks the engine for.
+
+    Pacing prefill is what makes a Mac quiet: prefill is the one command that
+    pins the GPU for seconds at a time, so bounding the share of the wall time
+    it may use bounds the heat its fans answer, at the price of a prompt's
+    prefill taking about 100/duty as long. Decoding keeps its speed either
+    way, and a lower duty also backs off further as the Mac's thermal state
+    rises.
+    """
+
+    # The share of wall time prefill may keep the GPU busy.
+    prefill_duty: float
+
+
+# The ladder a person picks from, loudest first: what the desktop app's
+# heat-and-noise control offers, and what --thermal-policy names, so both
+# speak of the same rungs. `auto` is not a choice of its own: it passes no
+# duty at all, so the engine paces nothing and the Mac's own thermal
+# management decides the fans, which is what a server started without
+# --prefill-duty does.
+THERMAL_POLICIES = {
+    "auto": ThermalPolicy(prefill_duty=100.0),
+    "performance": ThermalPolicy(prefill_duty=90.0),
+    "balanced": ThermalPolicy(prefill_duty=75.0),
+    "moderate": ThermalPolicy(prefill_duty=50.0),
+    "quiet": ThermalPolicy(prefill_duty=30.0),
+}
+# What the engine does without --prefill-duty: the default policy's duty, which
+# the engine's own command line therefore leaves off.
+DEFAULT_PREFILL_DUTY = THERMAL_POLICIES[DEFAULT_THERMAL_POLICY].prefill_duty
 # The port both commands serve on unless --port names another, or for the
 # launcher SPLASH_PORT does.
 DEFAULT_PORT = 8000
@@ -225,6 +263,54 @@ def parse_decode_share(value):
     return share
 
 
+# What a duty outside the range is told, from the command line and from the
+# control endpoint alike.
+_PREFILL_DUTY_RANGE = f"must be a percentage from {MINIMUM_PREFILL_DUTY:.0f} to 100"
+
+
+def prefill_duty(value):
+    """The duty `value` names, from the command line or a control request.
+
+    Raises ValueError when it is not a percentage from MINIMUM_PREFILL_DUTY to
+    100: the engine paces prefill by the share of wall time it may keep the GPU
+    busy, and below the minimum a prompt takes longer than a person waits.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(_PREFILL_DUTY_RANGE)
+    try:
+        duty = float(value)
+    except ValueError:
+        raise ValueError(_PREFILL_DUTY_RANGE) from None
+    if not math.isfinite(duty) or not MINIMUM_PREFILL_DUTY <= duty <= 100:
+        raise ValueError(_PREFILL_DUTY_RANGE)
+    return duty
+
+
+def parse_prefill_duty(value):
+    try:
+        return prefill_duty(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def parse_thermal_policy(value):
+    if value not in THERMAL_POLICIES:
+        raise argparse.ArgumentTypeError("must be " + ", ".join(THERMAL_POLICIES))
+    return value
+
+
+def thermal_policy(arguments) -> ThermalPolicy:
+    """The policy `arguments` name, with an explicit --prefill-duty overriding
+    the value the policy would set."""
+    policy = THERMAL_POLICIES[arguments.thermal_policy]
+    duty = (
+        policy.prefill_duty
+        if arguments.prefill_duty is None
+        else arguments.prefill_duty
+    )
+    return replace(policy, prefill_duty=duty)
+
+
 def parse_max_image_pixels(value):
     try:
         pixels = int(value)
@@ -300,6 +386,7 @@ GROUPS = (
     ("network", "network and access"),
     ("memory", "memory and context"),
     ("cache", "SSD cache"),
+    ("thermal", "heat and noise"),
     ("api", "API"),
     ("requests", "requests"),
 )
@@ -614,6 +701,37 @@ SERVE_OPTIONS = (
             metavar="SHARE",
             help="decode time owed per unit of prefill time while other requests "
             "decode (default: 0.5; 0 alternates one command each)",
+        ),
+    ),
+    ServeOption(
+        "--thermal-policy",
+        "thermal",
+        dict(
+            type=parse_thermal_policy,
+            default=DEFAULT_THERMAL_POLICY,
+            metavar="POLICY",
+            help="how hard prefill may drive the Mac, as the percent of the wall "
+            "time it may keep the GPU busy: "
+            + ", ".join(
+                f"{name} {policy.prefill_duty:.0f}"
+                for name, policy in THERMAL_POLICIES.items()
+                if name != DEFAULT_THERMAL_POLICY
+            )
+            + "; a lower rung is quieter and backs off further while the thermal "
+            f"state is above nominal. {DEFAULT_THERMAL_POLICY}, the default, paces "
+            "nothing and leaves the Mac's own thermal management in charge",
+        ),
+    ),
+    ServeOption(
+        "--prefill-duty",
+        "thermal",
+        dict(
+            type=parse_prefill_duty,
+            default=None,
+            metavar="PERCENT",
+            help="the share of wall time prefill may keep the GPU busy, in percent "
+            f"from {MINIMUM_PREFILL_DUTY:.0f} to 100, whatever the thermal policy "
+            "says",
         ),
     ),
     ServeOption(

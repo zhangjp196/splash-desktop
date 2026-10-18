@@ -18,11 +18,11 @@
 // pins the bytes both sides agree on.
 namespace splash::protocol {
 
-inline constexpr uint16_t kProtocolVersion = 10;
+inline constexpr uint16_t kProtocolVersion = 11;
 // A frame is its header, the magic "SPLH", the u16 protocol version, the
 // u16 FrameType and the u64 payload length, then the payload.
 inline constexpr size_t kFrameHeaderBytes = 16;
-inline constexpr uint32_t kStatusSchemaVersion = 6;
+inline constexpr uint32_t kStatusSchemaVersion = 7;
 // Image pixels travel inside the request frame; a multi-image agent turn can
 // carry well over 64 MiB of resized RGB bytes.
 inline constexpr uint64_t kAbsoluteMaxFramePayloadBytes =
@@ -36,6 +36,7 @@ enum class FrameType : uint16_t {
   MaskResponse = 0x0003,
   StatusRequest = 0x0004,
   ReleaseRequest = 0x0005,
+  PrefillDutyRequest = 0x0006,
 
   Ready = 0x0100,
   Start = 0x0101,
@@ -192,6 +193,7 @@ struct RequestFrame {
 //   MaskResponse   u64 requestId, u64 maskRequestId, u32 count, u32 words
 //   StatusRequest  u64 correlationId
 //   ReleaseRequest u64 correlationId
+//   PrefillDutyRequest f32 dutyPercent
 //   Ready          u32 maxConcurrentRequests, u32 maxContextTokens, u8 vision
 //   Start          u64 requestId, u32 lane, u32 matchedPromptTokens
 //   PromptProgress u64 requestId, u32 processedTokens, u64 elapsedMicros
@@ -234,6 +236,17 @@ struct ReleaseRequestFrame {
   uint64_t correlationId = 0;
 
   bool operator==(const ReleaseRequestFrame &) const = default;
+};
+
+// Changes the prefill duty of a running engine, as --prefill-duty does at
+// startup: the share of wall time prefill may run, so a person can trade prompt
+// speed for quiet without restarting the engine. The engine clamps it to
+// [kMinimumPrefillDutyPercent, 100] and answers nothing; the effective value is
+// in the next status, whose throttle section is the truth the caller reads.
+struct PrefillDutyRequestFrame {
+  float dutyPercent = 0.0F;
+
+  bool operator==(const PrefillDutyRequestFrame &) const = default;
 };
 
 struct ReadyEvent {
@@ -324,8 +337,10 @@ struct StatusJsonEvent {
   bool operator==(const StatusJsonEvent &) const = default;
 };
 
-using ClientMessage = std::variant<RequestFrame, CancelFrame, MaskResponseFrame,
-                                   StatusRequestFrame, ReleaseRequestFrame>;
+using ClientMessage =
+    std::variant<RequestFrame, CancelFrame, MaskResponseFrame,
+                 StatusRequestFrame, ReleaseRequestFrame,
+                 PrefillDutyRequestFrame>;
 using EngineEvent =
     std::variant<ReadyEvent, StartEvent, PromptProgressEvent, TokensEvent,
                  MaskRequestEvent, DoneEvent, ErrorEvent, StatusJsonEvent>;
