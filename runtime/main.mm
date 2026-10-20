@@ -158,6 +158,7 @@ void printUsage(std::string_view executable) {
       " [--max-cache-disk-writes BYTES]"
       " [--idle-release SECONDS|off]"
       " [--idle-sleep prevent|allow] [--ane on|off]"
+      " [--loop-guard on|off]"
       " [--relaunch-context TOKENS]");
   writeStderrLine("       " + command + " model-check mlx-affine none|safetensors CONFIG [DRAFT_CONFIG]");
   writeStderrLine("       " + command + " model-check gguf none|gguf CONFIG GGUF_METADATA [DRAFT_CONFIG]");
