@@ -2,17 +2,19 @@
 
 import hashlib
 import json
+import os
+import queue
 import secrets
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
 
 from jinja2 import TemplateError
 
+from . import compaction, json_codec, judgments
 from . import images as image_input
-from . import json_codec, judgments
 from . import protocol as wire
 from .api_shapes import (
     IMAGE_PAD_TOKEN,
@@ -110,6 +112,21 @@ def _preparation_checkpoint(deadline, disconnected):
 # Text completions' output budget when max_tokens is omitted: OpenAI's
 # default for the endpoint, which vLLM and SGLang also use.
 COMPLETION_DEFAULT_MAX_TOKENS = 16
+
+
+# --compact-at: the room a reply keeps before a request compacts, and the
+# reply a request that names no output limit is assumed to want.
+COMPACT_RESERVE_TOKENS = 1024
+COMPACT_DEFAULT_REPLY_TOKENS = 4096
+# The most the note's own generation may produce, and what it is asked for.
+COMPACT_MAX_NOTE_TOKENS = 1024
+COMPACT_INSTRUCTION = (
+    "Summarize the conversation below into a note for yourself, so you can "
+    "continue the work: the goal, the constraints, what has been done, the "
+    "decisions and why, the immediate next steps, and the exact names, "
+    "numbers and file paths it mentions. Reply with the note alone, with no "
+    "preamble and no advice to the user."
+)
 
 
 # A stable marker lets repeated image requests reuse the compiled template.
@@ -255,6 +272,9 @@ class Frontend:
         announce_served_name=False,
         default_reasoning_effort=None,
         default_thinking_token_budget=None,
+        compact_at=None,
+        compact_keep=None,
+        compact_memory=None,
     ):
         if not isinstance(preparation_capacity, int) or preparation_capacity <= 0:
             raise ValueError("frontend preparation capacity must be positive")
@@ -294,6 +314,35 @@ class Frontend:
             raise ValueError("invalid default_thinking_token_budget")
         self.default_thinking_token_budget = default_thinking_token_budget
         self.max_context = max_context
+        # --compact-at: "auto", or the share of the window a prompt may reach
+        # before a request compacts; None turns compaction off.
+        if (
+            compact_at is not None
+            and compact_at != "auto"
+            and not (
+                isinstance(compact_at, (int, float))
+                and not isinstance(compact_at, bool)
+                and 0.0 < compact_at < 1.0
+            )
+        ):
+            raise ValueError("invalid compact_at")
+        self.compact_at = compact_at
+        if compact_keep is not None and (
+            not isinstance(compact_keep, int)
+            or isinstance(compact_keep, bool)
+            or compact_keep <= 0
+        ):
+            raise ValueError("invalid compact_keep")
+        if compact_keep is not None and compact_at is None:
+            raise ValueError("compact_keep needs compact_at")
+        self.compact_keep = compact_keep
+        if compact_memory is not None and compact_at is None:
+            raise ValueError("compact_memory needs compact_at")
+        self.compact_memory = (
+            Path(compact_memory) if compact_memory is not None else None
+        )
+        if self.compact_memory is not None:
+            self.compact_memory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.request_timeout = request_timeout
         self.constraint_factory = constraint_factory
         self.max_image_pixels = max_image_pixels
@@ -996,6 +1045,19 @@ class Frontend:
                 "tool_choice none or structured output",
             )
         rendered = self._render_prompt(prompt, deadline)
+        requested = body.get("max_completion_tokens", body.get("max_tokens"))
+        if output_field is None:
+            # Chat takes either field; errors name the one the client sent.
+            output_field = (
+                "max_completion_tokens"
+                if "max_completion_tokens" in body
+                else "max_tokens"
+            )
+        # --compact-at: a prompt that leaves no room for the reply becomes the
+        # newest turns plus a note (compaction.py).
+        prompt, rendered, compaction_report = self._compact(
+            prompt, rendered, deadline, requested
+        )
         prompt_tokens, prepared_images = rendered.tokens, rendered.images
         image_positions, thinking = rendered.image_positions, rendered.thinking
         constraint = None
@@ -1026,18 +1088,10 @@ class Frontend:
                 prompt_tokens, prepared_images, image_positions
             )
         remaining_request_time(deadline)
-        requested = body.get("max_completion_tokens", body.get("max_tokens"))
-        if output_field is None:
-            # Chat takes either field; errors name the one the client sent.
-            output_field = (
-                "max_completion_tokens"
-                if "max_completion_tokens" in body
-                else "max_tokens"
-            )
         max_new = self._output_budget(requested, prompt_tokens, output_field)
         # A budget the output limit reaches first closes nothing.
         budget = options.thinking_token_budget
-        return self._generation_job(
+        job = self._generation_job(
             options,
             prompt_tokens,
             max_new,
@@ -1061,6 +1115,8 @@ class Frontend:
             generation_prompt_tokens=rendered.generation_prompt_tokens,
             output_clamped_to_context=requested is not None and max_new < requested,
         )
+        job.compaction = compaction_report
+        return job
 
     def _call_openings(self, policy, thinking):
         """The tokens that begin each strict tool's call. Its parameter names
@@ -1159,6 +1215,168 @@ class Frontend:
         if not isinstance(max_new, int) or isinstance(max_new, bool) or max_new <= 0:
             raise APIError(400, f"{field} must be a positive integer")
         return min(max_new, remaining)
+
+    def _compact(self, prompt, rendered, deadline, requested):
+        """The request's prompt after `--compact-at`: the newest turns and a
+        note in place of the older ones, or the prompt unchanged. Returns the
+        prompt, its render, and the note's report (compaction.py)."""
+        if self.compact_at is None:
+            return prompt, rendered, None
+        reply = (
+            requested
+            if isinstance(requested, int) and not isinstance(requested, bool)
+            else COMPACT_DEFAULT_REPLY_TOKENS
+        )
+        if not compaction.should_compact(
+            len(rendered.tokens),
+            reply,
+            self.max_context,
+            COMPACT_RESERVE_TOKENS,
+            self.compact_at,
+        ):
+            return prompt, rendered, None
+        messages = prompt.messages
+        budget = compaction.keep_budget(self.max_context, self.compact_keep)
+
+        def count(candidate):
+            trial = replace(prompt, messages=candidate)
+            return len(self._render_prompt(trial, deadline, check_context=False).tokens)
+
+        cut = compaction.choose_cut(messages, count, budget)
+        start = compaction.leading_system_end(messages)
+        if cut <= start or cut >= len(messages):
+            return prompt, rendered, None
+        removed = messages[start:cut]
+        text = compaction.transcript(removed)
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        key = self._compaction_key(messages)
+        note = self._read_note(key, digest)
+        if note is None:
+            note = self._summarize(text, deadline)
+            self._write_note(key, digest, note)
+        compacted = replace(
+            prompt, messages=compaction.compacted_messages(messages, cut, note)
+        )
+        final = self._render_prompt(compacted, deadline)
+        report = compaction.Compaction(
+            note, cut - start, len(rendered.tokens), len(final.tokens)
+        )
+        return compacted, final, report
+
+    def _summarize(self, text, deadline):
+        """The note's own generation: the removed turns and one instruction,
+        greedy and at background priority."""
+        text = self._fit_transcript(text, deadline)
+        prompt = Prompt(
+            messages=[{"role": "user", "content": f"{COMPACT_INSTRUCTION}\n\n{text}"}],
+            tools=None,
+            tool_policy=None,
+            reasoning_effort="none",
+        )
+        rendered = self._render_prompt(prompt, deadline, check_context=False)
+        max_new = min(
+            COMPACT_MAX_NOTE_TOKENS,
+            max(1, self.max_context - len(rendered.tokens) - COMPACT_RESERVE_TOKENS),
+        )
+        options = GenerationOptions(
+            sampling=wire.SamplingParameters(temperature=0.0),
+            stop_sequences=(),
+            ignore_eos=False,
+            seed=0,
+            priority=wire.RequestPriority.BACKGROUND,
+            cache_salt=0,
+            thinking_token_budget=None,
+        )
+        job = self._generation_job(options, rendered.tokens, max_new, deadline)
+        self.backend.submit(job)
+        parts = []
+        while True:
+            try:
+                kind, value = job.events.get(timeout=remaining_request_time(deadline))
+            except queue.Empty:
+                self.backend.cancel(job)
+                raise APIError(504, "request timed out", "request_timeout") from None
+            if kind == "text":
+                parts.append(value)
+            elif kind == "done":
+                break
+            elif kind == "error":
+                raise value
+        return "".join(parts).strip()
+
+    def _fit_transcript(self, text, deadline):
+        """The transcript shortened to fit the note's own prompt, keeping its
+        start (the goal) and its end (the newest progress)."""
+        limit = max(
+            256, self.max_context - COMPACT_RESERVE_TOKENS - COMPACT_MAX_NOTE_TOKENS
+        )
+        for _ in range(8):
+            tokens = self._tokenize(
+                f"{COMPACT_INSTRUCTION}\n\n{text}", add_special_tokens=False
+            )["input_ids"]
+            if len(tokens) <= limit:
+                return text
+            keep = max(1, int(len(text) * limit / max(1, len(tokens)) * 0.9))
+            head = int(keep * 0.6)
+            tail = keep - head
+            text = f"{text[:head]}\n\n[...]\n\n{text[-tail:]}" if tail else text[:head]
+        return text
+
+    @staticmethod
+    def _compaction_key(messages):
+        """A conversation's key for --compact-memory: its leading system text
+        and its first user message, which later turns keep."""
+        system = (
+            messages[0].get("content", "")
+            if messages and messages[0].get("role") == "system"
+            else ""
+        )
+        first_user = next(
+            (
+                message.get("content", "")
+                for message in messages
+                if message.get("role") == "user"
+            ),
+            "",
+        )
+        seed = f"{system}\0{first_user}"
+        return hashlib.sha256(seed.encode()).hexdigest()
+
+    def _read_note(self, key, digest):
+        """The note --compact-memory kept for this conversation and this run
+        of removed turns, or None."""
+        if self.compact_memory is None:
+            return None
+        try:
+            data = json.loads(
+                (self.compact_memory / f"{key}.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+        note = data.get("note") if isinstance(data, dict) else None
+        return note if isinstance(note, str) and data.get("removed") == digest else None
+
+    def _write_note(self, key, digest, note):
+        """Keep a compaction's note for a later identical compaction; a
+        failure leaves the reply alone."""
+        if self.compact_memory is None:
+            return
+        path = self.compact_memory / f"{key}.json"
+        temporary = path.with_name(f".{path.name}.tmp")
+        try:
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as target:
+                json.dump({"removed": digest, "note": note}, target, ensure_ascii=False)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temporary, path)
+        except OSError:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
     def _generation_job(self, options, prompt_tokens, max_new, deadline, **fields):
         """The job for a prepared prompt, with the endpoint's own fields."""

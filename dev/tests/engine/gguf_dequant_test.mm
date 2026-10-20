@@ -2,15 +2,18 @@
 // gguf_dequant_test.metal expose before the matmul): every weight of every format is the half rounding of its
 // GGML fp32 value, the CPU reference that gguf-reference pins to llama.cpp's golden hashes.
 #include "GgufFormatReference.hpp"
+#include "KernelContract.hpp"
 #include "TestBuffers.hpp"
 #include "metal/CommandGraph.hpp"
 #include "metal/MetalBackend.hpp"
 #include "metal/abi/Gguf.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -18,13 +21,15 @@ using namespace gguf_reference;
 using splash::metal::CommandGraph;
 using splash::metal::MetalBackend;
 using splash::metal::MetalBuffer;
-using splash::test::sharedBuffer;
+using splash::test::ContractBuffer;
+using splash::test::KernelContract;
 
 namespace {
 
-MetalBuffer upload(MetalBackend &backend, const std::vector<uint8_t> &bytes) {
-  MetalBuffer buffer = sharedBuffer(backend, bytes.size());
-  std::memcpy(buffer.contents(), bytes.data(), bytes.size());
+ContractBuffer upload(KernelContract &contract,
+                      const std::vector<uint8_t> &bytes) {
+  ContractBuffer buffer = contract.make(bytes.size(), true, false);
+  std::memcpy(buffer.view.contents(), bytes.data(), bytes.size());
   return buffer;
 }
 
@@ -46,14 +51,27 @@ int main(int argc, char **argv) {
         const Fmt f = Fmt(fi);
         std::vector<float> values;
         const Packed planes = repack(f, makeNative(f, N, K, rng), N, K, &values);
-        const MetalBuffer w0 = upload(backend, planes.w0), meta = upload(backend, planes.meta);
-        const MetalBuffer w1 = kQuantFormats[f].plane1_bytes ? upload(backend, planes.w1) : meta;
-        const MetalBuffer output = sharedBuffer(backend, uint64_t{N} * K * 2);
-        CommandGraph graph;
-        graph.add(std::string("gguf_test_dequant_") + fmtName(f), {w0, w1, meta, output}, GgufDecodeParams{K, 1, N, 0, 0},
-                  {N * (K / kGroup) / kThreads, 1, 1}, {kThreads, 1, 1});
-        static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
-        const auto *got = static_cast<const uint16_t *>(output.contents());
+        KernelContract contract(backend);
+        const ContractBuffer w0 = upload(contract, planes.w0);
+        const ContractBuffer meta = upload(contract, planes.meta);
+        const ContractBuffer w1 =
+            kQuantFormats[f].plane1_bytes ? upload(contract, planes.w1) : meta;
+        const ContractBuffer output = contract.make(uint64_t{N} * K * 2, false, true);
+        const std::array<ContractBuffer, 4> buffers{w0, w1, meta, output};
+        const auto contractFailures = contract.check(
+            std::span<const ContractBuffer>(buffers),
+            [&](std::span<const ContractBuffer> bound) {
+              CommandGraph graph;
+              graph.add(std::string("gguf_test_dequant_") + fmtName(f),
+                        {bound[0].view, bound[1].view, bound[2].view, bound[3].view},
+                        GgufDecodeParams{K, 1, N, 0, 0},
+                        {N * (K / kGroup) / kThreads, 1, 1}, {kThreads, 1, 1});
+              static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
+            });
+        for (const std::string &why : contractFailures)
+          std::cerr << fmtName(f) << ": contract: " << why << '\n';
+        failures += !contractFailures.empty();
+        const auto *got = static_cast<const uint16_t *>(output.view.contents());
         size_t differ = 0;
         for (size_t i = 0; i < values.size(); ++i) differ += got[i] != f2h(values[i]);
         std::cout << fmtName(f) << ": " << differ << " of " << values.size()

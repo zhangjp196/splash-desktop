@@ -1013,7 +1013,7 @@ def responses_response(model, job, status, output, result=None, error=None):
     text_format = job.response_format or {"type": "text"}
     if text_format.get("type") == "json_schema":
         text_format = {"type": "json_schema", **text_format["json_schema"]}
-    return {
+    response = {
         "id": f"resp_{job.public_id}",
         "object": "response",
         "created_at": job.created_at,
@@ -1035,6 +1035,9 @@ def responses_response(model, job, status, output, result=None, error=None):
         and result.reason == "stop"
         and not any(item["type"] == "function_call" for item in output),
     }
+    if (compaction := compaction_dict(job)) is not None:
+        response["compaction"] = compaction
+    return response
 
 
 def finish_reason(result, called):
@@ -1045,8 +1048,24 @@ def finish_reason(result, called):
     return result.reason
 
 
-def completion_response(model, job, result, message, called):
+def compaction_dict(job):
+    """The `compaction` extension of a reply whose request compacted its
+    conversation (`--compact-at`), or None: the note, the turns it replaced
+    and the rendered tokens before and after. A client that sends the note
+    back with its conversation keeps it."""
+    report = getattr(job, "compaction", None)
+    if report is None:
+        return None
     return {
+        "note": report.note,
+        "removed_messages": report.removed_messages,
+        "prompt_tokens_before": report.prompt_tokens_before,
+        "prompt_tokens_after": report.prompt_tokens_after,
+    }
+
+
+def completion_response(model, job, result, message, called):
+    response = {
         "id": f"chatcmpl-{job.public_id}",
         "object": "chat.completion",
         "created": job.created_at,
@@ -1062,10 +1081,13 @@ def completion_response(model, job, result, message, called):
         "metrics": result.metrics,
         "timings": timings_dict(result),
     }
+    if (compaction := compaction_dict(job)) is not None:
+        response["compaction"] = compaction
+    return response
 
 
 def text_completion_response(model, job, result, text):
-    return {
+    response = {
         "id": f"cmpl-{job.public_id}",
         "object": "text_completion",
         "created": job.created_at,
@@ -1082,9 +1104,22 @@ def text_completion_response(model, job, result, text):
         "metrics": result.metrics,
         "timings": timings_dict(result),
     }
+    if (compaction := compaction_dict(job)) is not None:
+        response["compaction"] = compaction
+    return response
 
 
-def _chunk(object_type, chunk_id, created, model, choice, usage, metrics, timings):
+def _chunk(
+    object_type,
+    chunk_id,
+    created,
+    model,
+    choice,
+    usage,
+    metrics,
+    timings,
+    compaction=None,
+):
     chunk = {
         "id": chunk_id,
         "object": object_type,
@@ -1099,6 +1134,8 @@ def _chunk(object_type, chunk_id, created, model, choice, usage, metrics, timing
         chunk["metrics"] = metrics
     if timings is not None:
         chunk["timings"] = timings
+    if compaction is not None:
+        chunk["compaction"] = compaction
     return chunk
 
 
@@ -1111,6 +1148,7 @@ def stream_chunk(
     usage=None,
     metrics=None,
     timings=None,
+    compaction=None,
 ):
     return _chunk(
         "chat.completion.chunk",
@@ -1121,6 +1159,7 @@ def stream_chunk(
         usage,
         metrics,
         timings,
+        compaction,
     )
 
 
@@ -1133,6 +1172,7 @@ def text_completion_chunk(
     usage=None,
     metrics=None,
     timings=None,
+    compaction=None,
 ):
     return _chunk(
         "text_completion",
@@ -1143,6 +1183,7 @@ def text_completion_chunk(
         usage,
         metrics,
         timings,
+        compaction,
     )
 
 
@@ -1247,7 +1288,7 @@ def anthropic_response(model, job, blocks, result, called, thinking_signature):
     content = [anthropic_block(job, block, thinking_signature) for block in blocks]
     if all(item["type"] == "thinking" for item in content):
         content.append({"type": "text", "text": ""})
-    return {
+    response = {
         "id": f"msg_{job.public_id}",
         "type": "message",
         "role": "assistant",
@@ -1259,3 +1300,6 @@ def anthropic_response(model, job, blocks, result, called, thinking_signature):
             result.prompt_tokens, result.completion_tokens, result.cache
         ),
     }
+    if (compaction := compaction_dict(job)) is not None:
+        response["compaction"] = compaction
+    return response

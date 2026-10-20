@@ -543,6 +543,59 @@ request's `reasoning_tokens` can then exceed the budget. Only the end is
 forced, and a close the model selects itself before the budget ends the count.
 Text completions have no reasoning split and refuse a budget with 400.
 
+## Reasoning loop guard
+
+A reasoning model can get stuck repeating the same short cycle of thought and
+spend its whole output limit there. `--loop-guard` ends the thinking block when
+the last 256 tokens of it repeat a cycle of at most 8 tokens, once at least 64
+tokens precede the repeated run, and the model then answers as a thinking
+budget's end has it. The rule is TensorFold's, and the end it selects is the
+same end `--thinking-end-text` names.
+
+The flag is the engine's. The server gives every thinking request a closable
+thinking budget so the engine can end it; a request's own
+`thinking_token_budget`, when it has one, still caps the thinking as above. A
+request that does not think is unaffected, and with the flag off every reply is
+byte for byte what it was. `/status` counts the blocks it ended under
+`metrics.loop_guard_cuts`.
+
+```sh
+splash serve --model mlx-community/Qwen3.8-27B-4bit --loop-guard
+```
+
+## Context compaction
+
+`--compact-at auto|FRACTION` keeps a long conversation inside the window
+instead of squeezing its reply. After a prompt renders, a request compacts
+when its prompt plus reply would pass the window minus a 1,024-token reserve
+(`auto`; the reply is the request's `max_tokens`, or 4,096 when it names
+none), or when its prompt reaches the fraction. The newest turns stay word for
+word, up to `--compact-keep` tokens (default a quarter of the window, at most
+20,000); the older ones become a note the engine writes through its own
+background, greedy request (at most 1,024 tokens). A tool call and its results
+are never separated, and a note joins the leading system message, so a
+template that rejects a later system message still renders.
+
+The reply carries a `compaction` object: the note, the messages it replaced
+and the rendered tokens before and after. A client that sends the note back
+with its conversation does not compact those turns again.
+`--compact-memory DIR` keeps the note per conversation (its leading system
+message and first user message) and per removed transcript, in a user-only
+JSON file, so an identical compaction reuses it instead of paying for the
+summary again. Both `--compact-keep` and `--compact-memory` need
+`--compact-at`.
+
+```sh
+splash serve --model mlx-community/Qwen3.8-27B-4bit --compact-at auto \
+  --compact-keep 16000 --compact-memory ~/Library/Caches/Splash/notes
+```
+
+The note is greedy, so an identical compaction asks the same question; the
+answer can still differ between a cold prompt and one that resumed a cached
+prefix while the KV cache is INT8 (`--kv-format bf16` keeps the two alike).
+`--compact-memory` makes later compactions reuse the first note, so they match
+whatever it kept.
+
 ## Agent launchers
 
 Agents must already be installed; `splash claude|opencode|codex|hermes|pi`
@@ -2716,6 +2769,17 @@ The native tests are in `dev/tests/engine`; each Python test is in the
 directory of what it tests: `dev/tests/server`, `dev/tests/install` (launcher,
 client configuration and model installation) or `dev/tests/tools`
 (`dev/tools`, `dev/benchmarks`, the Makefiles and the real-model harnesses).
+
+`metal-backend` also runs the kernel contract's launch-limit gate: it reads a
+pipeline's `maxTotalThreadsPerThreadgroup` and execution width, and the
+device's threadgroup memory limit, through the test-only
+`BackendInstrumentation::launchLimits`, and its planted controls (one more
+thread, one more byte) must fail. The same test runs the contract's buffer
+gate (`dev/tests/engine/KernelContract.hpp`): five runs with the same inputs
+must write the same bytes, an input not declared in-place must survive
+unchanged, the guard bytes on both sides of every buffer must stay intact, and
+an input/output pair that shares memory must be declared in-place. A control
+for each rule is run beside it and must be caught.
 
 The real-model targets run against an installation in this checkout's
 `install/models`: run `make install` with the same options first, or in the

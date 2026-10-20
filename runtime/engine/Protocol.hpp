@@ -137,7 +137,9 @@ validateLimits(const ProtocolLimits &limits);
 //  106 u32 thinking end token count, u32 thinkingBudget.alsoEnds, zero
 //      without a budget
 // then the prompt tokens, the 32-byte image spans, the image pixels, the
-// score tokens and the thinking end tokens.
+// score tokens and the thinking end tokens. The no-budget sentinel with end
+// tokens is a closable thinking block the engine's --loop-guard may end
+// early.
 inline constexpr uint64_t kRequestFixedBytes = 114;
 inline constexpr uint32_t kNoThinkingBudget = 0xFFFFFFFFU;
 // A thinking budget's end holds 1 to this many tokens.

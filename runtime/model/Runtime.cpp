@@ -1,5 +1,6 @@
 #include "model/Runtime.hpp"
 #include "AwakeClock.hpp"
+#include "model/LoopGuard.hpp"
 #include "model/QwenState.hpp"
 #include "model/QwenTarget.hpp"
 #include "model/RuntimeArenas.hpp"
@@ -262,8 +263,14 @@ struct Runtime::Impl {
     struct Thinking final {
       ThinkingBudget budget;
       uint32_t endSelected = 0;
+      // `--loop-guard` over this request's thinking tokens, and whether it
+      // already ended the block.
+      LoopGuard guard;
+      bool guardFired = false;
     };
     std::optional<Thinking> thinking;
+    // ModelRequest::loopGuard: this request's thinking is guarded.
+    bool loopGuard = false;
     // A constrained request's final prompt row, held from its prompt's end
     // until its first token is selected under its first mask, suspensions
     // included. Composite cache state never stores it; every cache hit
@@ -988,18 +995,34 @@ struct Runtime::Impl {
       throw std::logic_error("no selected token to commit");
     if (samplingPenalties(entry).active())
       ops::Sampling::countPenaltyTokens(penaltyWords(entry.stateLane), tokens);
+    bool guardFired = false;
     for (const uint32_t token : tokens) {
       if (!entry.thinking)
         break;
       ThinkingBudget &budget = entry.thinking->budget;
-      if (token == budget.end.back() || token == budget.alsoEnds)
+      if (token == budget.end.back() || token == budget.alsoEnds) {
         entry.thinking.reset();
-      else if (budget.tokens)
+        continue;
+      }
+      const bool thinkingToken = budget.tokens != 0;
+      if (budget.tokens)
         --budget.tokens;
       else if (token == budget.end[entry.thinking->endSelected])
         ++entry.thinking->endSelected;
       else if (!thinkingEndWaits(entry))
         throw std::logic_error("thinking went past its budget");
+      // The guard watches thinking tokens only: a selection whose cutoff
+      // already began the end is not a cycle of thought.
+      if (thinkingToken && entry.loopGuard && !entry.thinking->guardFired &&
+          entry.thinking->guard.push(token))
+        guardFired = true;
+    }
+    // The selection that completed a cycle already ran under the old cutoff;
+    // the next one starts the end tokens, as a budget that ran out does.
+    if (guardFired && entry.thinking) {
+      entry.thinking->budget.tokens = 0;
+      entry.thinking->guardFired = true;
+      ++counters.loopGuardCuts;
     }
     entry.pendingToken = tokens.back();
   }
@@ -2227,8 +2250,12 @@ StateAdmission Runtime::beginAt(const ModelRequest &request, uint32_t stateLane)
   entry.sampling = request.sampling;
   entry.constraint = request.constraint;
   entry.flags = request.flags;
-  if (request.thinkingBudget)
-    entry.thinking = Impl::Request::Thinking{*request.thinkingBudget};
+  entry.loopGuard = request.loopGuard;
+  if (request.thinkingBudget) {
+    Impl::Request::Thinking thinking;
+    thinking.budget = *request.thinkingBudget;
+    entry.thinking = std::move(thinking);
+  }
   entry.scoreTokens.assign(request.scoreTokens.begin(),
                            request.scoreTokens.end());
   std::vector<Impl::ImageState> images;

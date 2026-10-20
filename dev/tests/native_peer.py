@@ -192,9 +192,11 @@ def _decode_request(payload: bytes) -> wire.RequestFrame:
         generation_prompt_tokens,
         wire.RequestFlag(flags),
         salt_lo | salt_hi << 64,
-        None
-        if thinking_tokens == 0xFFFFFFFF
-        else wire.ThinkingBudget(thinking_tokens, thinking_end, thinking_also_ends),
+        (
+            wire.ThinkingBudget(thinking_tokens, thinking_end, thinking_also_ends)
+            if thinking_tokens != 0xFFFFFFFF or thinking_end_count
+            else None
+        ),
     )
 
 

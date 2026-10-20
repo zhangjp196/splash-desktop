@@ -168,6 +168,9 @@ class Job:
     tools_signature: tuple | None = None
     response_previous_id: str | None = None
     response_history_items: list | None = None
+    # --compact-at: the note a compaction wrote and what it replaced, or None
+    # (compaction.Compaction). The response may report it.
+    compaction: object | None = None
     # Option token ids for score-only jobs; empty means ordinary generation.
     score_tokens: tuple = ()
     # Trailing prompt tokens of the chat template's generation prompt; zero
@@ -333,7 +336,12 @@ class NativeBackend:
     }
 
     def __init__(
-        self, runtime, tokenizer, request_logger, thinking_end=DEFAULT_THINKING_END
+        self,
+        runtime,
+        tokenizer,
+        request_logger,
+        thinking_end=DEFAULT_THINKING_END,
+        loop_guard=False,
     ):
         self.runtime = runtime
         self.tokenizer = tokenizer
@@ -341,6 +349,9 @@ class NativeBackend:
         # What the engine selects where a thinking budget runs out
         # (thinking_end_tokens).
         self.thinking_end = thinking_end
+        # `--loop-guard`: every thinking request carries a closable thinking
+        # budget, so the engine can end a repeated cycle early.
+        self.loop_guard = loop_guard
         self.active = {}
         self.closing = False
         self.lock = threading.RLock()
@@ -687,11 +698,20 @@ class NativeBackend:
         close or, where a call may follow, at any call-open token, while
         count_reasoning_tokens ends the reasoning at a call-open token only
         where it begins CALL_OPEN: a stray call-open token in the thinking ends
-        the engine's count, and the reasoning can then run past the budget."""
-        if job.thinking_token_budget is None:
+        the engine's count, and the reasoning can then run past the budget.
+        With --loop-guard a thinking job without a budget carries an uncapped
+        one, so the engine can close a repeated cycle (it is otherwise
+        inert)."""
+        if not job.thinking:
+            return None
+        if job.thinking_token_budget is not None:
+            tokens = job.thinking_token_budget
+        elif self.loop_guard:
+            tokens = wire.NO_THINKING_BUDGET
+        else:
             return None
         return wire.ThinkingBudget(
-            job.thinking_token_budget,
+            tokens,
             self.thinking_end,
             TOOL_CALL_OPEN_TOKEN_ID if job.may_call_tools else THINK_END_TOKEN_ID,
         )

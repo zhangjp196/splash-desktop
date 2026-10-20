@@ -76,12 +76,15 @@ struct EngineRequest final {
   uint32_t flags = 0;
   // Set only for a request that generates inside a thinking block.
   std::optional<ThinkingBudget> thinkingBudget;
+  // `--loop-guard`: end a thinking block that repeats a short token cycle.
+  bool loopGuard = false;
   CacheSalt cacheSalt;
 
   [[nodiscard]] ModelRequest modelView() const noexcept {
     return {id,           prompt,   images,     imagePixels,
             maxNewTokens, sampling, constraint, scoreTokens,
-            flags,        thinkingBudget ? &*thinkingBudget : nullptr};
+            flags,        thinkingBudget ? &*thinkingBudget : nullptr,
+            loopGuard};
   }
 };
 

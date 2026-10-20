@@ -97,6 +97,7 @@ class ServerMainTests(unittest.TestCase):
             tokenizer,
             request_logger=diagnostics.print_request,
             thinking_end=backend_api.DEFAULT_THINKING_END,
+            loop_guard=False,
         )
         self.assertEqual(app_type.call_args.args[3], 262144)
         # No --request-timeout, no deadline.

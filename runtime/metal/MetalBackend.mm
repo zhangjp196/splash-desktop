@@ -1413,6 +1413,17 @@ size_t BackendInstrumentation::cachedPipelines(const MetalBackend &backend) {
     return backend.impl_->pipelines.size();
 }
 
+LaunchLimits
+BackendInstrumentation::launchLimits(MetalBackend &backend,
+                                     std::string_view pipeline) {
+    id<MTLComputePipelineState> state = backend.impl_->pipeline(pipeline);
+    return {
+        static_cast<uint32_t>(state.maxTotalThreadsPerThreadgroup),
+        static_cast<uint32_t>(state.threadExecutionWidth),
+        static_cast<uint64_t>(backend.impl_->device.maxThreadgroupMemoryLength),
+    };
+}
+
 void BackendInstrumentation::setDispatchProfiling(MetalBackend &backend,
                                                   bool enabled) {
     backend.impl_->dispatchProfiling = enabled;

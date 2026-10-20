@@ -683,6 +683,8 @@ class ProtocolPythonTests(unittest.TestCase):
             p.ThinkingBudget(
                 7, (198,) * (p.MAX_THINKING_END_TOKENS - 1) + (248069,), 248058
             ),
+            # --loop-guard: an uncapped closable budget (the sentinel).
+            p.ThinkingBudget(0xFFFFFFFF, (248069,), 248069),
         ):
             with self.subTest(budget=budget):
                 request = replace(example_request(), thinking_budget=budget)
@@ -694,7 +696,6 @@ class ProtocolPythonTests(unittest.TestCase):
                     self.assertEqual(len(encoded) + 8, len(wire))
                 self.assertEqual(decode_client(encoded), request)
         for budget in (
-            p.ThinkingBudget(0xFFFFFFFF, (248069,), 248069),
             p.ThinkingBudget(-1, (248069,), 248069),
             p.ThinkingBudget(True, (248069,), 248069),
             p.ThinkingBudget(4096, (1 << 32,), 248069),

@@ -258,6 +258,9 @@ class ThinkingBudget:
 
 # The request frame's thinking budget tokens without one.
 _NO_THINKING_BUDGET = 0xFFFFFFFF
+# `--loop-guard`: an uncapped closable thinking budget (tokens is the
+# sentinel above) ends with the end tokens the guard selects.
+NO_THINKING_BUDGET = _NO_THINKING_BUDGET
 
 
 @dataclass(slots=True, frozen=True)
@@ -752,7 +755,9 @@ def _validated_request(
         try:
             if scores:
                 raise ValueError("score requests take no thinking budget")
-            _integer(thinking.tokens, 0, _NO_THINKING_BUDGET - 1, "thinking budget")
+            # --loop-guard: an uncapped budget (the sentinel) is a closable
+            # thinking block the engine's guard may end early.
+            _integer(thinking.tokens, 0, _NO_THINKING_BUDGET, "thinking budget")
             end = _words(thinking.end, "thinking end tokens")
             also_ends = _u32(thinking.also_ends, "thinking end token")
             if not 1 <= len(end) <= MAX_THINKING_END_TOKENS:

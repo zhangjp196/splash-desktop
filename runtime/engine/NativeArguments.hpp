@@ -46,6 +46,9 @@ struct NativeArguments final {
   // --prefill-duty PERCENT: the share of wall time prefill may keep the GPU
   // busy, 100 for no pacing at all.
   double prefillDutyPercent = EngineConfig{}.prefillDutyPercent;
+  // --loop-guard on|off: whether a thinking block that repeats a short token
+  // cycle is ended early.
+  bool loopGuard = false;
   uint32_t maxImagePatches = ops::kMaximumImagePatches;
   // --idle-release SECONDS|off, infinite for off.
   double idleReleaseSeconds = RuntimeResourcesConfig{}.idleReleaseSeconds;

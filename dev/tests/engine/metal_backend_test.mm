@@ -1,5 +1,6 @@
 #include "../../../runtime/metal/BackendInstrumentation.hpp"
 #include "../../../runtime/metal/MetalBackend.hpp"
+#include "KernelContract.hpp"
 #include "TestBuffers.hpp"
 #include "TestChecks.hpp"
 
@@ -24,7 +25,9 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -32,6 +35,7 @@ namespace {
 
 using splash::metal::AllocationFailure;
 using splash::metal::BackendInstrumentation;
+using splash::metal::LaunchLimits;
 using splash::metal::MetalAllocationError;
 using splash::metal::BufferBinding;
 using splash::metal::BufferStorage;
@@ -1740,6 +1744,110 @@ void run(const std::string &metallibPath) {
               << " last_wall_seconds=" << lastWallSeconds << '\n';
 }
 
+// A launch fits when it asks for one to the pipeline's threads and no more
+// threadgroup memory than the device holds. The contract gate's control asks
+// for one more of either, which must not fit.
+bool launchFits(const LaunchLimits &limits,
+                uint32_t threads, uint64_t threadgroupBytes) {
+    return threads > 0 && threads <= limits.maxThreadsPerThreadgroup &&
+           threadgroupBytes <= limits.maxThreadgroupMemoryBytes;
+}
+
+void launchLimitsGate(const char *metallibPath) {
+    MetalBackend backend(metallibPath);
+    const LaunchLimits limits =
+        BackendInstrumentation::launchLimits(backend, "test_add_u32");
+    require(limits.maxThreadsPerThreadgroup > 0,
+            "a pipeline reported no threadgroup limit");
+    require(limits.threadExecutionWidth > 0,
+            "a pipeline reported no execution width");
+    require(limits.maxThreadgroupMemoryBytes > 0,
+            "the device reported no threadgroup memory limit");
+    require(launchFits(limits, 1, 0), "a one-thread launch does not fit");
+    require(launchFits(limits, limits.maxThreadsPerThreadgroup, 0),
+            "the pipeline's own thread limit does not fit");
+    require(!launchFits(limits, limits.maxThreadsPerThreadgroup + 1, 0),
+            "the planted control (too many threads) was not caught");
+    require(!launchFits(limits, 1, limits.maxThreadgroupMemoryBytes + 1),
+            "the planted control (too much threadgroup memory) was not caught");
+    std::cout << "PASS launch limits threads=" << limits.maxThreadsPerThreadgroup
+              << " width=" << limits.threadExecutionWidth
+              << " threadgroup_memory=" << limits.maxThreadgroupMemoryBytes
+              << '\n';
+}
+
+bool hasFailure(const std::vector<std::string> &failures,
+                std::string_view text) {
+    return std::any_of(failures.begin(), failures.end(),
+                       [&](const std::string &failure) {
+                           return failure.find(text) != std::string::npos;
+                       });
+}
+
+// The buffer contract: repeated runs, untouched inputs, guard bytes, and
+// in-place declarations, each with a control that must be caught.
+void kernelContractGate(const char *metallibPath) {
+    MetalBackend backend(metallibPath);
+    splash::test::KernelContract contract(backend);
+    using splash::test::ContractBuffer;
+
+    // A deterministic in-place kernel passes.
+    ContractBuffer passing = contract.make(16 * sizeof(uint32_t), true, true, true);
+    splash::test::KernelContract::fill(passing, 0);
+    const auto clean = contract.check(
+        std::span(&passing, 1),
+        [&](std::span<const ContractBuffer> buffers) {
+            const uint32_t count = 16, increment = 1;
+            (void)backend.submit(addition(buffers[0].view, count, increment));
+        });
+    if (!clean.empty())
+        fail("a deterministic in-place kernel failed the contract: " + clean.front());
+
+    // A write into the guard bytes is caught.
+    ContractBuffer guarded = contract.make(64, true, true, true);
+    splash::test::KernelContract::fill(guarded, 0);
+    const auto badGuard = contract.check(
+        std::span(&guarded, 1),
+        [&](std::span<const ContractBuffer> buffers) {
+            std::memset(buffers[0].view.contents(), 0, 64);
+            static_cast<uint8_t *>(buffers[0].base.contents())[0] ^= 0xFF;
+        });
+    require(hasFailure(badGuard, "guard"), "the guard-byte control was not caught");
+
+    // An input changed without an in-place declaration is caught.
+    ContractBuffer input = contract.make(64, true, false, false);
+    const auto badInput = contract.check(
+        std::span(&input, 1),
+        [&](std::span<const ContractBuffer> buffers) {
+            std::memset(buffers[0].view.contents(), 9, 64);
+        });
+    require(hasFailure(badInput, "input changed"),
+            "the input control was not caught");
+
+    // An output that differs between runs is caught.
+    ContractBuffer output = contract.make(64, false, true, false);
+    uint8_t value = 0;
+    const auto badOutput = contract.check(
+        std::span(&output, 1),
+        [&](std::span<const ContractBuffer> buffers) {
+            std::memset(buffers[0].view.contents(), value++, 64);
+        });
+    require(hasFailure(badOutput, "differs between runs"),
+            "the repeat control was not caught");
+
+    // An in-place buffer that does not declare it is caught.
+    ContractBuffer overlap = contract.make(64, true, true, false);
+    const auto badOverlap = contract.check(
+        std::span(&overlap, 1),
+        [&](std::span<const ContractBuffer> buffers) {
+            std::memset(buffers[0].view.contents(), 0, 64);
+        });
+    require(hasFailure(badOverlap, "overlap"),
+            "the overlap control was not caught");
+
+    std::cout << "PASS kernel contract repeat/inputs/guards/overlap\n";
+}
+
 }  // namespace
 
 int main(int argc, const char *argv[]) {
@@ -1776,6 +1884,8 @@ int main(int argc, const char *argv[]) {
             residencyEndsWithoutBlits(argv[1]);
             residencyReturnsRemovedBuffers(argv[1]);
             buffersReachedThroughTables(argv[1]);
+            launchLimitsGate(argv[1]);
+            kernelContractGate(argv[1]);
             run(argv[1]);
         } catch (const std::exception &error) {
             std::cerr << "FAIL: unexpected exception: " << error.what()

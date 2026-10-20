@@ -135,6 +135,10 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       result.decodeShare = parseDecodeShare(value);
     } else if (option == "--prefill-duty") {
       result.prefillDutyPercent = parsePrefillDuty(value);
+    } else if (option == "--loop-guard") {
+      if (value != "on" && value != "off")
+        throw UsageError("--loop-guard requires on or off");
+      result.loopGuard = value == "on";
     } else if (option == "--max-image-patches") {
       result.maxImagePatches = parseMaxImagePatches(value);
     } else if (option == "--persistent-cache") {

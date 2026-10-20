@@ -59,6 +59,9 @@ struct EngineConfig final {
   // value a Mac that must be quiet only as far as its own thermal state
   // says gets left with whatever the state scales it to.
   double prefillDutyPercent = 100.0;
+  // `--loop-guard`: end a thinking block that repeats a short token cycle.
+  // Off keeps every reply exactly as it is without the flag.
+  bool loopGuard = false;
   // The prefill checkpoint interval and the resource wait limit.
   uint32_t prefillCheckpointTokens = kPrefillCheckpointTokens;
   double resourceWaitTimeoutMilliseconds = kResourceWaitTimeoutMilliseconds;

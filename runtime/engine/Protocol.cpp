@@ -719,11 +719,13 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
   }
   request.priority = static_cast<RequestPriority>(priority);
   request.constraint = static_cast<ConstraintMode>(constraint);
-  if (thinking.tokens == kNoThinkingBudget &&
-      (thinkingEndCount || thinking.alsoEnds))
+  // --loop-guard: end tokens may accompany kNoThinkingBudget, an uncapped
+  // thinking block the engine may close early. An end token without end
+  // tokens is not a budget.
+  if (thinkingEndCount == 0 && thinking.alsoEnds)
     return failure<ClientMessage>(
         requestIssue(IssueCode::InvalidCount, request.requestId,
-                     "thinking end tokens need a thinking budget"));
+                     "a thinking end token needs thinking end tokens"));
   if (thinkingEndCount > kMaximumThinkingEndTokens) {
     return failure<ClientMessage>(
         requestIssue(IssueCode::InvalidCount, request.requestId,
@@ -773,7 +775,7 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
                      "image pixel, score or thinking end payload does not "
                      "match its counts"));
   }
-  if (thinking.tokens != kNoThinkingBudget)
+  if (thinking.tokens != kNoThinkingBudget || thinkingEndCount)
     request.thinkingBudget = std::move(thinking);
   // The pixels are most of a large frame, so they stay in its buffer: the
   // words behind them are read, and moving the pixels to its front

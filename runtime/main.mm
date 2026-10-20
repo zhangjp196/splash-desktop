@@ -214,6 +214,7 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engine.decodeShare = arguments.decodeShare;
   config.nativeLoop.engine.prefillDutyPercent = arguments.prefillDutyPercent;
+  config.nativeLoop.engine.loopGuard = arguments.loopGuard;
   return config;
 }
 

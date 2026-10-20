@@ -89,6 +89,8 @@ TEST_NATIVE_ARGUMENTS_TEST := $(ENGINE_TEST_BUILD)/native-arguments
 TEST_RESOURCES_TEST := $(ENGINE_TEST_BUILD)/runtime-resources
 TEST_KV_PAGE_TIER_TEST := $(ENGINE_TEST_BUILD)/kv-page-tier
 TEST_METRICS_TEST := $(ENGINE_TEST_BUILD)/runtime-metrics
+TEST_LOOP_GUARD_TEST := $(ENGINE_TEST_BUILD)/loop-guard
+TEST_RECALL_MATCH_TEST := $(ENGINE_TEST_BUILD)/recall-match
 TEST_MODEL_LOADING_TEST := $(ENGINE_TEST_BUILD)/model-loading
 TEST_MEMORY_AUDIT_TEST := $(ENGINE_TEST_BUILD)/memory-audit
 TEST_MEMORY_GOVERNOR_TEST := $(ENGINE_TEST_BUILD)/memory-governor
@@ -169,6 +171,8 @@ TEST_CPU_TARGETS := $(TEST_SLOT_FILE) $(TEST_CACHE_DIRECTORY) $(TEST_DISK_SPACE)
 	$(TEST_BOOTSTRAP_TEST) \
 	$(TEST_NATIVE_ARGUMENTS_TEST) \
 	$(TEST_METRICS_TEST) \
+	$(TEST_LOOP_GUARD_TEST) \
+	$(TEST_RECALL_MATCH_TEST) \
 	$(TEST_MEMORY_AUDIT_TEST) \
 	$(TEST_MEMORY_GOVERNOR_TEST) \
 	$(TEST_STATUS_TEST) \
@@ -264,6 +268,9 @@ $(TEST_NATIVE_LOOP_TEST): $(NATIVE_RUNTIME_SOURCES) \
 		dev/tests/engine/ProtocolPeer.cpp \
 		dev/tests/engine/native_engine_loop_test.cpp
 $(TEST_METRICS_TEST): dev/tests/engine/runtime_metrics_test.cpp
+$(TEST_LOOP_GUARD_TEST): dev/tests/engine/loop_guard_test.cpp
+$(TEST_RECALL_MATCH_TEST): runtime/model/RecallMatch.cpp \
+		dev/tests/engine/recall_match_test.cpp
 $(TEST_MEMORY_AUDIT_TEST): runtime/metal/DeviceCapabilities.cpp \
 		runtime/engine/MemoryPlan.cpp runtime/engine/MemoryAudit.cpp \
 		dev/tests/engine/memory_audit_test.cpp
@@ -282,6 +289,8 @@ $(TEST_LEGACY_WEIGHT_CACHE): dev/tests/engine/legacy_weight_cache_test.cpp
 $(TEST_WEIGHT_SOURCE) $(TEST_GGUF_FILE) $(TEST_MEMORY_TEST) $(TEST_KV_PAGE_CACHE_TEST) \
 		$(TEST_DRAFT_CONTEXT_PLAN_TEST) $(TEST_RAGGED_SCHEDULER_TEST) \
 		$(TEST_ELASTIC_KV_TEST) $(TEST_NATIVE_LOOP_TEST) $(TEST_METRICS_TEST) \
+		$(TEST_LOOP_GUARD_TEST) \
+		$(TEST_RECALL_MATCH_TEST) \
 		$(TEST_MEMORY_AUDIT_TEST) $(TEST_MEMORY_GOVERNOR_TEST) $(TEST_STATUS_TEST) \
 		$(TEST_PREFILL_PACER_TEST) \
 		$(TEST_Q8_CPU_TEST) $(TEST_SLOT_FILE) $(TEST_CACHE_DIRECTORY) $(TEST_DISK_SPACE) \

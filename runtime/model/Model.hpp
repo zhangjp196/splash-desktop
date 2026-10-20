@@ -144,6 +144,9 @@ struct ModelRequest final {
   uint32_t flags = 0;
   // The engine request's thinking budget; null for a request without one.
   const ThinkingBudget *thinkingBudget = nullptr;
+  // `--loop-guard`: end this request's thinking where it repeats a short
+  // token cycle (LoopGuard). The engine sets it from its own serve option.
+  bool loopGuard = false;
   // Prompt tokens the lane takes from a cached state. Images that end at or
   // before it are neither staged nor encoded; their spans still place
   // rotary positions.
@@ -526,6 +529,8 @@ struct ModelTelemetry final {
   // Prefill chunks the GPU ran again alone once the Neural Engine split's
   // work for them failed (Runtime::prefillAsync).
   uint64_t aneFfnReruns = 0;
+  // Thinking blocks `--loop-guard` ended where they repeated a short cycle.
+  uint64_t loopGuardCuts = 0;
   double lastConstrainedTargetForwardGpuSeconds = 0.0;
   double totalConstrainedTargetForwardGpuSeconds = 0.0;
   double lastConstrainedMaskWaitSeconds = 0.0;

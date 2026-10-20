@@ -433,6 +433,7 @@ std::string runtimeStatusJson(
       << ",\"drafted_tokens\":" << metrics.draftedTokens
       << ",\"accepted_draft_tokens\":" << metrics.acceptedDraftTokens
       << ",\"draft_acceptance_rate\":" << metrics.draftAcceptanceRate
+      << ",\"loop_guard_cuts\":" << executorTelemetry.loopGuardCuts
       << ",\"capacity_failures\":" << metrics.capacityFailures
       << ",\"metal_failures\":" << metrics.metalFailures
       << ",\"current_prefill_batch\":";

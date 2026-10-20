@@ -33,6 +33,7 @@ from .api_shapes import (
     anthropic_to_chat_body,
     anthropic_to_chat_prompt,
     anthropic_usage,
+    compaction_dict,
     completion_response,
     finish_reason,
     responses_item,
@@ -1170,20 +1171,20 @@ class FrontendHandler(BaseHTTPRequestHandler):
             )
             result = collected.result
             sequencer.finish(collected.cut, collected.reasoning_open)
-            send(
-                "message_delta",
-                {
-                    "delta": {
-                        "stop_reason": anthropic_stop(
-                            result,
-                            collected.called,
-                            job.output_clamped_to_context,
-                        ),
-                        "stop_sequence": result.stop_sequence,
-                    },
-                    "usage": {"output_tokens": result.completion_tokens},
+            delta_payload = {
+                "delta": {
+                    "stop_reason": anthropic_stop(
+                        result,
+                        collected.called,
+                        job.output_clamped_to_context,
+                    ),
+                    "stop_sequence": result.stop_sequence,
                 },
-            )
+                "usage": {"output_tokens": result.completion_tokens},
+            }
+            if (compaction := compaction_dict(job)) is not None:
+                delta_payload["compaction"] = compaction
+            send("message_delta", delta_payload)
             send("message_stop", {})
 
         def send_error(error):
@@ -1509,11 +1510,17 @@ class FrontendHandler(BaseHTTPRequestHandler):
                     empty,
                     finish_reason(result, collected.called),
                     timings=timings_dict(result),
+                    compaction=compaction_dict(job),
                 )
             )
             if stream_options.get("include_usage"):
                 self._sse(
-                    chunk(empty, usage=usage_dict(result, job), metrics=result.metrics)
+                    chunk(
+                        empty,
+                        usage=usage_dict(result, job),
+                        metrics=result.metrics,
+                        compaction=compaction_dict(job),
+                    )
                 )
             self._sse("[DONE]")
 
@@ -1751,6 +1758,8 @@ def _native_command(args, relaunch_context=None):
         )
     if args.allow_idle_sleep:
         command.extend(("--idle-sleep", "allow"))
+    if args.loop_guard:
+        command.extend(("--loop-guard", "on"))
     if relaunch_context is not None and args.max_context is None:
         command.extend(("--relaunch-context", str(relaunch_context)))
     return command
@@ -1829,6 +1838,7 @@ def main():
             tokenizer,
             request_logger=print_request,
             thinking_end=thinking_end,
+            loop_guard=args.loop_guard,
         )
         if not runtime.wait_ready():
             raise engine_runtime.EngineUnhealthy("native runtime did not become ready")
@@ -1863,6 +1873,9 @@ def main():
             announce_served_name=args.announce_served_name,
             default_reasoning_effort=args.default_reasoning_effort,
             default_thinking_token_budget=args.thinking_token_budget,
+            compact_at=args.compact_at,
+            compact_keep=args.compact_keep,
+            compact_memory=args.compact_memory,
             vision=readiness.vision,
         )
         server.app = app

@@ -378,6 +378,30 @@ def parse_thinking_token_budget(value):
     return tokens
 
 
+def parse_compact_at(value):
+    if value == "auto":
+        return "auto"
+    try:
+        fraction = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "must be auto or a fraction in (0,1)"
+        ) from None
+    if not 0.0 < fraction < 1.0:
+        raise argparse.ArgumentTypeError("must be auto or a fraction in (0,1)")
+    return fraction
+
+
+def parse_compact_keep(value):
+    try:
+        tokens = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if tokens <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return tokens
+
+
 # The help's option groups, in the order `splash serve --help` lists them:
 # each group's key and title. The launcher's own model options and --port
 # join "model" and "network".
@@ -636,6 +660,50 @@ SERVE_OPTIONS = (
         environment="SPLASH_THINKING_TOKEN_BUDGET",
     ),
     ServeOption(
+        "--loop-guard",
+        "api",
+        dict(
+            action="store_true",
+            default=False,
+            help="end a thinking block that repeats a short token cycle, so "
+            "a reasoning loop does not run to the output limit",
+        ),
+    ),
+    ServeOption(
+        "--compact-at",
+        "api",
+        dict(
+            type=parse_compact_at,
+            default=None,
+            metavar="auto|FRACTION",
+            help="compact a conversation whose prompt would leave no room for "
+            "the reply: older turns become a note (default: off)",
+        ),
+    ),
+    ServeOption(
+        "--compact-keep",
+        "api",
+        dict(
+            type=parse_compact_keep,
+            default=None,
+            metavar="TOKENS",
+            help="tokens of the newest turns a compaction keeps word for word "
+            "(default: a quarter of the window, at most 20000); needs "
+            "--compact-at",
+        ),
+    ),
+    ServeOption(
+        "--compact-memory",
+        "api",
+        dict(
+            type=parse_cache_dir,
+            default=None,
+            metavar="DIRECTORY",
+            help="keep compaction notes here, one per conversation, so a "
+            "repeated compaction reuses its note; needs --compact-at",
+        ),
+    ),
+    ServeOption(
         "--thinking-end-text",
         "api",
         dict(
@@ -781,6 +849,10 @@ def check_serve_arguments(parser, args):
     """The checks of the shared options that involve more than one."""
     if args.announce_served_name and not args.served_model_name:
         parser.error("--announce-served-name needs --served-model-name")
+    if args.compact_keep is not None and args.compact_at is None:
+        parser.error("--compact-keep needs --compact-at")
+    if args.compact_memory is not None and args.compact_at is None:
+        parser.error("--compact-memory needs --compact-at")
     if args.persistent_cache and args.max_cache_disk == 0:
         parser.error(
             "--persistent-cache needs the SSD cache --max-cache-disk 0 turns off"

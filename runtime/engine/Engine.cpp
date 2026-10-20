@@ -96,6 +96,9 @@ void Engine::submit(EngineRequest value) {
         outOfVocabulary(value.thinkingBudget->alsoEnds))
       throw std::invalid_argument("thinking end token is out of vocabulary");
   }
+  // The serve option applies to every request; a request that asked for it
+  // itself (a test) keeps it with the option off.
+  value.loopGuard = value.loopGuard || config_.loopGuard;
   if (!value.images.empty() && !config_.maxImagePatches) {
     throw std::invalid_argument("this model is serving without vision");
   }

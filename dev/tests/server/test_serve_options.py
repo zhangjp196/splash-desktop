@@ -65,6 +65,36 @@ OPTIONS = {
         "--state-format", {"fp32": "fp32", "bf16": "bf16"}, ("fp16", "int8")
     ),
     "--disable-ane": ([(["--disable-ane"], True)], []),
+    "--loop-guard": ([(["--loop-guard"], True)], []),
+    "--compact-at": values(
+        "--compact-at",
+        {"auto": "auto", "0.5": 0.5, "0.75": 0.75},
+        ("0", "1", "-0.5", "half", "auto!"),
+    ),
+    "--compact-keep": (
+        [
+            (["--compact-keep=4096", "--compact-at=auto"], 4096),
+            (["--compact-keep=1", "--compact-at=0.5"], 1),
+        ],
+        [
+            ["--compact-keep=4096"],
+            ["--compact-keep=0", "--compact-at=auto"],
+            ["--compact-keep=-1", "--compact-at=auto"],
+            ["--compact-keep=1.5", "--compact-at=auto"],
+        ],
+    ),
+    "--compact-memory": (
+        [
+            (
+                ["--compact-memory=/tmp/splash-notes", "--compact-at=auto"],
+                Path("/tmp/splash-notes"),
+            )
+        ],
+        [
+            ["--compact-memory=/tmp/splash-notes"],
+            ["--compact-memory=", "--compact-at=auto"],
+        ],
+    ),
     "--max-memory": values(
         "--max-memory",
         {

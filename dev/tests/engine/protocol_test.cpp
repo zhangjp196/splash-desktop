@@ -921,11 +921,21 @@ void testThinkingBudget() {
                     decoded.issue->failureClass == FailureClass::RequestError &&
                     decoded.issue->code == IssueCode::InvalidCount);
   };
-  for (const size_t word : {at + 4, at + 8}) {
-    std::vector<uint8_t> stray = noneWire;
-    storeU32(stray, word, 1);
-    expectInvalidCount(stray);
+  RequestFrame uncapped = exampleRequest();
+  uncapped.thinkingBudget->tokens = kNoThinkingBudget;
+  CHECK(test, roundTrip(uncapped) == uncapped);
+  // An end count the frame does not carry words for is a payload problem;
+  // an end token with no end tokens is not a budget.
+  std::vector<uint8_t> missingEnds = noneWire;
+  storeU32(missingEnds, at + 4, 1);
+  {
+    const auto decoded = decodeClient(missingEnds, kLimits);
+    CHECK(test, !decoded && decoded.issue &&
+                    decoded.issue->code == IssueCode::InvalidPayloadLength);
   }
+  std::vector<uint8_t> strayEnd = noneWire;
+  storeU32(strayEnd, at + 8, 1);
+  expectInvalidCount(strayEnd);
   // The count is checked before the tokens are read.
   std::vector<uint8_t> overlong = wire;
   storeU32(overlong, at + 4, kMaximumThinkingEndTokens + 1);
