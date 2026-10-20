@@ -142,6 +142,8 @@ final class AppModel: ObservableObject {
     @Published var modelDirectory = ""
     @Published var draftDirectory = ""
     @Published var port = ServerSettings.First.port
+    @Published var lanAccess = false
+    @Published var allowedHosts = ""
     @Published var languageOnly = false
     @Published var maxMemory = ""
     @Published var maxContext = ""
@@ -253,6 +255,8 @@ final class AppModel: ObservableObject {
         settings.modelDirectory = modelDirectory
         settings.draftDirectory = draftDirectory
         settings.port = port
+        settings.lanAccess = lanAccess
+        settings.allowedHosts = allowedHosts
         settings.languageOnly = languageOnly
         settings.kvFormat = kvFormat
         settings.neuralEngine = neuralEngine
@@ -310,6 +314,8 @@ final class AppModel: ObservableObject {
         modelDirectory = settings.modelDirectory
         draftDirectory = settings.draftDirectory
         port = settings.port
+        lanAccess = settings.lanAccess
+        allowedHosts = settings.allowedHosts
         languageOnly = settings.languageOnly
         kvFormat = settings.kvFormat
         neuralEngine = settings.neuralEngine
@@ -501,6 +507,14 @@ final class AppModel: ObservableObject {
             if !draft.isEmpty { arguments += ["--draft-model", draft] }
         }
         arguments += ["--port", String(port)]
+        // Loopback unless the configuration asks for the LAN; the extra Host
+        // names are passed either way, since a tunnel or proxy reaches the
+        // loopback listener under a name of its own.
+        if lanAccess { arguments += ["--host", "0.0.0.0"] }
+        for name in allowedHosts.split(separator: ",") {
+            let trimmed = name.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { arguments += ["--allowed-host", trimmed] }
+        }
         // The panel owns the admission limit: it equals the server's own
         // default until edited, so passing it keeps the two in step.
         arguments += ["--queue-size", String(maxConcurrency)]
@@ -546,6 +560,9 @@ final class AppModel: ObservableObject {
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment["PYTHONUNBUFFERED"] = "1"
+        // Keep the signed bundle sealed: an import that writes a .pyc inside
+        // it would add files the signature does not cover.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["TRANSFORMERS_VERBOSITY"] = "error"
         process.environment = environment
         let pipe = Pipe()

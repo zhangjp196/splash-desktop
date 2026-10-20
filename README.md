@@ -24,13 +24,22 @@ installing it nor its first run needs anything but the model you choose.
    drag Splash Desktop to Applications. The app used to be called Splash: if
    `/Applications/Splash.app` is there from an older disk image, delete it, so
    the two do not sit side by side.
-2. Open it. The build is unsigned, so the first time you may need to
-   right-click and choose Open.
+2. Open it. The build is ad-hoc signed but not notarized, so the first time
+   you may need to right-click and choose Open.
 3. In the **Models** pane, pick a configuration and press **Start**. The
    first run downloads the model and its DFlash2 draft and serves on
    `127.0.0.1:8000`; later starts reuse the downloads.
 4. Open <http://127.0.0.1:8000> in your browser, or point a coding agent at
    the server.
+
+To reach the server from another device on the same network, turn on **Allow
+access from other devices** in the configuration's **Server** section: it
+starts the server with `--host 0.0.0.0`, so this Mac's IP address works from
+the other device. Set an **API key** in the **Requests and access** section at
+the same time — without one, anyone on the network can use the model. Reaching
+it over a name rather than an IP, such as `mymac.local` or a tunnel domain,
+also lists that name in **Extra host names** (each becomes `--allowed-host`).
+These edits apply to the next start.
 
 The window is a sidebar of **Models**, **Live**, **Thermal**, and **Log**, with
 the run state and Start and Stop pinned beneath it:
@@ -151,7 +160,7 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | `--kv-format bf16` | Use BF16 KV cache. Default: 8-bit (INT8). |
 | `--state-format bf16` | Use BF16 recurrent states, half the size. Default: FP32. |
 | `--disable-ane` | Prefill on the GPU alone. Default: the 27B also uses the Neural Engine. |
-| `--max-cache-disk 16G` | Cap the SSD cache (default: auto, up to 128 GiB; `0` turns it off). |
+| `--max-cache-disk 16G` | Cap the SSD cache (default: auto, up to 64 GiB; `0` turns it off). |
 | `--persistent-cache` | Keep the SSD cache across restarts. Off in `splash serve`; the app turns it on. |
 | `--thermal-policy quiet` | Make prefill quieter: it keeps the GPU busy 30 percent of the wall time (`moderate` 50, `balanced` 75, `performance` 90), so prompts take longer and the fans answer less. The default, `auto`, paces nothing and leaves the Mac's own thermal management in charge. A running server's rung changes through `POST /v1/thermal`. |
 

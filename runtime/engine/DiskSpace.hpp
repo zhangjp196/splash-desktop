@@ -41,8 +41,8 @@ struct DiskVolume final {
 // head_dim 256, int8), so 32 GiB held about one full-context conversation
 // and the tier turned over before a session could be restored from it. The
 // 28 GB a persistent point of that model's full context takes is what the
-// cap has to clear, several times over, to keep a working set of them.
-inline constexpr uint64_t kAutomaticCacheDiskBytes = uint64_t{128} << 30;
+// cap has to clear, more than twice over, to keep a working set of them.
+inline constexpr uint64_t kAutomaticCacheDiskBytes = uint64_t{64} << 30;
 
 // What a disk tier leaves free on its volume: 10 GiB, or 5% of a volume
 // smaller than 200 GiB.

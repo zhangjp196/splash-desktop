@@ -105,7 +105,7 @@ access.
 | `--state-format` | `fp32` | Recurrent state storage: `fp32` or `bf16`. See [state precision](#state-precision). |
 | `--idle-release` | `10m` | Time without a request before the engine unwires its memory and frees the weights; the next request restores them. `off` keeps the weights, though `POST /v1/memory/release` still frees them. See [weight loading](#weight-loading). |
 | `--cache-idle-spill` | `30` | Time without a request before the engine writes the cached prefixes to disk and releases their memory; the next request restores what it needs from there. Its own timer, so `--idle-release off` may keep the weights while the cache still spills; `off` keeps the cache in memory. See [SSD cache](#ssd-cache). |
-| `--max-cache-disk` | `auto` | SSD quota for cached KV pages and states: `auto` follows the volume's free space up to 128 GiB, a size such as `16G` sets the quota, `0` turns the cache off. Kept for the session, or across restarts with `--persistent-cache`. See [SSD cache](#ssd-cache). |
+| `--max-cache-disk` | `auto` | SSD quota for cached KV pages and states: `auto` follows the volume's free space up to 64 GiB, a size such as `16G` sets the quota, `0` turns the cache off. Kept for the session, or across restarts with `--persistent-cache`. See [SSD cache](#ssd-cache). |
 | `--max-cache-disk-writes` | `0` (no limit) | The most the SSD cache writes a day, e.g. `200G`. See [SSD cache](#ssd-cache). |
 | `--persistent-cache` | Off | Keep the SSD cache across restarts. See [persistent cache](#persistent-cache). |
 | `--cache-dir` | `~/Library/Caches/Splash/prefix-cache` | Where `--persistent-cache` keeps its files; needs `--persistent-cache`. |
@@ -258,7 +258,7 @@ suspension. It does not raise the context limit.
 
 `--max-cache-disk` sizes it. The default, `auto`, holds at most a quarter of
 what its volume has beyond the space it keeps free (10 GiB, or 5% of a volume
-smaller than 200 GiB), its own files counted, and at most 128 GiB. The cap is a
+smaller than 200 GiB), its own files counted, and at most 64 GiB. The cap is a
 working set, not a drive's worth: a dense model's KV costs about 128 KiB a
 token (a 27B: 64 layers, 4 KV heads, head_dim 256, int8), so a 57K-token
 conversation is 7.3 GiB of KV beside 153 MiB of state, and the old 32 GiB cap
@@ -428,7 +428,7 @@ are not moved.
 | `~/Library/Application Support/Splash` | The data directory of a packaged install: `models/`, the installed models' links into the Hugging Face cache and the metadata derived from GGUFs; `runtime/`, the locks of running servers; and `thinking.key`, which encrypts the Messages reasoning a response hides. A source checkout keeps the first two in `install/models` and `build/runtime`. |
 | Hugging Face cache (`HF_HUB_CACHE`, by default `~/.cache/huggingface/hub`) | Model and draft downloads, with Splash's pins under `refs/splash` ([revisions](#revisions)). |
 | `~/Library/Caches/Splash/prefix-cache` (`--cache-dir`) | The [persistent cache](#persistent-cache), with `--persistent-cache` only, within the [SSD cache](#ssd-cache)'s limit. Every start removes the caches there that nobody used for 14 days. |
-| `$TMPDIR/splash-cache-*` | The [SSD cache](#ssd-cache)'s files, on by default, without `--persistent-cache`, or when another process holds the persistent cache's directory or it cannot be used: one of KV pages and one of states, together at most about the SSD cache's limit, which follows the volume's free space up to 128 GiB unless `--max-cache-disk` sets it. Each is unlinked as it is created, so no directory lists it and macOS's storage settings count it as System Data, and its space returns when the engine exits, even after a crash. `--cache-dir` does not move them; they follow `TMPDIR`. |
+| `$TMPDIR/splash-cache-*` | The [SSD cache](#ssd-cache)'s files, on by default, without `--persistent-cache`, or when another process holds the persistent cache's directory or it cannot be used: one of KV pages and one of states, together at most about the SSD cache's limit, which follows the volume's free space up to 64 GiB unless `--max-cache-disk` sets it. Each is unlinked as it is created, so no directory lists it and macOS's storage settings count it as System Data, and its space returns when the engine exits, even after a crash. `--cache-dir` does not move them; they follow `TMPDIR`. |
 | `~/Library/Logs/Splash/crash` | [Crash traces](#failures-and-crash-traces), with `SPLASH_CRASH_TRACE=1` only. |
 | Pi's `models.json` (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`) and the Hermes profile (`~/.hermes/profiles/splash`, or `splash-<port>`) | The settings `splash pi` and `splash hermes` write ([agent launchers](#agent-launchers)). Every agent keeps its sessions in its own home; `splash claude`, `codex` and `opencode` pass their settings at launch and write none. |
 
@@ -3041,9 +3041,8 @@ per setting, `SPLASH_SETTINGS_DB` points it elsewhere): the panel saves each
 edit after a short pause, the next launch opens on what the last one saved, and
 Restore Defaults returns the form to the values the first launch opened with
 (upstream model, port 8000, 8-bit KV, a 16-request admission limit, a 10
-second residency and a persistent cache with a 50 GB a day write budget; the
-quota itself is automatic and empty means the engine's own, as the quota
-field's label says). A stored value the launcher would reject falls
+second residency and a persistent cache with a 16 GiB quota and a 32 GiB a day
+write budget). A stored value the launcher would reject falls
 back to its first-launch default rather than starting a server that refuses to
 run. `swift run --selfcheck-settings` exercises the store and that round trip
 headlessly against a temporary database. The
@@ -3054,7 +3053,8 @@ Chinese are bundled). The model
 section offers three modes — a Splash package (its draft is built in), an
 upstream MLX or GGUF model (the installer pairs its draft), or a local
 directory per [local model directories](#local-model-directories) — and the
-remaining sections group the rest by what it decides: the server's port, KV
+remaining sections group the rest by what it decides: the server's port and
+whether it serves the LAN, with the extra Host names it accepts; KV
 format, text-only mode, API key and model aliases; the admission limit of
 requests running or waiting at once; the memory ceiling and
 context length; what happens while idle (releasing weights back to the GPU the

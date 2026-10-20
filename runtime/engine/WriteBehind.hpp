@@ -34,7 +34,7 @@ struct WriteBehindSnapshot final {
 // the floor decides is only whether a conversation shallower than it is
 // restorable at all: every conversation keeps its newest point on the
 // floor's other side. 512 tokens is about 1.7 s of prefill to save for
-// some 217 MiB of a quota that now clears 128 GiB, against never saving
+// some 217 MiB of a quota that now clears 64 GiB, against never saving
 // it. Points become durable one at a time, in the order they were
 // published. Like every write of the tier these draw on its write budget,
 // when one is set (model::DiskBudget): a point waits while the budget holds

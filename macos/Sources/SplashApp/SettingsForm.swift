@@ -93,14 +93,16 @@ struct SettingsTabs: View {
                     disabled: disabled
                 )
             }
-        } footer: {
-            Text(verbatim: L10n.string("footer.model"))
         }
     }
 
     @ViewBuilder private var serverSection: some View {
         Section {
             TextField(L10n.string("field.port"), value: $settings.port, format: .number)
+                .disabled(disabled)
+            Toggle(L10n.string("field.lan_access"), isOn: $settings.lanAccess)
+                .disabled(disabled)
+            TextField(L10n.string("field.allowed_hosts"), text: $settings.allowedHosts)
                 .disabled(disabled)
             Picker(L10n.string("field.kv"), selection: $settings.kvFormat) {
                 Text(verbatim: L10n.string("kv.int8")).tag("int8")
@@ -113,7 +115,13 @@ struct SettingsTabs: View {
             Toggle(L10n.string("field.neural_engine"), isOn: $settings.neuralEngine)
                 .disabled(disabled)
         } footer: {
-            Text(verbatim: L10n.string("help.neural_engine"))
+            if settings.lanAccess && settings.apiKey.isEmpty {
+                Label(
+                    L10n.string("help.lan_access.no_key"),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+            }
         }
     }
 
@@ -121,8 +129,6 @@ struct SettingsTabs: View {
         Section {
             TextField(L10n.string("field.max_concurrency"), value: $settings.maxConcurrency, format: .number)
                 .disabled(disabled)
-        } footer: {
-            Text(verbatim: L10n.string("help.max_concurrency"))
         }
     }
 
@@ -139,8 +145,6 @@ struct SettingsTabs: View {
         Section {
             TextField(L10n.string("field.residency"), text: $settings.residencySeconds)
                 .disabled(disabled)
-        } footer: {
-            Text(verbatim: L10n.string("footer.idle"))
         }
     }
 
@@ -152,8 +156,6 @@ struct SettingsTabs: View {
                 .disabled(disabled)
             TextField(L10n.string("field.cache_writes"), text: $settings.maxCacheDiskWrites)
                 .disabled(disabled)
-        } footer: {
-            Text(verbatim: L10n.string("footer.cache"))
         }
     }
 

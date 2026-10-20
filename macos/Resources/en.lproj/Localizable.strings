@@ -13,22 +13,21 @@
 "field.draft" = "Draft folder";
 "field.draft.prompt" = "the matching DFlash2 checkpoint (empty downloads the family's)";
 "field.port" = "Port";
+"field.lan_access" = "Allow access from other devices (LAN)";
+"field.allowed_hosts" = "Extra host names (comma-separated)";
 "field.language_only" = "Text only (skip vision)";
 "field.kv" = "KV cache";
 "kv.int8" = "8-bit";
 "kv.bf16" = "BF16";
 "field.neural_engine" = "Use Neural Engine (ANE)";
-"help.neural_engine" = "Prefill the dense FFN on the Neural Engine when it is faster (Qwen3.8-27B). Turn off to pass --disable-ane.";
-"help.max_concurrency" = "Requests admitted at once, running or waiting; more get 503.";
+"help.lan_access.no_key" = "No API key is set: anyone who can reach this Mac can use the model.";
 "field.max_memory" = "Max memory (e.g. 28G)";
 "field.max_context" = "Max context (e.g. 100K)";
 "field.max_concurrency" = "Max concurrency";
 "field.residency" = "Release weights after idle seconds (LM Studio style)";
-"footer.idle" = "Releasing weights after idle returns GPU memory while the server keeps serving; the next request restores them. The idle timer restarts on every request.";
 "field.persistent_cache" = "Keep cached prefixes across restarts";
-"field.cache_quota" = "SSD cache quota (e.g. 64G, or 0 to turn it off)";
-"field.cache_writes" = "Daily SSD write budget (e.g. 50G)";
-"footer.cache" = "The SSD cache holds the prefixes and states a conversation resumes from, so a restart, an upgrade or a crash does not start it over. Its quota follows the volume's free space up to 128 GiB unless a size is set here. The write budget paces writing against the drive's life: past it, the cache keeps the states conversations resume from and gives up the rest. The server itself writes without a budget unless one is set here.";
+"field.cache_quota" = "SSD cache quota (e.g. 16G, or 0 to turn it off)";
+"field.cache_writes" = "Daily SSD write budget (e.g. 32G)";
 "control.saved" = "Saved automatically";
 "control.defaults" = "Restore defaults";
 "field.api_key" = "API key";
@@ -136,7 +135,6 @@
 "config.edit.title" = "Edit configuration";
 "config.save" = "Save";
 "config.cancel" = "Cancel";
-"footer.model" = "A Hugging Face MLX or GGUF model ID, or a local folder that holds one.";
 
 // Background running, when the window closes with the server up.
 "menu.show" = "Show Window";

@@ -43,6 +43,8 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.modelDirectory = "/tmp/selfcheck"
     edited.draftDirectory = "/tmp/selfcheck-draft"
     edited.port = 9123
+    edited.lanAccess = true
+    edited.allowedHosts = "mymac.local, tunnel.example"
     edited.languageOnly = true
     edited.kvFormat = "bf16"
     edited.neuralEngine = false
@@ -88,6 +90,8 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && decoded?.maxConcurrency == ServerSettings.First.maxConcurrency
         && decoded?.persistentCache == ServerSettings.First.persistentCache
         && decoded?.maxCacheDiskWrites == ServerSettings.First.maxCacheDiskWrites
+        && decoded?.lanAccess == ServerSettings.default.lanAccess
+        && decoded?.allowedHosts == ServerSettings.default.allowedHosts
 
     // The model: what one launch saves is what the next one opens on, and the
     // defaults button returns it to the state the app first opened with. The

@@ -13,22 +13,21 @@
 "field.draft" = "Draft 文件夹";
 "field.draft.prompt" = "匹配的 DFlash2 检查点（留空则自动下载）";
 "field.port" = "端口";
+"field.lan_access" = "允许其他设备访问（局域网）";
+"field.allowed_hosts" = "额外主机名（逗号分隔）";
 "field.language_only" = "仅文本（跳过视觉）";
 "field.kv" = "KV 缓存";
 "kv.int8" = "8 位";
 "kv.bf16" = "BF16";
 "field.neural_engine" = "使用神经引擎（ANE）";
-"help.neural_engine" = "在更快时用神经引擎做稠密 FFN 预填充（Qwen3.8-27B）。关闭会传入 --disable-ane。";
-"help.max_concurrency" = "同时受理的请求数（运行中或排队中），超出则返回 503。";
+"help.lan_access.no_key" = "未设置 API 密钥：任何能连到这台 Mac 的人都能使用模型。";
 "field.max_memory" = "最大内存（如 28G）";
 "field.max_context" = "最大上下文（如 100K）";
 "field.max_concurrency" = "最大并发";
 "field.residency" = "空闲释放权重秒数（LM Studio 风格）";
-"footer.idle" = "空闲达到该秒数后会释放权重，把显存还给系统而服务继续可用，下次请求再恢复；空闲计时在每次请求后重新开始。";
 "field.persistent_cache" = "跨重启保留缓存前缀";
-"field.cache_quota" = "SSD 缓存配额（如 64G，0 关闭缓存）";
-"field.cache_writes" = "SSD 每日写入预算（如 50G）";
-"footer.cache" = "SSD 缓存保存会话可续算的前缀与状态，重启、升级或崩溃后都不必从头重算。配额默认跟随卷空闲空间，上限 128 GiB；也可在此指定大小。写入预算把写入摊到驱动器寿命上：超出后仍会写入会话续算所需的状态，其余放弃。服务端本身不设写入预算，除非在此指定。";
+"field.cache_quota" = "SSD 缓存配额（如 16G，0 关闭缓存）";
+"field.cache_writes" = "SSD 每日写入预算（如 32G）";
 "control.saved" = "已自动保存";
 "control.defaults" = "恢复默认";
 "field.api_key" = "API 密钥";
@@ -136,7 +135,6 @@
 "config.edit.title" = "编辑配置";
 "config.save" = "保存";
 "config.cancel" = "取消";
-"footer.model" = "Hugging Face 上的 MLX / GGUF 模型 ID，或存放它的本地目录。";
 
 // 关闭窗口后的后台运行提示。
 "menu.show" = "显示窗口";

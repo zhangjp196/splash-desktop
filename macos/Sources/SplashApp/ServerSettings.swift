@@ -15,14 +15,12 @@ struct ServerSettings: Codable, Equatable {
         // the residency below; the residency releases the weights alone.
         static let residencySeconds = "10"
         // The SSD cache: kept across restarts, so a restart, an upgrade or a
-        // crash does not cost every conversation its prefix; its quota the
-        // engine's own automatic one (up to 128 GiB, following the volume);
-        // and a daily write budget that paces it against the drive's life.
-        // The budget is what a desktop app should default to: it paces, and
-        // past it the cache keeps the states conversations resume from.
+        // crash does not cost every conversation its prefix; a 16 GiB quota,
+        // and a 32 GiB a day write budget that paces it against the drive's
+        // life.
         static let persistentCache = true
-        static let maxCacheDisk = ""
-        static let maxCacheDiskWrites = "50G"
+        static let maxCacheDisk = "16G"
+        static let maxCacheDiskWrites = "32G"
         // The admission limit: requests running and waiting at once. The
         // server's own default, so the panel and the engine open on the same
         // number.
@@ -39,6 +37,12 @@ struct ServerSettings: Codable, Equatable {
     var modelDirectory = ""
     var draftDirectory = ""
     var port = First.port
+    /// Listen on every IPv4 interface (`--host 0.0.0.0`) so other devices on
+    /// the network can reach the server. Off keeps it on loopback.
+    var lanAccess = false
+    /// Extra HTTP Host names to accept (`--allowed-host`), comma-separated:
+    /// the Mac's `.local` name, a DNS name, or a tunnel or proxy hostname.
+    var allowedHosts = ""
     var languageOnly = false
     var kvFormat = First.kvFormat
     var neuralEngine = true
@@ -47,10 +51,11 @@ struct ServerSettings: Codable, Equatable {
     var residencySeconds = First.residencySeconds
     /// Keep the SSD cache across restarts (`--persistent-cache`).
     var persistentCache = First.persistentCache
-    /// The SSD cache's quota: empty follows the volume's free space, up to
-    /// 128 GiB; `0` turns the cache off.
+    /// The SSD cache's quota. The default is a size; empty follows the
+    /// volume's free space up to 64 GiB, and `0` turns the cache off.
     var maxCacheDisk = First.maxCacheDisk
-    /// The most the SSD cache writes a day: empty is no limit.
+    /// The most the SSD cache writes a day: the default paces the drive, and
+    /// empty is no limit.
     var maxCacheDiskWrites = First.maxCacheDiskWrites
     var maxRequestSize = ""
     var apiKey = ""
@@ -70,6 +75,7 @@ struct ServerSettings: Codable, Equatable {
     // failing the whole decode and dropping the user's configurations.
     private enum CodingKeys: String, CodingKey {
         case modelMode, modelID, modelDirectory, draftDirectory, port
+        case lanAccess, allowedHosts
         case languageOnly, kvFormat, neuralEngine, maxMemory, maxContext
         case residencySeconds, maxRequestSize, apiKey, servedNames
         case reasoningEffort, maxConcurrency
@@ -87,6 +93,8 @@ struct ServerSettings: Codable, Equatable {
         modelDirectory = value(String.self, .modelDirectory) ?? modelDirectory
         draftDirectory = value(String.self, .draftDirectory) ?? draftDirectory
         port = value(Int.self, .port) ?? port
+        lanAccess = value(Bool.self, .lanAccess) ?? lanAccess
+        allowedHosts = value(String.self, .allowedHosts) ?? allowedHosts
         languageOnly = value(Bool.self, .languageOnly) ?? languageOnly
         kvFormat = value(String.self, .kvFormat) ?? kvFormat
         neuralEngine = value(Bool.self, .neuralEngine) ?? neuralEngine
@@ -120,6 +128,8 @@ struct ServerSettings: Codable, Equatable {
             ("modelDirectory", modelDirectory),
             ("draftDirectory", draftDirectory),
             ("port", String(port)),
+            ("lanAccess", lanAccess ? "1" : "0"),
+            ("allowedHosts", allowedHosts),
             ("languageOnly", languageOnly ? "1" : "0"),
             ("kvFormat", kvFormat),
             ("neuralEngine", neuralEngine ? "1" : "0"),
@@ -150,6 +160,8 @@ struct ServerSettings: Codable, Equatable {
         if let value = rows["modelDirectory"] { modelDirectory = value }
         if let value = rows["draftDirectory"] { draftDirectory = value }
         if let value = Self.number(rows["port"], in: 0...65_535) { port = value }
+        if let value = rows["lanAccess"] { lanAccess = value == "1" }
+        if let value = rows["allowedHosts"] { allowedHosts = value }
         if let value = rows["languageOnly"] { languageOnly = value == "1" }
         if let value = rows["kvFormat"], Self.kvFormats.contains(value) { kvFormat = value }
         if let value = rows["neuralEngine"] { neuralEngine = value == "1" }
