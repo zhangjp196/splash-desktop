@@ -45,9 +45,11 @@ public:
     result.input = input;
     result.output = output;
     result.inPlace = inPlace;
+    // Addressed: check() compares buffers' GPU addresses to find input and
+    // output aliasing, which only an addressed buffer reports.
     result.base = backend_.allocateBuffer(
         bytes + 2 * guard_, splash::metal::BufferStorage::Shared,
-        "kernel contract");
+        "kernel contract", splash::metal::BufferReach::Addressed);
     result.view = backend_.view(result.base, guard_, bytes);
     std::memset(result.base.contents(), kPoison, bytes + 2 * guard_);
     return result;

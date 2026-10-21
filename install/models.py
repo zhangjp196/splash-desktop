@@ -4,14 +4,15 @@
 
 Terms the installer modules share:
 - selection: what `--model OWNER/REPO[:VARIANT]` or `--model-dir DIRECTORY`
-  and its source options name (Selection); its selection link, under the
-  models root, points to what serves it.
+  and its source options name (Selection), or the local files a model is
+  prepared from (local.py); its selection link, under the models root, points
+  to what serves it.
 - assembly: the directory an upstream model is served from, of links to
   source snapshot files and its record, model.json (assembly.py), built and
   published by upstream.py. A local target directory is assembled the same
   way, of links to the directory's own files.
 - source snapshot: a repository at one commit in the Hub cache, or a local
-  target or draft directory (hub.py).
+  target or draft directory (hub.py), or what local.py prepares.
 
 This module holds what the installers share, and the command line.
 """
@@ -68,6 +69,11 @@ ENTRY_STAGING = ".loading-"
 
 class ModelError(RuntimeError):
     pass
+
+
+class VisionError(ModelError):
+    """A refusal of the model's vision alone, which serving text only avoids:
+    each caller names its own way to ask for that."""
 
 
 def warn(message):
@@ -222,10 +228,7 @@ def selection_link(
     .selections/<hash of the selection>."""
     repo_id, variant = split_model_id(model_id)
     if revision or language_only or draft_model:
-        selection = json.dumps(
-            [model_id, revision, language_only, draft_model], separators=(",", ":")
-        )
-        return models / ".selections" / hashlib.sha256(selection.encode()).hexdigest()
+        return _hashed_link(models, [model_id, revision, language_only, draft_model])
     if variant is None:
         return models / repo_id
     return models / f"{repo_id}{serve_options.VARIANT_SEPARATOR}{variant}"
@@ -241,6 +244,27 @@ def local_selection_link(
         [str(directory), language_only, draft_model], separators=(",", ":")
     )
     return models / ".selections" / hashlib.sha256(selection.encode()).hexdigest()
+
+
+def prepared_selection_link(models: Path, target, draft, mmproj, language_only) -> Path:
+    """The selection link of a model prepared from local files (local.py):
+    .selections/<hash of its paths and options>, apart from every Hub
+    selection's, whose hashed form is a list."""
+    return _hashed_link(
+        models,
+        {
+            "target": str(target),
+            "draft": draft and str(draft),
+            "mmproj": mmproj and str(mmproj),
+            "language_only": language_only,
+        },
+    )
+
+
+def _hashed_link(models: Path, selection) -> Path:
+    """.selections/<SHA-256 of selection's compact JSON> under models."""
+    encoded = json.dumps(selection, separators=(",", ":"))
+    return models / ".selections" / hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def selection_links(models: Path):
@@ -402,7 +426,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--draft-model",
         type=parse_draft_model,
-        help="override the automatically selected DFlash2 repository or local directory",
+        help="the DFlash2 draft's repository or local directory, in place of the "
+        "family's released one (required for a family without one)",
     )
     parser.add_argument(
         "--language-only",

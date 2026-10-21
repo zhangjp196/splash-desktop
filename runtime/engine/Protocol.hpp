@@ -315,6 +315,10 @@ struct DoneEvent {
   uint32_t deduplicatedTokens = 0;
   // Its speculative decoding; zero without a draft and for scoring.
   engine::SpeculativeCounts speculation{};
+  // A Length end short of the request's logical maximum, at a bound of the
+  // engine's own: the SSD cache's quota, or memory a lone lane could not
+  // grow past (engine::EngineEventSink::completed).
+  bool bounded = false;
 
   bool operator==(const DoneEvent &) const = default;
 };
@@ -325,6 +329,9 @@ struct ErrorEvent {
   bool retryable = false;
   std::string code;
   std::string message;
+  // For a retryable request error, the seconds after which a retry may
+  // succeed, as when the SSD cache's write budget refills; 0 for at once.
+  uint32_t retryAfterSeconds = 0;
 
   bool operator==(const ErrorEvent &) const = default;
 };
