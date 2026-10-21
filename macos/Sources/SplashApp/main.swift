@@ -50,6 +50,10 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.neuralEngine = false
     edited.maxMemory = "28G"
     edited.maxContext = "100K"
+    edited.expertMemory = "16G"
+    edited.pleMemory = "2G"
+    edited.sparseKvMemory = "1200M"
+    edited.verifyRows = "all"
     edited.residencySeconds = "45"
     edited.persistentCache = false
     edited.maxCacheDisk = "64G"
@@ -72,6 +76,10 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     broken.reasoningEffort = "extreme"
     broken.port = 70_000
     broken.maxConcurrency = 0
+    broken.expertMemory = "banana"
+    broken.pleMemory = "-2G"
+    broken.sparseKvMemory = "0"
+    broken.verifyRows = "every"
     _ = store.save(broken)
     let repaired = store.load()
     passed = passed
@@ -79,6 +87,10 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && repaired.reasoningEffort == ""
         && repaired.port == ServerSettings.First.port
         && repaired.maxConcurrency == ServerSettings.First.maxConcurrency
+        && repaired.expertMemory == ServerSettings.default.expertMemory
+        && repaired.pleMemory == ServerSettings.default.pleMemory
+        && repaired.sparseKvMemory == ServerSettings.default.sparseKvMemory
+        && repaired.verifyRows == ServerSettings.default.verifyRows
 
     // A configuration stored before a setting existed still decodes: a missing
     // key keeps its first-launch value instead of dropping the user's saved

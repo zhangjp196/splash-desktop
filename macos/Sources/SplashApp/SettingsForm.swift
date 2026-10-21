@@ -129,6 +129,14 @@ struct SettingsTabs: View {
         Section {
             TextField(L10n.string("field.max_concurrency"), value: $settings.maxConcurrency, format: .number)
                 .disabled(disabled)
+            Picker(L10n.string("field.verify_rows"), selection: $settings.verifyRows) {
+                Text(verbatim: L10n.string("verify.auto")).tag("auto")
+                Text(verbatim: L10n.string("verify.all")).tag("all")
+            }
+            .pickerStyle(.segmented)
+            .disabled(disabled)
+        } footer: {
+            Text(L10n.string("help.verify_rows"))
         }
     }
 
@@ -138,6 +146,14 @@ struct SettingsTabs: View {
                 .disabled(disabled)
             TextField(L10n.string("field.max_context"), text: $settings.maxContext)
                 .disabled(disabled)
+            TextField(L10n.string("field.expert_memory"), text: $settings.expertMemory)
+                .disabled(disabled)
+            TextField(L10n.string("field.ple_memory"), text: $settings.pleMemory)
+                .disabled(disabled)
+            TextField(L10n.string("field.sparse_kv_memory"), text: $settings.sparseKvMemory)
+                .disabled(disabled)
+        } footer: {
+            Text(L10n.string("help.streamed_stores"))
         }
     }
 

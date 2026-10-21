@@ -22,7 +22,15 @@
 "field.neural_engine" = "Use Neural Engine (ANE)";
 "help.lan_access.no_key" = "No API key is set: anyone who can reach this Mac can use the model.";
 "field.max_memory" = "Max memory (e.g. 28G)";
-"field.max_context" = "Max context (e.g. 100K)";
+"field.max_context" = "Max context (e.g. 100K, up to 1M)";
+"field.expert_memory" = "Routed experts in memory (e.g. 16G, off loads every expert)";
+"field.ple_memory" = "PLE table in memory (e.g. 2G, off loads it whole)";
+"field.sparse_kv_memory" = "KV read-back memory (e.g. 1200M)";
+"field.verify_rows" = "Draft verification";
+"verify.auto" = "Auto";
+"verify.all" = "Every row";
+"help.streamed_stores" = "Empty follows the server's automatic plan; off loads a store whole. A streamed store is read from the SSD as a step needs it, so a model larger than memory still serves.";
+"help.verify_rows" = "Every row repeats a draft's greedy and seeded output; Auto is faster, but its tokens can vary between runs.";
 "field.max_concurrency" = "Max concurrency";
 "field.residency" = "Release weights after idle seconds (LM Studio style)";
 "field.persistent_cache" = "Keep cached prefixes across restarts";

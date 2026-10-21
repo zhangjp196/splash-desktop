@@ -147,6 +147,10 @@ final class AppModel: ObservableObject {
     @Published var languageOnly = false
     @Published var maxMemory = ""
     @Published var maxContext = ""
+    @Published var expertMemory = ""
+    @Published var pleMemory = ""
+    @Published var sparseKvMemory = ""
+    @Published var verifyRows = "auto"
     @Published var kvFormat = ServerSettings.First.kvFormat
     @Published var neuralEngine = true
     @Published var apiKey = ""
@@ -262,6 +266,10 @@ final class AppModel: ObservableObject {
         settings.neuralEngine = neuralEngine
         settings.maxMemory = maxMemory
         settings.maxContext = maxContext
+        settings.expertMemory = expertMemory
+        settings.pleMemory = pleMemory
+        settings.sparseKvMemory = sparseKvMemory
+        settings.verifyRows = verifyRows
         settings.residencySeconds = residencySeconds
         settings.persistentCache = persistentCache
         settings.maxCacheDisk = maxCacheDisk
@@ -321,6 +329,10 @@ final class AppModel: ObservableObject {
         neuralEngine = settings.neuralEngine
         maxMemory = settings.maxMemory
         maxContext = settings.maxContext
+        expertMemory = settings.expertMemory
+        pleMemory = settings.pleMemory
+        sparseKvMemory = settings.sparseKvMemory
+        verifyRows = settings.verifyRows
         residencySeconds = settings.residencySeconds
         persistentCache = settings.persistentCache
         maxCacheDisk = settings.maxCacheDisk
@@ -521,6 +533,20 @@ final class AppModel: ObservableObject {
         if languageOnly { arguments.append("--language-only") }
         if !maxMemory.isEmpty { arguments += ["--max-memory", maxMemory] }
         if !maxContext.isEmpty { arguments += ["--max-context", maxContext] }
+        // The stores the merge added: a MoE target's routed experts, a
+        // Flash-Next target's PLE table, and the KV blocks read back from the
+        // SSD. Empty leaves each to the server's automatic plan.
+        for (flag, value) in [
+            ("--expert-memory", expertMemory),
+            ("--ple-memory", pleMemory),
+            ("--sparse-kv-memory", sparseKvMemory),
+        ] {
+            let trimmed = value.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { arguments += [flag, trimmed] }
+        }
+        // `auto` is the server's own default; `all` makes a draft's greedy and
+        // seeded outputs repeat.
+        if verifyRows != "auto" { arguments += ["--verify-rows", verifyRows] }
         if kvFormat != "int8" { arguments += ["--kv-format", kvFormat] }
         if !neuralEngine { arguments.append("--disable-ane") }
         if !apiKey.isEmpty { arguments += ["--api-key", apiKey] }

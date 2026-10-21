@@ -31,6 +31,7 @@ struct ServerSettings: Codable, Equatable {
     /// default and is not one of them.
     static let reasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
     static let kvFormats = ["int8", "bf16"]
+    static let verifyRowsOptions = ["auto", "all"]
 
     var modelMode = AppModel.ModelMode.upstream
     var modelID = First.modelID
@@ -48,6 +49,19 @@ struct ServerSettings: Codable, Equatable {
     var neuralEngine = true
     var maxMemory = ""
     var maxContext = ""
+    /// Memory of the stores the engine streams from the SSD: a MoE target's
+    /// routed experts (`--expert-memory`), Qwen3.8-Flash-Next's PLE table
+    /// (`--ple-memory`), and the KV blocks read back for requests whose KV
+    /// lives on the SSD (`--sparse-kv-memory`). Empty is the server's
+    /// automatic plan, `off` loads the store whole, and a size such as `16G`
+    /// caps it.
+    var expertMemory = ""
+    var pleMemory = ""
+    var sparseKvMemory = ""
+    /// Whether a draft's decode cycles verify every row (`all`) or let the
+    /// verify budget choose (`auto`): `all` repeats its output, `auto` is
+    /// faster but its sampled tokens vary between runs.
+    var verifyRows = "auto"
     var residencySeconds = First.residencySeconds
     /// Keep the SSD cache across restarts (`--persistent-cache`).
     var persistentCache = First.persistentCache
@@ -80,6 +94,7 @@ struct ServerSettings: Codable, Equatable {
         case residencySeconds, maxRequestSize, apiKey, servedNames
         case reasoningEffort, maxConcurrency
         case persistentCache, maxCacheDisk, maxCacheDiskWrites
+        case expertMemory, pleMemory, sparseKvMemory, verifyRows
     }
 
     init(from decoder: Decoder) throws {
@@ -100,6 +115,10 @@ struct ServerSettings: Codable, Equatable {
         neuralEngine = value(Bool.self, .neuralEngine) ?? neuralEngine
         maxMemory = value(String.self, .maxMemory) ?? maxMemory
         maxContext = value(String.self, .maxContext) ?? maxContext
+        expertMemory = value(String.self, .expertMemory) ?? expertMemory
+        pleMemory = value(String.self, .pleMemory) ?? pleMemory
+        sparseKvMemory = value(String.self, .sparseKvMemory) ?? sparseKvMemory
+        verifyRows = value(String.self, .verifyRows) ?? verifyRows
         residencySeconds = value(String.self, .residencySeconds) ?? residencySeconds
         persistentCache = value(Bool.self, .persistentCache) ?? persistentCache
         maxCacheDisk = value(String.self, .maxCacheDisk) ?? maxCacheDisk
@@ -135,6 +154,10 @@ struct ServerSettings: Codable, Equatable {
             ("neuralEngine", neuralEngine ? "1" : "0"),
             ("maxMemory", maxMemory),
             ("maxContext", maxContext),
+            ("expertMemory", expertMemory),
+            ("pleMemory", pleMemory),
+            ("sparseKvMemory", sparseKvMemory),
+            ("verifyRows", verifyRows),
             ("residencySeconds", residencySeconds),
             ("persistentCache", persistentCache ? "1" : "0"),
             ("maxCacheDisk", maxCacheDisk),
@@ -167,6 +190,12 @@ struct ServerSettings: Codable, Equatable {
         if let value = rows["neuralEngine"] { neuralEngine = value == "1" }
         if let value = rows["maxMemory"] { maxMemory = value }
         if let value = rows["maxContext"] { maxContext = value }
+        if let value = Self.streamedSetting(rows["expertMemory"]) { expertMemory = value }
+        if let value = Self.streamedSetting(rows["pleMemory"]) { pleMemory = value }
+        if let value = Self.streamedSetting(rows["sparseKvMemory"]) { sparseKvMemory = value }
+        if let value = rows["verifyRows"], Self.verifyRowsOptions.contains(value) {
+            verifyRows = value
+        }
         if let value = rows["residencySeconds"],
            Self.number(value, in: 1...86_400) != nil {
             residencySeconds = value
@@ -186,6 +215,25 @@ struct ServerSettings: Codable, Equatable {
         if let value = Self.number(rows["maxConcurrency"], in: 1...4096) {
             maxConcurrency = value
         }
+    }
+
+    /// A streamed store's setting: empty (the server's automatic plan),
+    /// `auto`, `off`, or a positive size such as `16G`, `1200M` or `0.75G`.
+    /// Anything else falls back to the first-launch value, so a hand-edited
+    /// database cannot make the next launch start a server that refuses to.
+    private static func streamedSetting(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespaces)
+        if value.isEmpty || value.caseInsensitiveCompare("auto") == .orderedSame
+            || value.caseInsensitiveCompare("off") == .orderedSame {
+            return value.isEmpty ? "" : value.lowercased()
+        }
+        var number = Substring(value)
+        if let last = value.last, "KMGT".contains(last) {
+            number = value.dropLast()
+        }
+        guard let amount = Double(number), amount > 0 else { return nil }
+        return value
     }
 
     private static func number(_ raw: String?, in range: ClosedRange<Int>) -> Int? {

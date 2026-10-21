@@ -22,7 +22,15 @@
 "field.neural_engine" = "使用神经引擎（ANE）";
 "help.lan_access.no_key" = "未设置 API 密钥：任何能连到这台 Mac 的人都能使用模型。";
 "field.max_memory" = "最大内存（如 28G）";
-"field.max_context" = "最大上下文（如 100K）";
+"field.max_context" = "最大上下文（如 100K，最高 1M）";
+"field.expert_memory" = "专家驻留内存（如 16G，off 全部载入）";
+"field.ple_memory" = "PLE 表内存（如 2G，off 全部载入）";
+"field.sparse_kv_memory" = "KV 回读内存（如 1200M）";
+"field.verify_rows" = "草稿校验";
+"verify.auto" = "自动";
+"verify.all" = "逐行";
+"help.streamed_stores" = "留空按服务端自动规划；off 表示整表载入。流式存储按需从 SSD 读取，模型大于内存也能服务。";
+"help.verify_rows" = "逐行校验时草稿的贪心与固定种子输出可复现；自动更快，但多次运行的结果可能不同。";
 "field.max_concurrency" = "最大并发";
 "field.residency" = "空闲释放权重秒数（LM Studio 风格）";
 "field.persistent_cache" = "跨重启保留缓存前缀";
