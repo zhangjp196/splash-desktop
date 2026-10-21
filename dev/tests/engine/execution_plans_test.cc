@@ -126,9 +126,10 @@ void baselinePlans() {
   }
 }
 
-// MoE plans run the three expert passes: the exact register tile on Apple9,
-// with its Table16 row sums in the workspace bounds, staged tiles everywhere
-// else (32-row tiles for prefill chunks past one route per expert).
+// MoE plans run the three expert passes: the exact register tile on Apple9
+// decode, with its Table16 row sums in the workspace bounds, and staged tiles
+// for every prefill and for decode everywhere else (32-row prefill tiles for
+// chunks past one route per expert).
 void ggufMoePlans() {
   const MoeShape shape = routedShape;
   for (uint32_t family : {9U, 10U, 11U}) {
@@ -165,23 +166,24 @@ void ggufMoePlans() {
               "GGUF MoE plan of staged experts took the register tile");
       covers(plans.moeDecodeWorkspacePerLane(staged), plan.workspace(), lanes, kMoeWorkspaceFields);
     }
-    // Prefill: the register tile's 8 rows, or staged 8-row tiles while the
-    // routes average at most one row per expert (32 rows of 8 of 256
-    // experts). The router's float tile follows Linear::ggufFloatTile (32
-    // assumed cores: the neural accelerator from 321 rows, never on Apple9).
+    // Prefill: staged 8-row tiles while the routes average at most one row per
+    // expert (32 rows of 8 of 256 experts), 32-row tiles beyond, on every
+    // family; the register tile only decodes. The router's float tile follows
+    // Linear::ggufFloatTile (32 assumed cores: the neural accelerator from 321
+    // rows, never on Apple9).
     for (uint32_t rows : {1U, 8U, 17U, 32U, 33U, 100U, 256U, 257U, 320U, 321U, 2048U}) {
       const MoePlan plan = plans.moePrefill(shape, rows);
-      const uint32_t tileRows = expected == MoeGgufTile::Register || rows <= 32 ? 8 : 32;
+      const uint32_t tileRows = rows <= 32 ? 8 : 32;
       const FloatTile router = family != 9 && rows > 320 ? FloatTile::NeuralAccelerator : FloatTile::Simdgroup;
-      require(plan.configuration().ggufTile == expected && plan.tileRows() == tileRows &&
-                  (plan.workspace().groupedSumsBytes > 0) == (expected == MoeGgufTile::Register) &&
+      require(plan.configuration().ggufTile == MoeGgufTile::Staged && plan.tileRows() == tileRows &&
+                  plan.workspace().groupedSumsBytes == 0 &&
                   plan.configuration().ggufRouterTile == router,
-              "GGUF MoE prefill plan left the device's tile");
+              "GGUF MoE prefill plan left the staged tile");
       covers(plans.moePrefillWorkspace(shape, 2048), plan.workspace(), 1, kMoeWorkspaceFields);
     }
-    // The prefill bound holds the device's plans and nothing else: on Apple9
-    // the register tile's 8-row tiles (20480 grouped rows at 2048 rows), not
-    // the staged 32-row tiles it never runs (26624).
+    // The prefill bound holds the staged plans and nothing else: 32-row tiles
+    // (26624 grouped rows at 2048 rows), not the register tile's 8-row tiles
+    // (20480).
     MoeWorkspace devicePlans;
     for (uint32_t rows = 1; rows <= 2048; ++rows) {
       const MoeWorkspace workspace = plans.moePrefill(shape, rows).workspace();

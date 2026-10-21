@@ -23,7 +23,10 @@
 #define GGUF_GATE_UP_THREADS 32u
 // Prefill tile of the staged kernels: GGUF_PREFILL_SIMDGROUPS simdgroups of
 // GGUF_PREFILL_SIMDGROUP_ROWS rows share one stage of GGUF_PREFILL_STEP
-// inputs of the tile's columns, which all threads dequantize.
+// inputs of the tile's columns, which all threads dequantize. Four
+// simdgroups cover 128 rows: eight measured 2.4x slower on a 40-core M3 Max
+// (74.9 against 30.7 ms for 2048x17408x5120 Q4_K), since 256 threads share
+// one stage and one threadgroup no longer leaves a core room for a second.
 #define GGUF_PREFILL_SIMDGROUP_ROWS 32u
 #define GGUF_PREFILL_SIMDGROUPS 4u
 #define GGUF_PREFILL_STEP 64u

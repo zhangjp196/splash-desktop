@@ -187,11 +187,13 @@ enum class MoeExpertTile : uint8_t { M8 = 8, M32 = 32 };
 // GGUF image: the half-staged tiles of
 // kernels/shared/moe_gguf.metal, or Register, the exact register tile of
 // kernels/decode/linear_gguf_sgmatrix.metal over Table16 tiles of the
-// grouped rows (8-row tiles only). Apple9 runs Register in both phases but
-// for experts mostly in a format it stages. In decode, as its dense GGUF
-// projections do (LinearGguf.cpp): its matrix operations share the FP32 pipe,
-// where the register tile beats staging. In prefill it keeps the decode
-// numerics at a cost: the staged 32-row tiles run long chunks faster.
+// grouped rows (8-row tiles only). Prefill runs the staged tile on every
+// family, whose 32-row tiles stream an expert's weights once for up to 32 of
+// its rows; Apple9 decode runs Register for experts mostly in a format it
+// stages, as its dense GGUF decode does (LinearGguf.cpp), where its matrix
+// operations share the FP32 pipe and the register tile beats staging. Both
+// stay inside the fp64 bounds `gguf-moe` checks; their sums are reassociated,
+// so a prefill and a decode of the same row need not be bitwise equal.
 enum class MoeGgufTile : uint8_t { Staged, Register };
 
 // Apple9 stages experts mostly in a format apple9StagesFormat names: one

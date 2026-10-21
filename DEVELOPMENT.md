@@ -2564,15 +2564,22 @@ one lane 3.3-3.6% faster on a 12-core M6). Split plans take more time on it, as 
 4.5 bits on the M6. Prefill runs the staged kernels on both families: the 128-row prefill tile
 (`LinearTile::GgufPrefill`), and the staged tile for chunks of up to 32 rows. Every projection
 splits its K across threadgroups by one rule (`decodeSplits`: each tile's tiers of threadgroups
-per core, inputs per partition and partitions, from measured occupancy, Apple9's staged tile taking
-the register tile's of eight partitions) that does not depend on the batch width. Partitions stop
-at eight, but the register tile splits a grid that eight leave below three threadgroups per core
-into sixteen while partitions keep 512 inputs (Qwen3.8-Flash-Next's hyper-connection down
-projection, 320 columns over 10240 inputs; measured on Apple10). The MoE experts
-(`runtime/ops/MoE.cpp`) run the same numerics per family over the grouped rows: the register
-form in `linear_gguf_sgmatrix.metal`, the staged one in `kernels/shared/moe_gguf.metal`, which
-Apple9 takes for experts mostly in the formats it stages (`MoeShape::expertFormat`) and for
-experts with an F16 weight (`MoeShape::registerFormats`). One `MoeShape` serves all of a model's
+per core, inputs per partition and partitions, from measured occupancy, Apple9's staged tile
+taking the register tile's of eight partitions) that does not depend on the batch width. Partitions
+stop at eight, but the register tile splits a grid that eight leave below three threadgroups per
+core into sixteen while partitions keep 512 inputs (Qwen3.8-Flash-Next's hyper-connection down
+projection, 320 columns over 10240 inputs; measured on Apple10). The MoE
+experts (`runtime/ops/MoE.cpp`) run over the grouped rows in the staged form of
+`kernels/shared/moe_gguf.metal` in prefill on every family, and in decode on
+Apple9 in the register form of `linear_gguf_sgmatrix.metal` for experts mostly
+in the formats it stages (`MoeShape::expertFormat`); decode elsewhere and
+prefill everywhere run the staged form, whose 32-row tiles stream an expert's
+weights once for up to 32 of its rows. On the 35B's Q4_K/Q5_K experts and a
+40-core M3 Max that is 16% faster than the register tile over a 2048-row chunk
+(`gguf-moe-benchmark`), so Apple9 prefill uses it and decode keeps the register
+form; both stay inside the fp64 bounds `gguf-moe` checks, but their sums are
+reassociated, so a prefill and a decode of the same row need not be bitwise
+equal. One `MoeShape` serves all of a model's
 MoE layers, so one F16 routed or shared expert tensor in any layer stages every layer's experts
 there. Their
 passes launch the live tiles alone: the grouping kernel writes each pass's grid with the tile
@@ -2843,6 +2850,15 @@ Pro and 1.4 s on an M6. Across many starts over hours of prefill on those three
 Macs the timings chose the same units within their noise, while timing every
 start cost 3-8 s, and a start whose timings strayed could change the share,
 each share compiling a program of its own (half a minute on an M6).
+
+The layer timings do not see the GDN and attention projections the GPU still
+runs, so the calibrated share can be a unit or two low. On a 40-core M3 Max
+with Qwen3.8-27B, a 2048-token prefill took 11.32 s on the GPU alone, 7.5-8.3 s
+at the calibrated share 0.53, and 7.1-7.6 s at 0.60 (0-10% faster across runs,
+the spread thermal and clock noise; `model-runtime-oracle`, one 2048-row
+chunk); 0.65 and 0.70 failed to compile. `--ane-ffn-share` takes the measured
+share, and the start's logged context shows what its buffers cost the KV cache.
+`dev/benchmarks/prefill-m3max.md` records the sweep.
 
 The start then builds the split that serves and checks every function of its
 program against the GPU alone (`AneFfn::verify`): at the function's own rows
