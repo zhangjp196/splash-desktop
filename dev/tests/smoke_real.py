@@ -1642,7 +1642,7 @@ def run_persistent_cache(arguments) -> None:
     nonce = uuid.uuid4().hex
     conversation = chat_body(
         arguments.model,
-        f"{filler(nonce, 'persistent', 100)} Reply with one short word.",
+        f"{filler(nonce, 'persistent', arguments.persistent_cache_items)} Reply with one short word.",
     )
     with tempfile.TemporaryDirectory(prefix="splash-persistent-cache-") as directory:
         root = Path(directory)
@@ -1764,7 +1764,16 @@ def parse_args(argv=None):
         help="instead of the smoke, check a conversation's prefix across a clean "
         "restart of a server with --persistent-cache in a fresh cache directory",
     )
+    parser.add_argument(
+        "--persistent-cache-items",
+        type=int,
+        default=100,
+        help="filler items in the persistent-cache prompt (default 100, about "
+        "4.9K tokens; 700 is about 32.8K, the agent-sized case)",
+    )
     arguments = parser.parse_args(argv)
+    if arguments.persistent_cache_items < 1:
+        parser.error("--persistent-cache-items must be positive")
     if arguments.persistent_cache and arguments.max_cache_disk == "0":
         parser.error(
             "--persistent-cache needs the SSD cache --max-cache-disk 0 turns off"
