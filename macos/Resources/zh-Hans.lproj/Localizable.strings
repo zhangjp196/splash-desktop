@@ -29,7 +29,7 @@
 "field.verify_rows" = "草稿校验";
 "verify.auto" = "自动";
 "verify.all" = "逐行";
-"help.streamed_stores" = "留空按服务端自动规划；off 表示整表载入。流式存储按需从 SSD 读取，模型大于内存也能服务。";
+"help.streamed_stores" = "留空按服务端自动规划；off 表示整表载入。专家流式适用于所有 MoE 模型；PLE 表只适用于 Qwen3.8-Flash-Next 的 GGUF；KV 回读只适用于块稀疏模型（如 Flash-Next）。均在下次启动生效，日志会说明模型无法使用哪一项。";
 "help.verify_rows" = "逐行校验时草稿的贪心与固定种子输出可复现；自动更快，但多次运行的结果可能不同。";
 "field.max_concurrency" = "最大并发";
 "field.residency" = "空闲释放权重秒数（LM Studio 风格）";

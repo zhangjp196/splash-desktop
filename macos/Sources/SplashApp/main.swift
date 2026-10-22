@@ -114,6 +114,19 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         passed = passed
             && reloaded.settings == edited
             && reloaded.settingsFingerprint == edited.fingerprint
+        // What the form holds is what the command carries: the merge's
+        // streamed stores and the verify policy included.
+        let launch = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        func carries(_ flag: String, _ value: String) -> Bool {
+            guard let index = launch.firstIndex(of: flag) else { return false }
+            return launch.indices.contains(index + 1) && launch[index + 1] == value
+        }
+        passed = passed
+            && carries("--expert-memory", "16G")
+            && carries("--ple-memory", "2G")
+            && carries("--sparse-kv-memory", "1200M")
+            && carries("--verify-rows", "all")
+            && carries("--max-context", "100K")
         reloaded.restoreDefaultSettings()
         let restored = AppModel()
         passed = passed

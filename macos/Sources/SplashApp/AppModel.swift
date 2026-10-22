@@ -499,17 +499,12 @@ final class AppModel: ObservableObject {
 
     // MARK: Lifecycle
 
-    func start() {
-        guard canStart else { return }
-        guard let python = Runtime.python, let launcher = Runtime.launcher else {
-            phase = .failed(L10n.string("error.no_runtime"))
-            return
-        }
-        log = ""
-        contextTokens = nil
-        live = LiveStatus()
-        stopping = false
-        var arguments = [launcher.path, "serve"]
+    /// The command `serve` runs with, from the settings the panel holds:
+    /// the launcher first, then each flag this configuration sets. The
+    /// headless selfcheck reads it too, so a setting the panel added is also
+    /// one the command carries.
+    func launchArguments(launcherPath: String) -> [String] {
+        var arguments = [launcherPath, "serve"]
         switch modelMode {
         case .upstream:
             arguments += ["--model", modelID.trimmingCharacters(in: .whitespaces)]
@@ -580,6 +575,27 @@ final class AppModel: ObservableObject {
         if thermalRung != .auto {
             arguments += ["--thermal-policy", thermalRung.rawValue]
         }
+        return arguments
+    }
+
+    func start() {
+        guard canStart else { return }
+        guard let python = Runtime.python, let launcher = Runtime.launcher else {
+            phase = .failed(L10n.string("error.no_runtime"))
+            return
+        }
+        log = ""
+        contextTokens = nil
+        live = LiveStatus()
+        stopping = false
+        let arguments = launchArguments(launcherPath: launcher.path)
+
+        // The engine reports settings a model cannot use ("--ple-memory
+        // ignored: ... has no PLE table to stream"), and the log keeps those
+        // lines; naming the command here makes a start that kept or dropped a
+        // setting visible without reading the whole log. The API key is the
+        // one argument the log must not carry.
+        logLaunch(arguments)
 
         let process = Process()
         process.executableURL = python
@@ -673,6 +689,24 @@ final class AppModel: ObservableObject {
         append(L10n.format("log.attached", foreignPID ?? 0) + "\n")
         phase = .ready
         pollStatus()
+    }
+
+
+    /// The launched command, with the API key's value held back: what a start
+    /// passed to the server, for the log beside the engine's own notices.
+    private func logLaunch(_ arguments: [String]) {
+        var shown: [String] = []
+        var redact = false
+        for argument in arguments {
+            if redact {
+                shown.append("***")
+                redact = false
+                continue
+            }
+            shown.append(argument)
+            redact = argument == "--api-key"
+        }
+        append("Launch: " + shown.joined(separator: " ") + "\n")
     }
 
     /// The PID the launcher records in `serve-<port>.lock`, or nil.
