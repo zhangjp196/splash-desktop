@@ -55,7 +55,7 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.sparseKvMemory = "1200M"
     edited.verifyRows = "all"
     edited.residencySeconds = "45"
-    edited.persistentCache = false
+    edited.diskCache = false
     edited.maxCacheDisk = "64G"
     edited.maxCacheDiskWrites = "200G"
     edited.maxRequestSize = "128M"
@@ -100,10 +100,15 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     passed = passed
         && decoded?.modelID == "legacy/model"
         && decoded?.maxConcurrency == ServerSettings.First.maxConcurrency
-        && decoded?.persistentCache == ServerSettings.First.persistentCache
+        && decoded?.diskCache == ServerSettings.First.diskCache
         && decoded?.maxCacheDiskWrites == ServerSettings.First.maxCacheDiskWrites
         && decoded?.lanAccess == ServerSettings.default.lanAccess
         && decoded?.allowedHosts == ServerSettings.default.allowedHosts
+    // A configuration that turned the SSD cache off through its quota keeps
+    // that meaning after the switch arrives.
+    let quotaOff = Data(#"{"modelID":"legacy/model","maxCacheDisk":"0"}"#.utf8)
+    let quotaDecoded = try? JSONDecoder().decode(ServerSettings.self, from: quotaOff)
+    passed = passed && quotaDecoded?.diskCache == false
 
     // The model: what one launch saves is what the next one opens on, and the
     // defaults button returns it to the state the app first opened with. The
@@ -127,6 +132,12 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries("--sparse-kv-memory", "1200M")
             && carries("--verify-rows", "all")
             && carries("--max-context", "100K")
+            // The switch is off in this configuration, so the command turns
+            // the disk tier off instead of passing the quota or write budget;
+            // nothing here asks for a cache that survives the server.
+            && carries("--max-cache-disk", "0")
+            && !launch.contains("--persistent-cache")
+            && !launch.contains("--max-cache-disk-writes")
         reloaded.restoreDefaultSettings()
         let restored = AppModel()
         passed = passed

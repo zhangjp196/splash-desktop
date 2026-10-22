@@ -14,7 +14,7 @@ struct SettingsTabs: View {
     /// rest of how requests are taken, rather than hidden among the server's
     /// transport options.
     private enum Pane: String, CaseIterable, Identifiable {
-        case model, server, schedule, memory, idle, cache, request
+        case model, server, schedule, memory, cache, request
 
         var id: String { rawValue }
 
@@ -26,7 +26,6 @@ struct SettingsTabs: View {
             case .server: return "network"
             case .schedule: return "speedometer"
             case .memory: return "memorychip"
-            case .idle: return "leaf"
             case .cache: return "internaldrive"
             case .request: return "text.bubble"
             }
@@ -58,7 +57,6 @@ struct SettingsTabs: View {
         case .server: serverSection
         case .schedule: scheduleSection
         case .memory: memorySection
-        case .idle: idleSection
         case .cache: cacheSection
         case .request: requestsSection
         }
@@ -135,8 +133,6 @@ struct SettingsTabs: View {
             }
             .pickerStyle(.segmented)
             .disabled(disabled)
-        } footer: {
-            Text(L10n.string("help.verify_rows"))
         }
     }
 
@@ -152,26 +148,19 @@ struct SettingsTabs: View {
                 .disabled(disabled)
             TextField(L10n.string("field.sparse_kv_memory"), text: $settings.sparseKvMemory)
                 .disabled(disabled)
-        } footer: {
-            Text(L10n.string("help.streamed_stores"))
-        }
-    }
-
-    @ViewBuilder private var idleSection: some View {
-        Section {
-            TextField(L10n.string("field.residency"), text: $settings.residencySeconds)
-                .disabled(disabled)
         }
     }
 
     @ViewBuilder private var cacheSection: some View {
         Section {
-            Toggle(L10n.string("field.persistent_cache"), isOn: $settings.persistentCache)
+            TextField(L10n.string("field.residency"), text: $settings.residencySeconds)
+                .disabled(disabled)
+            Toggle(L10n.string("field.disk_cache"), isOn: $settings.diskCache)
                 .disabled(disabled)
             TextField(L10n.string("field.cache_quota"), text: $settings.maxCacheDisk)
-                .disabled(disabled)
+                .disabled(disabled || !settings.diskCache)
             TextField(L10n.string("field.cache_writes"), text: $settings.maxCacheDiskWrites)
-                .disabled(disabled)
+                .disabled(disabled || !settings.diskCache)
         }
     }
 

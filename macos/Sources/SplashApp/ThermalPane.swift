@@ -57,7 +57,11 @@ struct ThermalPane: View {
                         systemImage: "fan.fill",
                         cards: fanCards
                     )
-                    SensorCard(readings: model.live.temperatures)
+                    MetricSection(
+                        title: L10n.string("thermal.sensors"),
+                        systemImage: "thermometer.medium",
+                        cards: temperatureCards
+                    )
                     MetricSection(
                         title: L10n.string("thermal.pacing"),
                         systemImage: "metronome.fill",
@@ -136,6 +140,35 @@ struct ThermalPane: View {
         return L10n.format("thermal.cost.paced", 100 / duty)
     }
 
+    /// One block per part: CPU, GPU, IO and the disk, each the hottest of the
+    /// SMC keys that belong to it. A Mac that reports none of a group's keys
+    /// keeps the block with no reading rather than hiding it, so the four are
+    /// always read the same way.
+    private var temperatureCards: [MetricCard] {
+        let readings = model.live.temperatures
+        let hottest = TemperatureGroup.hottest(readings)?.group
+        return TemperatureGroup.allCases.map { group in
+            let celsius = TemperatureGroup.peak(readings, in: group)
+            return MetricCard(
+                title: group.title,
+                value: celsius.map { String(format: "%.1f °C", $0) }
+                    ?? L10n.string("thermal.unavailable"),
+                caption: group == hottest ? L10n.string("thermal.sensor.hottest") : "",
+                systemImage: icon(group),
+                tint: celsius.map(heatTint) ?? .gray
+            )
+        }
+    }
+
+    private func icon(_ group: TemperatureGroup) -> String {
+        switch group {
+        case .cpu: return "cpu"
+        case .gpu: return "square.stack.3d.up.fill"
+        case .io: return "arrow.left.arrow.right"
+        case .disk: return "internaldrive"
+        }
+    }
+
     /// One card per fan, read-only: the speed against what the fan can do, so
     /// the bar says how hard it is already working.
     private var fanCards: [MetricCard] {
@@ -211,77 +244,6 @@ struct ThermalPane: View {
 /// ceiling the runtime takes readings to.
 func heatTint(_ celsius: Double) -> Color {
     celsius < 70 ? .green : (celsius < 90 ? .orange : .red)
-}
-
-/// Every temperature the engine read, in one tile: a Mac reports a dozen or
-/// more sensors, and they are read down a column, the hottest marked, rather
-/// than spread over a wall of tiles that buries what follows them.
-private struct SensorCard: View {
-    let readings: [TemperatureReading]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Label(L10n.string("thermal.sensors"), systemImage: "thermometer.medium")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-            if readings.isEmpty {
-                Text(L10n.string("thermal.unavailable"))
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 6)
-            } else {
-                HStack(alignment: .top, spacing: 28) {
-                    ForEach(columns) { column in
-                        VStack(alignment: .leading, spacing: 7) {
-                            ForEach(column.readings) { reading in
-                                row(reading, hottest: reading == readings.first)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: TileMetrics.corner))
-        .overlay(
-            RoundedRectangle(cornerRadius: TileMetrics.corner)
-                .strokeBorder(.separator.opacity(0.5))
-        )
-    }
-
-    private func row(_ reading: TemperatureReading, hottest: Bool) -> some View {
-        HStack(spacing: 10) {
-            Text(reading.sensor)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-            Text(String(format: "%.1f °C", reading.celsius))
-                .font(.callout.weight(.medium).monospacedDigit())
-                .foregroundStyle(heatTint(reading.celsius))
-            if hottest {
-                Image(systemName: "flame.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-                    .help(L10n.string("thermal.sensor.hottest"))
-            }
-            Spacer(minLength: 0)
-        }
-    }
-
-    /// The readings split into the two columns they are read down.
-    private var columns: [SensorColumn] {
-        let half = (readings.count + 1) / 2
-        return [
-            SensorColumn(id: 0, readings: Array(readings.prefix(half))),
-            SensorColumn(id: 1, readings: Array(readings.dropFirst(half))),
-        ]
-    }
-
-    private struct SensorColumn: Identifiable {
-        let id: Int
-        let readings: [TemperatureReading]
-    }
 }
 
 /// One rung of the ladder: its name and the share of the wall time prefill may

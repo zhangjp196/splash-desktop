@@ -139,7 +139,7 @@ std::string RuntimeBootstrap::statusJson(const RuntimeMetricsSnapshot &metrics,
       nativeLoop_->resourceWaitSnapshot(), loop, nativeLoop_->weightsSnapshot(),
       resources_->aneFfnSnapshot(), thermalState_.state(),
       resources_->streamedTableStats(), resources_->streamedExpertStats(), resources_->kvSpillStatus(),
-      fanState_.state());
+      fanState_);
 }
 
 void RuntimeBootstrap::sampleThermalState() {
@@ -156,9 +156,8 @@ void RuntimeBootstrap::sampleThermalState() {
 }
 
 void RuntimeBootstrap::sampleFans() {
-  const std::string change = fanState_.update(readFanState());
-  if (!change.empty())
-    logLine(change);
+  // The status document only: fan speeds and temperatures stay out of the log.
+  fanState_ = readFanState();
 }
 
 RuntimeBootstrapReport RuntimeBootstrap::requireWarmupAndAnnounce(

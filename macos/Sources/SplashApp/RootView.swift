@@ -10,7 +10,7 @@ struct RootView: View {
     @State private var section: Section = .models
 
     enum Section: String, CaseIterable, Identifiable {
-        case models, live, thermal, log
+        case models, live, thermal, log, about
 
         var id: String { rawValue }
 
@@ -20,6 +20,7 @@ struct RootView: View {
             case .live: return L10n.string("view.live")
             case .thermal: return L10n.string("view.thermal")
             case .log: return L10n.string("view.log")
+            case .about: return L10n.string("view.about")
             }
         }
 
@@ -29,6 +30,7 @@ struct RootView: View {
             case .live: return "chart.line.uptrend.xyaxis"
             case .thermal: return "fan.fill"
             case .log: return "terminal"
+            case .about: return "info.circle"
             }
         }
 
@@ -36,6 +38,7 @@ struct RootView: View {
         /// how it is running.
         static let serving: [Section] = [.models]
         static let monitoring: [Section] = [.live, .thermal, .log]
+        static let aboutSection: [Section] = [.about]
     }
 
     var body: some View {
@@ -49,6 +52,7 @@ struct RootView: View {
                 case .live: LivePane()
                 case .thermal: ThermalPane()
                 case .log: LogPane()
+                case .about: AboutPane()
                 }
             }
             .navigationTitle(section.title)
@@ -89,6 +93,13 @@ private struct Sidebar: View {
                     }
                 } header: {
                     Text(L10n.string("sidebar.monitor"))
+                }
+                Section {
+                    ForEach(RootView.Section.aboutSection) { section in
+                        Label(section.title, systemImage: section.systemImage).tag(section)
+                    }
+                } header: {
+                    Text(L10n.string("sidebar.about"))
                 }
             }
             .listStyle(.sidebar)

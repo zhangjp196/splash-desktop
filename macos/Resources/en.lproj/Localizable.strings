@@ -4,8 +4,7 @@
 "section.model" = "Model";
 "section.server" = "Server";
 "section.memory" = "Memory";
-"section.idle" = "When idle";
-"section.cache" = "Cache";
+"section.cache" = "Idle and cache";
 "section.request" = "Requests and access";
 "section.schedule" = "Scheduling";
 "field.target" = "Target folder";
@@ -29,12 +28,10 @@
 "field.verify_rows" = "Draft verification";
 "verify.auto" = "Auto";
 "verify.all" = "Every row";
-"help.streamed_stores" = "Empty follows the server's automatic plan; off loads a store whole. Routed experts stream for any MoE model; the PLE table only for a Qwen3.8-Flash-Next GGUF, and KV read-back only for a block-sparse model such as Flash-Next. They apply at the next start, and the log says when a model cannot use one.";
-"help.verify_rows" = "Every row repeats a draft's greedy and seeded output; Auto is faster, but its tokens can vary between runs.";
 "field.max_concurrency" = "Max concurrency";
 "field.residency" = "Release weights after idle seconds (LM Studio style)";
-"field.persistent_cache" = "Keep cached prefixes across restarts";
-"field.cache_quota" = "SSD cache quota (e.g. 16G, or 0 to turn it off)";
+"field.disk_cache" = "Use the SSD cache";
+"field.cache_quota" = "SSD cache quota (e.g. 16G)";
 "field.cache_writes" = "Daily SSD write budget (e.g. 32G)";
 "control.saved" = "Saved automatically";
 "control.defaults" = "Restore defaults";
@@ -50,6 +47,7 @@
 "view.thermal" = "Thermal";
 "view.control" = "Control";
 "view.log" = "Log";
+"view.about" = "About";
 "menu.open" = "Open Chat in Browser";
 "open.in.browser" = "Open in Browser";
 "open.chat" = "Chat";
@@ -118,6 +116,7 @@
 // The sidebar: its two groups, then one entry per pane.
 "sidebar.serve" = "Serve";
 "sidebar.monitor" = "Monitor";
+"sidebar.about" = "About";
 
 // The models pane: configurations and managed directories.
 "view.models" = "Models";
@@ -134,6 +133,7 @@
 "models.empty.configs" = "No configurations yet. Add one to choose a model.";
 "models.text_only" = "text only";
 "models.ane_off" = "ANE off";
+"models.disk_cache_off" = "disk cache off";
 "models.concurrency" = "%d concurrent";
 
 // The configuration editor.
@@ -143,6 +143,13 @@
 "config.edit.title" = "Edit configuration";
 "config.save" = "Save";
 "config.cancel" = "Cancel";
+
+// The about page: what this app is and where its projects live.
+"about.version" = "Version %@";
+"about.description" = "A local inference engine for Apple silicon, with a desktop control panel to run and watch it.";
+"about.links" = "GitHub";
+"about.current" = "Splash Desktop (this project)";
+"about.upstream" = "Splash engine";
 
 // Background running, when the window closes with the server up.
 "menu.show" = "Show Window";
@@ -171,6 +178,10 @@
 "thermal.no_fans" = "this Mac reports none";
 "thermal.unavailable" = "No reading";
 "thermal.sensors" = "Temperature";
+"thermal.sensor.cpu" = "CPU";
+"thermal.sensor.gpu" = "GPU";
+"thermal.sensor.io" = "IO";
+"thermal.sensor.disk" = "Disk";
 "thermal.sensor.hottest" = "hottest";
 "thermal.pacing" = "Prefill pacing";
 "thermal.duty" = "Prefill share";

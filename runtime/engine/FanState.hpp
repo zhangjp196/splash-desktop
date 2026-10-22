@@ -49,8 +49,8 @@ struct FanState final {
 [[nodiscard]] FanState readFanState();
 
 // The sensor keys read, in the order they are tried. The CPU's performance and
-// efficiency cores first, then the GPU, then the memory, ambient and fan-zone
-// sensors the Macs that have them report.
+// efficiency cores first, then the GPU, then the memory, ambient, storage and
+// IO fabric sensors the Macs that have them report.
 [[nodiscard]] std::span<const std::string_view> temperatureKeys();
 
 // Decodes one of the SMC's scalar encodings, the formats the fan and thermal
@@ -62,32 +62,10 @@ struct FanState final {
 [[nodiscard]] std::optional<double>
 decodeSmcValue(std::string_view type, std::span<const uint8_t> bytes);
 
-// Keeps the latest sample for the status document and spells the line the log
-// gets when the fans change speed, as ThermalStateReporter does for the
-// thermal state: a fan spinning up is what a person hears, and nothing else in
-// the log says why. Speeds are rounded to 50 RPM, so the log holds the ramp
-// rather than every sample, and the first sample reports, because the speed a
-// Mac idles at is worth knowing.
-class FanStateReporter final {
-public:
-  // The line to log, or empty when nothing changed since the last sample.
-  [[nodiscard]] std::string update(FanState sample);
-  [[nodiscard]] const FanState &state() const noexcept { return state_; }
-
-private:
-  FanState state_;
-  // The key of the last line: the rounded speeds, or nothing at all when the
-  // SMC did not answer, which is a different state from a Mac with no fans.
-  std::optional<std::vector<int>> reported_;
-  bool started_ = false;
-};
-
 // A temperature outside this range is a key that holds something other than a
 // temperature in degrees, or a sensor that failed: it is dropped rather than
-// reported as the hottest reading of the Mac. The upper bound is below what an
-// Apple silicon part reports before it throttles, so a key that holds a
-// constant (Tf26 reads 115.56 on an M3 Max at idle and under load alike) is
-// not mistaken for the hottest sensor of the machine.
+// reported as the hottest reading of the Mac, so a key that holds a constant
+// is not mistaken for the hottest sensor of the machine.
 inline constexpr double kMinimumPlausibleCelsius = 0.0;
 inline constexpr double kMaximumPlausibleCelsius = 110.0;
 

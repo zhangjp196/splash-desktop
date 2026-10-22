@@ -176,11 +176,11 @@ struct LivePane: View {
     }
 
     /// What the Mac is doing about the heat, as the thermal page reads it in
-    /// full: the fastest fan, the hottest sensor, and the share of the wall
-    /// time prefill may keep the GPU busy.
+    /// full: the fastest fan, the hottest of the four temperatures, and the
+    /// share of the wall time prefill may keep the GPU busy.
     private func thermal(_ live: LiveStatus) -> [MetricCard] {
         let fastest = live.fanSpeeds.max()
-        let hottest = live.temperatures.first
+        let hottest = TemperatureGroup.hottest(live.temperatures)
         return [
             MetricCard(title: L10n.string("live.fans"),
                        value: fastest.map { "\($0)" } ?? "—",
@@ -188,7 +188,7 @@ struct LivePane: View {
                        systemImage: "fan.fill", tint: .cyan),
             MetricCard(title: L10n.string("live.hottest"),
                        value: hottest.map { String(format: "%.1f °C", $0.celsius) } ?? "—",
-                       caption: hottest?.sensor ?? "",
+                       caption: hottest?.group.title ?? "",
                        systemImage: "thermometer", tint: .orange),
             MetricCard(title: L10n.string("live.duty"),
                        value: live.dutyPercent.map { String(format: "%.0f%%", $0) } ?? "—",

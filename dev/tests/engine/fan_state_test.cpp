@@ -1,7 +1,7 @@
 // The Mac's fans and temperatures (engine::FanState): the SMC's encodings,
-// the probe list, the reporter the log gets its lines from, and a read of the
-// machine this runs on. Reading the SMC needs no privilege and no fan is
-// touched: the engine only ever reads.
+// the probe list, and a read of the machine this runs on. Reading the SMC needs
+// no privilege and no fan is touched: the engine only ever reads, and the
+// sample feeds the status document rather than the log.
 
 #include "TestChecks.hpp"
 #include "engine/FanState.hpp"
@@ -68,56 +68,6 @@ void testProbeList() {
     require(key.size() == 4, "an SMC key is four characters: " + std::string(key));
 }
 
-FanState sample(double first, double second, double celsius) {
-  FanState state;
-  state.available = true;
-  state.fans.push_back(FanReading{.rotationsPerMinute = first, .mode = 3});
-  state.fans.push_back(FanReading{.rotationsPerMinute = second, .mode = 3});
-  state.temperatures.push_back(TemperatureReading{.key = "Tp05", .celsius = celsius});
-  state.hottestCelsius = celsius;
-  state.hottestKey = "Tp05";
-  return state;
-}
-
-// The log holds the fans spinning up, not every sample: a Mac that is loud is
-// what a person hears, and the line says how loud and how hot.
-void testReporterReportsChanges() {
-  FanStateReporter reporter;
-  const std::string first = reporter.update(sample(0.0, 0.0, 50.0));
-  require(!first.empty(), "the first sample reports");
-  require(first.starts_with("Fans:"), "the line names the fans: " + first);
-  require(first.find("0 RPM") != std::string::npos, "the line holds the speed");
-  require(first.find("hottest Tp05") != std::string::npos,
-          "the line holds the hottest sensor: " + first);
-
-  require(reporter.update(sample(0.0, 0.0, 50.0)).empty(),
-          "an unchanged sample stays out of the log");
-  require(reporter.update(sample(24.0, 20.0, 51.0)).empty(),
-          "a drift within the rounding stays out of the log");
-
-  const std::string ramp = reporter.update(sample(3186.0, 3437.0, 94.8));
-  require(!ramp.empty(), "a ramp reports");
-  require(ramp.find("3186 RPM") != std::string::npos, "the line holds the speed");
-  require(ramp.find("94.8") != std::string::npos, "the line holds the heat: " + ramp);
-  require(reporter.state().fans.size() == 2, "the reporter keeps the latest sample");
-
-  require(reporter.update(sample(0.0, 0.0, 50.0)).find("0 RPM") != std::string::npos,
-          "the fans spinning down report");
-}
-
-// A Mac with no fans, and one whose SMC did not answer, are both states the
-// engine serves in.
-void testWithoutFans() {
-  FanStateReporter reporter;
-  FanState fanless;
-  fanless.available = true;
-  require(reporter.update(fanless) == "Fans: none reported", "a fanless Mac says so");
-  FanState unreachable;
-  require(reporter.update(unreachable) == "Fans: the SMC could not be read",
-          "an unreadable SMC says so");
-  require(reporter.update(unreachable).empty(), "the same state stays out of the log");
-}
-
 // The machine this runs on, read the way the engine reads it. A Mac without
 // fans, or a machine whose SMC does not answer, still passes: every reading is
 // checked for being a reading, not for being a particular one.
@@ -151,8 +101,6 @@ int main() {
   try {
     testSmcEncodings();
     testProbeList();
-    testReporterReportsChanges();
-    testWithoutFans();
     testTheMachineReadsCoherently();
     std::cout << "fan state tests passed\n";
     return EXIT_SUCCESS;

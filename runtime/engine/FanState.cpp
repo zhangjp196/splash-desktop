@@ -4,10 +4,7 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
-#include <cstdio>
 #include <cstring>
-#include <utility>
 
 namespace splash::engine {
 namespace {
@@ -156,20 +153,24 @@ void fanKey(char *key, size_t fan, std::string_view suffix) noexcept {
 } // namespace
 
 std::span<const std::string_view> temperatureKeys() {
-  // One key per cluster plus the ambient and fan-zone sensors: a key a Mac
-  // does not have reads as nullopt, so the list costs a few microseconds on a
-  // machine with two of them and covers the rest.
+  // One key per cluster plus the ambient, storage and IO fabric sensors: a
+  // key a Mac does not have reads as nullopt, so the list costs a few
+  // microseconds on a machine with two of them and covers the rest.
   static constexpr std::string_view keys[] = {
       // The performance and efficiency cores, which the fan curve follows.
       "Tp01", "Tp05", "Tp09", "Tp0D", "Tp0b", "Tp0f", "Tp0j", "Tp0n", "Tp0r",
       "Tp0v", "Tp0z", "Tp0B", "Tp0F", "Tp0J", "Tp0N", "Tp0R",
       // The GPU, and its own cluster on the Max and Ultra parts.
       "Tg0D", "Tg0d", "Tg0L", "Tg0l", "Tg1D", "Tg1d",
-      // The efficiency clusters, the memory controller, and the SoC's own.
+      // The efficiency clusters.
       "Te05", "Te09", "Te0L", "Te0S", "Te0H",
-      "Tm0P", "Ts0P", "Ts1P", "Ta0P", "Ta1P",
-      // The fan zone: where the airflow the fans make actually lands.
-      "Tf26", "Tf0D", "Tf08",
+      // The memory controller and the ambient sensors.
+      "Tm0P", "Ta0P", "Ta1P",
+      // The storage: the NAND packages' own sensors.
+      "Ts0P", "Ts1P",
+      // The IO fabric. Tf26 is left out: on the Macs that report it it holds a
+      // constant near 108 C rather than a temperature.
+      "Tf0D", "Tf08",
   };
   return keys;
 }
@@ -264,39 +265,6 @@ FanState readFanState() {
     }
   }
   return state;
-}
-
-std::string FanStateReporter::update(FanState sample) {
-  state_ = std::move(sample);
-  std::optional<std::vector<int>> key;
-  if (state_.available) {
-    std::vector<int> speeds;
-    speeds.reserve(state_.fans.size());
-    for (const FanReading &fan : state_.fans)
-      speeds.push_back(int(std::lround(fan.rotationsPerMinute / 50.0)));
-    key = std::move(speeds);
-  }
-  if (started_ && key == reported_)
-    return {};
-  started_ = true;
-  reported_ = std::move(key);
-  if (state_.fans.empty()) {
-    return state_.available ? "Fans: none reported"
-                            : "Fans: the SMC could not be read";
-  }
-  std::string line = "Fans:";
-  for (const FanReading &fan : state_.fans) {
-    line += ' ';
-    line += std::to_string(std::lround(fan.rotationsPerMinute));
-    line += " RPM";
-  }
-  if (!state_.hottestKey.empty()) {
-    char hottest[64];
-    std::snprintf(hottest, sizeof(hottest), " (hottest %s %.1f C)",
-                  state_.hottestKey.c_str(), state_.hottestCelsius);
-    line += hottest;
-  }
-  return line;
 }
 
 } // namespace splash::engine

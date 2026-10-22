@@ -169,6 +169,7 @@ private struct ConfigRow: View {
         parts.append(config.settings.kvFormat.uppercased())
         if !config.settings.neuralEngine { parts.append(L10n.string("models.ane_off")) }
         if config.settings.languageOnly { parts.append(L10n.string("models.text_only")) }
+        if !config.settings.diskCache { parts.append(L10n.string("models.disk_cache_off")) }
         parts.append(L10n.format("models.concurrency", config.settings.maxConcurrency))
         return parts
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AwakeClock.hpp"
+#include "engine/FanState.hpp"
 #include "engine/MemoryControl.hpp"
 #include "engine/NativeRuntime.hpp"
 #include "engine/RuntimeResources.hpp"
@@ -160,9 +161,9 @@ private:
     // loop's regular tick, so a polled state needs no observer of its own.
     void sampleThermalState();
     // Records the fans and temperatures the SMC reports for the status
-    // document, and logs the fans changing speed: that is what a person
-    // hears. Reads of the SMC need no privilege, and a Mac whose SMC cannot
-    // be read still serves.
+    // document. Nothing about them is logged: the live panel shows the
+    // temperatures, and a fan's speed is the Mac's business. Reads of the SMC
+    // need no privilege, and a Mac whose SMC cannot be read still serves.
     void sampleFans();
 
     // Reverse destruction order is loop -> modelRuntime -> resources.
@@ -172,7 +173,7 @@ private:
     MemoryControl memoryControl_;
     RuntimeBootstrapReport report_;
     ThermalStateReporter thermalState_;
-    FanStateReporter fanState_;
+    FanState fanState_;
 };
 
 }  // namespace splash::engine

@@ -41,7 +41,8 @@ it over a name rather than an IP, such as `mymac.local` or a tunnel domain,
 also lists that name in **Extra host names** (each becomes `--allowed-host`).
 These edits apply to the next start.
 
-The window is a sidebar of **Models**, **Live**, **Thermal**, and **Log**, with
+The window is a sidebar of **Models**, **Live**, **Thermal**, **Log**, and
+**About**, with
 the run state and Start and Stop pinned beneath it:
 
 - **Models** — the configurations you have saved, each holding the whole set
@@ -52,8 +53,9 @@ the run state and Start and Stop pinned beneath it:
 - **Thermal** — how hard the Mac may work and how loud it gets: five rungs,
   from **System default** (which sets nothing and leaves the fans to macOS)
   through Performance 90, Balanced 75 and Moderate 50 to Quiet 30 percent of
-  the wall time, applied to a running server at once, above the fans and
-  temperatures the engine reads from the SMC. The rung is the app's own
+  the wall time, applied to a running server at once, above the fans and the
+  CPU, GPU, IO and disk temperatures the engine reads from the SMC. The rung is
+  the app's own
   preference rather than part of a model configuration.
 - **Log** — the server's log.
 
@@ -163,7 +165,7 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | `--state-format bf16` | Use BF16 recurrent states, half the size. Default: FP32. |
 | `--disable-ane` | Prefill on the GPU alone. Default: the 27B also uses the Neural Engine. |
 | `--max-cache-disk 16G` | Cap the SSD cache (default: auto, up to 64 GiB; `0` turns it off). |
-| `--persistent-cache` | Keep the SSD cache across restarts. Off in `splash serve`; the app turns it on. |
+| `--persistent-cache` | Keep the SSD cache across restarts. Off in `splash serve`; the desktop app does not keep it across restarts. |
 | `--thermal-policy quiet` | Make prefill quieter: it keeps the GPU busy 30 percent of the wall time (`moderate` 50, `balanced` 75, `performance` 90), so prompts take longer and the fans answer less. The default, `auto`, paces nothing and leaves the Mac's own thermal management in charge. A running server's rung changes through `POST /v1/thermal`. |
 
 Use `--max-memory` to leave room for other applications.

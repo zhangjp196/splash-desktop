@@ -14,17 +14,16 @@ struct ServerSettings: Codable, Equatable {
         // The idle spill is the engine's own timer now and no longer follows
         // the residency below; the residency releases the weights alone.
         static let residencySeconds = "10"
-        // The SSD cache: kept across restarts, so a restart, an upgrade or a
-        // crash does not cost every conversation its prefix; a 16 GiB quota,
-        // and a 32 GiB a day write budget that paces it against the drive's
-        // life.
-        static let persistentCache = true
+        // The SSD cache: on by default, within a 16 GiB quota, and a 32 GiB a
+        // day write budget that paces it against the drive's life. It lives
+        // for the session: a restart starts from an empty cache.
+        static let diskCache = true
         static let maxCacheDisk = "16G"
         static let maxCacheDiskWrites = "32G"
         // The admission limit: requests running and waiting at once. The
         // server's own default, so the panel and the engine open on the same
         // number.
-        static let maxConcurrency = 16
+        static let maxConcurrency = 8
     }
 
     /// The reasoning levels the server accepts; the empty string is the model
@@ -63,8 +62,11 @@ struct ServerSettings: Codable, Equatable {
     /// faster but its sampled tokens vary between runs.
     var verifyRows = "auto"
     var residencySeconds = First.residencySeconds
-    /// Keep the SSD cache across restarts (`--persistent-cache`).
-    var persistentCache = First.persistentCache
+    /// Whether the engine may use the SSD for cached KV pages and states at
+    /// all. Off keeps every cached prefix in memory and passes
+    /// `--max-cache-disk 0`, which turns the disk tier off. On, the tier lives
+    /// for the session; no cache survives a restart.
+    var diskCache = First.diskCache
     /// The SSD cache's quota. The default is a size; empty follows the
     /// volume's free space up to 64 GiB, and `0` turns the cache off.
     var maxCacheDisk = First.maxCacheDisk
@@ -93,7 +95,7 @@ struct ServerSettings: Codable, Equatable {
         case languageOnly, kvFormat, neuralEngine, maxMemory, maxContext
         case residencySeconds, maxRequestSize, apiKey, servedNames
         case reasoningEffort, maxConcurrency
-        case persistentCache, maxCacheDisk, maxCacheDiskWrites
+        case diskCache, maxCacheDisk, maxCacheDiskWrites
         case expertMemory, pleMemory, sparseKvMemory, verifyRows
     }
 
@@ -120,8 +122,11 @@ struct ServerSettings: Codable, Equatable {
         sparseKvMemory = value(String.self, .sparseKvMemory) ?? sparseKvMemory
         verifyRows = value(String.self, .verifyRows) ?? verifyRows
         residencySeconds = value(String.self, .residencySeconds) ?? residencySeconds
-        persistentCache = value(Bool.self, .persistentCache) ?? persistentCache
+        // A configuration stored before the switch existed follows its quota:
+        // a quota of `0` already meant "no disk cache".
+        let storedDiskCache = value(Bool.self, .diskCache)
         maxCacheDisk = value(String.self, .maxCacheDisk) ?? maxCacheDisk
+        diskCache = storedDiskCache ?? (maxCacheDisk.trimmingCharacters(in: .whitespaces) != "0")
         maxCacheDiskWrites = value(String.self, .maxCacheDiskWrites) ?? maxCacheDiskWrites
         maxRequestSize = value(String.self, .maxRequestSize) ?? maxRequestSize
         apiKey = value(String.self, .apiKey) ?? apiKey
@@ -159,7 +164,7 @@ struct ServerSettings: Codable, Equatable {
             ("sparseKvMemory", sparseKvMemory),
             ("verifyRows", verifyRows),
             ("residencySeconds", residencySeconds),
-            ("persistentCache", persistentCache ? "1" : "0"),
+            ("diskCache", diskCache ? "1" : "0"),
             ("maxCacheDisk", maxCacheDisk),
             ("maxCacheDiskWrites", maxCacheDiskWrites),
             ("maxRequestSize", maxRequestSize),
@@ -200,8 +205,13 @@ struct ServerSettings: Codable, Equatable {
            Self.number(value, in: 1...86_400) != nil {
             residencySeconds = value
         }
-        if let value = rows["persistentCache"] { persistentCache = value == "1" }
         if let value = rows["maxCacheDisk"] { maxCacheDisk = value }
+        if let value = rows["diskCache"] {
+            diskCache = value == "1"
+        } else {
+            // A row set written before the switch existed follows its quota.
+            diskCache = maxCacheDisk.trimmingCharacters(in: .whitespaces) != "0"
+        }
         if let value = rows["maxCacheDiskWrites"] { maxCacheDiskWrites = value }
         if let value = rows["maxRequestSize"] { maxRequestSize = value }
         if let value = rows["apiKey"] { apiKey = value }

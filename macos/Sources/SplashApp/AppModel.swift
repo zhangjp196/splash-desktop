@@ -68,6 +68,44 @@ struct TemperatureReading: Equatable, Identifiable {
     var id: String { sensor }
 }
 
+/// The four temperatures the panel shows, each aggregated from the SMC keys
+/// that belong to one part of the Mac: the CPU clusters (`Tp`, `Te`), the GPU
+/// (`Tg`), the IO fabric (`Tf`), and the storage (`Ts`). A Mac that reports
+/// none of a group's keys leaves that row without a reading.
+enum TemperatureGroup: String, CaseIterable, Identifiable {
+    case cpu, gpu, io, disk
+
+    var id: String { rawValue }
+
+    var title: String { L10n.string("thermal.sensor." + rawValue) }
+
+    func contains(_ sensor: String) -> Bool {
+        switch self {
+        case .cpu: return sensor.hasPrefix("Tp") || sensor.hasPrefix("Te")
+        case .gpu: return sensor.hasPrefix("Tg")
+        case .io: return sensor.hasPrefix("Tf")
+        case .disk: return sensor.hasPrefix("Ts")
+        }
+    }
+
+    /// The hottest sensor of this group, or nil when the Mac reports none.
+    static func peak(_ readings: [TemperatureReading], in group: TemperatureGroup) -> Double? {
+        readings.lazy
+            .filter { group.contains($0.sensor) }
+            .map(\.celsius)
+            .max()
+    }
+
+    /// The group whose hottest sensor is the hottest of the sample.
+    static func hottest(
+        _ readings: [TemperatureReading]
+    ) -> (group: TemperatureGroup, celsius: Double)? {
+        allCases
+            .compactMap { group in peak(readings, in: group).map { (group, $0) } }
+            .max { $0.celsius < $1.celsius }
+    }
+}
+
 /// One `/status` fetch and the model id `/v1/models` reports, both decoded in
 /// the background so the live panel never blocks the main thread.
 struct LiveSnapshot {
@@ -156,7 +194,7 @@ final class AppModel: ObservableObject {
     @Published var apiKey = ""
     @Published var servedNames = ""
     @Published var residencySeconds = ServerSettings.First.residencySeconds
-    @Published var persistentCache = ServerSettings.First.persistentCache
+    @Published var diskCache = ServerSettings.First.diskCache
     @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
     @Published var maxCacheDiskWrites = ServerSettings.First.maxCacheDiskWrites
     @Published var maxRequestSize = ""
@@ -271,7 +309,7 @@ final class AppModel: ObservableObject {
         settings.sparseKvMemory = sparseKvMemory
         settings.verifyRows = verifyRows
         settings.residencySeconds = residencySeconds
-        settings.persistentCache = persistentCache
+        settings.diskCache = diskCache
         settings.maxCacheDisk = maxCacheDisk
         settings.maxCacheDiskWrites = maxCacheDiskWrites
         settings.maxRequestSize = maxRequestSize
@@ -334,7 +372,7 @@ final class AppModel: ObservableObject {
         sparseKvMemory = settings.sparseKvMemory
         verifyRows = settings.verifyRows
         residencySeconds = settings.residencySeconds
-        persistentCache = settings.persistentCache
+        diskCache = settings.diskCache
         maxCacheDisk = settings.maxCacheDisk
         maxCacheDiskWrites = settings.maxCacheDiskWrites
         maxRequestSize = settings.maxRequestSize
@@ -549,17 +587,24 @@ final class AppModel: ObservableObject {
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += ["--served-model-name", trimmed] }
         }
-        // The SSD cache: persistent by default, its quota the server's own
-        // automatic one unless the panel set a size, and a daily write budget
-        // that paces it against the drive's life. The engine's idle spill is
-        // its own timer now and needs no argument. A quota of `0` turns the
-        // cache off, and the server refuses --persistent-cache beside it.
+        // The SSD cache: on by default, its quota the server's own automatic
+        // one unless the panel set a size, and a daily write budget that paces
+        // it against the drive's life. The tier lives for the session: the
+        // panel never asks for a persistent cache, so a restart starts from an
+        // empty one. The switch turns the disk tier off outright
+        // (`--max-cache-disk 0`), keeping cached prefixes in memory only; the
+        // engine's idle spill is its own timer and needs no argument. A quota
+        // of `0` still means off.
         let cacheQuota = maxCacheDisk.trimmingCharacters(in: .whitespaces)
-        if persistentCache && cacheQuota != "0" { arguments.append("--persistent-cache") }
-        if !cacheQuota.isEmpty { arguments += ["--max-cache-disk", cacheQuota] }
-        let cacheWrites = maxCacheDiskWrites.trimmingCharacters(in: .whitespaces)
-        if !cacheWrites.isEmpty {
-            arguments += ["--max-cache-disk-writes", cacheWrites]
+        let cacheOn = diskCache && cacheQuota != "0"
+        if cacheOn {
+            if !cacheQuota.isEmpty { arguments += ["--max-cache-disk", cacheQuota] }
+            let cacheWrites = maxCacheDiskWrites.trimmingCharacters(in: .whitespaces)
+            if !cacheWrites.isEmpty {
+                arguments += ["--max-cache-disk-writes", cacheWrites]
+            }
+        } else {
+            arguments += ["--max-cache-disk", "0"]
         }
         if let seconds = Int(residencySeconds), seconds >= 1, seconds <= 86_400 {
             arguments += ["--idle-release", String(seconds)]

@@ -29,7 +29,7 @@ MAX_YARN_CONTEXT_TOKENS = 1010000
 # The suffixes of a --max-context: K, 1024 tokens, and M, a million.
 _CONTEXT_UNITS = {"K": 1024, "M": 1000000}
 DEFAULT_MAX_REQUEST_BYTES = 128 * 1024 * 1024
-DEFAULT_QUEUE_SIZE = 16
+DEFAULT_QUEUE_SIZE = 8
 # The lowest duty the engine takes: below it even a short prompt would take
 # longer than a person waits (kMinimumPrefillDutyPercent).
 MINIMUM_PREFILL_DUTY = 10
@@ -294,7 +294,7 @@ def parse_queue_size(value):
         size = 0
     if size <= 0:
         raise argparse.ArgumentTypeError(
-            "must be a positive number of requests such as 16"
+            "must be a positive number of requests such as 8"
         )
     return size
 

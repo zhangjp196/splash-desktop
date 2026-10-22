@@ -120,7 +120,7 @@ access.
 | `--max-request-size` | `128M` | Largest HTTP request body. See [request limits](#request-limits-and-timeouts). |
 | `--max-image-pixels` | `4194304` | Maximum resized pixels per image. An image's vision scratch grows with its patches (pixels / 256), to about 600 MiB at the default. |
 | `--request-timeout` | None | Time a request may take from its arrival; a request's own `timeout` can only shorten it. |
-| `--queue-size` | `16` | Requests admitted at once, running or waiting; more get 503 with `Retry-After`. |
+| `--queue-size` | `8` | Requests admitted at once, running or waiting; more get 503 with `Retry-After`. |
 | `--thermal-policy` | `auto` | How hard prefill may drive the Mac: `performance` 90, `balanced` 75, `moderate` 50 or `quiet` 30 percent of the wall time; `auto`, the default, paces nothing and leaves the fans to macOS. Prefill is what heats a Mac; decoding keeps its speed at every rung. See [heat and noise](#heat-and-noise). |
 | `--prefill-duty` | The rung's | The same share in percent, 10 to 100, whatever the rung says; a running engine's duty changes through `POST /v1/thermal`. |
 | `--decode-share` | `0.5` | Decode time owed per unit of prefill time while other requests generate. Higher keeps their output faster during a long prompt and slows that prompt; `0` alternates one command each. |
@@ -1126,7 +1126,7 @@ and `http.max_request_bytes`. A body's JSON nests at most 128 levels of arrays
 and objects; deeper is refused as invalid JSON. A history tool call's arguments
 nested deeper stay text, as other arguments that are not a JSON object do.
 
-The server holds at most `--queue-size` + 64 connections at once (96 by
+The server holds at most `--queue-size` + 64 connections at once (72 by
 default), each in a connection slot. A connection waits for its request without
 a thread until the request's head, its request line and headers, has arrived, or
 its client has closed; one of the server's worker threads, one per slot and all
@@ -1591,8 +1591,8 @@ context lost — and answers the duty the engine took. The server writes the
 `prefill_duty_request` frame and then a status request on the same stream; the
 engine applies the frames it reads in order, so the `throttle` section of that
 status is the truth, not the wish. The desktop app's **Thermal** page is this
-control over the same ladder, with the fans and temperatures the engine reads
-from the SMC beside it.
+control over the same ladder, with the fans and four temperature groups — CPU,
+GPU, IO and disk — that the engine reads from the SMC beside it.
 
 Measurements on an M3 Max (Qwen3.8-27B, 8K-token prompts, three rounds): at a
 duty of 60 percent prefill ran at 205 rows/s against 321 unpaced, the same 24 414
@@ -1630,7 +1630,7 @@ Proxy consumers can use these fields; additional fields may be added:
 | `thermal_state` | The Mac's thermal state as macOS reports it: `nominal`, `fair`, `serious` or `critical`. As the Mac heats, its CPU and GPU clocks drop and prefill and decode slow down, on some Macs already at `fair`; readiness ignores it. The engine samples it twice a second and logs each change (`Thermal state: fair → serious`) |
 | `throttle.duty_percent`, `thermal_scale`, `paced_waits`, `paced_wait_ms` | [Heat and noise](#heat-and-noise): the share of the wall time prefill may keep the GPU busy, what the thermal state leaves of it (1 when there is none), the prefill commands the pacing has held back since engine start, and the wall time they waited |
 | `fans.available`, `speeds_rpm`, `minimum_rpm`, `maximum_rpm`, `target_rpm`, `modes` | What the fans report, which the engine reads from the SMC without root: whether this Mac reports any, and one entry per fan — its speed now, the range it may run in, the speed it is heading for, and its mode as the SMC reports it |
-| `fans.temperatures`, `hottest_sensor`, `hottest_celsius` | The temperature sensors the engine read, each as `{"sensor": "Tp0b", "celsius": 55.3}`, and the hottest of them |
+| `fans.temperatures`, `hottest_sensor`, `hottest_celsius` | The temperature sensors the engine read, each as `{"sensor": "Tp0b", "celsius": 55.3}`, and the hottest of them. The panel groups them into CPU, GPU, IO and disk; nothing here is logged |
 | `vision`, `input_modalities` | Whether image and PDF input is accepted; `false` and `["text"]` after `--language-only` |
 | `chat_template.later_system` | `native`, `patched` or `unsupported`: how system messages after the first render (per name for named templates) |
 | `transport.recovering`, `transport.stopped`, `transport.error` | The engine is restarting, or Splash stopped restarting it after repeated failures; `error` names its failure, the last failed restart, or why restarts stopped |
@@ -3935,14 +3935,14 @@ actions. Its thermal page holds the [heat-and-noise rung](#heat-and-noise) of
 the Mac itself rather than of a model: the choice is remembered in
 `UserDefaults` (as the interface language is), passes `--thermal-policy` to a
 server it starts, and reaches a running engine at once through
-`POST /v1/thermal`; beside it the page shows the fans and temperatures the
-engine reads. Its settings live in SQLite at
+`POST /v1/thermal`; beside it the page shows the fans and the CPU, GPU, IO and
+disk temperatures the engine reads. Its settings live in SQLite at
 `~/Library/Application Support/ai.inco.splash/settings.db` (one key/value row
 per setting, `SPLASH_SETTINGS_DB` points it elsewhere): the panel saves each
 edit after a short pause, the next launch opens on what the last one saved, and
 Restore Defaults returns the form to the values the first launch opened with
-(upstream model, port 8000, 8-bit KV, a 16-request admission limit, a 10
-second residency and a persistent cache with a 16 GiB quota and a 32 GiB a day
+(upstream model, port 8000, 8-bit KV, an 8-request admission limit, a 10
+second residency and a session SSD cache with a 16 GiB quota and a 32 GiB a day
 write budget). A stored value the launcher would reject falls
 back to its first-launch default rather than starting a server that refuses to
 run. `swift run --selfcheck-settings` exercises the store and that round trip
@@ -3959,9 +3959,10 @@ whether it serves the LAN, with the extra Host names it accepts; KV
 format, text-only mode, API key and model aliases; the admission limit of
 requests running or waiting at once; the memory ceiling and
 context length; what happens while idle (releasing weights back to the GPU the
-way LM Studio unloads a model) and the cache section beside it (keeping the
-SSD cache across restarts, its quota, and the day's write budget); and the
-per-request size and default reasoning
+way LM Studio unloads a model) and the cache section beside it (a switch that
+turns the SSD cache off entirely, keeping prefixes in memory, and, while it is
+on, its quota and the day's write budget; the cache lives for the session, and
+the app never keeps it across restarts); and the per-request size and default reasoning
 effort. The bundle is built
 with Xcode's Swift toolchain, the placeholder icon
 is generated at package time, and neither the app nor the DMG is code-signed:

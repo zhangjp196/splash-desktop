@@ -4,8 +4,7 @@
 "section.model" = "模型";
 "section.server" = "服务";
 "section.memory" = "内存";
-"section.idle" = "空闲时";
-"section.cache" = "缓存";
+"section.cache" = "空闲与缓存";
 "section.request" = "请求与访问";
 "section.schedule" = "调度";
 "field.target" = "目标文件夹";
@@ -29,12 +28,10 @@
 "field.verify_rows" = "草稿校验";
 "verify.auto" = "自动";
 "verify.all" = "逐行";
-"help.streamed_stores" = "留空按服务端自动规划；off 表示整表载入。专家流式适用于所有 MoE 模型；PLE 表只适用于 Qwen3.8-Flash-Next 的 GGUF；KV 回读只适用于块稀疏模型（如 Flash-Next）。均在下次启动生效，日志会说明模型无法使用哪一项。";
-"help.verify_rows" = "逐行校验时草稿的贪心与固定种子输出可复现；自动更快，但多次运行的结果可能不同。";
 "field.max_concurrency" = "最大并发";
 "field.residency" = "空闲释放权重秒数（LM Studio 风格）";
-"field.persistent_cache" = "跨重启保留缓存前缀";
-"field.cache_quota" = "SSD 缓存配额（如 16G，0 关闭缓存）";
+"field.disk_cache" = "使用磁盘缓存";
+"field.cache_quota" = "SSD 缓存配额（如 16G）";
 "field.cache_writes" = "SSD 每日写入预算（如 32G）";
 "control.saved" = "已自动保存";
 "control.defaults" = "恢复默认";
@@ -50,6 +47,7 @@
 "view.thermal" = "散热";
 "view.control" = "控制";
 "view.log" = "日志";
+"view.about" = "关于";
 "menu.open" = "在浏览器中打开对话";
 "open.in.browser" = "在浏览器中打开";
 "open.chat" = "对话";
@@ -118,6 +116,7 @@
 // 侧栏：两个分组，然后每个面板一项。
 "sidebar.serve" = "服务";
 "sidebar.monitor" = "监控";
+"sidebar.about" = "关于";
 
 // 模型面板：配置与目录管理。
 "view.models" = "模型";
@@ -134,6 +133,7 @@
 "models.empty.configs" = "还没有配置。添加一个来选模型。";
 "models.text_only" = "仅文本";
 "models.ane_off" = "ANE 关";
+"models.disk_cache_off" = "无磁盘缓存";
 "models.concurrency" = "并发 %d";
 
 // 配置编辑器。
@@ -143,6 +143,13 @@
 "config.edit.title" = "编辑配置";
 "config.save" = "保存";
 "config.cancel" = "取消";
+
+// 关于页：应用说明与项目地址。
+"about.version" = "版本 %@";
+"about.description" = "面向 Apple 芯片的本地推理引擎，附带桌面控制面板用于运行和监控。";
+"about.links" = "GitHub";
+"about.current" = "Splash Desktop（当前项目）";
+"about.upstream" = "Splash 引擎";
 
 // 关闭窗口后的后台运行提示。
 "menu.show" = "显示窗口";
@@ -171,7 +178,11 @@
 "thermal.no_fans" = "本机没有风扇";
 "thermal.unavailable" = "无读数";
 "thermal.sensors" = "温度";
-"thermal.sensor.hottest" = "最高";
+"thermal.sensor.cpu" = "CPU";
+"thermal.sensor.gpu" = "GPU";
+"thermal.sensor.io" = "IO";
+"thermal.sensor.disk" = "磁盘";
+"thermal.sensor.hottest" = "最热";
 "thermal.pacing" = "预填充节流";
 "thermal.duty" = "预填充占时";
 "thermal.duty.caption" = "占墙钟时间的比例";
