@@ -1885,11 +1885,15 @@ and lists every unsupported tensor in one error:
 A variant no root file names may be a folder of a split GGUF's parts, as
 repositories publish files too large for one
 (`VARIANT/MODEL-VARIANT-00001-of-0000N.gguf`, `upstream.split_gguf`): every
-part from 1 to N must be present. The parts install side by side in
+part from 1 to N must be present, and the folder must hold one GGUF's parts.
+The parts install side by side in
 `target/`, and the native loader reads them as one GGUF (`findTargetGgufs`,
 `OpenGguf`): the first part's metadata, whose `split.count` and
 `split.tensors.count` must describe the parts, and every part's tensors. The
-installer screens the merged header (`gguf.merged_split`).
+installer screens the merged header (`gguf.merged_split`). A download leaves
+a split GGUF's parts at the root, where a `:VARIANT` names the model name they
+share, exactly or by its ending, and without one they are the only target; a
+local model directory serves them as they lie.
 
 BF16 and F16 are formats of the image like the quantized ones, for the tensors
 a quantized file keeps unquantized: UD-Q8_K_XL keeps the 27B's attention
@@ -2230,7 +2234,8 @@ absolute, so the selection does not depend on the working directory, and an
 MLX or GGUF target's content is verified on every start: a changed file fails
 verification and the assembly is prepared and published again. A directory
 with several target GGUFs is ambiguous and refused, listing them; keep one
-variant per directory.
+variant per directory. A split GGUF's parts at the root are one target, as a
+download leaves them, and need no `:VARIANT`.
 
 A local target has no repository revision to follow and no repository whose
 draft Splash may select. An MLX or GGUF target's matching DFlash2 checkpoint is

@@ -18,6 +18,7 @@ from dev.tests.installer_fixtures import (
     CONFIGS,
     DENSE,
     DRAFT_COMMIT,
+    GGML,
     GGUF_ONLY,
     MODEL,
     MOE,
@@ -27,11 +28,15 @@ from dev.tests.installer_fixtures import (
     draft_dir,
     fake_hub,
     family_config,
+    fixture,
     http_error,
+    loadable_tensors,
     local_selection,
     mlx_target,
     pins,
     selection,
+    vision_fixture,
+    write_gguf,
 )
 from install import assembly, families, hub, models, paths, upstream
 
@@ -244,6 +249,53 @@ class UpstreamTest(unittest.TestCase):
             models.ModelError, "are both part 1 of the split GGUF in BF16/"
         ):
             upstream.select_gguf(files | parts, "BF16")
+        # Without :VARIANT, a split GGUF's parts at the root, where a local
+        # download leaves them, are one target; every part must be there.
+        root_parts = [
+            "Qwen3.8-27B-UD-Q4_K_M-00001-of-00002.gguf",
+            "Qwen3.8-27B-UD-Q4_K_M-00002-of-00002.gguf",
+        ]
+        self.assertEqual(
+            upstream.select_gguf(set(root_parts), None), (root_parts, False)
+        )
+        with self.assertRaisesRegex(
+            models.ModelError, "the split GGUF at the root is incomplete"
+        ):
+            upstream.select_gguf({root_parts[0]}, None)
+        # Two split GGUFs at the root are still several targets.
+        with self.assertRaisesRegex(models.ModelError, "select a GGUF"):
+            upstream.select_gguf(
+                set(root_parts)
+                | {
+                    "Qwen3.8-27B-Q8_0-00001-of-00002.gguf",
+                    "Qwen3.8-27B-Q8_0-00002-of-00002.gguf",
+                },
+                None,
+            )
+        # :VARIANT names a root split too, by the model name its parts share,
+        # exactly or by its ending.
+        with_q8 = set(root_parts) | {"Qwen3.8-27B-Q8_0.gguf"}
+        self.assertEqual(
+            upstream.select_gguf(with_q8, "UD-Q4_K_M"), (root_parts, False)
+        )
+        self.assertEqual(upstream.select_gguf(with_q8, "Q4_K_M"), (root_parts, True))
+        # A split target and a whole file of the same model name are two
+        # targets: no variant selects one.
+        with self.assertRaisesRegex(
+            models.ModelError, "no single GGUF matches :UD-Q4_K_M"
+        ):
+            upstream.select_gguf(
+                set(root_parts) | {"Qwen3.8-27B-UD-Q4_K_M.gguf"}, "UD-Q4_K_M"
+            )
+        # A variant folder holds the parts of one GGUF alone.
+        with self.assertRaisesRegex(models.ModelError, "parts of several GGUFs"):
+            upstream.select_gguf(
+                {
+                    "BF16/Qwen3.8-27B-BF16-00001-of-00002.gguf",
+                    "BF16/Qwen3.8-27B-Q8_0-00002-of-00002.gguf",
+                },
+                "BF16",
+            )
         # A repository of one GGUF has no shared name to strip, and needs no
         # variant.
         for variant in ("UD-Q4_K_M", "Q4_K_M", None):
@@ -1588,6 +1640,45 @@ class UpstreamTest(unittest.TestCase):
         chosen = local_selection(self.root, target, draft_model=str(draft.resolve()))
         with self.assertRaisesRegex(models.ModelError, "select a GGUF"):
             self.prepare_local(chosen)
+
+    def test_a_local_directory_serves_its_split_gguf_at_the_root(self):
+        # A download leaves a split GGUF's parts at the directory's root, a
+        # vision projector beside them: --model-dir serves them as one target,
+        # without a :VARIANT to name.
+        target = self.root / "ggufs"
+        target.mkdir()
+        headers = self.root / "headers"
+        headers.mkdir()
+        header = fixture(native=True)
+        tensors = list(loadable_tensors(header, headers).items())
+        split = {"split.count": 2, "split.tensors.count": len(tensors)}
+        parts = [
+            f"Model-UD-Q4_K_M-{number + 1:05d}-of-00002.gguf" for number in range(2)
+        ]
+        for number, part in enumerate(parts):
+            values = (header if number == 0 else {}) | split | {"split.no": number}
+            write_gguf(target / part, values, tensors[number::2])
+        write_gguf(
+            target / "mmproj-BF16.gguf",
+            vision_fixture(),
+            [("v.patch_embd.weight", GGML["BF16"])],
+        )
+        # A safetensors file in a subdirectory is not the target's: the
+        # directory is still a GGUF target.
+        nested = target / "patches"
+        nested.mkdir()
+        (nested / "weights.safetensors").write_bytes(b"")
+        draft = draft_dir(self.root / "draft", MOE)
+        chosen = local_selection(
+            self.root, target, draft_model=str(draft.resolve()), language_only=False
+        )
+        output, _ = self.prepare_local(chosen)
+        self.assertIn("Installing", output)
+        record = assembly.verify(chosen.link)
+        self.assertEqual(
+            sorted(path.name for path in (chosen.link / "target").iterdir()), parts
+        )
+        self.assertEqual(record["vision_format"], "gguf")
 
     def test_a_local_directory_without_a_draft_uses_the_family_draft(self):
         # A local MLX or GGUF target needs no --draft-model: the DFlash2
