@@ -227,7 +227,8 @@ inline void moe_group_routes_phase(
   if (thread_index == 0) {
     const uint live = routed_tiles + shared_tiles;
     *tile_count = MoeTileCount{live, {params.gate_up_columns, live, 1},
-                               {params.down_columns, live, 1}};
+                               {params.down_columns, live, 1},
+                               {params.rotation_columns, routed_tiles, params.tile_rows}};
   }
 }
 
@@ -278,12 +279,44 @@ MOE_GROUP_ROUTES_VERIFIED_ENTRY(moe_group_routes_verified_e512, SPLASH_MOE_WIDE_
 #undef MOE_GROUP_ROUTES_ENTRY
 #undef MOE_GROUP_ROUTES_BODY
 
+// A grouped row's input: a routed route's row of `rotated` when the block's
+// weights were stored for rotated inputs (Gyro), the shared expert's and every
+// route's of an unrotated block's of `input`.
+template <bool Rotated>
+inline device const bfloat *moe_gathered_source(device const bfloat *input, device const bfloat *rotated,
+                                                uint route, constant MoeGatherParams &params) {
+  if constexpr (!Rotated)
+    return input;
+  else
+    return route % params.routes_per_row == params.routes_per_row - 1 ? input : rotated;
+}
+
 // Copies each grouped row's input so every expert tile is a dense matrix,
 // over the rows the staged expert passes read (moe_staged_rows): padding rows
 // among them are zero and their outputs are never read. Threadgroup (tile,
 // part) copies the part's 256 columns of the tile's rows, eight rows at once,
 // each thread eight columns (16 bytes, rows of whole 256 columns starting
 // 16-byte aligned) of one row.
+template <bool Rotated>
+inline void moe_gather_rows_body(device const bfloat *input, device const bfloat *rotated,
+                                 device const uint *grouped_routes, device const MoeTileDescriptor *tiles,
+                                 device const uint *tile_count, device bfloat *grouped_input,
+                                 constant MoeGatherParams &params, uint2 group, uint thread_index) {
+  if (group.x >= *tile_count)
+    return;
+  const uint column = group.y * 256 + (thread_index % 32) * 8;
+  const uint rows = moe_staged_rows(tiles, group.x, params.tile_rows);
+  for (uint local = thread_index / 32; local < rows; local += 8) {
+    const uint row = group.x * params.tile_rows + local;
+    const uint route = grouped_routes[row];
+    device const bfloat *source =
+        route == ~0u ? input : moe_gathered_source<Rotated>(input, rotated, route, params);
+    *reinterpret_cast<device uint4 *>(grouped_input + ulong(row) * params.input_size + column) =
+        route == ~0u ? uint4(0)
+                     : *reinterpret_cast<device const uint4 *>(
+                           source + ulong(route / params.routes_per_row) * params.input_size + column);
+  }
+}
 kernel void moe_gather_rows(device const bfloat *input [[buffer(0)]],
                             device const uint *grouped_routes [[buffer(1)]],
                             device const MoeTileDescriptor *tiles [[buffer(2)]],
@@ -292,18 +325,22 @@ kernel void moe_gather_rows(device const bfloat *input [[buffer(0)]],
                             constant MoeGatherParams &params [[buffer(5)]],
                             uint2 group [[threadgroup_position_in_grid]],
                             uint thread_index [[thread_index_in_threadgroup]]) {
-  if (group.x >= *tile_count)
-    return;
-  const uint column = group.y * 256 + (thread_index % 32) * 8;
-  const uint rows = moe_staged_rows(tiles, group.x, params.tile_rows);
-  for (uint local = thread_index / 32; local < rows; local += 8) {
-    const uint row = group.x * params.tile_rows + local;
-    const uint route = grouped_routes[row];
-    *reinterpret_cast<device uint4 *>(grouped_input + ulong(row) * params.input_size + column) =
-        route == ~0u ? uint4(0)
-                     : *reinterpret_cast<device const uint4 *>(
-                           input + ulong(route / params.routes_per_row) * params.input_size + column);
-  }
+  moe_gather_rows_body<false>(input, nullptr, grouped_routes, tiles, tile_count, grouped_input, params, group,
+                              thread_index);
+}
+// The gather of a block whose weights were stored for rotated inputs: `rotated` holds H (D x) of the block's rows,
+// which every routed route reads (the shared expert reads `input`).
+kernel void moe_gather_rows_rotated(device const bfloat *input [[buffer(0)]],
+                                    device const bfloat *rotated [[buffer(1)]],
+                                    device const uint *grouped_routes [[buffer(2)]],
+                                    device const MoeTileDescriptor *tiles [[buffer(3)]],
+                                    device const uint *tile_count [[buffer(4)]],
+                                    device bfloat *grouped_input [[buffer(5)]],
+                                    constant MoeGatherParams &params [[buffer(6)]],
+                                    uint2 group [[threadgroup_position_in_grid]],
+                                    uint thread_index [[thread_index_in_threadgroup]]) {
+  moe_gather_rows_body<true>(input, rotated, grouped_routes, tiles, tile_count, grouped_input, params, group,
+                             thread_index);
 }
 
 // The grouped rows as Table16 tiles (kernels/common/gguf_sgmatrix.h), the
@@ -328,6 +365,23 @@ inline void moe_table16_tile(Source source, device bfloat *table,
   }
 }
 
+template <bool Rotated>
+inline void moe_gather_table16_body(device const bfloat *input, device const bfloat *rotated,
+                                    device const uint *grouped_routes, device const uint *tile_count,
+                                    device bfloat *table, device float *sums, constant MoeGatherParams &params,
+                                    uint2 group, uint simd_lane, uint simd_group) {
+  if (group.x >= *tile_count)
+    return;
+  moe_table16_tile(
+      [&](uint row, uint k) {
+        const uint route = grouped_routes[group.x * 8 + row];
+        if (route == ~0u) return bfloat2(bfloat(0.0f));
+        device const bfloat *source = moe_gathered_source<Rotated>(input, rotated, route, params);
+        return *reinterpret_cast<device const bfloat2 *>(
+            source + ulong(route / params.routes_per_row) * params.input_size + k);
+      },
+      table, sums, params.input_size, group, simd_lane, simd_group);
+}
 kernel void moe_gather_table16(device const bfloat *input [[buffer(0)]],
                                device const uint *grouped_routes [[buffer(1)]],
                                device const uint *tile_count [[buffer(2)]],
@@ -337,18 +391,21 @@ kernel void moe_gather_table16(device const bfloat *input [[buffer(0)]],
                                uint2 group [[threadgroup_position_in_grid]],
                                uint simd_lane [[thread_index_in_simdgroup]],
                                uint simd_group [[simdgroup_index_in_threadgroup]]) {
-  if (group.x >= *tile_count)
-    return;
-  moe_table16_tile(
-      [&](uint row, uint k) {
-        const uint route = grouped_routes[group.x * 8 + row];
-        return route == ~0u
-                   ? bfloat2(bfloat(0.0f))
-                   : *reinterpret_cast<device const bfloat2 *>(
-                         input + ulong(route / params.routes_per_row) *
-                                     params.input_size + k);
-      },
-      table, sums, params.input_size, group, simd_lane, simd_group);
+  moe_gather_table16_body<false>(input, nullptr, grouped_routes, tile_count, table, sums, params, group, simd_lane,
+                                 simd_group);
+}
+kernel void moe_gather_table16_rotated(device const bfloat *input [[buffer(0)]],
+                                       device const bfloat *rotated [[buffer(1)]],
+                                       device const uint *grouped_routes [[buffer(2)]],
+                                       device const uint *tile_count [[buffer(3)]],
+                                       device bfloat *table [[buffer(4)]],
+                                       device float *sums [[buffer(5)]],
+                                       constant MoeGatherParams &params [[buffer(6)]],
+                                       uint2 group [[threadgroup_position_in_grid]],
+                                       uint simd_lane [[thread_index_in_simdgroup]],
+                                       uint simd_group [[simdgroup_index_in_threadgroup]]) {
+  moe_gather_table16_body<true>(input, rotated, grouped_routes, tile_count, table, sums, params, group, simd_lane,
+                                simd_group);
 }
 
 kernel void moe_prepare_table16(device const bfloat *rows [[buffer(0)]],

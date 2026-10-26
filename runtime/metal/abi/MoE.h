@@ -72,23 +72,31 @@ struct MoeGroupParams {
   uint32_t gate_up_columns;
   uint32_t down_columns;
   uint32_t lane_rows;
+  // The intermediate's rotation blocks (intermediate_size / block), or 0 for a
+  // block whose weights were not stored for rotated inputs: the width of the
+  // grid (moe_rotate_intermediate) that rotates the routed tiles.
+  uint32_t rotation_columns;
 };
 
-static_assert(sizeof(MoeGroupParams) == 28,
-              "MoE grouping parameters are 28 bytes on both sides");
+static_assert(sizeof(MoeGroupParams) == 32,
+              "MoE grouping parameters are 32 bytes on both sides");
 
 // What the grouping writes besides the tiles: their count, which every pass
-// over them reads first, and the grids (column tiles, tiles, 1) of the
-// gate/up and down passes, which they read as an indirect dispatch
-// (MTLDispatchThreadgroupsIndirectArguments) to launch the live tiles alone.
+// over them reads first, the grids (column tiles, tiles, 1) of the gate/up and
+// down passes, which they read as an indirect dispatch
+// (MTLDispatchThreadgroupsIndirectArguments) to launch the live tiles alone,
+// and that of the rotation of the routed tiles' intermediate (rotation blocks,
+// routed tiles, tile rows), zeros for them too when the block's weights were
+// stored for rotated inputs.
 struct MoeTileCount {
   uint32_t tiles;
   uint32_t gate_up_grid[3];
   uint32_t down_grid[3];
+  uint32_t routed_grid[3];
 };
 
-static_assert(sizeof(MoeTileCount) == 28,
-              "the MoE tile count is 28 bytes on both sides");
+static_assert(sizeof(MoeTileCount) == 40,
+              "the MoE tile count is 40 bytes on both sides");
 
 struct MoeGatherParams {
   uint32_t tile_rows;

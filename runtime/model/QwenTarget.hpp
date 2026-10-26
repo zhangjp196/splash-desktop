@@ -104,11 +104,14 @@ struct QwenTargetGeometry final : QwenTargetDimensions {
       std::ranges::copy(captureLayers, captureLayerValues.begin());
   }
 
-  // The format of most of the sparse MoE blocks' routed expert weights, and
+  // The format of most of the sparse MoE blocks' routed expert weights,
   // whether every routed and shared expert weight is in a format the register
-  // tile takes (ops::MoeShape).
+  // tile takes, and the block of the routed experts' stored input rotation
+  // (0 when they were not stored for rotated inputs), which ops::MoeShape
+  // holds.
   uint32_t moeExpertFormat = GGUF_FMT_COUNT;
   bool moeRegisterFormats = true;
+  uint32_t moeRotationBlock = 0;
   // The layers whose output rows the DFlash2 draft reads, ascending.
   std::array<uint32_t, ExecutionLimits::maximumDraftTargetLayers> captureLayerValues{};
   uint32_t captureLayerCount = 0;
@@ -140,7 +143,8 @@ struct QwenTargetGeometry final : QwenTargetDimensions {
     return hiddenSize * captureLayerCount;
   }
   [[nodiscard]] constexpr ops::MoeShape moeShape() const noexcept {
-    return {hiddenSize, experts, expertsPerToken, expertIntermediateSize, moeExpertFormat, moeRegisterFormats};
+    return {hiddenSize,           experts,       expertsPerToken, expertIntermediateSize,
+            moeExpertFormat,      moeRegisterFormats, moeRotationBlock};
   }
   [[nodiscard]] constexpr std::span<const uint32_t>
   captureLayers() const noexcept {

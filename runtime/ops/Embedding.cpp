@@ -34,11 +34,13 @@ void Embedding::add(metal::CommandGraph &graph, metal::MetalBuffer tokens,
   if (table.rotation) {
     // One threadgroup per rotation block of a row, which gathers the block
     // and inverts its rotation in fp32 (kernels/shared/gguf_rotation.metal).
-    if (native.formatId != GGUF_FMT_PQ20 || table.inputSize % GGUF_ROTATION_BLOCK)
+    const uint32_t block = table.rotation.block;
+    if (native.formatId != GGUF_FMT_PQ20 || table.inputSize % block)
       throw std::invalid_argument("a rotated token table takes PQ2_0 rows of whole rotation blocks");
     requireBytes(table.rotation.signs, table.inputSize, "embedding rotation sign");
     graph.add("gguf_embed_rotated_pq20", {std::move(tokens), native.rows, table.rotation.signs, std::move(output)},
-              params, {table.inputSize / GGUF_ROTATION_BLOCK, rows, 1}, {GGUF_ROTATION_THREADS, 1, 1});
+              GgufEmbedRotationParams{params, {table.inputSize, block, rotationScale(block), 0}},
+              {table.inputSize / block, rows, 1}, {block / 4, 1, 1});
     return;
   }
   graph.add(std::string("gguf_embed_") + format.name, {std::move(tokens), native.rows, std::move(output)}, params,

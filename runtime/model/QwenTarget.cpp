@@ -53,8 +53,14 @@ void QwenTargetGeometry::finish(std::span<const ops::BlockMoeWeights *const> moe
   // The format of most routed expert weights, GGUF_FMT_COUNT for none.
   std::array<uint64_t, GGUF_FMT_COUNT> weights{};
   moeRegisterFormats = true;
+  moeRotationBlock = 0;
   for (const ops::BlockMoeWeights *block : moeBlocks) {
     moeRegisterFormats &= registerTakes(*block);
+    if (block->rotation) {
+      if (moeRotationBlock && moeRotationBlock != block->rotation.block)
+        throw WeightStoreError("a target's MoE blocks take different rotation blocks");
+      moeRotationBlock = block->rotation.block;
+    }
     for (const ops::BlockExpertProjection *projection : {&block->gate, &block->up, &block->down})
       if (!projection->routed.isFloat())
         weights[projection->routed.formatId] += uint64_t{projection->routed.outputSize} * projection->routed.inputSize;

@@ -11,7 +11,11 @@ runtime/metal/kernels/common/quant_formats.h and the GGUF kernels built on it
 follow ggml's Metal dequantize.h and mul_mm.metal. They are compiled into
 splash.metallib. The tests' CPU reference,
 dev/tests/engine/GgufFormatReference.hpp, decodes the same blocks as ggml's
-dequantize_row_* (ggml/src/ggml-quants.c).
+dequantize_row_* (ggml/src/ggml-quants.c). The 2048-point "Hyb" codebook
+kTqLut in runtime/metal/abi/QuantTables.h and the TQ2_T, TQK6 and TQK7 block
+layouts in runtime/metal/abi/QuantFormat.h follow ggml-common-tq.h of
+Agention's llama.cpp fork (073bc9e68, github.com/agentionai/llama.cpp), which
+keeps ggml's MIT license below.
 
 MIT License
 

@@ -424,6 +424,9 @@ TENSOR_TYPES = {
     40: "NVFP4",
     42: "Q2_0",
     142: "PQ2_0",
+    144: "TQ2_T",
+    145: "TQK6",
+    146: "TQK7",
 }
 QUANTIZED_TYPES = {
     "Q2_K",
@@ -449,6 +452,9 @@ QUANTIZED_TYPES = {
     "NVFP4",
     "Q2_0",
     "PQ2_0",
+    "TQ2_T",
+    "TQK6",
+    "TQK7",
 }
 FORMAT_TYPES = QUANTIZED_TYPES | {"BF16", "F16"}
 # Splash loads quantized GGUFs: BF16 and F16 are formats for the tensors a
@@ -471,7 +477,7 @@ EMBEDDING_TYPES = FORMAT_TYPES
 F32 = {"F32"}
 NORM_TYPES = {"F32", "BF16", "F16"}
 FLOAT_PROJECTION_TYPES = {"F32", "BF16"}
-FLOAT_ROW_TYPES = {"F32", "BF16", "Q8_0"}
+FLOAT_ROW_TYPES = FORMAT_TYPES | {"F32"}
 MODEL_TENSORS = {
     "token_embd.weight": EMBEDDING_TYPES,
     "output_norm.weight": NORM_TYPES,
@@ -688,26 +694,28 @@ def merged_split(headers):
     return first
 
 
-# Prism ML's input rotation of a dense target: the parameters and keys
-# GgufFile::readRotation (runtime/model/GgufFile.cpp) accepts;
-# gguf::planImages (runtime/model/GgufImage.cpp, requireRotation) refuses MoE
-# targets and ungrouped GDN value heads and checks the names.
+# Prism ML's and Gyro's input rotation: the parameters and keys
+# GgufFile::readRotation (runtime/model/GgufFile.cpp) accepts. A dense target's
+# (Prism's, qwen35) is of 1024-input blocks with its GDN value heads grouped,
+# and its weight names are what gguf::planImages (runtime/model/GgufImage.cpp,
+# requireRotation) checks against the repacked tensors; a sparse one's (Gyro's,
+# qwen4exp) is of 128-input blocks over its routed expert tensors alone.
 ROTATION_PREFIX = "prism.hadamard."
 ROTATION = {
     "version": 1,
-    "block_size": 1024,
     "transform": "normalized-sylvester-walsh-hadamard",
     "axis": "input-last-dimension",
     "sign_mode": "explicit",
-    "gdn_v_grouped": True,
 }
+ROTATION_BLOCKS = {128, 1024}
 ROTATION_ARRAYS = {"weight_names", "inverse_weight_names", "sign_widths", "sign_values"}
 
 
 def require_rotation(metadata):
-    """Reject a rotated target (Prism ML's GGUFs) whose rotation the native
-    loader does not run: a MoE target, other rotation parameters or a
-    rotation key it does not know."""
+    """Reject a rotated target (Prism ML's or Gyro's GGUFs) whose rotation the
+    native loader does not run: another architecture, block size or rotation
+    parameter, a rotation key it does not know, or a sparse target's rotation
+    that does not name its routed experts alone."""
     keys = {
         key[len(ROTATION_PREFIX) :]
         for key in metadata.values
@@ -715,18 +723,40 @@ def require_rotation(metadata):
     }
     if not keys:
         return
+    architecture = text_architecture(metadata)
+    values = metadata.values
+    block = values.get(ROTATION_PREFIX + "block_size")
+    grouped = values.get(ROTATION_PREFIX + "gdn_v_grouped")
     if (
-        text_architecture(metadata) != "qwen35"
-        or not keys <= ROTATION.keys() | ROTATION_ARRAYS
+        architecture not in ("qwen35", "qwen4exp")
+        or not keys
+        <= ROTATION.keys() | ROTATION_ARRAYS | {"block_size", "gdn_v_grouped"}
         or any(
-            type(metadata.values.get(ROTATION_PREFIX + key)) is not type(value)
-            or metadata.values.get(ROTATION_PREFIX + key) != value
+            type(values.get(ROTATION_PREFIX + key)) is not type(value)
+            or values.get(ROTATION_PREFIX + key) != value
             for key, value in ROTATION.items()
         )
+        or type(block) is not int
+        or block not in ROTATION_BLOCKS
+        or (architecture == "qwen35" and grouped is not True)
+        or (architecture == "qwen4exp" and grouped is not None)
     ):
         raise ModelError(
             "this GGUF's input rotation is not one Splash runs; choose another variant"
         )
+    if architecture == "qwen4exp":
+        names = values.get(ROTATION_PREFIX + "weight_names")
+        if values.get(ROTATION_PREFIX + "inverse_weight_names") is not None or not isinstance(names, list):
+            raise ModelError(
+                "this GGUF's input rotation does not name its routed experts alone; "
+                "choose another variant"
+            )
+        experts = {name for name in metadata.tensors if name.endswith("_exps.weight")}
+        if set(names) != experts:
+            raise ModelError(
+                "this GGUF's input rotation does not name its routed experts alone; "
+                "choose another variant"
+            )
 
 
 def require_loadable(metadata):

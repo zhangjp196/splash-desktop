@@ -51,6 +51,9 @@ GGUF_EMBEDDING_FORMAT(nvfp4, GgufEmbedNVFP4)
 GGUF_EMBEDDING_FORMAT(fp8, GgufEmbedFP8)
 GGUF_EMBEDDING_FORMAT(bf16, GgufEmbedBF16)
 GGUF_EMBEDDING_FORMAT(f16, GgufEmbedF16)
+GGUF_EMBEDDING_FORMAT(tq2t, GgufEmbedTQ2T)
+GGUF_EMBEDDING_FORMAT(tqk6, GgufEmbedTQK6)
+GGUF_EMBEDDING_FORMAT(tqk7, GgufEmbedTQK7)
 #define GGUF_EMBEDDING_AFFINE(B)                                                                \
   GGUF_EMBEDDING_FORMAT(af##B##g32, GgufEmbedAF##B##G32)                                        \
   GGUF_EMBEDDING_FORMAT(af##B##g64, GgufEmbedAF##B##G64)                                        \

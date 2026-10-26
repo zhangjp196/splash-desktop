@@ -130,7 +130,10 @@ up to `UD-Q8_K_XL`, whose BF16 tensors load too. Whole-BF16 and F16 models are
 not supported: the installer refuses a GGUF whose projections and experts are
 all BF16, F16 or F32.
 [Prism ML Ternary Bonsai 2](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf)
-is also supported in PQ2_0 (7.2 GB), including vision. Pass `OWNER/REPO:VARIANT`
+is also supported in PQ2_0 (7.2 GB), including vision. Agention's Gyro GGUFs
+load their routed experts in the TQ2_T, TQK6 and TQK7 trellis formats (2.1,
+1.6 and 1.9 bits per weight), rotated in 128-input blocks, unquantized
+router and shared experts included. Pass `OWNER/REPO:VARIANT`
 to `--model`, as in the quick start. MLX targets can be affine 2–8-bit,
 including mixed precision, mxfp4 or nvfp4. NVIDIA's and unsloth's NVFP4
 checkpoints and NVFP4 GGUFs also load. Smaller variants run on

@@ -117,17 +117,28 @@ static_assert(sizeof(GgufEmbedParams) == 12, "GGUF embedding parameters are 12 b
 // gguf_embed_f32_<name>): every format.
 inline constexpr bool gguf_embedding_format(uint32_t format) { return format < GGUF_FMT_COUNT; }
 
-// Prism ML's input rotation (kernels/shared/gguf_rotation.metal): weights
-// stored for rotated inputs multiply H (D x), H the normalized Walsh-Hadamard
-// transform of every block of GGUF_ROTATION_BLOCK inputs and D their int8
-// signs (+1 or -1); an embedding row stored rotated gathers as D (H r).
-// One threadgroup of GGUF_ROTATION_THREADS threads per block and row.
+// Prism ML's and Gyro's input rotation (kernels/shared/gguf_rotation.metal):
+// weights stored for rotated inputs multiply H (D x), H the normalized
+// Walsh-Hadamard transform of every block of `block` inputs and D their int8
+// signs (+1 or -1); an embedding row stored rotated gathers as D (H r). A
+// block is a power of two of GGUF_ROTATION_MIN_BLOCK..GGUF_ROTATION_BLOCK
+// inputs (Prism's 1024, Gyro's 128), and one threadgroup of block / 4 threads
+// transforms a block of a row.
 #define GGUF_ROTATION_BLOCK 1024u
-#define GGUF_ROTATION_THREADS 256u
+#define GGUF_ROTATION_MIN_BLOCK 128u
 struct GgufRotationParams {
-  uint32_t width; // a multiple of GGUF_ROTATION_BLOCK
+  uint32_t width;     // a multiple of block
+  uint32_t block;     // inputs per transform: a power of two, 128..GGUF_ROTATION_BLOCK
+  float scale;        // 1 / sqrt(block), which normalizes the transform
+  uint32_t tile_rows; // the rows of a MoE tile (kernels/shared/moe.metal)
 };
-static_assert(sizeof(GgufRotationParams) == 4, "GGUF rotation parameters are 4 bytes on both sides");
+static_assert(sizeof(GgufRotationParams) == 16, "GGUF rotation parameters are 16 bytes on both sides");
+// A rotated token table's gather: the gather's parameters and its rotation's.
+struct GgufEmbedRotationParams {
+  GgufEmbedParams embed;
+  GgufRotationParams rotation;
+};
+static_assert(sizeof(GgufEmbedRotationParams) == 28, "rotated embedding parameters are 28 bytes on both sides");
 
 // fp32 projections of GGUF float tensors (kernels/shared/gguf_float.metal),
 // up to GGUF_FLOAT_PROJECTIONS of one input in one dispatch, their column

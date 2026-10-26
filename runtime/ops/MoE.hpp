@@ -26,6 +26,12 @@ struct MoeShape final {
   // Whether the register tile takes every routed and shared expert weight
   // (quant_register_tensor).
   bool registerFormats = true;
+  // The block of the routed experts' stored rotation (BlockMoeWeights's
+  // rotation): 0 when they were not stored for rotated inputs, else the
+  // gather reads H (D x) of the block's input for its routed routes and the
+  // down pass H (D e) of the routed tiles' intermediate.
+  uint32_t rotationBlock = 0;
+  [[nodiscard]] constexpr bool rotated() const noexcept { return rotationBlock != 0; }
 
   [[nodiscard]] constexpr bool valid() const noexcept {
     // Experts the routing kernels' slots hold, of an intermediate width
@@ -80,6 +86,12 @@ struct BlockMoeWeights final {
   uint32_t slots = 0;
   const MoeExpertStream *stream = nullptr;
   uint32_t streamBlock = 0;
+  // The routed experts' weights stored for rotated inputs (Gyro): their gate
+  // and up multiply H (D x) of the block's input, their down H (D e) of the
+  // intermediate (MoeShape::rotationBlock); the router and the shared experts
+  // read both as they are.
+  InputRotation rotation;
+  InputRotation intermediateRotation;
 };
 
 // One MoE step of a block a load serves: its plan, and its buffers once the
@@ -125,6 +137,8 @@ struct MoeWorkspace final {
   uint64_t expertOutputBytes = 0;
   // The row sums of the Table16 tiles the GGUF register expert tile reads.
   uint64_t groupedSumsBytes = 0;
+  // The rows of a rotated block's input, H (D x) (MoeShape::rotated).
+  uint64_t rotatedInputBytes = 0;
   bool operator==(const MoeWorkspace &) const = default;
 };
 
@@ -147,6 +161,8 @@ struct MoeScratch final {
   metal::MetalBuffer expertOutput;
   // GGUF register plans: the row sums of the Table16 tiles in groupedInput.
   metal::MetalBuffer groupedSums;
+  // A rotated block's input rows, H (D x), which its routed routes gather.
+  metal::MetalBuffer rotatedInput;
 };
 
 // Each scratch buffer with the workspace field that sizes it, in field order.
@@ -155,7 +171,7 @@ struct MoeScratchField final {
   uint64_t MoeWorkspace::*bytes;
   const char *name;
 };
-inline constexpr std::array<MoeScratchField, 10> kMoeScratchFields{{
+inline constexpr std::array<MoeScratchField, 11> kMoeScratchFields{{
     {&MoeScratch::selectedExperts, &MoeWorkspace::selectedExpertsBytes, "MoE selected experts"},
     {&MoeScratch::routingWeights, &MoeWorkspace::routingWeightsBytes, "MoE routing weights"},
     {&MoeScratch::tileDescriptors, &MoeWorkspace::tileDescriptorsBytes, "MoE tile descriptors"},
@@ -166,6 +182,7 @@ inline constexpr std::array<MoeScratchField, 10> kMoeScratchFields{{
     {&MoeScratch::expertIntermediate, &MoeWorkspace::expertIntermediateBytes, "MoE expert intermediate"},
     {&MoeScratch::expertOutput, &MoeWorkspace::expertOutputBytes, "MoE expert output"},
     {&MoeScratch::groupedSums, &MoeWorkspace::groupedSumsBytes, "MoE grouped sums"},
+    {&MoeScratch::rotatedInput, &MoeWorkspace::rotatedInputBytes, "MoE rotated input"},
 }};
 static_assert(sizeof(MoeWorkspace) == kMoeScratchFields.size() * sizeof(uint64_t) &&
               sizeof(MoeScratch) == kMoeScratchFields.size() * sizeof(metal::MetalBuffer),

@@ -135,7 +135,7 @@ inline gguf_reference::Fmt fitting(const std::vector<gguf_reference::Fmt> &forma
                                    splash::ops::MoeGgufTile tile) {
   for (size_t j = 0; j < formats.size(); ++j) {
     const gguf_reference::Fmt g = formats[(i + j) % formats.size()];
-    if (K % quant_column_unit(kQuantFormats[g].block_elements) == 0 &&
+    if (K % quant_column_unit(kQuantFormats[g]) == 0 &&
         (tile == splash::ops::MoeGgufTile::Staged || quant_register_tensor(g, K)))
       return g;
   }

@@ -31,7 +31,8 @@ enum Fmt { Q4K = GGUF_FMT_Q4K, IQ4XS = GGUF_FMT_IQ4XS, IQ4NL = GGUF_FMT_IQ4NL, Q
            IQ2XXS = GGUF_FMT_IQ2XXS, IQ2XS = GGUF_FMT_IQ2XS, IQ2S = GGUF_FMT_IQ2S, IQ1S = GGUF_FMT_IQ1S,
            IQ1M = GGUF_FMT_IQ1M, Q40 = GGUF_FMT_Q40, Q41 = GGUF_FMT_Q41, MXFP4 = GGUF_FMT_MXFP4,
            PQ20 = GGUF_FMT_PQ20, NVFP4 = GGUF_FMT_NVFP4, FP8 = GGUF_FMT_FP8, Q50 = GGUF_FMT_Q50, Q51 = GGUF_FMT_Q51,
-           BF16 = GGUF_FMT_BF16, F16 = GGUF_FMT_F16, Q20 = GGUF_FMT_Q20, FMT_COUNT = GGUF_FMT_COUNT };
+           BF16 = GGUF_FMT_BF16, F16 = GGUF_FMT_F16, Q20 = GGUF_FMT_Q20, TQ2T = GGUF_FMT_TQ2T,
+           TQK6 = GGUF_FMT_TQK6, TQK7 = GGUF_FMT_TQK7, FMT_COUNT = GGUF_FMT_COUNT };
 inline const char *fmtName(uint32_t f) { return kQuantFormats[f].name; }
 // The format of kQuantFormats name `name`, FMT_COUNT for none.
 inline Fmt fmtNamed(const std::string &name) {
@@ -302,6 +303,8 @@ inline std::uniform_real_distribution<float> scaleRange(Fmt f) {
     case IQ2XXS: case IQ2XS: case IQ2S: return std::uniform_real_distribution<float>(0.0002f, 0.001f);
     case IQ1S: case IQ1M: return std::uniform_real_distribution<float>(0.001f, 0.008f);
     case PQ20: case Q20: return std::uniform_real_distribution<float>(0.004f, 0.03f);
+    // Trellis: the codebook's values are a few units, so d a few thousandths.
+    case TQ2T: case TQK6: case TQK7: return std::uniform_real_distribution<float>(0.002f, 0.02f);
     // Tensor scales: an NVFP4 block's scale is 1 to 60 of them, and an E4M3 value at most 448.
     case NVFP4: return std::uniform_real_distribution<float>(0.000008f, 0.00006f);
     case FP8: return std::uniform_real_distribution<float>(0.00002f, 0.00012f);
@@ -612,6 +615,49 @@ inline void groupPack(Fmt f, const uint8_t *row, uint32_t g, float vals[32], uin
       }
       memcpy(p0, qs, 4); memcpy(p1, qh, 2); return;
     }
+    case TQ2T: case TQK6: case TQK7: {
+      // Step t's 15-bit state, as tq_states.hpp takes it: TQ2_T's from the byte pair (t, t - 1), the others'
+      // from the 16-bit window at bit (31 - t)K of the block's circular 32K-bit stream.
+      const uint32_t K = f == TQ2T ? 8 : f == TQK6 ? 6 : 7, NB = 4 * K;
+      const uint8_t *qs = blk + 2;
+      uint16_t d16; memcpy(&d16, blk, 2);
+      uint64_t window = 0;
+      uint8_t carry = 0;
+      uint32_t state[8];
+      for (uint32_t c = 0; c < 8; ++c) {
+        const uint32_t t = 8 * j + c;
+        uint32_t v;
+        if (K == 8) {
+          v = ((uint32_t(qs[(t + 31) & 31]) << 8) | qs[t]) & 0x7FFF;
+          if (c == 0) carry = uint8_t(v >> 8);
+        } else {
+          const uint32_t off = (31 - t) * K, b = off >> 3;
+          if (b + 4 <= NB) {
+            v = (uint32_t(qs[b]) | uint32_t(qs[b + 1]) << 8 | uint32_t(qs[b + 2]) << 16 |
+                 uint32_t(qs[b + 3]) << 24) >> (off & 7);
+          } else {
+            const uint64_t wrap = uint64_t(qs[NB - 4]) | uint64_t(qs[NB - 3]) << 8 |
+                                  uint64_t(qs[NB - 2]) << 16 | uint64_t(qs[NB - 1]) << 24 |
+                                  uint64_t(qs[0]) << 32 | uint64_t(qs[1]) << 40 | uint64_t(qs[2]) << 48 |
+                                  uint64_t(qs[3]) << 56;
+            v = uint32_t(wrap >> (off - 8 * (NB - 4)));
+          }
+          v &= 0x7FFF;
+        }
+        state[c] = v;
+        window |= uint64_t(v) << (K * (7 - c));
+      }
+      for (uint32_t s = 0; s < 8; ++s) {
+        const uint32_t x = state[s] * 0x9e3779b1u;
+        const uint32_t point[2] = {x >> 21, (x >> 10) & 2047};
+        for (uint32_t p = 0; p < 2; ++p)
+          for (uint32_t e = 0; e < 2; ++e)
+            vals[4 * s + 2 * p + e] = h2f(uint16_t(kTqLut[point[p]] >> (16 * e))) * h2f(d16);
+      }
+      memcpy(p0, &window, 8);
+      p1[0] = carry;
+      return;
+    }
     case FMT_COUNT: break;
   }
   unknownFormat(f);
@@ -623,7 +669,8 @@ inline void metaPack(Fmt f, const uint8_t *row, uint32_t unit, uint8_t *dst) {
   switch (f) {
     // The block's leading fields.
     case Q4K: case Q5K: case IQ4XS: case IQ4NL: case Q80: case IQ3S: case IQ3XXS: case IQ2XXS: case IQ2XS: case IQ2S:
-    case IQ1S: case Q40: case Q41: case Q50: case Q51: case MXFP4: case PQ20: case Q20:
+    case IQ1S: case Q40: case Q41: case Q50: case Q51: case MXFP4: case PQ20: case Q20: case TQ2T: case TQK6:
+    case TQK7:
       memcpy(dst, blk, fi.meta_bytes); return;
     case Q6K: memcpy(dst, blk + kQ6KScales, 16); memcpy(dst + 16, blk + kQ6KD, 2); dst[18] = dst[19] = 0; return;
     case NVFP4: case FP8: memcpy(dst, blk, fi.meta_bytes); return;   // the scales and g, or g
@@ -689,7 +736,8 @@ constexpr std::pair<Fmt, const char *> kGgmlSymbols[] = {
     {IQ2S, "dequantize_row_iq2_s"},   {IQ1S, "dequantize_row_iq1_s"},     {IQ1M, "dequantize_row_iq1_m"},
     {Q40, "dequantize_row_q4_0"},     {Q41, "dequantize_row_q4_1"},       {MXFP4, "dequantize_row_mxfp4"},
     {PQ20, "dequantize_row_pq2_0"},   {Q50, "dequantize_row_q5_0"},       {Q51, "dequantize_row_q5_1"},
-    {BF16, "ggml_bf16_to_fp32_row"},  {F16, "ggml_fp16_to_fp32_row"},     {Q20, "dequantize_row_q2_0"}};
+    {BF16, "ggml_bf16_to_fp32_row"},  {F16, "ggml_fp16_to_fp32_row"},     {Q20, "dequantize_row_q2_0"},
+    {TQ2T, "dequantize_row_tq2_t"},   {TQK6, "dequantize_row_tqk6"},      {TQK7, "dequantize_row_tqk7"}};
 static_assert([] {
   uint32_t formats = 0;
   for (uint32_t f = 0; f < GGUF_FMT_COUNT; ++f) formats += !quant_loader_format(f);

@@ -526,6 +526,45 @@ template <uint F> struct FmtTwoBit {
 };
 typedef FmtTwoBit<GGUF_FMT_PQ20> FmtPQ20;
 typedef FmtTwoBit<GGUF_FMT_Q20> FmtQ20;
+// Gyro's trellis formats (TQ2_T, TQK6, TQK7; GGUF types 144, 145, 146): 128
+// weights per block, one fp16 d and 32 steps of a 15-bit state, K bits each.
+// Step t covers weights 4t..4t+3: x = state * 0x9e3779b1 (uint32), whose bits
+// 31..21 and 20..10 index two points of the 2048-point Hyb codebook (kTqLut),
+// each a pair of halves, times d. plane0 is the group's eight states as one
+// window at K bits a step (TQ2_T's state 0 overflows into plane1's byte);
+// meta: d.
+template <uint F, uint K> struct FmtTrellis {
+  QUANT_FORMAT(F, QuantFloat16, 0, 32, false);
+  typedef half Value;
+  struct Payload { ulong window; ushort carry; };
+  typedef uint4 Chunk; typedef ushort Meta;
+  static Payload load(device uchar *p0, device uchar *p1) {
+    device const uint *w = (device const uint *)p0;
+    ushort carry = 0;
+    if constexpr (K == 8) carry = *p1;
+    return {ulong(w[0]) | (ulong(w[1]) << 32), carry};
+  }
+  static Meta loadMeta(device uchar *m) { return *((device ushort *)m); }
+  // State c of the group, the state of step 8g + c.
+  static uint state(Payload w, ushort c) {
+    if constexpr (K == 8)
+      return c ? uint((w.window >> (8 * (7 - c))) & 0x7FFFu)
+               : uint(w.window >> 56) | (uint(w.carry) << 8);
+    else
+      return uint((w.window >> (K * (7 - c))) & 0x7FFFu);
+  }
+  static uint4 chunk(Payload w, ushort c) {
+    const uint x = state(w, c) * 0x9e3779b1u, y = state(w, c + 4) * 0x9e3779b1u;
+    return uint4(kTqLut[x >> 21], kTqLut[(x >> 10) & 2047], kTqLut[y >> 21],
+                 kTqLut[(y >> 10) & 2047]);
+  }
+  static Chunk loadChunk(device uchar *p0, device uchar *p1, ushort c) { return chunk(load(p0, p1), c); }
+  static uint4 values(Chunk q) { return q; }
+  static QuantCoef coef(Meta d, ushort) { return {float2(float(as_type<half>(d)))}; }
+};
+typedef FmtTrellis<GGUF_FMT_TQ2T, 8> FmtTQ2T;
+typedef FmtTrellis<GGUF_FMT_TQK6, 6> FmtTQK6;
+typedef FmtTrellis<GGUF_FMT_TQK7, 7> FmtTQK7;
 
 // The GGUF format whose planes hold Bits-bit linear codes, which an MLX affine format keeps as it does
 // (metal/abi/QuantFormat.h).
@@ -577,7 +616,8 @@ QUANT_AFFINE_GROUPS(8)
   X(FmtAF5G64, af5g64) X(FmtAF5G128, af5g128) X(FmtAF6G32, af6g32) X(FmtAF6G64, af6g64) X(FmtAF6G128, af6g128)    \
   X(FmtAF8G32, af8g32) X(FmtAF8G64, af8g64) X(FmtAF8G128, af8g128) X(FmtNVFP4, nvfp4) X(FmtFP8, fp8)            \
   X(FmtQ50, q50) X(FmtQ51, q51) X(FmtBF16, bf16) X(FmtQ20, q20)
-#define QUANT_FORMATS(X) QUANT_REGISTER_FORMATS(X) X(FmtF16, f16)
+#define QUANT_FORMATS(X)                                                                                           \
+  QUANT_REGISTER_FORMATS(X) X(FmtF16, f16) X(FmtTQ2T, tq2t) X(FmtTQK6, tqk6) X(FmtTQK7, tqk7)
 
 // Runs body(F()) with the format type of run-time format id `format` (GGUF_FMT_*), for kernels whose tiles pick
 // their tensor, and so its format, at run time: any format (quant_format_switch), or one of the register tile's

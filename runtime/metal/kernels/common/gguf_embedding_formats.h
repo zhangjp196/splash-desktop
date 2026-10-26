@@ -326,6 +326,37 @@ struct GgufEmbedF16 {
     return float(gguf_half(block, 0));
   }
 };
+// Gyro's trellis blocks (TQ2_T, TQK6, TQK7): half d | uchar qs[4K], 32 steps of a 15-bit state. Step t covers
+// weights 4t..4t+3 from the state's hash's two codebook points (kTqLut).
+template <uint K> struct GgufEmbedTrellis {
+  enum : uint { Weights = 128, Bytes = 2 + 4 * K, D = 0, Qs = 2 };
+  __attribute__((always_inline)) static float decode(device const uchar *block, uint dim) {
+#pragma clang fp reassociate(off)
+    const uint l = dim % Weights, t = l / 4;
+    device const uchar *qs = block + Qs;
+    uint state;
+    if (K == 8) {
+      state = ((uint(qs[(t + 31) & 31]) << 8) | uint(qs[t])) & 0x7FFF;
+    } else {
+      constexpr uint NB = 4 * K;
+      const uint off = (31 - t) * K, b = off >> 3;
+      uint v;
+      if (b + 4 <= NB) {
+        v = gguf_u32(qs, b) >> (off & 7);
+      } else {   // the block's last four bytes, then its first four: tq_states' wrap
+        const ulong wrap = ulong(gguf_u32(qs, NB - 4)) | (ulong(gguf_u32(qs, 0)) << 32);
+        v = uint(wrap >> (off - 8 * (NB - 4)));
+      }
+      state = v & 0x7FFF;
+    }
+    const uint x = state * 0x9e3779b1u, point = (l & 2) ? ((x >> 10) & 2047) : (x >> 21);
+    const uint pair = kTqLut[point];
+    return float(as_type<half>(ushort((pair >> (16 * (l & 1))) & 0xFFFF))) * float(gguf_half(block, D));
+  }
+};
+using GgufEmbedTQ2T = GgufEmbedTrellis<8>;
+using GgufEmbedTQK6 = GgufEmbedTrellis<6>;
+using GgufEmbedTQK7 = GgufEmbedTrellis<7>;
 #define GGUF_EMBED_AFFINE(B)                                                                                       \
   typedef GgufEmbedAffine<B, 32> GgufEmbedAF##B##G32; typedef GgufEmbedAffine<B, 64> GgufEmbedAF##B##G64;        \
   typedef GgufEmbedAffine<B, 128> GgufEmbedAF##B##G128;

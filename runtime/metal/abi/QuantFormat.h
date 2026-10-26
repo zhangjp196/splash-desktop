@@ -36,6 +36,10 @@
 //     span four or eight elements and so several chunks: its block_*'s fields
 //     for the group's 32 elements, split between the planes as its row below
 //     states. kernels/common/quant_formats.h decodes a chunk from them.
+//   The trellis formats (Gyro's TQ2_T, TQK6 and TQK7) keep in plane0 one
+//     64-bit little-endian window of the group's eight 15-bit states, state c
+//     of steps 8g + c at bit K(7 - c): TQ2_T's state 0 runs seven bits past
+//     bit 63, which are plane1's one byte. Their meta is the block's fp16 d.
 //
 // The MLX affine formats (mlx.core.quantize, mode "affine") hold b-bit codes
 // q, b of 2, 3, 4, 5, 6 or 8, in groups of 32, 64 or 128 elements with a
@@ -121,7 +125,11 @@
 #define GGUF_FMT_BF16 41u
 #define GGUF_FMT_F16 42u
 #define GGUF_FMT_Q20 43u
-#define GGUF_FMT_COUNT 44u
+// Gyro's trellis expert formats: TQ2_T, TQK6 and TQK7.
+#define GGUF_FMT_TQ2T 44u
+#define GGUF_FMT_TQK6 45u
+#define GGUF_FMT_TQK7 46u
+#define GGUF_FMT_COUNT 47u
 
 // The tensor type an image descriptor names for an MLX affine format: no GGUF
 // type is of this form.
@@ -195,6 +203,12 @@ QUANT_CONSTANT QuantFormat kQuantFormats[GGUF_FMT_COUNT] = {
     {30, 256, 512, 64, 0, 4, 8, "bf16"},
     {1, 256, 512, 64, 0, 4, 8, "f16"},
     {42, 64, 18, 8, 0, 2, 2, "q20"},      // GGUF's block_q2_0, one d per 64 elements; meta: d
+    // Gyro's trellis formats (kernels/common/quant_formats.h): 128 weights of one fp16 d and 32
+    // trellis steps, K bits each. plane0: the group's eight 15-bit states as one window at K bits
+    // a step, TQ2_T's state 0 overflowing into plane1's byte; meta: d.
+    {144, 128, 34, 8, 1, 2, 4, "tq2t"},
+    {145, 128, 26, 8, 0, 2, 4, "tqk6"},
+    {146, 128, 30, 8, 0, 2, 4, "tqk7"},
 };
 
 // The format that stores a GGUF tensor type (or a loader's);
@@ -215,10 +229,16 @@ inline constexpr uint32_t quant_affine_bits(uint32_t format) { return (kQuantFor
 inline constexpr bool quant_loader_format(uint32_t format) {
   return quant_affine_format(format) || format == GGUF_FMT_NVFP4 || format == GGUF_FMT_FP8;
 }
+// Whether a GGUF tensor type is one of Gyro's trellis formats (TQ2_T, TQK6, TQK7).
+inline constexpr bool quant_trellis_type(uint32_t ggml_type) { return ggml_type >= 144 && ggml_type <= 146; }
 // Whether a format's values enter a bf16 matrix multiply exactly, as the
 // Apple9 register tile takes them (kernels/decode/linear_gguf_sgmatrix.metal):
-// every format's but F16's, whose 11-bit significands bf16 does not hold.
-inline constexpr bool quant_register_format(uint32_t format) { return format != GGUF_FMT_F16; }
+// every format's but F16's, whose 11-bit significands bf16 does not hold, and
+// the trellis formats', whose codebook values are fp16.
+inline constexpr bool quant_register_format(uint32_t format) {
+  return format != GGUF_FMT_F16 && format != GGUF_FMT_TQ2T && format != GGUF_FMT_TQK6 &&
+         format != GGUF_FMT_TQK7;
+}
 // The MLX affine format of b bits in groups of g; GGUF_FMT_COUNT when none
 // (QUANT_AFFINE_TYPE holds b and g in a byte each).
 inline constexpr uint32_t quant_affine_format_of(uint32_t bits, uint32_t group) {
@@ -236,9 +256,10 @@ inline constexpr uint32_t quant_slot(uint32_t e) { return 8 * ((e >> 2) & 3) + 4
 // block of `block_elements` elements: one 64-input span of the activation
 // tables for a block that fits in one (32 or 64 elements: Q2_0's 64 and the
 // MLX affine formats' groups of 64 too), else a whole 256-input superblock
-// (PQ2_0's 128-input blocks and the groups of 128 too).
-inline constexpr uint32_t quant_column_unit(uint32_t block_elements) {
-  return block_elements > 64 ? 256 : 64;
+// (PQ2_0's 128-input blocks and the groups of 128 too), but the trellis
+// formats' 128-weight blocks, which are their meta unit: 128.
+inline constexpr uint32_t quant_column_unit(QuantFormat format) {
+  return quant_trellis_type(format.ggml_type) ? 128 : format.block_elements > 64 ? 256 : 64;
 }
 
 // Whether the Apple9 register tile (kernels/decode/linear_gguf_sgmatrix.metal)

@@ -55,9 +55,9 @@ bool normType(uint32_t type) { return floatType(type) || float16Type(type); }
 // A tensor the float projection runs in fp32 (floatTensor): F32, or BF16 as
 // stored.
 bool floatProjectionType(uint32_t type) { return floatType(type) || type == ggml::kBF16; }
-// A tensor of F32 rows (floatRows): F32, or BF16 or Q8_0, which widen or
-// decode to it.
-bool floatRowType(uint32_t type) { return floatProjectionType(type) || type == ggml::kQ8_0; }
+// A tensor of F32 rows (floatRows): F32, or BF16 or a quantized format, which
+// widen or decode to it (a Q6_K hyper-connection injection, some Gyro GGUFs').
+bool floatRowType(uint32_t type) { return floatProjectionType(type) || gguf_format_of(type) != GGUF_FMT_COUNT; }
 
 // The header type of the image of a table a family adds (planImages), beside
 // the layers' 0 and 1 (GDN and full attention) and the head's 2.
@@ -556,10 +556,23 @@ std::vector<Image> familyImages(const GgufFile &file, const QwenTargetDimensions
 // H (D x) (ops::InputRotation) while float segments (alpha/beta as one float
 // tensor) read x as it is, and the token table, which the rotated gather
 // decodes from PQ2_0 rows, with the GDN value heads of the rotated inputs
-// grouped.
+// grouped; a sparse target's, its routed expert tensors alone, whose gate and
+// up read H (D x) of the block's input and whose down H (D e) of the
+// intermediate (ops::BlockMoeWeights), while its router, shared experts and
+// token table read both as they are.
 void requireRotation(const GgufFile &file, const QwenTargetDimensions &g, const std::vector<Image> &images) {
   const GgufRotation &rotation = *file.rotation();
-  if (g.ffnKind == QwenFfnKind::SparseMoe) throw GgufError("rotated weights are supported for dense targets only");
+  if (g.ffnKind == QwenFfnKind::SparseMoe) {
+    std::set<std::string, std::less<>> experts;
+    for (uint32_t layer = 0; layer < g.layers; ++layer)
+      for (const char *name : {"ffn_gate_up_exps.weight", "ffn_gate_exps.weight", "ffn_up_exps.weight",
+                               "ffn_down_exps.weight"})
+        if (file.find(prefix(layer) + name)) experts.insert(prefix(layer) + name);
+    if (rotation.weights != experts)
+      throw GgufError("the rotation must name every routed expert tensor of the target and nothing else");
+    if (!rotation.tables.empty()) throw GgufError("a sparse target's rotation names no token table");
+    return;
+  }
   if (!rotation.valueHeadsGrouped)
     throw GgufError("rotated GDN inputs must keep their value heads grouped (prism.hadamard.gdn_v_grouped)");
   std::set<std::string, std::less<>> repacked;

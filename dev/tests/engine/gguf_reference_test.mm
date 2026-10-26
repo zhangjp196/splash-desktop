@@ -126,7 +126,11 @@ int main(int argc, char **argv) {
     }
     const Goldens hashes = goldens(argv[1], @"gguf_dequantization");
     for (uint32_t f = 0; f < GGUF_FMT_COUNT; ++f)
-      if (!quant_loader_format(f)) checkFormat(ggml, hashes, Fmt(f));
+      // The trellis formats are Agention's alone, which no upstream GGML hash
+      // pins: their states are tq_states.hpp's, and gguf-dequant holds the
+      // kernels to this reference.
+      if (!quant_loader_format(f) && !quant_trellis_type(kQuantFormats[f].ggml_type))
+        checkFormat(ggml, hashes, Fmt(f));
     checkBlockNvfp4(ggml, hashes);
     checkQ8_0Quantization(ggml, goldens(argv[1], @"gguf_quantization"));
     checkMlx(argv[2]);

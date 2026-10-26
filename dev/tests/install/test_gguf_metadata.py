@@ -609,23 +609,31 @@ class GgufMetadataTests(unittest.TestCase):
         )
 
     def test_rotation_screen_is_the_native_loaders(self):
-        # ROTATION and ROTATION_ARRAYS must be what GgufFile::readRotation
-        # (runtime/model/GgufFile.cpp) accepts: the keys it knows, its fixed
-        # parameters and GGUF_ROTATION_BLOCK (runtime/metal/abi/Gguf.h), and
-        # the grouped GDN value heads the planner requires.
+        # ROTATION, ROTATION_BLOCKS and ROTATION_ARRAYS must be what
+        # GgufFile::readRotation (runtime/model/GgufFile.cpp) accepts: the keys
+        # it knows, its fixed parameters, and the block sizes its kernels run
+        # (powers of two from GGUF_ROTATION_MIN_BLOCK to GGUF_ROTATION_BLOCK,
+        # runtime/metal/abi/Gguf.h). A dense target's rotation keeps its GDN
+        # value heads grouped, which the planner requires; a sparse one's has
+        # no such key and names its routed experts alone.
         runtime = Path(__file__).resolve().parents[3] / "runtime"
         source = (runtime / "model/GgufFile.cpp").read_text()
         known = source.split("kKnown[] = {", 1)[1].split("};", 1)[0]
+        keys = set(re.findall(r'"(\w+)"', known))
         self.assertEqual(
-            set(re.findall(r'"(\w+)"', known)),
+            keys - {"block_size", "gdn_v_grouped"},
             gguf.ROTATION.keys() | gguf.ROTATION_ARRAYS,
         )
+        self.assertLessEqual({"block_size", "gdn_v_grouped"}, keys)
         fixed = dict(re.findall(r'stringValue\(key\("(\w+)"\)\) != "([^"]+)"', source))
         fixed["version"] = int(re.search(r'key\("version"\)\) != (\d+)', source)[1])
+        self.assertEqual(fixed, gguf.ROTATION)
         header = (runtime / "metal/abi/Gguf.h").read_text()
-        block = re.search(r"#define GGUF_ROTATION_BLOCK (\d+)u", header)[1]
-        fixed["block_size"] = int(block)
-        self.assertEqual(fixed | {"gdn_v_grouped": True}, gguf.ROTATION)
+        low = int(re.search(r"#define GGUF_ROTATION_MIN_BLOCK (\d+)u", header)[1])
+        high = int(re.search(r"#define GGUF_ROTATION_BLOCK (\d+)u", header)[1])
+        powers = {1 << shift for shift in range(low.bit_length() - 1, high.bit_length())}
+        self.assertLessEqual(gguf.ROTATION_BLOCKS, powers)
+        self.assertLessEqual({low, high}, gguf.ROTATION_BLOCKS)
 
     def test_flash_next_arrays_are_screened_by_the_native_layout(self):
         # qwen4exp's QSA block and PLE layer must be Qwen4ExpLayout's

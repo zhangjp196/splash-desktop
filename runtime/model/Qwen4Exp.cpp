@@ -3,8 +3,11 @@
 #include "model/GgufTarget.hpp"
 #include "model/QwenTargetLoader.hpp"
 #include "model/SparseRowStore.hpp"
+#include "model/WeightStore.hpp"
 
 #include <cmath>
+#include <cstring>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -98,12 +101,46 @@ Qwen4PleHash readPleHash(const GgufFile &file, const Qwen4ExpLayout &layout) {
   return hash;
 }
 
+// Attaches a GGUF's input rotation to a sparse target's routed experts
+// (prism.hadamard.*, which gguf::planImages checked names them alone): their
+// gate and up multiply H (D x) of the block's input and their down H (D e) of
+// the intermediate, one signs buffer per input width. The router and the
+// shared experts read both as they are, and the token table is not rotated.
+// The manifest fingerprint covers the signs.
+void rotateMoeInputs(metal::MetalBackend &backend, Qwen4ExpWeights &weights, const GgufRotation &rotation) {
+  const uint64_t allocationBaseline = backend.memoryStats().allocatedBytes;
+  std::map<uint32_t, metal::MetalBuffer> signs;
+  std::string identity = weights.manifestFingerprintSha256 + " expert input rotation";
+  for (const auto &[width, values] : rotation.signs) {
+    metal::MetalBuffer buffer = backend.allocateBuffer(width, metal::BufferStorage::Shared, "rotation-signs");
+    std::memcpy(buffer.contents(), values.data(), width);
+    identity += " " + std::to_string(width) + ":" +
+                weightDigest(std::span(reinterpret_cast<const uint8_t *>(values.data()), values.size()));
+    signs.emplace(width, std::move(buffer));
+  }
+  const auto rotationOf = [&](uint32_t width) {
+    const auto found = signs.find(width);
+    if (found == signs.end())
+      throw WeightStoreError("the rotation has no signs of width " + std::to_string(width));
+    ops::InputRotation result;
+    result.signs = found->second;
+    result.block = rotation.block;
+    return result;
+  };
+  for (auto &layer : weights.layers) {
+    layer.ffn.rotation = rotationOf(weights.layout.hiddenSize);
+    layer.ffn.intermediateRotation = rotationOf(weights.layout.expertIntermediateSize);
+  }
+  weights.manifestFingerprintSha256 = weightDigest(identity);
+  weights.actualAllocatedBytes += metal::allocationDelta(allocationBaseline, backend.memoryStats().allocatedBytes);
+}
+
 } // namespace
 
 Qwen4ExpWeights loadQwen4ExpWeights(metal::MetalBackend &backend, Qwen4ExpLayout layout,
                                     const QwenTargetFiles &files) {
   requireQwen4Layout(layout);
-  return loadQwenTarget<Qwen4ExpWeights>(
+  Qwen4ExpWeights weights = loadQwenTarget<Qwen4ExpWeights>(
       backend, layout, files, [&](GgufTargetLoader &gguf, const BlockTargetFormat &format, const MoeExperts &experts) {
         Qwen4ExpWeights result;
         result.layout = layout;
@@ -163,6 +200,10 @@ Qwen4ExpWeights loadQwen4ExpWeights(metal::MetalBackend &backend, Qwen4ExpLayout
         }
         return result;
       });
+  if (const auto *gguf = std::get_if<std::reference_wrapper<GgufTargetLoader>>(&files))
+    if (const std::optional<GgufRotation> &rotation = gguf->get().rotation())
+      rotateMoeInputs(backend, weights, *rotation);
+  return weights;
 }
 
 } // namespace splash::model

@@ -1,8 +1,10 @@
 #pragma once
 
 #include "metal/MetalBackend.hpp"
+#include "metal/abi/Gguf.h"
 #include "metal/abi/QuantFormat.h"
 
+#include <cmath>
 #include <compare>
 #include <cstdint>
 #include <stdexcept>
@@ -39,8 +41,16 @@ struct ProjectionShape final {
 // per input.
 struct InputRotation final {
   metal::MetalBuffer signs;
+  // The transform's block of inputs (metal/abi/Gguf.h): Prism's 1024, Gyro's
+  // 128.
+  uint32_t block = GGUF_ROTATION_BLOCK;
   [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(signs); }
 };
+// 1 / sqrt(block), the transform's normalizing scale, which gguf_rotate
+// multiplies its fp32 butterflies by.
+[[nodiscard]] inline float rotationScale(uint32_t block) noexcept {
+  return static_cast<float>(1.0 / std::sqrt(double(block)));
+}
 
 // The element type a projection writes: bf16, or fp32 for the vocabulary
 // head's logits and a float segment's router scores.

@@ -1867,12 +1867,13 @@ and lists every unsupported tensor in one error:
 
 - linears and experts: Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0, Q4_0, Q4_1,
   Q5_0, Q5_1, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS,
-  IQ4_NL, MXFP4, NVFP4, PQ2_0, Q2_0, BF16 or F16;
+  IQ4_NL, MXFP4, NVFP4, PQ2_0, Q2_0, TQ2_T, TQK6, TQK7, BF16 or F16;
 - token embeddings: any of the linears' formats;
 - norms: F32, BF16 or F16, loaded as the F32 values they hold;
 - the MoE router: F32 or BF16, which the float projection runs as stored;
-- the shared-expert scalar gate: F32, BF16 or Q8_0, loaded as the F32 values
-  it holds;
+- the shared-expert scalar gate and the hyper-connection injection weights:
+  F32, BF16 or any quantized format, loaded as the F32 values they hold (a
+  quantized one decoded on the GPU by its format's gather);
 - the GDN convolution, decay and time-step bias: F32;
 - GDN alpha and beta: each any of the linears' formats or F32. Two of one
   quantized type other than BF16 and F16 load as one segment of the GDN input
@@ -1955,11 +1956,47 @@ Prism ML's GGUFs, such as `prism-ml/Ternary-Bonsai-2-27B-gguf:PQ2_0`, store
 every projection for rotated inputs: the `prism.hadamard.*` metadata names the
 tensors whose weights multiply H (D x), H the normalized Walsh-Hadamard
 transform of each block of 1024 inputs and D an explicit sign per input, and the
-token table, whose rows are stored as H (D e). The engine runs that one form, on
-dense targets whose rotation names exactly the tensors the planner repacks
+token table, whose rows are stored as H (D e). The engine runs that one form,
+on dense targets whose rotation names exactly the tensors the planner repacks
 (every quantized projection and the head, and alpha/beta when quantized), a
 PQ2_0 token table, and GDN value heads in grouped order (the installer screens
-the parameters, `GgufFile` and the planner check the rest).
+the parameters, `GgufFile` and the planner check the rest). Gyro's sparse
+targets declare 128-input blocks over their routed expert tensors alone
+([TQ2_T, TQK6 and TQK7](#tq2_t-tqk6-and-tqk7)), which the planner checks in
+place of the dense form's names.
+
+### TQ2_T, TQK6 and TQK7
+
+TQ2_T, TQK6 and TQK7 are Agention's trellis expert formats, GGUF types 144,
+145 and 146 (`block_tq2_t`, `block_tqk6` and `block_tqk7` of its llama.cpp
+fork's `ggml-common-tq.h`, which averyjohnkucan-arch/StrataUnleashed keeps):
+128 weights per block, one half d and 32 trellis steps of K bits each (K = 8, 6
+and 7). A step t covers weights 4t..4t+3 from two points of a 2048-point
+codebook of fp16 pairs: the step's 15-bit state s hashed as x = s * 0x9e3779b1
+in uint32 picks x >> 21 and (x >> 10) & 2047, and the weights are those points'
+halves times d. TQ2_T's state is byte-aligned, the bytes t and t - 1 of its 32;
+the others' is the 16-bit window at bit (31 - t)K of the block's circular
+32K-bit string, LSB first. The planes keep a group's eight states as one
+64-bit window at K bits a step, TQ2_T's state 0 overflowing into plane1's one
+byte, and the meta unit is the block's d: 2.125, 1.625 and 1.875 bits per
+weight. A thread decodes a group of 32 to half from the 2048 packed codebook
+pairs (`kTqLut`, `kernels/common/quant_formats.h`), as it does every other
+format's; the Apple9 register tile takes none of the three, whose codebook
+values are fp16.
+
+Gyro's GGUFs (`agentionai/Gyro-S` and `Gyro-M`, `qwen4exp`) store their routed
+experts in these formats for rotated inputs, in 128-input blocks: the
+`prism.hadamard.*` metadata names exactly the routed expert tensors, whose gate
+and up multiply H (D x) of the block's input and whose down H (D e) of the
+intermediate, while the router, the shared experts and the token table read
+their inputs as they are. A plan with such a block rotates the input rows once
+into its scratch (`gguf_rotate`), gathers a routed route's rows from them and
+the shared expert's from the input itself (`moe_gather_rows_rotated`), and
+rotates the routed tiles' intermediate between the gate/up and down passes
+(`moe_rotate_intermediate`) as the grouping's grid names them; the shared
+expert's tiles follow the routed ones and keep theirs. The installer screens
+the rotation's names before any download, and the planner refuses a rotation
+that names anything else.
 
 ### Drafts
 
@@ -2653,10 +2690,13 @@ plans; both run in `make test-engine-cpu`.
 production executor and its `gguf_repack` kernel write them, bitwise against the reference,
 the alpha/beta, norm, convolution and router bytes they write and the golden images; then
 `gguf-dequant`, the staged tile's dequantizer, built with the production Metal flags, against
-the half rounding of every reference weight; `gguf-rotation`, `gguf_rotate` and the rotated
-PQ2_0 token gather bitwise against the fp32 butterflies and within one bf16 step of fp64;
+the half rounding of every reference weight (the trellis formats' states, including the windows
+that wrap, are `tq_states.hpp`'s, transcribed); `gguf-rotation`, `gguf_rotate`, the rotated
+PQ2_0 token gather and the MoE gather's and intermediate's rotations bitwise against the fp32
+butterflies and within one bf16 step of fp64, at Prism's 1024-input blocks and Gyro's 128;
 `gguf-projection`, every GGUF projection through `ops::Linear` with each tile forced, so both
-decode tiles run on every GPU, each in every format it takes (the register tile all but F16), at
+decode tiles run on every GPU, each in every format it takes (the register tile all but F16 and
+the trellis formats), at
 one to four lanes, every K split and epilogue, fused segments, every format's gate with the next
 format's up and the prefill tiles, each output inside the fp64 bound of
 `GgufFormatReference.hpp`, the one-pass gate/up bitwise against the two passes at the same K

@@ -66,3 +66,9 @@ compare them with MLX's own values in
 `dev/tests/fixtures/mlx-quantization/fixture.json`, which
 `python dev/tools/mlx_quantization_fixture.py dev/tests/fixtures/mlx-quantization/fixture.json`
 regenerates (it needs MLX: `pip install mlx`).
+
+The trellis formats (TQ2_T, TQK6 and TQK7) have no GGML hash either: they are
+Agention's fork's alone. `gguf-reference` leaves them out of
+`gguf_dequantization`, and `gguf-dequant` holds the staged tile's dequantizer
+to the CPU reference, whose states are the fork's `tq_states.hpp`, transcribed
+and checked against the reference decoder.

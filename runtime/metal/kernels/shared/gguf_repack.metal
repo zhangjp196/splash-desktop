@@ -17,6 +17,10 @@ static inline uint gguf_bit_word(thread const uchar *slots, uint bits, uint w) {
 static inline void gguf_store_bits(thread const uchar *slots, uint bits, device uchar *dst) {
   for (uint w = 0; w < bits; ++w) ((device uint *)dst)[w] = gguf_bit_word(slots, bits, w);
 }
+// Little-endian 32-bit read of four bytes, which a trellis block's window may start mid-word.
+static inline uint gguf_le32(device const uchar *p) {
+  return uint(p[0]) | uint(p[1]) << 8 | uint(p[2]) << 16 | uint(p[3]) << 24;
+}
 // 4-bit linear codes: word c holds slots 8c..8c+7, pair p at bits 4p (e0) and 16 + 4p (e1).
 static inline void gguf_store_pairs(thread const uchar *slots, device uchar *dst) {
   for (uint c = 0; c < 4; ++c) {
@@ -170,6 +174,37 @@ static inline void gguf_repack_group(device const uchar *row, uint fmt, uint G, 
     case GGUF_FMT_IQ2S: {   // {d, qs[32], signs[32], qh[8], scales[8]}: plane0 the group's qs, then its signs
       for (uint i = 0; i < 4; ++i) { out0[i] = blk[2 + 4 * j + i]; out0[4 + i] = blk[34 + 4 * j + i]; }
       out1[0] = blk[66 + j]; out1[1] = blk[74 + j];
+      if (j == 0) { meta[0] = blk[0]; meta[1] = blk[1]; }
+      break;
+    }
+    case GGUF_FMT_TQ2T: case GGUF_FMT_TQK6: case GGUF_FMT_TQK7: {
+      // The group's eight states, steps 8j..8j+7. TQ2_T's state t is
+      // qs[(t + 31) % 32] << 8 | qs[t]; the other formats' is the 16-bit window at bit (31 - t)K of
+      // the block's circular 32K-bit stream, LSB first, which wraps for the block's first steps.
+      // The states of the group become plane0's window, state c at bit K(7 - c); TQ2_T's state 0
+      // runs seven bits past it, into plane1.
+      const uint K = fmt == GGUF_FMT_TQ2T ? 8 : fmt == GGUF_FMT_TQK6 ? 6 : 7, NB = 4 * K;
+      device const uchar *qs = blk + 2;
+      const ulong wrap = ulong(gguf_le32(qs + NB - 4)) | (ulong(gguf_le32(qs)) << 32);
+      ulong window = 0;
+      uint carry = 0;
+      for (uint c = 0; c < 8; ++c) {
+        const uint t = 8 * j + c;
+        uint state;
+        if (K == 8) {
+          state = ((uint(qs[(t + 31) & 31]) << 8) | uint(qs[t])) & 0x7FFF;
+          if (c == 0) carry = state >> 8;
+        } else {
+          const uint off = (31 - t) * K, b = off >> 3;
+          const uint v = b + 4 <= NB ? gguf_le32(qs + b) >> (off & 7)
+                                     : uint(wrap >> (off - 8 * (NB - 4)));
+          state = v & 0x7FFF;
+        }
+        window |= ulong(state) << (K * (7 - c));
+      }
+      ((device uint *)out0)[0] = uint(window);
+      ((device uint *)out0)[1] = uint(window >> 32);
+      if (K == 8) *out1 = uchar(carry);
       if (j == 0) { meta[0] = blk[0]; meta[1] = blk[1]; }
       break;
     }

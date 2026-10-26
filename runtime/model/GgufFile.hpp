@@ -4,6 +4,7 @@
 // strings and small numeric arrays, the tensor table and where the tensor
 // data starts. Tensor data is never read here.
 
+#include "metal/abi/Gguf.h"
 #include "model/WeightSource.hpp"
 
 #include <array>
@@ -42,8 +43,9 @@ struct GgmlTypeTraits {
 
 // (id, name, block elements, block bytes) of the ggml types this parser can
 // size, as ggml-common.h defines them and, for 142, PrismML-Eng/llama.cpp's
-// block_pq2_0; a tensor of another type is rejected.
-inline constexpr std::array<std::pair<uint32_t, GgmlTypeTraits>, 33> kGgmlTypes{{
+// block_pq2_0, and for 144..146 Agention's llama.cpp block_tq2_t, block_tqk6
+// and block_tqk7 (ggml-common-tq.h); a tensor of another type is rejected.
+inline constexpr std::array<std::pair<uint32_t, GgmlTypeTraits>, 36> kGgmlTypes{{
     {0, {"F32", 1, 4}},         {1, {"F16", 1, 2}},         {2, {"Q4_0", 32, 18}},
     {3, {"Q4_1", 32, 20}},      {6, {"Q5_0", 32, 22}},      {7, {"Q5_1", 32, 24}},
     {8, {"Q8_0", 32, 34}},      {9, {"Q8_1", 32, 36}},      {10, {"Q2_K", 256, 84}},
@@ -55,6 +57,7 @@ inline constexpr std::array<std::pair<uint32_t, GgmlTypeTraits>, 33> kGgmlTypes{
     {26, {"I32", 1, 4}},        {27, {"I64", 1, 8}},        {28, {"F64", 1, 8}},
     {29, {"IQ1_M", 256, 56}},   {30, {"BF16", 1, 2}},       {39, {"MXFP4", 32, 17}},
     {40, {"NVFP4", 64, 36}},    {42, {"Q2_0", 64, 18}},     {142, {"PQ2_0", 128, 34}},
+    {144, {"TQ2_T", 128, 34}},  {145, {"TQK6", 128, 26}},   {146, {"TQK7", 128, 30}},
 }};
 
 // nullptr for type ids this parser does not know.
@@ -83,6 +86,9 @@ struct GgufTensor {
 // per input. The parser keeps only the one transform the kernels run and
 // checks that every named tensor has the signs of its width.
 struct GgufRotation {
+  // The number of inputs one transform covers (prism.hadamard.block_size):
+  // Prism ML's 1024, Gyro's 128.
+  uint32_t block = GGUF_ROTATION_BLOCK;
   // The GDN value dimension of the rotated inputs is in grouped head order
   // (prism.hadamard.gdn_v_grouped), not llama.cpp's tiled one.
   bool valueHeadsGrouped = false;

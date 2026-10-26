@@ -34,6 +34,13 @@ void validate(const BlockMoeWeights &weights, MoeShape shape) {
     throw std::invalid_argument("the MoE shared scalar gate is not F32");
   requireBytes(weights.sharedScalarGate.plane0, uint64_t{hidden} * sizeof(float), "MoE shared scalar gate weight");
   if (!weights.slots) throw std::invalid_argument("MoE routed experts have no slots");
+  if (shape.rotated() != static_cast<bool>(weights.rotation) ||
+      shape.rotated() != static_cast<bool>(weights.intermediateRotation))
+    throw std::invalid_argument("a MoE block's stored rotation does not match its shape");
+  if (shape.rotated() &&
+      (hidden % weights.rotation.block || intermediate % weights.intermediateRotation.block ||
+       weights.rotation.block != shape.rotationBlock || weights.intermediateRotation.block != shape.rotationBlock))
+    throw std::invalid_argument("a rotated MoE block takes whole rotation blocks");
   requireBytes(weights.slotTable, uint64_t{shape.experts} * sizeof(uint32_t), "MoE slot table");
   for (const auto &[projection, name, output, input] :
        {std::tuple{&weights.gate, "gate", intermediate, hidden}, std::tuple{&weights.up, "up", intermediate, hidden},
@@ -61,7 +68,8 @@ MoeWorkspace workspaceFor(MoeShape shape, uint32_t rows, uint32_t tileRows, MoeG
           groupedRows * sizeof(uint32_t), routes * sizeof(uint32_t),
           std::max(tableBytes(table16 ? widest : shape.hiddenSize, groupedRows), scoreBytes),
           groupedRows * shape.expertIntermediateSize * sizeof(uint16_t),
-          groupedRows * widest * sizeof(uint16_t), sumsBytes};
+          groupedRows * widest * sizeof(uint16_t), sumsBytes,
+          shape.rotated() ? uint64_t{rows} * shape.hiddenSize * sizeof(uint16_t) : 0};
 }
 
 // A routing kernel's instance for the shape's router width: past
@@ -87,7 +95,7 @@ bool oneGateUpPass(const MoePlan &plan) noexcept { return plan.configuration().g
 // on register plans, whose down pass reads the tiles a prepare dispatch
 // writes there.
 void addExperts(metal::CommandGraph &graph, const MoeScratch &scratch, const BlockMoeWeights &weights,
-                const MoePlan &plan, const MoeGroupParams &group) {
+                const MoePlan &plan, const MoeGroupParams &group, bool rotated) {
   const MoeShape shape = plan.shape();
   const uint32_t tiles = plan.maximumTiles();
   const bool table16 = plan.configuration().ggufTile == MoeGgufTile::Register;
@@ -141,6 +149,17 @@ void addExperts(metal::CommandGraph &graph, const MoeScratch &scratch, const Blo
     pass(weights.up, true, scratch.groupedInput, scratch.expertIntermediate,
          intermediate, hidden, group.gate_up_columns, gateUpGrid);
   }
+  if (rotated) {
+    // The routed tiles' intermediate, H (D e), which the down pass's routed
+    // weights multiply: the shared expert's tiles follow the routed ones and
+    // keep theirs.
+    const uint32_t block = weights.intermediateRotation.block;
+    graph.add("moe_rotate_intermediate",
+              {scratch.expertIntermediate, scratch.tileDescriptors, weights.intermediateRotation.signs},
+              GgufRotationParams{intermediate, block, rotationScale(block), plan.tileRows()},
+              {intermediate / block, tiles, plan.tileRows()},
+              metal::IndirectGrid{scratch.tileCount, offsetof(MoeTileCount, routed_grid)}, {block / 4, 1, 1});
+  }
   if (table16)
     graph.add("moe_prepare_table16",
               {scratch.expertIntermediate, scratch.tileCount,
@@ -176,7 +195,8 @@ MoeGroupParams groupParams(const MoePlan &plan) {
   const bool oneGateUp = oneGateUpPass(plan);
   return {plan.rows(), shape.expertsPerToken, plan.tileRows(), shape.experts,
           shape.expertIntermediateSize / (oneGateUp ? GGUF_STAGED_COLUMNS : GGUF_TILE_COLUMNS),
-          shape.hiddenSize / GGUF_TILE_COLUMNS, SPLASH_TARGET_VERIFY_ROWS};
+          shape.hiddenSize / GGUF_TILE_COLUMNS, SPLASH_TARGET_VERIFY_ROWS,
+          shape.rotated() ? shape.expertIntermediateSize / shape.rotationBlock : 0};
 }
 
 } // namespace
@@ -233,17 +253,38 @@ void MoE::addRouted(metal::CommandGraph &graph, const MoeBuffers &buffers,
   const uint32_t tiles = plan.maximumTiles();
   const MoeScratch &scratch = buffers.scratch;
   const MoeGatherParams gather{tileRows, shape.hiddenSize, shape.routesPerToken()};
-  if (plan.configuration().ggufTile == MoeGgufTile::Register)
-    graph.add("moe_gather_table16",
-              {buffers.input, scratch.groupedRoutes, scratch.tileCount,
-               scratch.groupedInput, scratch.groupedSums},
-              gather, {tiles, shape.hiddenSize / 256, 1});
-  else
-    graph.add("moe_gather_rows",
-              {buffers.input, scratch.groupedRoutes, scratch.tileDescriptors,
-               scratch.tileCount, scratch.groupedInput},
-              gather, {tiles, shape.hiddenSize / 256, 1});
-  addExperts(graph, scratch, weights, plan, groupParams(plan));
+  if (shape.rotated()) {
+    // H (D x) of the block's input once, whose rows the gather of every routed
+    // route reads (BlockMoeWeights::rotation).
+    const uint32_t block = shape.rotationBlock;
+    graph.add("gguf_rotate", {buffers.input, weights.rotation.signs, scratch.rotatedInput},
+              GgufRotationParams{shape.hiddenSize, block, rotationScale(block), 0},
+              {shape.hiddenSize / block, rows, 1}, {block / 4, 1, 1});
+  }
+  if (plan.configuration().ggufTile == MoeGgufTile::Register) {
+    if (shape.rotated())
+      graph.add("moe_gather_table16_rotated",
+                {buffers.input, scratch.rotatedInput, scratch.groupedRoutes, scratch.tileCount,
+                 scratch.groupedInput, scratch.groupedSums},
+                gather, {tiles, shape.hiddenSize / 256, 1});
+    else
+      graph.add("moe_gather_table16",
+                {buffers.input, scratch.groupedRoutes, scratch.tileCount,
+                 scratch.groupedInput, scratch.groupedSums},
+                gather, {tiles, shape.hiddenSize / 256, 1});
+  } else {
+    if (shape.rotated())
+      graph.add("moe_gather_rows_rotated",
+                {buffers.input, scratch.rotatedInput, scratch.groupedRoutes, scratch.tileDescriptors,
+                 scratch.tileCount, scratch.groupedInput},
+                gather, {tiles, shape.hiddenSize / 256, 1});
+    else
+      graph.add("moe_gather_rows",
+                {buffers.input, scratch.groupedRoutes, scratch.tileDescriptors,
+                 scratch.tileCount, scratch.groupedInput},
+                gather, {tiles, shape.hiddenSize / 256, 1});
+  }
+  addExperts(graph, scratch, weights, plan, groupParams(plan), shape.rotated());
   graph.add("moe_combine",
             {scratch.expertOutput, scratch.routeRows, scratch.routingWeights,
              buffers.residual, buffers.output},

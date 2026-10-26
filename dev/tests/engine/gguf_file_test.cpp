@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <tuple>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -124,6 +125,23 @@ int main() {
             "valid Q4_K shape/size changed");
     require(source.dataOffset() + weight.offset + weight.bytes == source.bytes(),
             "valid data must end exactly at EOF");
+
+    // The trellis expert formats: Agention's types 144..146, 128 weights of one
+    // half d and 32 steps of 8, 6 and 7 bits, plane0 the group's states and the
+    // meta unit the block's d (runtime/metal/abi/QuantFormat.h).
+    for (const auto &[type, token, bytes, plane1] :
+         {std::tuple{144u, "tq2t", 34u, 1u}, std::tuple{145u, "tqk6", 26u, 0u}, std::tuple{146u, "tqk7", 30u, 0u}}) {
+      const auto *traits = splash::model::ggmlTypeTraits(type);
+      require(traits && traits->blockElements == 128 && traits->blockBytes == bytes, "a trellis block changed");
+      const uint32_t format = gguf_format_of(type);
+      require(format < GGUF_FMT_COUNT && std::string_view(kQuantFormats[format].name) == token,
+              "a trellis format's name changed");
+      require(kQuantFormats[format].plane0_bytes == 8 && kQuantFormats[format].plane1_bytes == plane1 &&
+                  kQuantFormats[format].meta_bytes == 2 && kQuantFormats[format].meta_groups == 4,
+              "a trellis format's planes changed");
+      require(quant_column_unit(kQuantFormats[format]) == 128 && !quant_register_format(format),
+              "a trellis tensor's columns or tile changed");
+    }
 
     constexpr std::string_view overflow = "GGUF size overflows", pastEnd = "runs past the end of the file";
     rejects("shape overflow", model({256, uint64_t{1} << 60}), overflow);
