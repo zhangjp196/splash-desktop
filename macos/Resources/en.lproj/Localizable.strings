@@ -11,6 +11,8 @@
 "field.target.prompt" = "an MLX 4-bit or GGUF directory";
 "field.draft" = "Draft folder";
 "field.draft.prompt" = "the matching DFlash2 checkpoint (empty downloads the family's)";
+"field.mmproj" = "Vision projector (GGUF)";
+"field.mmproj.prompt" = "the GGUF target's mmproj (empty uses the one beside it)";
 "field.port" = "Port";
 "field.lan_access" = "Allow access from other devices (LAN)";
 "field.allowed_hosts" = "Extra host names (comma-separated)";

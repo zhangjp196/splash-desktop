@@ -91,6 +91,7 @@ access.
 | `--revision` | Default branch | Select an upstream target branch, tag, or commit. See [revisions](#revisions). |
 | `--draft-model` | Matching DFlash2 checkpoint | Override the draft with a compatible repository or local directory; required for a family without a released draft. See [drafts](#drafts). |
 | `--model-dir` | None | Serve a local directory: a Splash package (no draft) or an MLX/GGUF target with `--draft-model`. See [local model directories](#local-model-directories). |
+| `--mmproj` | The target's | A local GGUF target's vision projector, a GGUF file wherever it lies, in place of the one the installer picks beside the target. See [vision](#vision). |
 | `--language-only` | Off | Skip vision loading; image and PDF input is rejected. See [vision](#vision). |
 | `--offline` | Off | Start the installed model without asking the Hub, as `HF_HUB_OFFLINE=1` does. See [revisions](#revisions). |
 | `--port` | `SPLASH_PORT` or `8000` | HTTP port. |
@@ -2056,10 +2057,19 @@ embedding is already in the image's order), linking
 only `config.json` and the shards holding them, or the GGUF repository's root
 projector, a GGUF whose name holds `mmproj` (as `mmproj-BF16.gguf` or
 `MODEL-mmproj-BF16.gguf`), chosen by its header: a `clip` projector whose
-weights are BF16, F32 or F16, preferred in that order. An F16 projector made
-from a BF16 tower, llama.cpp's default output, loads exactly: F16 rounds the
+weights are BF16, F32 or F16, preferred in that order, else one of Q8_0
+weights. An F16 projector made from a BF16 tower, llama.cpp's default output,
+loads exactly: F16 rounds the
 smallest BF16 weights onto its subnormal grid, and what that keeps is still a
-BF16. The processor configuration (MLX `preprocessor_config.json`, or the
+BF16. A Q8_0 projector is the quantized tower llama.cpp's `--mmproj` quantizer
+writes: each value is exact in float and preparation rounds it once to the
+BF16 the tower stores, which the quantization already outweighs. A local
+target directory's projector is the one beside the target whose name holds
+`mmproj`; `--mmproj FILE` (or `prepare_local_model`'s `mmproj=`) names another
+GGUF file, wherever it lies, which the installation links as
+`vision/mmproj.gguf` in place of that one; the selection link holds the path,
+so the same target with another projector installs apart. The processor
+configuration (MLX `preprocessor_config.json`, or the
 `image_processor` object of `processor_config.json`, where newer Transformers
 releases save it; the GGUF's `clip.vision` metadata) must describe the one
 preprocessing Splash implements (`server/images.py`); it is checked before any
@@ -2068,7 +2078,7 @@ weight download and not installed.
 Both sources are written into one image, which the one BF16 vision operator
 reads: BF16 tensors are
 copied, and F32 or F16 tensors are converted under the exact-BF16 rule of
-[weight loading](#weight-loading).
+[weight loading](#weight-loading), while Q8_0 tensors are dequantized to it.
 Unsloth's mmproj stores its 1-D tensors, patch embedding and position table as
 F32, all of them BF16-exact, and loads byte-identical to the MLX tower.
 Quantized MLX towers, deepstack projectors and mmproj tensors the tower does not

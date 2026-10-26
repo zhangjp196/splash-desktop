@@ -12,13 +12,34 @@
 namespace splash::model::vision {
 namespace {
 
-uint32_t elementBytes(const SourceTensor &tensor) { return tensor.dtype == "F32" ? 4 : 2; }
+// The bytes a source row of `columns` values has: 2 or 4 per value, but
+// Q8_0's blocks of 32 int8 values and their fp16 d.
+uint64_t rowBytes(const Input &in, uint32_t columns) {
+  if (in.tensor.dtype != "Q8_0") return uint64_t(columns) * (in.tensor.dtype == "F32" ? 4 : 2);
+  if (columns % 32)
+    throw WeightStoreError("vision tensor " + in.name + " in " + in.tensor.file->path().string() +
+                           " is Q8_0 in rows of " + std::to_string(columns) +
+                           " values, not a multiple of its blocks of 32");
+  return uint64_t(columns / 32) * 34;
+}
 
-// Converts count values of tensor to BF16 bits. False when a value is not
-// exactly a BF16.
+// Converts count values of tensor to BF16 bits. False when a value of an
+// unquantized tensor is not exactly a BF16. A Q8_0 tensor is quantized: its
+// int8 codes times their fp16 d are exact in float, and each value is rounded
+// once to the BF16 the tower stores.
 bool convert(const SourceTensor &tensor, const uint8_t *source, uint16_t *destination, uint64_t count) {
   if (tensor.dtype == "BF16") {
     std::memcpy(destination, source, count * kBFloat16Bytes);
+    return true;
+  }
+  if (tensor.dtype == "Q8_0") {
+    for (uint64_t block = 0; block < count / 32; ++block) {
+      _Float16 d;
+      std::memcpy(&d, source + block * 34, 2);
+      const float scale = static_cast<float>(d);
+      for (uint32_t i = 0; i < 32; ++i)
+        destination[block * 32 + i] = narrowBfloat16(scale * static_cast<float>(int8_t(source[block * 34 + 2 + i])));
+    }
     return true;
   }
   for (uint64_t i = 0; i < count; ++i) {
@@ -52,9 +73,9 @@ void addSectionTasks(uint8_t *image, const Section &s, uint32_t pixels,
                      std::vector<std::function<void(Staging &)>> &tasks) {
   const auto frames = static_cast<uint32_t>(s.inputs.size());
   const uint32_t columns = s.columns / frames;
-  uint32_t widest = 0;
-  for (const auto &in : s.inputs) widest = std::max(widest, elementBytes(in.tensor));
-  const uint64_t stagedRowBytes = uint64_t(columns) * widest + (s.patch ? uint64_t(s.columns) * kBFloat16Bytes : 0);
+  uint64_t widest = 0;
+  for (const auto &in : s.inputs) widest = std::max(widest, rowBytes(in, columns));
+  const uint64_t stagedRowBytes = widest + (s.patch ? uint64_t(s.columns) * kBFloat16Bytes : 0);
   const auto batchRows = static_cast<uint32_t>(std::clamp<uint64_t>(kLoadStepBytes / stagedRowBytes, 1, s.rows));
   for (uint32_t row = 0; row < s.rows; row += batchRows) {
     const uint32_t count = std::min(batchRows, s.rows - row);
@@ -62,7 +83,7 @@ void addSectionTasks(uint8_t *image, const Section &s, uint32_t pixels,
     tasks.push_back([&s, pixels, frames, columns, row, count, output](Staging &staging) {
       // Converts count rows of one input to rows of stride BF16 values.
       const auto convertRows = [&](const Input &in, uint16_t *to, uint32_t stride) {
-        const uint64_t bytes = uint64_t(columns) * elementBytes(in.tensor);
+        const uint64_t bytes = rowBytes(in, columns);
         if (staging.source.size() < count * bytes) staging.source.resize(count * bytes);
         in.tensor.read(row * bytes, std::span(staging.source).first(count * bytes));
         for (uint32_t r = 0; r < count; ++r)

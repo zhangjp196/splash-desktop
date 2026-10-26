@@ -1641,6 +1641,81 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaisesRegex(models.ModelError, "select a GGUF"):
             self.prepare_local(chosen)
 
+    def test_a_named_vision_projector_installs_in_place_of_the_selected_one(self):
+        # --mmproj names a GGUF target's vision projector, a file wherever it
+        # lies, even one the directory's selection would not pick up: a tower
+        # whose name holds no mmproj.
+        headers = self.root / "headers"
+        headers.mkdir()
+        header = fixture(native=True)
+        tensors = list(loadable_tensors(header, headers).items())
+        draft = draft_dir(self.root / "draft", MOE)
+
+        def target_dir(name):
+            directory = self.root / name
+            directory.mkdir()
+            write_gguf(directory / "Model-UD-Q4_K_M.gguf", header, tensors)
+            return directory
+
+        def prepare(directory, mmproj):
+            chosen = local_selection(
+                self.root,
+                directory,
+                draft_model=str(draft.resolve()),
+                language_only=False,
+                mmproj=str(mmproj),
+            )
+            output, _ = self.prepare_local(chosen)
+            return chosen, output
+
+        target = target_dir("outside")
+        projector = self.root / "vision" / "tower.gguf"
+        projector.parent.mkdir()
+        write_gguf(
+            projector, vision_fixture(), [("v.patch_embd.weight", GGML["F32"])]
+        )
+        chosen, output = prepare(target, projector)
+        self.assertIn("vision enabled", output)
+        record = assembly.verify(chosen.link)
+        self.assertEqual(record["vision_format"], "gguf")
+        self.assertEqual(
+            (chosen.link / assembly.GGUF_VISION).resolve(), projector.resolve()
+        )
+        # The selection link holds the projector: the same target with none
+        # selects another installation.
+        self.assertNotEqual(
+            chosen.link,
+            local_selection(
+                self.root,
+                target,
+                draft_model=str(draft.resolve()),
+                language_only=False,
+            ).link,
+        )
+        # A projector beside the target, under a name that is not a
+        # projector's, is the named one rather than a second target.
+        inside = target_dir("inside")
+        tower = inside / "tower.gguf"
+        write_gguf(tower, vision_fixture(), [("v.patch_embd.weight", GGML["BF16"])])
+        chosen, _ = prepare(inside, tower)
+        self.assertEqual(
+            (chosen.link / assembly.GGUF_VISION).resolve(), tower.resolve()
+        )
+        # A named file that is not a vision projector is refused by its path,
+        # and the target itself is not a projector either.
+        text = self.root / "vision" / "text.gguf"
+        write_gguf(text, fixture(), [("blk.0.attn_qkv.weight", GGML["Q4_K"])])
+        with self.assertRaisesRegex(
+            models.ModelError,
+            rf"{text.resolve()} \(qwen35moe: Q4_K\) is not a vision projector",
+        ):
+            prepare(target_dir("text"), text)
+        only = target_dir("only")
+        with self.assertRaisesRegex(
+            models.ModelError, "is the target, not a vision projector"
+        ):
+            prepare(only, only / "Model-UD-Q4_K_M.gguf")
+
     def test_a_local_directory_serves_its_split_gguf_at_the_root(self):
         # A download leaves a split GGUF's parts at the directory's root, a
         # vision projector beside them: --model-dir serves them as one target,

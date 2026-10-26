@@ -178,6 +178,18 @@ def parse_model_dir(value: str) -> str:
     return str(path.resolve())
 
 
+def parse_mmproj(value: str) -> str:
+    # A vision projector is a GGUF file wherever it lies, recorded as an
+    # absolute path as a local draft is: an installation it selects does not
+    # depend on the working directory.
+    path = Path(value).expanduser() if value else None
+    if path is None or not path.is_file():
+        raise argparse.ArgumentTypeError(f"vision projector not found: {value}")
+    if path.suffix.lower() != ".gguf":
+        raise argparse.ArgumentTypeError(f"a vision projector is a GGUF file: {value}")
+    return str(path.resolve())
+
+
 def derived_model_id(directory) -> str:
     """The API model ID a local target directory serves as: its folder name,
     reduced to the characters a repository ID may hold. A name that reduces
@@ -235,14 +247,17 @@ def selection_link(
 
 
 def local_selection_link(
-    models: Path, directory: Path, *, language_only=False, draft_model=None
+    models: Path, directory: Path, *, language_only=False, draft_model=None, mmproj=None
 ) -> Path:
     """The selection link of a local target directory with these source
     options, in the same .selections place as a selected Hub model: the
-    directory has no repository ID to name a link."""
-    selection = json.dumps(
-        [str(directory), language_only, draft_model], separators=(",", ":")
-    )
+    directory has no repository ID to name a link. A named vision projector is
+    part of the selection: the same target with the installer's projector and
+    with this one links apart. Without one, the link is what it always was."""
+    selection = [str(directory), language_only, draft_model]
+    if mmproj is not None:
+        selection.append(str(mmproj))
+    selection = json.dumps(selection, separators=(",", ":"))
     return models / ".selections" / hashlib.sha256(selection.encode()).hexdigest()
 
 
@@ -286,6 +301,9 @@ class Selection:
     models_root: Path
     link: Path
     directory: Path | None = None
+    # The vision projector a local GGUF target names, instead of the one the
+    # installer selects from the directory and the Hub.
+    mmproj: Path | None = None
 
     @classmethod
     def of(
@@ -297,8 +315,22 @@ class Selection:
         revision=None,
         language_only=False,
         draft_model=None,
+        mmproj=None,
     ):
         models_root = Path(models_root).resolve()
+        if mmproj is not None:
+            mmproj = Path(mmproj).expanduser().resolve()
+            if directory is None:
+                raise ModelError(
+                    f"vision projector {mmproj} requires a local model directory "
+                    "(--model-dir): a Hub model's projector is chosen from its "
+                    "repository"
+                )
+            if language_only:
+                raise ModelError(
+                    f"{mmproj} is a vision projector, which a model that serves "
+                    "text only (--language-only) does not load"
+                )
         if directory is not None:
             if model is not None:
                 raise ModelError(
@@ -312,6 +344,7 @@ class Selection:
                 directory,
                 language_only=language_only,
                 draft_model=draft_model,
+                mmproj=mmproj,
             )
         else:
             repo_id, variant = split_model_id(model)
@@ -332,6 +365,7 @@ class Selection:
             models_root,
             link,
             directory,
+            mmproj,
         )
 
 
@@ -430,6 +464,13 @@ def parse_args(argv=None):
         "family's released one (required for a family without one)",
     )
     parser.add_argument(
+        "--mmproj",
+        type=parse_mmproj,
+        metavar="FILE",
+        help="a local GGUF target's vision projector (a GGUF mmproj file), in "
+        "place of the one the installer selects beside the target",
+    )
+    parser.add_argument(
         "--language-only",
         action="store_true",
         help="skip vision preparation and loading",
@@ -444,6 +485,12 @@ def parse_args(argv=None):
         # also needs --draft-model depends on what it holds: a Splash runtime
         # package carries its own draft, an MLX or GGUF target names one.
         parser.error("--revision requires a Hugging Face model ID")
+    if args.mmproj is not None:
+        if args.model_dir is None:
+            # A Hub model's projector is chosen from its repository's headers.
+            parser.error("--mmproj requires --model-dir")
+        if args.language_only:
+            parser.error("--mmproj and --language-only are exclusive")
     return args
 
 
@@ -456,6 +503,7 @@ def main(argv=None):
         revision=args.revision,
         language_only=args.language_only,
         draft_model=args.draft_model,
+        mmproj=args.mmproj,
     )
     if args.command == "link":
         print(selection.link)

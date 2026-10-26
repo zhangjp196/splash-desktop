@@ -3,7 +3,9 @@
 // The image of a vision tower (MDFV0001, every tensor BF16), as
 // model/VisionLoader.cpp plans it from an MLX checkpoint or a GGUF mmproj, and
 // its writer. A BF16 tensor is copied; an F32 or F16 tensor is converted only
-// when every value is exactly a BF16, and loading fails otherwise.
+// when every value is exactly a BF16, and loading fails otherwise. A Q8_0
+// tensor, which a quantized mmproj's tower keeps, is dequantized: its value is
+// exact in float and each is rounded once to BF16, the tower's storage.
 
 #include "model/WeightSource.hpp"
 

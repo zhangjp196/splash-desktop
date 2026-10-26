@@ -213,6 +213,58 @@ class InstallerTest(unittest.TestCase):
                 ["--model", "owner/repo", "--model-dir", str(target), "prepare"]
             )
 
+    def test_a_named_vision_projector_is_part_of_a_local_selection(self):
+        target = self.root / "model"
+        target.mkdir()
+        mmproj = self.root / "vision" / "tower.gguf"
+        mmproj.parent.mkdir()
+        mmproj.write_bytes(b"GGUF")
+        models = self.root / "models"
+        chosen = installer.Selection.of(
+            models, directory=str(target), mmproj=str(mmproj)
+        )
+        self.assertEqual(chosen.mmproj, mmproj.resolve())
+        self.assertEqual(
+            chosen.link,
+            installer.local_selection_link(
+                models.resolve(), target.resolve(), mmproj=mmproj.resolve()
+            ),
+        )
+        # The projector is part of the selection: without one, another link.
+        self.assertNotEqual(
+            chosen.link,
+            installer.local_selection_link(models.resolve(), target.resolve()),
+        )
+        self.assertEqual(
+            installer.parse_mmproj(str(mmproj)), str(mmproj.resolve())
+        )
+        # A projector is a GGUF file that exists, of a local target only, and
+        # not of a model that serves text only.
+        for bad in (str(self.root / "missing.gguf"), str(target)):
+            with self.subTest(path=bad), self.assertRaises(
+                argparse.ArgumentTypeError
+            ):
+                installer.parse_mmproj(bad)
+        with self.assertRaises(installer.ModelError):
+            installer.Selection.of(models, self.MODEL_ID, mmproj=str(mmproj))
+        with self.assertRaises(installer.ModelError):
+            installer.Selection.of(
+                models, directory=str(target), mmproj=str(mmproj), language_only=True
+            )
+        for arguments in (
+            ["--model", self.MODEL_ID, "--mmproj", str(mmproj), "prepare"],
+            [
+                "--model-dir",
+                str(target),
+                "--mmproj",
+                str(mmproj),
+                "--language-only",
+                "prepare",
+            ],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                installer.parse_args(arguments)
+
     def test_link_prints_a_local_model_directorys_selection_link(self):
         models = self.root / "models"
         draft = self.root / "draft"

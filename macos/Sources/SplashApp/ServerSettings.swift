@@ -36,6 +36,9 @@ struct ServerSettings: Codable, Equatable {
     var modelID = First.modelID
     var modelDirectory = ""
     var draftDirectory = ""
+    /// A local GGUF target's vision projector (`--mmproj`): a GGUF file
+    /// wherever it lies, or empty for the one beside the target.
+    var mmproj = ""
     var port = First.port
     /// Listen on every IPv4 interface (`--host 0.0.0.0`) so other devices on
     /// the network can reach the server. Off keeps it on loopback.
@@ -90,7 +93,7 @@ struct ServerSettings: Codable, Equatable {
     // or one a hand edit corrupted, keeps its first-launch default instead of
     // failing the whole decode and dropping the user's configurations.
     private enum CodingKeys: String, CodingKey {
-        case modelMode, modelID, modelDirectory, draftDirectory, port
+        case modelMode, modelID, modelDirectory, draftDirectory, mmproj, port
         case lanAccess, allowedHosts
         case languageOnly, kvFormat, neuralEngine, maxMemory, maxContext
         case residencySeconds, maxRequestSize, apiKey, servedNames
@@ -109,6 +112,7 @@ struct ServerSettings: Codable, Equatable {
         modelID = value(String.self, .modelID) ?? modelID
         modelDirectory = value(String.self, .modelDirectory) ?? modelDirectory
         draftDirectory = value(String.self, .draftDirectory) ?? draftDirectory
+        mmproj = value(String.self, .mmproj) ?? mmproj
         port = value(Int.self, .port) ?? port
         lanAccess = value(Bool.self, .lanAccess) ?? lanAccess
         allowedHosts = value(String.self, .allowedHosts) ?? allowedHosts
@@ -151,6 +155,7 @@ struct ServerSettings: Codable, Equatable {
             ("modelID", modelID),
             ("modelDirectory", modelDirectory),
             ("draftDirectory", draftDirectory),
+            ("mmproj", mmproj),
             ("port", String(port)),
             ("lanAccess", lanAccess ? "1" : "0"),
             ("allowedHosts", allowedHosts),
@@ -187,6 +192,7 @@ struct ServerSettings: Codable, Equatable {
         if let value = rows["modelID"] { modelID = value }
         if let value = rows["modelDirectory"] { modelDirectory = value }
         if let value = rows["draftDirectory"] { draftDirectory = value }
+        if let value = rows["mmproj"] { mmproj = value }
         if let value = Self.number(rows["port"], in: 0...65_535) { port = value }
         if let value = rows["lanAccess"] { lanAccess = value == "1" }
         if let value = rows["allowedHosts"] { allowedHosts = value }

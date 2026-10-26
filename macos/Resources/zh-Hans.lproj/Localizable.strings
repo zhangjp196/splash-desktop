@@ -11,6 +11,8 @@
 "field.target.prompt" = "MLX 4-bit 或 GGUF 目录";
 "field.draft" = "Draft 文件夹";
 "field.draft.prompt" = "匹配的 DFlash2 检查点（留空则自动下载）";
+"field.mmproj" = "视觉投影器（GGUF）";
+"field.mmproj.prompt" = "GGUF 目标的 mmproj（留空则用目标旁的）";
 "field.port" = "端口";
 "field.lan_access" = "允许其他设备访问（局域网）";
 "field.allowed_hosts" = "额外主机名（逗号分隔）";

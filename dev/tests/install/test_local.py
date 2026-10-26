@@ -170,16 +170,17 @@ class LocalModelTest(unittest.TestCase):
         self.assertEqual(record["vision_format"], "gguf")
         self.assertEqual((prepared / assembly.GGUF_VISION).readlink(), mmproj)
         self.assertIn("vision_config", models.read_json(prepared / "config.json"))
-        # Only a clip GGUF of BF16, F32 or F16 weights is one; and a model that
-        # serves text only loads none.
+        # A Q8_0 projector, the tower llama.cpp's mmproj quantizer keeps, is
+        # one too; and a model that serves text only loads none.
         quantized = self.projector(self.root / "vision" / "q8.gguf", "Q8_0")
+        self.assertEqual(
+            assembly.verify(self.prepare(target, draft, mmproj=quantized))[
+                "vision_format"
+            ],
+            "gguf",
+        )
         text = self.gguf(self.root / "vision" / "text.gguf")
         for mmproj_path, refusal in (
-            (
-                quantized,
-                rf"{quantized} \(clip: Q8_0\) is not a vision projector Splash "
-                "loads.*; omit mmproj to serve text only",
-            ),
             (text, rf"{text} \(qwen35moe: F32, Q4_K\) is not a vision projector"),
             (target, f"{target} is named as one of the target's files"),
         ):

@@ -148,6 +148,8 @@ To serve weights already on disk instead of downloading them, pass
 to download the DFlash2 draft of the model's family, for example
 `splash serve --model-dir ~/models/Qwen3.8-27B-4bit` or
 `splash serve --model-dir ~/models/Qwen3.8-27B-4bit --draft-model ~/models/Qwen3.8-27B-DFlash2`.
+A GGUF folder serves images from the vision projector beside its target (a
+GGUF whose name holds `mmproj`); `--mmproj FILE` names another one.
 [Local model directories](DEVELOPMENT.md#local-model-directories)
 
 ## Settings

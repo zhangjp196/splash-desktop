@@ -17,4 +17,13 @@ namespace splash::model {
 // The float a bf16's bits hold.
 [[nodiscard]] inline float widenBfloat16(uint16_t bits) { return std::bit_cast<float>(uint32_t{bits} << 16); }
 
+// The bf16 bits nearest to value, ties to even, as a bf16 conversion rounds:
+// the one place preparation rounds a weight, a quantized vision tower's values
+// whose own quantization already lost more than the rounding does.
+[[nodiscard]] inline uint16_t narrowBfloat16(float value) {
+  const auto bits = std::bit_cast<uint32_t>(value);
+  if ((bits & 0x7FFFFFFFu) > 0x7F800000u) return static_cast<uint16_t>((bits >> 16) | 0x0040u); // NaN stays one
+  return static_cast<uint16_t>((bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16);
+}
+
 } // namespace splash::model

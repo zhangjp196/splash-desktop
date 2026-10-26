@@ -165,6 +165,9 @@ private struct ConfigRow: View {
             if !config.settings.draftDirectory.isEmpty {
                 parts.append("Draft: \((config.settings.draftDirectory as NSString).lastPathComponent)")
             }
+            if !config.settings.mmproj.isEmpty {
+                parts.append("Vision: \((config.settings.mmproj as NSString).lastPathComponent)")
+            }
         }
         parts.append(config.settings.kvFormat.uppercased())
         if !config.settings.neuralEngine { parts.append(L10n.string("models.ane_off")) }

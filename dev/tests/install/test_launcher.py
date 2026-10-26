@@ -946,6 +946,56 @@ class LauncherTests(unittest.TestCase):
             )
             self.assertEqual(run.call_args_list[0].args[0][0], "make")
 
+    def test_a_named_vision_projector_reaches_installation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            target = runtime / "model"
+            target.mkdir()
+            mmproj = runtime / "tower.gguf"
+            mmproj.write_bytes(b"GGUF")
+            with (
+                mock.patch.object(launcher, "RUNTIME_DIR", runtime),
+                mock.patch.object(launcher.socket, "socket"),
+                mock.patch.object(launcher, "_ensure_installed") as install,
+                mock.patch.object(launcher.os, "execve"),
+            ):
+                launcher.main(
+                    ["serve", "--model-dir", str(target), "--mmproj", str(mmproj)]
+                )
+            (chosen,) = install.call_args.args
+            self.assertEqual(chosen.mmproj, mmproj.resolve())
+            self.assertEqual(chosen.directory, target.resolve())
+            with (
+                mock.patch.object(
+                    launcher.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0),
+                ),
+                mock.patch.object(launcher, "_run_held", return_value=0) as run,
+                mock.patch.object(launcher.paths, "PACKAGED", True),
+            ):
+                launcher._ensure_installed(chosen)
+            parsed = launcher.model_artifacts.parse_args(run.call_args.args[0][2:])
+            self.assertEqual(
+                (parsed.command, parsed.model_dir, parsed.mmproj),
+                ("prepare", str(target.resolve()), str(mmproj.resolve())),
+            )
+            # A Hub model's projector is chosen from its repository, and a
+            # model that serves text only loads none.
+            for arguments in (
+                ["serve", "--model", MODEL_ID, "--mmproj", str(mmproj)],
+                [
+                    "serve",
+                    "--model-dir",
+                    str(target),
+                    "--mmproj",
+                    str(mmproj),
+                    "--language-only",
+                ],
+            ):
+                with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                    launcher.parse_args(arguments)
+
     def test_source_selection_reaches_installation_and_served_root(self):
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)

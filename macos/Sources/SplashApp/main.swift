@@ -42,6 +42,7 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.modelID = "selfcheck/model"
     edited.modelDirectory = "/tmp/selfcheck"
     edited.draftDirectory = "/tmp/selfcheck-draft"
+    edited.mmproj = "/tmp/selfcheck-mmproj.gguf"
     edited.port = 9123
     edited.lanAccess = true
     edited.allowedHosts = "mymac.local, tunnel.example"
@@ -132,6 +133,7 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries("--sparse-kv-memory", "1200M")
             && carries("--verify-rows", "all")
             && carries("--max-context", "100K")
+            && carries("--mmproj", "/tmp/selfcheck-mmproj.gguf")
             // The switch is off in this configuration, so the command turns
             // the disk tier off instead of passing the quota or write budget;
             // nothing here asks for a cache that survives the server.

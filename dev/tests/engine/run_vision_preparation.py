@@ -24,7 +24,7 @@ DTYPES = ("BF16", "F16", "F32")
 # The name prefix of each safetensors source's tower: MLX's, and transformers'
 # (as Model Optimizer keeps it).
 TOWER = {"mlx": "vision_tower.", "transformers": "model.visual."}
-GGML_TYPES = {"F32": 0, "F16": 1, "Q4_0": 2, "BF16": 30}
+GGML_TYPES = {"F32": 0, "F16": 1, "Q4_0": 2, "Q8_0": 8, "BF16": 30}
 VISION_SHARD = "model-00001-of-00002.safetensors"
 TEXT_SHARD = "model-00002-of-00002.safetensors"
 
@@ -33,6 +33,24 @@ def bfloat16(values):
     # The upper half of each value's F32 bits: the value itself when it is
     # exactly a BF16.
     return b"".join(struct.pack("<f", x)[2:] for x in values)
+
+
+def round_bfloat16(value):
+    """The BF16 nearest to value, ties to even, as a BF16 conversion rounds:
+    what preparation writes of a Q8_0 tower's values."""
+    bits = struct.unpack("<I", struct.pack("<f", value))[0]
+    bits = (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
+    return struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+
+
+def quantize_q8_0(codes, scale):
+    """The rows of int8 codes of a row's blocks, each block's fp16 d = scale,
+    as GGUF stores block_q8_0: d, then 32 codes."""
+    d = struct.pack("<e", scale)
+    return b"".join(
+        d + struct.pack("<32b", *codes[row : row + 32])
+        for row in range(0, len(codes), 32)
+    )
 
 
 def encode(values, dtype):
@@ -57,10 +75,29 @@ def fixture(root, source, shift=0, case=None):
         values = [-0.0, math.inf, 2.0**-24] + [
             ((i * 7 + index * 11) % 255 - 127) / 64 for i in range(3, rows * columns)
         ]
+        # A quantized mmproj's tower: two merger weights in Q8_0, one with a
+        # power of two d (whose values are exact) and one with 0.3's fp16 d,
+        # whose codes' products preparation rounds once to BF16.
+        q8 = (
+            case == "q8"
+            and source == "gguf"
+            and gguf_name in ("mm.0.weight", "mm.2.weight")
+        )
+        if q8:
+            scale = 1 / 64 if gguf_name == "mm.0.weight" else 0.3
+            d = struct.unpack("<e", struct.pack("<e", scale))[0]
+            codes = [((i * 7 + index * 11) % 255 - 127) for i in range(rows * columns)]
+            values = [round_bfloat16(float(d) * code) for code in codes]
+            dtype = "Q8_0"
         if case == "inexact-f32" and index == 0:
             values[5] = 1 + 2.0**-20
         if case == "inexact-f16" and index == 0:
             values[5] = 1 + 2.0**-10
+        if case == "q8-row" and source == "gguf" and mlx == "blocks.0.attn.proj.weight":
+            # A Q8_0 row of 8 values, which its blocks of 32 cannot fill.
+            q8, dtype, scale = True, "Q8_0", 1 / 64
+            codes = [1 + i % 3 for i in range(rows * columns)]
+            values = [round_bfloat16(float(scale) * code) for code in codes]
         if index == 0:
             # One patch row is [frame, patch-row, patch-col, channel] in MLX and
             # [channel, patch-row, patch-col] per frame in GGUF. The image's rows
@@ -109,7 +146,10 @@ def fixture(root, source, shift=0, case=None):
                 shape = [rows, columns] if source in TOWER else [columns, rows]
             if case == "dtype" and mlx == "merger.linear_fc1.weight":
                 dtype = "F64" if source in TOWER else "Q4_0"
-            raw = encode(values, "F32" if dtype == "Q4_0" else dtype)
+            if q8:
+                raw = quantize_q8_0(codes, scale)
+            else:
+                raw = encode(values, "F32" if dtype == "Q4_0" else dtype)
             tensors[name] = (shape, dtype, raw)
         output = []
         for row in range(padded_rows or rows):
@@ -230,6 +270,15 @@ def main():
                 assert result.returncode == 0, (source, shift, result.stderr)
                 digest = result.stdout.split()[0]
                 assert digest == golden, (source, shift, digest)
+            if not safetensors:
+                # A quantized mmproj: Q8_0 merger weights whose codes are
+                # dequantized, and one of them rounded once to BF16. Its own
+                # expected.bin is the oracle.
+                directory = root / f"{source}-q8"
+                directory.mkdir()
+                fixture(directory, source, 0, "q8")
+                result = prepare(binary, directory, source)
+                assert result.returncode == 0, (source, "q8", result.stderr)
             patch = (
                 TOWER[source] + "patch_embed.proj.weight"
                 if safetensors
@@ -263,6 +312,7 @@ def main():
                     ("deepstack", 0): ("deepstack", "unsupported"),
                     ("no-deepstack", 0): ("clip.vision.is_deepstack_layers",),
                     ("unused", 0): ("v.deepstack.0.fc1.weight", "{}", "does not use"),
+                    ("q8-row", 0): ("v.blk.0.attn_out.weight", "block aligned"),
                 }
             for (case, shift), parts in rejected.items():
                 directory = root / f"{source}-{case}"

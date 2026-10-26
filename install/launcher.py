@@ -133,9 +133,10 @@ def _ensure_installed(selection):
     for flag, value in (
         ("--revision", selection.revision),
         ("--draft-model", selection.draft_model),
+        ("--mmproj", selection.mmproj),
     ):
         if value is not None:
-            command += [flag, value]
+            command += [flag, str(value)]
     if selection.language_only:
         command.append("--language-only")
     command.append("prepare")
@@ -223,6 +224,7 @@ def serve(args):
             revision=args.revision,
             language_only=args.language_only,
             draft_model=args.draft_model,
+            mmproj=args.mmproj,
         )
         lock.seek(0)
         lock.truncate()
@@ -428,6 +430,13 @@ def parse_args(argv=None):
         "automatically selected one",
     )
     model.add_argument(
+        "--mmproj",
+        type=model_artifacts.parse_mmproj,
+        metavar="FILE",
+        help="a local GGUF target's vision projector (a GGUF mmproj file), in "
+        "place of the one beside the target",
+    )
+    model.add_argument(
         "--language-only",
         action="store_true",
         help="skip vision preparation and loading; image and PDF input is refused",
@@ -478,6 +487,13 @@ def parse_args(argv=None):
             # draft need is its own: a Splash package carries one, an MLX or
             # GGUF target names one.
             parser.error("--revision requires --model, not --model-dir")
+        if args.mmproj is not None:
+            # A Hub model's projector is chosen from its repository's headers,
+            # and a model that serves text only loads none.
+            if args.model is not None:
+                parser.error("--mmproj requires --model-dir")
+            if args.language_only:
+                parser.error("--mmproj and --language-only are exclusive")
         serve_options.check_serve_arguments(parser, args)
     if client_args and args.command == "serve":
         parser.error("arguments after -- are only supported for coding clients")

@@ -203,9 +203,9 @@ def select_vision(repo):
     """The name and header of the GGUF repository's vision projector, chosen
     by content among its root GGUF files named mmproj, whatever the publisher
     calls them: a projector Splash loads (read_projector) of BF16, F32 or F16
-    weights, preferred in that order. Each header costs a few range
-    requests."""
-    usable, found = {"BF16": [], "F32": [], "F16": []}, []
+    weights, preferred in that order, else one of Q8_0 weights, a quantized
+    tower. Each header costs a few range requests."""
+    usable, found = {"BF16": [], "F32": [], "F16": [], "Q8_0": []}, []
     for name in filter(projector_named, root_ggufs(repo.files)):
         header, precision, kind = read_projector(repo, name)
         found.append(f"{name} ({kind})")
@@ -221,7 +221,7 @@ def select_vision(repo):
                 + ", describe no single tower"
             )
     raise models.VisionError(
-        "the GGUF repository has no BF16, F32 or F16 vision projector ("
+        "the GGUF repository has no BF16, F32, F16 or Q8_0 vision projector ("
         + ("; ".join(found) or "no GGUF named mmproj")
         + ")"
     )
@@ -229,13 +229,15 @@ def select_vision(repo):
 
 def read_projector(repo, name):
     """The header of the GGUF name in repo; the precision of a vision
-    projector Splash loads, a clip model whose weights are BF16, F32 or F16,
-    or None for any other GGUF; and how a refusal describes what it is,
-    ARCHITECTURE: TYPES. The tower runs in BF16 and preparation never
-    rounds a weight: it converts F32 and F16 only where every value is
-    exact. An F16 projector made from a BF16 tower is: F16 rounds the
-    smallest BF16 weights onto its subnormal grid, and what that keeps is
-    still a BF16."""
+    projector Splash loads, a clip model whose weights are BF16, F32, F16 or
+    Q8_0, or None for any other GGUF; and how a refusal describes what it is,
+    ARCHITECTURE: TYPES. The tower runs in BF16 and preparation never rounds an
+    unquantized weight: it converts F32 and F16 only where every value is
+    exact. An F16 projector made from a BF16 tower is: F16 rounds the smallest
+    BF16 weights onto its subnormal grid, and what that keeps is still a BF16.
+    A Q8_0 projector is a quantized copy of the tower; its values are exact in
+    float and preparation rounds each once to the BF16 the tower stores, which
+    its own quantization already outweighs."""
     with repo.open(name) as stream:
         header = gguf.Metadata(stream, tensors=True)
     architecture = header.values.get("general.architecture")
@@ -243,9 +245,34 @@ def read_projector(repo, name):
         gguf.TENSOR_TYPES.get(kind, f"type {kind}") for kind in header.tensors.values()
     }
     precision = None
-    if architecture == "clip" and types and types <= {"BF16", "F32", "F16"}:
-        precision = next(p for p in ("F16", "BF16", "F32") if p in types)
+    if architecture == "clip" and types and types <= {"BF16", "F32", "F16", "Q8_0"}:
+        # The least precise type the tower has: the one a projector is chosen
+        # by, Q8_0's quantized weights below F16's.
+        precision = next(p for p in ("Q8_0", "F16", "BF16", "F32") if p in types)
     return header, precision, f"{architecture}: {', '.join(sorted(types))}"
+
+
+def file_projector(path, name=None):
+    """The projector of a local target that names its vision projector: path's
+    name in the repository that holds it (name, as prepare_local places a file
+    whose own name does not read as a projector's), and its header read by
+    read_projector, or the refusal of a file that is not a projector Splash
+    loads. inspect_target takes it as select_vision's place."""
+    name = name or path.name
+
+    def projector(repo):
+        try:
+            header, precision, kind = read_projector(repo, name)
+        except models.ModelError as error:
+            raise models.VisionError(f"{path}: {error}") from None
+        if precision is None:
+            raise models.VisionError(
+                f"{path} ({kind}) is not a vision projector Splash loads, a clip "
+                "model of BF16, F32, F16 or Q8_0 weights"
+            )
+        return name, header
+
+    return projector
 
 
 def check_model(
@@ -268,7 +295,7 @@ def check_model(
     return family
 
 
-def inspect_target(repo, variant, language_only, scratch):
+def inspect_target(repo, variant, language_only, scratch, projector=select_vision):
     """What the target repository supplies, from metadata alone: a GGUF
     header read by range requests, or an MLX config and shard index, and the
     family the engine finds its configuration to describe. A :VARIANT names a
@@ -276,7 +303,9 @@ def inspect_target(repo, variant, language_only, scratch):
     configuration and metadata are written into scratch. The target's text
     configuration is checked first, then its vision tower and the tower's
     configuration, so a model Splash cannot serve is refused for that,
-    whatever its tower; a refusal of the tower alone names --language-only."""
+    whatever its tower; a refusal of the tower alone names --language-only.
+    projector names the GGUF target's vision projector (select_vision), or one
+    a local target names (file_projector); an MLX target has its own."""
     try:
         # A local directory's root is its target's, as local.py holds: a
         # safetensors file in a subdirectory, a draft's say, makes no MLX
@@ -288,7 +317,7 @@ def inspect_target(repo, variant, language_only, scratch):
             and (repo.revision is not None or "/" not in name)
         ]
         if variant is not None or not weights:
-            return _gguf_target(repo, variant, language_only, scratch)
+            return _gguf_target(repo, variant, language_only, scratch, projector)
         return mlx_target(repo, language_only)
     except models.VisionError as error:
         raise models.VisionError(
@@ -296,7 +325,7 @@ def inspect_target(repo, variant, language_only, scratch):
         ) from None
 
 
-def _gguf_target(repo, variant, language_only, scratch):
+def _gguf_target(repo, variant, language_only, scratch, projector=select_vision):
     names, by_ending = select_gguf(repo.files, variant)
     name = names[0] if len(names) == 1 else f"{len(names)} split files {names[0]} ..."
     if by_ending:
@@ -306,7 +335,7 @@ def _gguf_target(repo, variant, language_only, scratch):
             flush=True,
         )
     target = gguf_target(
-        repo, names, scratch, projector=None if language_only else select_vision
+        repo, names, scratch, projector=None if language_only else projector
     )
     print(f"Selected {name} from {repo.name}.", flush=True)
     return target
@@ -527,9 +556,49 @@ def prepare_local(selection):
     published. --draft-model names the matching draft as a local directory, or
     as a repository resolved like an upstream draft's; without it, the DFlash2
     checkpoint the target's family publishes is resolved from the Hub and
-    downloaded, as an upstream model's draft is. The target has no repository
-    or revision, so no Hub request is made for it."""
+    downloaded, as an upstream model's draft is. --mmproj names a GGUF target's
+    vision projector, a file wherever it lies, which the installation links in
+    place of the one the directory's or the Hub's projectors would supply. The
+    target has no repository or revision, so no Hub request is made for it."""
     repo = hub.Repository.local_directory(selection.directory)
+    projector = select_vision
+    if selection.mmproj is not None:
+        mmproj = Path(selection.mmproj)
+        if not mmproj.is_file():
+            raise models.ModelError(f"vision projector {mmproj} is not a file")
+        if any(
+            name.endswith(".safetensors") and "/" not in name for name in repo.files
+        ):
+            raise models.ModelError(
+                f"{mmproj} is a GGUF target's vision projector; an MLX target "
+                "keeps its vision tower in its checkpoint"
+            )
+        try:
+            chosen, _ = select_gguf(repo.files, selection.variant)
+        except models.ModelError:
+            chosen = []
+        for name in chosen:
+            if repo.paths[name].resolve() == mmproj:
+                raise models.ModelError(
+                    f"{mmproj} is the target, not a vision projector"
+                )
+        # The named projector is the selection's: it leaves the target's files
+        # (a projector in the directory is never one) and joins them under a
+        # name that reads as a projector's, whichever the file has.
+        paths = {
+            name: path for name, path in repo.paths.items() if path.resolve() != mmproj
+        }
+        if not root_targets(paths):
+            raise models.ModelError(
+                f"{mmproj} is named as a vision projector, and no target GGUF is "
+                "left beside it"
+            )
+        name = mmproj.name if projector_named(mmproj.name) else f"mmproj-{mmproj.name}"
+        while name in paths:
+            name = "mmproj-" + name
+        paths[name] = mmproj
+        repo = hub.Repository.local_files(str(selection.directory), paths)
+        projector = file_projector(mmproj, name)
     installed = None
     if models.installation_kind(selection.link) == models.ASSEMBLY:
         try:
@@ -539,7 +608,7 @@ def prepare_local(selection):
     if selection.draft_model is None:
         # No draft named: the family's DFlash2 release stands in, which
         # _install resolves from the Hub and downloads when it is missing.
-        _install(selection, repo, installed)
+        _install(selection, repo, installed, projector=projector)
         return
     draft = _local_draft(selection, installed)
     if installed is not None and installed["sources"]["draft"] == draft.identity():
@@ -551,7 +620,7 @@ def prepare_local(selection):
             )
             return
         print(f"Reinstalling {selection.model}: {replaced}", flush=True)
-    _install(selection, repo, installed, draft)
+    _install(selection, repo, installed, draft, projector)
 
 
 def _local_draft(selection, installed):
@@ -678,18 +747,18 @@ def _retain_installed(selection):
     return None
 
 
-def _install(selection, repo, installed, draft=None):
+def _install(selection, repo, installed, draft=None, projector=select_vision):
     """Assemble repo's target and its draft, and publish the assembly at the
     selection link. draft is the draft's repository as this start resolved
     it, or None to resolve it here, asking the Hub only when it answered for
-    repo."""
+    repo. projector names the target's vision projector (select_vision)."""
     # Every Hub request (header reads, downloads) happens here.
     with (
         hub.as_model_errors(f"cannot install {selection.model}"),
         tempfile.TemporaryDirectory(prefix="splash-target-") as scratch,
     ):
         target = inspect_target(
-            repo, selection.variant, selection.language_only, Path(scratch)
+            repo, selection.variant, selection.language_only, Path(scratch), projector
         )
         if draft is None:
             draft = _resolve_draft(target.family, selection, installed, repo)

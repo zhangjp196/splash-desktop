@@ -57,11 +57,12 @@ Plan plan(const ops::VisionLayout &l) {
   return result;
 }
 
-// A source tensor of a dtype preparation reads.
+// A source tensor of a dtype preparation reads: the tower's own BF16, F16 or
+// F32, or Q8_0, which a quantized mmproj stores and preparation dequantizes.
 vision::Input input(std::string name, SourceTensor tensor) {
-  if (tensor.dtype != "BF16" && tensor.dtype != "F16" && tensor.dtype != "F32")
+  if (tensor.dtype != "BF16" && tensor.dtype != "F16" && tensor.dtype != "F32" && tensor.dtype != "Q8_0")
     throw WeightStoreError("vision tensor " + name + " in " + tensor.file->path().string() + " is " + tensor.dtype +
-                           "; preparation reads BF16, F16 or F32");
+                           "; preparation reads BF16, F16, F32 or Q8_0");
   return {std::move(name), std::move(tensor)};
 }
 

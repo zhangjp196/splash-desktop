@@ -808,6 +808,16 @@ class GgufMetadataTests(unittest.TestCase):
         f16 = (vision_fixture(), [(tensors[0][0], GGML["F16"]), tensors[1]])
         text = (fixture(), tensors)
         quantized = (vision_fixture(), [(tensors[0][0], GGML["Q8_0"]), tensors[1]])
+        # A tower llama.cpp's mmproj quantizer keeps in Q8_0, alone or beside
+        # an unquantized one, which is preferred.
+        q8 = projectors(**{"mmproj-q8": quantized, "mmproj-x": text})
+        self.assertEqual(upstream.select_vision(q8)[0], "mmproj-q8.gguf")
+        self.assertEqual(
+            upstream.select_vision(
+                projectors(**{"mmproj-q8": quantized, "mmproj-f16": f16})
+            )[0],
+            "mmproj-f16.gguf",
+        )
         # Other publishers' names; BF16 is preferred to F32 and F32 to F16, and
         # non-vision files never count.
         repo = projectors(
@@ -827,11 +837,22 @@ class GgufMetadataTests(unittest.TestCase):
         # Text only, the model is served: the caller says how to ask for it.
         with self.assertRaisesRegex(
             models.VisionError,
-            r"no BF16, F32 or F16 vision projector \(mmproj-q8.gguf \(clip: F32, Q8_0\); "
+            r"no BF16, F32, F16 or Q8_0 vision projector \(mmproj-q4.gguf \(clip: F32, Q4_0\); "
             r"mmproj-x.gguf \(qwen35moe: BF16, F32\)\)$",
         ):
             upstream.select_vision(
-                projectors(**{"mmproj-q8": quantized, "mmproj-x": text})
+                projectors(
+                    **{
+                        "mmproj-q4": (vision_fixture(), [(tensors[0][0], GGML["Q4_0"]), tensors[1]]),
+                        "mmproj-x": text,
+                    }
+                )
+            )
+        with self.assertRaisesRegex(
+            models.ModelError, "several Q8_0 vision projectors"
+        ):
+            upstream.select_vision(
+                projectors(**{"mmproj-a": quantized, "mmproj-b": quantized})
             )
         with self.assertRaisesRegex(
             models.ModelError, "several BF16 vision projectors"

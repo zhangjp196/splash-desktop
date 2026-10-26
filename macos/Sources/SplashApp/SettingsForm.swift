@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The configuration's settings, grouped in a rail the editor switches
 /// between: what model, how the server serves it, admission, memory, idle
@@ -89,6 +90,15 @@ struct SettingsTabs: View {
                     prompt: L10n.string("field.draft.prompt"),
                     path: $settings.draftDirectory,
                     disabled: disabled
+                )
+                // An MLX target's tower is in its checkpoint; a GGUF target's
+                // is a file beside it unless this names another.
+                DirectoryField(
+                    label: L10n.string("field.mmproj"),
+                    prompt: L10n.string("field.mmproj.prompt"),
+                    path: $settings.mmproj,
+                    disabled: disabled || settings.languageOnly,
+                    files: true
                 )
             }
         }
@@ -235,6 +245,8 @@ private struct DirectoryField: View {
     let prompt: String
     @Binding var path: String
     let disabled: Bool
+    /// choose a GGUF file rather than a directory.
+    var files = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -242,7 +254,7 @@ private struct DirectoryField: View {
                 .textFieldStyle(.roundedBorder)
                 .disabled(disabled)
             Button(L10n.string("field.browse")) {
-                selectFolder()
+                select()
             }
             .disabled(disabled)
             if !path.isEmpty {
@@ -259,11 +271,14 @@ private struct DirectoryField: View {
         }
     }
 
-    private func selectFolder() {
+    private func select() {
         let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
+        panel.canChooseFiles = files
+        panel.canChooseDirectories = !files
         panel.allowsMultipleSelection = false
+        if files {
+            panel.allowedContentTypes = [UTType(filenameExtension: "gguf")].compactMap { $0 }
+        }
         panel.prompt = L10n.string("field.browse")
         if panel.runModal() == .OK, let url = panel.url {
             path = url.path

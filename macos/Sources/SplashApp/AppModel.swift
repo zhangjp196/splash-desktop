@@ -179,6 +179,7 @@ final class AppModel: ObservableObject {
     @Published var modelID = ServerSettings.First.modelID
     @Published var modelDirectory = ""
     @Published var draftDirectory = ""
+    @Published var mmproj = ""
     @Published var port = ServerSettings.First.port
     @Published var lanAccess = false
     @Published var allowedHosts = ""
@@ -296,6 +297,7 @@ final class AppModel: ObservableObject {
         settings.modelID = modelID
         settings.modelDirectory = modelDirectory
         settings.draftDirectory = draftDirectory
+        settings.mmproj = mmproj
         settings.port = port
         settings.lanAccess = lanAccess
         settings.allowedHosts = allowedHosts
@@ -359,6 +361,7 @@ final class AppModel: ObservableObject {
         modelID = settings.modelID
         modelDirectory = settings.modelDirectory
         draftDirectory = settings.draftDirectory
+        mmproj = settings.mmproj
         port = settings.port
         lanAccess = settings.lanAccess
         allowedHosts = settings.allowedHosts
@@ -482,6 +485,7 @@ final class AppModel: ObservableObject {
         defaults.modelID = ""
         defaults.modelDirectory = ""
         defaults.draftDirectory = ""
+        defaults.mmproj = ""
         return ModelConfig(settings: defaults)
     }
 
@@ -550,6 +554,8 @@ final class AppModel: ObservableObject {
             arguments += ["--model-dir", modelDirectory]
             let draft = draftDirectory.trimmingCharacters(in: .whitespaces)
             if !draft.isEmpty { arguments += ["--draft-model", draft] }
+            let projector = mmproj.trimmingCharacters(in: .whitespaces)
+            if !projector.isEmpty { arguments += ["--mmproj", projector] }
         }
         arguments += ["--port", String(port)]
         // Loopback unless the configuration asks for the LAN; the extra Host

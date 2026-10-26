@@ -83,6 +83,7 @@ NORMAL, UNKNOWN, CONTROL, USER_DEFINED, UNUSED, BYTE = 1, 2, 3, 4, 5, 6
 GGML = {
     "F32": 0,
     "F16": 1,
+    "Q4_0": 2,
     "Q5_0": 6,
     "Q5_1": 7,
     "Q8_0": 8,
@@ -193,12 +194,13 @@ def selection(root, model=MODEL, **options):
 def local_selection(root, directory, **options):
     """A local target directory's selection under root/models, text only
     unless options say. An MLX or GGUF target names a draft, or its family's
-    draft is used."""
+    draft is used, and mmproj names its vision projector."""
     return models.Selection.of(
         root / "models",
         directory=str(directory),
         language_only=options.get("language_only", True),
         draft_model=options.get("draft_model"),
+        mmproj=options.get("mmproj"),
     )
 
 
