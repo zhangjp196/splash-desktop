@@ -81,3 +81,18 @@ kernel void verify_input_tokens(
                                   row - 1];
   verify_input[index] = min(token, params.vocabulary - 1u);
 }
+
+// Each lane's mask rows of its draft input, rows 1 to SPLASH_TARGET_VERIFY_ROWS - 1 (the
+// rows after its anchor), set to the mask embedding the draft's checkpoint ships
+// (ops/Embedding.cpp addDraftMaskRows): x a span of 256 columns, y the mask row, z the lane.
+kernel void draft_mask_rows(
+    device const bfloat *mask [[buffer(0)]],
+    device bfloat *rows [[buffer(1)]],
+    constant DraftMaskRowsParams &params [[buffer(2)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint thread_index [[thread_index_in_threadgroup]]) {
+  const uint column = group.x * 256 + thread_index;
+  if (column >= params.width)
+    return;
+  rows[(ulong(group.z) * SPLASH_TARGET_VERIFY_ROWS + 1 + group.y) * params.width + column] = mask[column];
+}

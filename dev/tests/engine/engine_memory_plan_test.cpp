@@ -308,6 +308,53 @@ void testModelProvidedKvGeometry() {
           "model-provided Q8 geometry is missing from status");
 }
 
+// A layout whose pages give up their windowed layers' K/V past every window
+// sizes one request's KV by Slim pages beside the Full ones its lane keeps:
+// its window's, a command's and one more, a group's where the routed
+// experts stream. Flint's 49 layers of 4 heads of 128, 35 of them windowed
+// over 512 keys, so hold about 3.5 times the pages in Slim form, and the
+// status names the Slim page and the floor; a layout without a window plans
+// and reports as it did. An extent holds pages of one form: the capacity's
+// Full pages take a whole Full extent and the rest whole Slim ones, which
+// fit the budget with no room for another, where on the 12 GiB device the
+// pages priced one by one would take 72 MiB more than it has.
+void testWindowedKvCostsSlimPages() {
+  constexpr uint64_t windowedLayers = [] {
+    uint64_t layers = (uint64_t{1} << 48) - 4;
+    for (uint32_t layer = 5; layer < 48; layer += 4)
+      layers &= ~(uint64_t{1} << layer);
+    return layers;
+  }();
+  ModelMemoryProfile flint = model();
+  flint.targetKvLayout = {49, 4, 128, kv::Format::Int8, 0, false, 512, windowedLayers};
+  ModelMemoryProfile unwindowed = flint;
+  unwindowed.targetKvLayout.windowTokens = 0;
+  unwindowed.targetKvLayout.windowedLayers = 0;
+  const EngineMemoryPlan windowedPlan = test::requireMemoryPlan(device(), flint);
+  const EngineMemoryBreakdown &budget = windowedPlan.breakdown();
+  const EngineMemoryBreakdown full = test::requireMemoryPlan(device(), unwindowed).breakdown();
+  const uint64_t fullBytes = 1'655'808, slimBytes = 473'088, extent = 128;
+  const uint64_t available = budget.dynamicBudgetBytes - budget.laneStateBytes;
+  const auto extents = [&](uint64_t pages) { return (pages + extent - 1) / extent; };
+  const uint64_t taken =
+      extents(81) * extent * fullBytes + extents(budget.kvCapacityPages - 81) * extent * slimBytes;
+  require(budget.kvPageBytes == fullBytes && budget.kvSlimPageBytes == slimBytes && budget.kvWindowFloorPages == 81 &&
+              budget.kvExtentPages == extent && (budget.kvCapacityPages - 81) % extent == 0 &&
+              taken <= available && available - taken < extent * slimBytes && budget.kvCapacityBytes == taken &&
+              budget.kvCapacityPages > 3 * full.kvCapacityPages,
+          "a windowed layout's KV capacity is not its lane's Full pages and the Slim extents beside them");
+  require(full.kvSlimPageBytes == 0 && full.kvWindowFloorPages == 0 &&
+              full.kvCapacityBytes == uint64_t{full.kvCapacityPages} * fullBytes,
+          "a layout without a window planned Slim pages");
+  require(windowedPlan.toStatusJson().find("\"kv_window\":{\"slim_page_bytes\":473088,\"floor_pages\":81}") !=
+                  std::string::npos &&
+              test::requireMemoryPlan(device(), unwindowed).toStatusJson().find("kv_window") == std::string::npos,
+          "the status did not name the Slim pages of a windowed layout alone");
+  flint.commandPages = 256;
+  require(test::requireMemoryPlan(device(), flint).breakdown().kvWindowFloorPages == 273,
+          "a streamed group's pages were not kept Full");
+}
+
 // The pool's extents leave the fewest of the budget's pages unused, the size
 // nearest the 128 MiB target on a tie, and a budget below the smallest
 // extent holds no pool.
@@ -905,6 +952,7 @@ int main() {
     testReservesAreTheModelConstants();
     testHardBudgetBoundaries();
     testModelProvidedKvGeometry();
+    testWindowedKvCostsSlimPages();
     testExtentSizeFollowsThePool();
     testHotBlockCacheIsDefinedOnce();
     testFlashNextOnTheThreeMacs();

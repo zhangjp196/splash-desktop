@@ -40,12 +40,6 @@
 namespace splash {
 namespace {
 
-// Temporary host/driver allocation failures can recover during startup.
-// Preserve the desktop reserve and bound retries; configuration and compute
-// failures remain immediate and fail-closed.
-constexpr auto kStartupMemoryRecoveryTimeout = std::chrono::seconds(30);
-constexpr auto kStartupMemoryRecoveryPoll = std::chrono::seconds(1);
-
 // One observer spans bootstrap and serving. The dispatch queue only records
 // pressure and wakes control; all allocation/reclaim decisions stay on the
 // native thread. RAII also covers failed or interrupted startup.
@@ -217,6 +211,7 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.resources.expertMemory = arguments.expertMemory;
   config.resources.sparseKvMemory = arguments.sparseKvMemory;
   config.resources.kvSpillAlways = arguments.kvSpillAlways;
+  config.resources.kvWindowTrim = arguments.kvWindowTrim;
   config.resources.verifyRows = arguments.verifyRows;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engine.decodeShare = arguments.decodeShare;
@@ -291,6 +286,26 @@ void closePersistentCache(engine::FdTransport &transport,
                     "back on probation.");
 }
 
+// A start that fails reports on stderr, as main does for any error, then
+// tells the server its reason in place of the ReadyEvent, as the engine does
+// for a failure once it serves (NativeRuntime::engineError). The frame
+// follows the report, so the server's line about it follows the report too.
+// A server that has gone away does not change the exit.
+void reportStartFailure(engine::FdTransport &transport,
+                        const engine::RuntimeBootstrapError &error) {
+  writeStderrLine(std::string("error: ") + error.what());
+  const auto frame = protocol::serializeEvent(
+      protocol::ErrorEvent{protocol::FailureClass::EngineUnhealthy, 0, false,
+                           "bootstrap_failed", error.report().message},
+      protocol::ProtocolLimits{});
+  if (!frame)
+    return;
+  try {
+    transport.outputSink()(*frame.value);
+  } catch (...) {
+  }
+}
+
 int runNative(const engine::NativeArguments &arguments) {
   if (const std::filesystem::path caches = splashCaches(); !caches.empty())
     reportLegacyWeightCache(caches / "weights");
@@ -306,7 +321,7 @@ int runNative(const engine::NativeArguments &arguments) {
         engine::NativeLoopTiming{transport.maxTickMilliseconds()});
   };
 
-  engine::StartupRetryWindow recovery(kStartupMemoryRecoveryTimeout);
+  engine::StartupRetryWindow recovery(engine::kStartupMemoryRecoveryTimeout);
   bool reportedRecoveryWait = false;
   std::unique_ptr<engine::RuntimeBootstrap> bootstrap;
   while (!bootstrap) {
@@ -326,14 +341,17 @@ int runNative(const engine::NativeArguments &arguments) {
         return static_cast<int>(engine::NativeProcessExit::CleanEof);
       const auto now = AwakeClock::now();
       const auto recoveryDeadline = recovery.retryUntil(error.report(), now);
-      if (!recoveryDeadline)
-        throw;
+      if (!recoveryDeadline) {
+        reportStartFailure(transport, error);
+        return static_cast<int>(engine::NativeProcessExit::EngineFailure);
+      }
       if (!reportedRecoveryWait) {
         logLine("Waiting for sufficient available memory to start; "
                 "the macOS reserve remains protected...");
         reportedRecoveryWait = true;
       }
-      const auto resumeAt = std::min(now + kStartupMemoryRecoveryPoll, *recoveryDeadline);
+      const auto resumeAt =
+          std::min(now + engine::kStartupMemoryRecoveryPoll, *recoveryDeadline);
       while (AwakeClock::now() < resumeAt &&
              !transport.shutdownRequested()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));

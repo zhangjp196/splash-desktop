@@ -87,6 +87,12 @@ private:
         reached_;
 };
 
+// Temporary host/driver allocation failures can recover during startup.
+// Preserve the desktop reserve and bound retries; configuration and compute
+// failures remain immediate and fail-closed.
+inline constexpr auto kStartupMemoryRecoveryTimeout = std::chrono::seconds(30);
+inline constexpr auto kStartupMemoryRecoveryPoll = std::chrono::seconds(1);
+
 // The wire limits of a model served with maxContext tokens: prompts and
 // outputs up to the context, the engine's step and draft query rows, and a
 // mask row per draft query and the anchor.

@@ -89,6 +89,7 @@ gguf::Image modelImage(const SafetensorsCheckpoint &checkpoint, const DFlashDraf
   b.projection({{selector + "hidden_projection", layout.selectorRank}}, hidden);
   b.stored(selector + "predecessor_codebook", {layout.vocabularySize, layout.selectorRank});
   b.stored(selector + "successor_codebook", {layout.vocabularySize, layout.selectorRank});
+  if (checkpoint.find(kDraftMaskEmbedding)) b.stored(std::string(kDraftMaskEmbedding), {hidden});
   return b.finish();
 }
 
@@ -130,5 +131,9 @@ WeightFile DraftCheckpointLoader::layer(uint32_t index) {
 }
 
 WeightFile DraftCheckpointLoader::model() { return open(planned_->images.size() - 1); }
+
+bool DraftCheckpointLoader::hasMaskEmbedding() const noexcept {
+  return planned_->checkpoint.find(kDraftMaskEmbedding) != nullptr;
+}
 
 } // namespace splash::model

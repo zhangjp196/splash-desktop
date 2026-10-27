@@ -10,22 +10,57 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace splash::ops {
 
-// The shared expert is an expert every row visits, so it has the routed
-// experts' intermediate width and runs through the same grouped tiles.
+// How a MoE block's router weights the top-k experts it selects, the
+// highest scores first and the lower expert id among equal scores: Softmax,
+// by the softmax of their scores; SigmoidNormalized, by each one's
+// sigmoid(score) over the sum of theirs plus 1e-20, in fp32. A sigmoid
+// router selects by score as it would by sigmoid(score), which is monotonic.
+enum class MoeRouter : uint8_t { Softmax, SigmoidNormalized };
+
+// The routings the MoE kernels compile (kernels/shared/moe.metal,
+// kernels/shared/moe_gguf.metal, kernels/decode/linear_gguf_sgmatrix.metal):
+// a router with a shared expert of sharedSlices slices behind the block's
+// scalar gate or none (MoeShape), and their kernels' name suffixes: the
+// selection's, which reads all three, and slicesSuffix of the grouping and
+// the expert passes, which read the slices alone.
+struct CompiledMoeRouting final {
+  MoeRouter router;
+  uint32_t sharedSlices;
+  bool sharedGate;
+  std::string_view selectSuffix;
+  std::string_view slicesSuffix;
+};
+inline constexpr std::array kCompiledMoeRoutings{
+    CompiledMoeRouting{MoeRouter::Softmax, 1, true, "", ""},
+    // Flint's: a sigmoid router, and an ungated shared expert twice the
+    // routed experts' width.
+    CompiledMoeRouting{MoeRouter::SigmoidNormalized, 2, false, "_sigmoid_s2", "_s2"},
+};
+
+// The shared expert is sharedSlices experts every row visits after its
+// routed ones, ids experts to experts + sharedSlices - 1: each has the
+// routed experts' intermediate width and runs through the same grouped
+// tiles, and a shared expert sharedSlices times that wide is their sum
+// (BlockExpertProjection). With sharedGate each slice's routing weight is the
+// sigmoid of the row's product with the block's scalar gate, else 1.
 struct MoeShape final {
   uint32_t hiddenSize = 0;
   uint32_t experts = 0;
   uint32_t expertsPerToken = 0;
   uint32_t expertIntermediateSize = 0;
   // The format of most routed expert weights, which picks the expert tile on
-  // Apple9 (moeGgufTile).
+  // Apple9 GPUs of more than 10 cores (moeGgufTile).
   uint32_t expertFormat = GGUF_FMT_COUNT;
   // Whether the register tile takes every routed and shared expert weight
   // (quant_register_tensor).
   bool registerFormats = true;
+  MoeRouter router = MoeRouter::Softmax;
+  uint32_t sharedSlices = 1;
+  bool sharedGate = true;
   // The block of the routed experts' stored rotation (BlockMoeWeights's
   // rotation): 0 when they were not stored for rotated inputs, else the
   // gather reads H (D x) of the block's input for its routed routes and the
@@ -35,19 +70,26 @@ struct MoeShape final {
 
   [[nodiscard]] constexpr bool valid() const noexcept {
     // Experts the routing kernels' slots hold, of an intermediate width
-    // that fills 64-column tiles.
+    // that fills 64-column tiles, routed as a kernel compiles.
     return hiddenSize && hiddenSize % 256 == 0 && experts && experts <= SPLASH_MOE_WIDE_EXPERT_SLOTS &&
            expertsPerToken && expertsPerToken <= experts &&
-           expertIntermediateSize && expertIntermediateSize % 64 == 0;
+           expertIntermediateSize && expertIntermediateSize % 64 == 0 && compiledRouting();
+  }
+  // The compiled routing of the router and the shared slices, or none.
+  [[nodiscard]] constexpr const CompiledMoeRouting *compiledRouting() const noexcept {
+    for (const CompiledMoeRouting &compiled : kCompiledMoeRoutings)
+      if (compiled.router == router && compiled.sharedSlices == sharedSlices && compiled.sharedGate == sharedGate)
+        return &compiled;
+    return nullptr;
   }
   // The router's scores per row: the expert slots of the select and group
   // kernels that route the block (metal/abi/MoE.h), one thread each.
   [[nodiscard]] constexpr uint32_t routerWidth() const noexcept {
     return experts > SPLASH_MOE_EXPERT_SLOTS ? SPLASH_MOE_WIDE_EXPERT_SLOTS : SPLASH_MOE_EXPERT_SLOTS;
   }
-  // Routed experts followed by the shared expert.
+  // Routed experts followed by the shared slices.
   [[nodiscard]] constexpr uint32_t routesPerToken() const noexcept {
-    return expertsPerToken + 1;
+    return expertsPerToken + sharedSlices;
   }
   bool operator==(const MoeShape &) const = default;
 };
@@ -56,7 +98,9 @@ struct MoeShape final {
 // rows, routed expert e's planes from tile slot(e) * N / QUANT_TILE_ROWS on
 // (moe_gguf_segment in kernels/common/moe_expert_slab.h, slot(e) from the
 // block's slot table), and the shared expert's segment, whose format may
-// differ.
+// differ, of its sharedSlices slices' N rows each in their order (the rows
+// of slice s of a shared gate or up, rows s * N on; the column window s of a
+// shared down, which a planner lays out so: gguf::TensorRows::windows).
 struct BlockExpertProjection final {
   QuantizedSegment routed;
   QuantizedSegment shared;
@@ -71,7 +115,8 @@ enum class MoePhase : uint8_t { Prefill, Decode };
 // The weights of one sparse MoE block, which the loaded model owns. The
 // router and the shared expert's scalar gate are float tensors (llama.cpp
 // keeps a GGUF's unquantized; an MLX target's load as their F32 values), and
-// they run in fp32. The routed segments hold `slots` experts, routed expert e
+// they run in fp32; a block without the gate (!MoeShape::sharedGate) leaves
+// it empty. The routed segments hold `slots` experts, routed expert e
 // in slot slotTable[e] (one uint32 per expert): every expert and the identity
 // table when they are all resident, or an expert store's slots and the
 // block's table there when they stream (`stream`, the block's index in it
@@ -115,14 +160,14 @@ public:
 
 // Grouped-row scratch. Routes are sorted by expert into tiles of tileRows
 // rows; every routed expert may leave one partially filled tile and no tile
-// is empty, and the shared expert fills one tile per tileRows rows. The gate
+// is empty, and each shared slice fills one tile per tileRows rows. The gate
 // pass parks its output in expertOutput before the down pass overwrites it,
 // so that field spans the wider of the two widths.
 [[nodiscard]] constexpr uint32_t moeMaximumTiles(uint32_t rows, MoeShape shape,
                                                  uint32_t tileRows) noexcept {
   const uint32_t routed = rows * shape.expertsPerToken;
   return std::min(routed / tileRows + shape.experts, routed) +
-         (rows + tileRows - 1) / tileRows;
+         shape.sharedSlices * ((rows + tileRows - 1) / tileRows);
 }
 
 struct MoeWorkspace final {
@@ -204,21 +249,34 @@ enum class MoeExpertTile : uint8_t { M8 = 8, M32 = 32 };
 // GGUF image: the half-staged tiles of
 // kernels/shared/moe_gguf.metal, or Register, the exact register tile of
 // kernels/decode/linear_gguf_sgmatrix.metal over Table16 tiles of the
-// grouped rows (8-row tiles only). Prefill runs the staged tile on every
-// family, whose 32-row tiles stream an expert's weights once for up to 32 of
-// its rows; Apple9 decode runs Register for experts mostly in a format it
-// stages, as its dense GGUF decode does (LinearGguf.cpp), where its matrix
-// operations share the FP32 pipe and the register tile beats staging. Both
-// stay inside the fp64 bounds `gguf-moe` checks; their sums are reassociated,
-// so a prefill and a decode of the same row need not be bitwise equal.
+// grouped rows (8-row tiles only). Apple9 GPUs of more than 10 cores run
+// Register in decode, as its dense GGUF projections do (LinearGguf.cpp), where
+// its matrix operations share the FP32 pipe and the register tile beats
+// staging; GPUs of 10 cores or fewer stage decode in every format. Prefill
+// runs the staged 32-row tiles on every family: they stream an expert's
+// weights once for up to 32 of its rows and run long chunks faster, at the
+// cost of numerics that need not match decode's. Both stay inside the fp64
+// bounds `gguf-moe` checks; their sums are reassociated, so a prefill and a
+// decode of the same row need not be bitwise equal.
 enum class MoeGgufTile : uint8_t { Staged, Register };
 
 // Apple9 stages experts mostly in a format apple9StagesFormat names: one
 // 35B-shaped layer on a 40-core M3 Max decodes UD-Q2_K_XL's IQ2_XS and
 // IQ3_XXS experts, and the IQ2, IQ3_XXS and IQ1 formats alone, 4-21% faster
 // staged at B1-B4, where Q4_K/Q5_K, Q2_K and IQ4_XS experts take 3-34% longer.
-[[nodiscard]] inline MoeGgufTile moeGgufTile(GpuFamilyClass family, MoeShape shape) noexcept {
-  return family == GpuFamilyClass::Apple9 && shape.registerFormats && !apple9StagesFormat(shape.expertFormat)
+// Apple9 GPUs of 10 cores or fewer (the base M3 and M4) stage experts in every
+// format, in both phases: on a 10-core M4 such a layer in each of the 25
+// formats the register tile takes, and one of Flash-Next's shape in 4-bit
+// formats, take 12-45% less time staged at B1-B4 with rows routed at random,
+// up to 17% less with each lane's rows routed among few experts (IQ4_NL at B1:
+// 1% more) and 7-28% less on a 2048-row chunk (at most 4% more on 128- to
+// 512-row chunks). The M3 Max's numbers predate the staged tile's one gate/up
+// pass and its column tile for an expert's lone tile of one or two rows: at
+// their code the M4 too ran Q4_K/Q5_K, Q2_K and IQ4_XS experts 2-15% faster on
+// the register tile, so larger GPUs, unmeasured since, keep it.
+[[nodiscard]] inline MoeGgufTile moeGgufTile(GpuFamilyClass family, uint32_t cores, MoeShape shape) noexcept {
+  return family == GpuFamilyClass::Apple9 && cores > 10 && shape.registerFormats &&
+                 !apple9StagesFormat(shape.expertFormat)
              ? MoeGgufTile::Register
              : MoeGgufTile::Staged;
 }
@@ -241,7 +299,8 @@ enum class MoeGgufTile : uint8_t { Staged, Register };
 struct MoeConfig final {
   // M8 for decode plans; a prefill plan takes moeGgufPrefillTile's.
   MoeExpertTile expertTile = MoeExpertTile::M8;
-  // The execution plans derive it from the GPU family.
+  // The execution plans derive it from the GPU family, its planned core count
+  // and the expert formats (moeGgufTile).
   MoeGgufTile ggufTile = MoeGgufTile::Staged;
   // The tile of the F32 router; the execution plans derive it from the
   // device and the plan's rows (Linear::ggufFloatTile).
@@ -304,10 +363,10 @@ struct MoE final {
   static void addRouted(metal::CommandGraph &graph, const MoeBuffers &buffers,
                         const BlockMoeWeights &weights, const MoePlan &plan);
   // The routing of `rows` rows of `input` by a block's `router` and
-  // `sharedScalarGate`: the router's fp32 scores in `scores` (rows of
-  // shape.routerWidth()), then each row's top-k experts and the shared
-  // expert with their routing weights in `selected` and `routingWeights`
-  // (shape.routesPerToken() per row).
+  // `sharedScalarGate` (unread without shape.sharedGate): the router's fp32
+  // scores in `scores` (rows of shape.routerWidth()), then each row's top-k
+  // experts and the shared slices with their routing weights in `selected`
+  // and `routingWeights` (shape.routesPerToken() per row).
   static void addRoutes(metal::CommandGraph &graph, const metal::MetalBuffer &input, const QuantizedSegment &router,
                         const QuantizedSegment &sharedScalarGate, const metal::MetalBuffer &scores,
                         const metal::MetalBuffer &selected, const metal::MetalBuffer &routingWeights, uint32_t rows,

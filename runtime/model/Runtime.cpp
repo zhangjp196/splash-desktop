@@ -116,8 +116,7 @@ private:
 using kv::ChunkedPrefillParams;
 
 bool isStopToken(const RuntimeGeometry &geometry, uint32_t token) noexcept {
-  return token == geometry.target.stopTokens[0] ||
-         token == geometry.target.stopTokens[1];
+  return geometry.target.stopTokens.contains(token);
 }
 
 void requireShared(const MetalBuffer &buffer, std::string_view label) {
@@ -423,6 +422,13 @@ struct Runtime::Impl {
   // The request the history's staging was last reserved for
   // (reserveHistoryStaging), whose next prefill command streams into it.
   uint64_t stagingRequest = 0;
+#ifdef SPLASH_RUNTIME_INSTRUMENTATION
+  // Whether commands copy the target's logits before their policy
+  // (RuntimeInstrumentation::captureTargetLogits), and the copies, one per
+  // batch lane of the last command that made them.
+  bool capturingTargetLogits = false;
+  std::vector<std::vector<float>> capturedTargetLogits;
+#endif
   explicit Impl(RuntimeContext value)
       : backend(value.backend),
         model(value.model),
@@ -476,14 +482,12 @@ struct Runtime::Impl {
     const ops::PenaltyTable penalties{penaltyTable, stateLanes};
     CommandGraph graph;
     sampling.addInitial(graph, policies, samplingBuffers(2), 0,
-                        geometry.target.stopTokens[0],
-                        geometry.target.stopTokens[1], penalties);
+                        geometry.target.stopTokens, penalties);
     sampling.addThinkingDrafts(
         graph, policies,
         decodeArena->batchSlice(DecodeTensor::ProposedTokens, 2));
     sampling.addVerify(graph, policies, samplingBuffers(2),
-                       geometry.target.stopTokens[0],
-                       geometry.target.stopTokens[1], penalties);
+                       geometry.target.stopTokens, penalties);
     backend.preparePipelines(graph.dispatches());
   }
 
@@ -809,9 +813,11 @@ struct Runtime::Impl {
 
   // Encodes every image whose rows first appear in this chunk and overwrites
   // the chunk's placeholder embedding rows, the item's from row `rowBegin` of
-  // `hidden` on, with the image rows. Text-only requests add no dispatches.
-  void addImageRows(CommandGraph &graph, Request &entry, const ModelBatchItem &item, const MetalBuffer &hidden,
+  // `hidden` on, with the image rows; true when it encoded one. Text-only
+  // requests add no dispatches.
+  bool addImageRows(CommandGraph &graph, Request &entry, const ModelBatchItem &item, const MetalBuffer &hidden,
                     uint32_t rowBegin) {
+    bool encodes = false;
     const uint64_t chunkBegin = item.logicalPosition;
     const uint64_t chunkEnd = chunkBegin + item.tokenCount;
     for (ImageState &image : entry.images) {
@@ -827,6 +833,7 @@ struct Runtime::Impl {
           throw std::logic_error("image request has no vision encoder");
         vision->encode(graph, image.span.grid(), rows.pixels, rows.embeddings);
         rows.encoding = true;
+        encodes = true;
         ++counters.imageEncodes;
       }
       const uint32_t width = model.vision.tensors.layout.outputHiddenSize;
@@ -836,6 +843,7 @@ struct Runtime::Impl {
           {rowBegin + static_cast<uint32_t>(begin - chunkBegin), width, 0},
           static_cast<uint32_t>(end - begin), width);
     }
+    return encodes;
   }
 
   static float nextUniform(Request &entry) noexcept {
@@ -973,7 +981,7 @@ struct Runtime::Impl {
         {.target_rows = targetRows,
          .draft_rows = draftRows,
          .target_scale = geometry.target.ropeScaling.attentionFactor()},
-        kPrefillRows);
+        kPrefillRows, geometry.target.rotaryPairs);
   }
 
   // A constrained lane keeps its final prompt row, which prefill leaves at
@@ -1229,6 +1237,28 @@ struct Runtime::Impl {
     uploadSamplingUniforms(entry, lane);
   }
 
+#ifdef SPLASH_RUNTIME_INSTRUMENTATION
+  // While capturing, a host step before the policy that copies the logits
+  // the target's forward left in each of the command's `lanes` batch lanes:
+  // row 0 for a selection (`rows` 1), the lane's verified rows for a verify.
+  void encodeTargetLogitsCapture(CommandGraph &graph, uint32_t lanes, uint32_t rows) {
+    if (!capturingTargetLogits)
+      return;
+    graph.host([this, lanes, rows] {
+      const uint64_t vocabulary = geometry.target.vocabularySize;
+      capturedTargetLogits.resize(lanes);
+      for (uint32_t lane = 0; lane < lanes; ++lane) {
+        const uint32_t copied =
+            rows == 1 ? 1 : *contents<uint32_t>(decodeArena->get(lane, DecodeTensor::VerifyRows), "verify rows");
+        if (!copied || copied > rows)
+          throw std::logic_error("captured verify rows are out of range");
+        const float *logits = contents<float>(decodeArena->get(lane, DecodeTensor::Logits), "logits");
+        capturedTargetLogits[lane].assign(logits, logits + copied * vocabulary);
+      }
+    });
+  }
+#endif
+
   // One LM head over the batch's `width` lanes, then one selection of the
   // first token of every selecting lane from its logits row 0, which
   // initialToken() reads. The head computes, and nothing reads, the other
@@ -1256,10 +1286,12 @@ struct Runtime::Impl {
       policies[lane.lane] = samplingPolicy(*lane.entry);
       stateLanes[lane.lane] = lane.entry->stateLane;
     }
+#ifdef SPLASH_RUNTIME_INSTRUMENTATION
+    encodeTargetLogitsCapture(graph, width, 1);
+#endif
     sampling.addInitial(graph, std::span(policies).first(width),
                         samplingBuffers(width), 0,
-                        geometry.target.stopTokens[0],
-                        geometry.target.stopTokens[1],
+                        geometry.target.stopTokens,
                         {penaltyTable, std::span(stateLanes).first(width)});
   }
 
@@ -1731,6 +1763,7 @@ struct Runtime::Impl {
     inside.reserve(uint64_t{chunks.size()} * kLaneCount);
     std::vector<QwenTargetPrefillChunk> modelChunks;
     modelChunks.reserve(chunks.size());
+    bool encodesImages = false;
     for (uint32_t c = 0; c < chunks.size(); ++c) {
       const PrefillChunk &chunk = chunks[c];
       const auto p = [&](PrefillTensor tensor) { return prefillArena->get(tensor, c); };
@@ -1746,7 +1779,7 @@ struct Runtime::Impl {
       for (uint32_t s = 0; s < chunk.sequences.size(); ++s) {
         const PrefillSequence &sequence = chunk.sequences[s];
         const ModelBatchItem &part = sequence.part;
-        if (begins) addImageRows(graph, *sequence.entry, part, model.buffers.hidden[0], sequence.rowBegin);
+        if (begins) encodesImages |= addImageRows(graph, *sequence.entry, part, model.buffers.hidden[0], sequence.rowBegin);
         const GdnParityBuffers &in = *from[sequence.lane], &out = *written[c][s];
         from[sequence.lane] = &out;
         QwenTargetPrefillSequence &destination = sequences[c].emplace_back();
@@ -1780,8 +1813,13 @@ struct Runtime::Impl {
       }
       model.sequences = sequences[c];
     }
+    // A command that encodes an image runs on the GPU alone: the encode, ahead
+    // of the command's waits for the Neural Engine, takes seconds for a large
+    // image on a small GPU (about 8 s for 2048 x 1792 on an M6), and Metal
+    // fails a command buffer whose event wait stays unmet for 5 s
+    // (ops/AneFfn.cpp), which fails the engine.
     const std::vector<MetalBuffer> finalHidden =
-        targetModel->addPrefill(graph, modelChunks, kvPages, reads, layers, aneFfn);
+        targetModel->addPrefill(graph, modelChunks, kvPages, reads, layers, encodesImages ? nullptr : aneFfn);
     for (uint32_t c = 0; ends && c < chunks.size(); ++c) addDraftContext(graph, chunks, c);
 
     PrefillOutputs outputs;
@@ -2050,9 +2088,11 @@ struct Runtime::Impl {
       policies[lane] = samplingPolicy(*entries[lane]);
       stateLanes[lane] = entries[lane]->stateLane;
     }
+#ifdef SPLASH_RUNTIME_INSTRUMENTATION
+    encodeTargetLogitsCapture(graph, lanes, kDecodeRows);
+#endif
     sampling.addVerify(graph, std::span(policies).first(lanes),
-                       samplingBuffers(lanes), geometry.target.stopTokens[0],
-                       geometry.target.stopTokens[1],
+                       samplingBuffers(lanes), geometry.target.stopTokens,
                        {penaltyTable, std::span(stateLanes).first(lanes)});
   }
 
@@ -2114,7 +2154,7 @@ struct Runtime::Impl {
          decodeArena->batchSlice(DecodeTensor::AcceptedCount, width),
          decodeArena->batchSlice(DecodeTensor::VerifyRows, width)},
         maximumRetained, std::span(policies).first(width),
-        geometry.target.stopTokens[0], geometry.target.stopTokens[1]);
+        geometry.target.stopTokens);
   }
 
   // The target's commit after acceptance (QwenTarget::addStateCommit): each
@@ -3017,6 +3057,8 @@ Runtime::decodeAsync(const BatchPlan &plan,
       impl_->decodeArena->batchSlice(DecodeTensor::DraftRopeSin, width));
   impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::DraftInputTokens,
                               DecodeTensor::DraftHidden0, width);
+  impl_->draftModel.addMaskRows(commandGraph, impl_->decodeArena->batchSlice(DecodeTensor::DraftHidden0, width),
+                                width);
   impl_->encodeDraftBatchGraph(commandGraph, entries,
                                {logicalPositions.data(), width},
                                {maximumRetained.data(), width}, constrained);
@@ -3498,8 +3540,25 @@ std::span<const float> RuntimeInstrumentation::lastLogits(const Runtime &runtime
           uint64_t{ExecutionLimits::targetVerifyRows} * impl.geometry.target.vocabularySize};
 }
 
+std::span<const uint16_t> RuntimeInstrumentation::lastCapturedRows(const Runtime &runtime, uint32_t chunk) {
+  const MetalBuffer captured = runtime.impl_->prefillArena->get(PrefillTensor::Captured, chunk);
+  return {contents<uint16_t>(captured, "captured target rows"), captured.sizeBytes() / sizeof(uint16_t)};
+}
+
 uint32_t RuntimeInstrumentation::lastVerifyRows(const Runtime &runtime, uint32_t lane) {
   return *contents<uint32_t>(runtime.impl_->decodeArena->get(lane, DecodeTensor::VerifyRows), "verify rows");
+}
+
+void RuntimeInstrumentation::captureTargetLogits(Runtime &runtime, bool enabled) {
+  runtime.impl_->capturingTargetLogits = enabled;
+}
+
+std::vector<std::vector<float>> RuntimeInstrumentation::takeTargetLogits(Runtime &runtime) {
+  return std::exchange(runtime.impl_->capturedTargetLogits, {});
+}
+
+std::optional<uint32_t> RuntimeInstrumentation::pendingToken(const Runtime &runtime, uint64_t requestId) {
+  return runtime.impl_->requests.at(requestId).pendingToken;
 }
 
 RuntimeInstrumentation::LaneTables RuntimeInstrumentation::laneTables(const Runtime &runtime, uint64_t requestId) {
@@ -3517,6 +3576,9 @@ std::vector<uint8_t> RuntimeInstrumentation::pendingGdnRows(const Runtime &runti
   const Runtime::Impl::Request &entry = impl.requests.at(requestId);
   if (!entry.resident)
     throw std::logic_error("request is not resident");
+  // A target without GDN layers keeps no tape.
+  if (!impl.geometry.target.stateLayout.layers)
+    return {};
   const QwenLaneMetadata &metadata = impl.states.metadata(entry.stateLane);
   const ops::GdnShape shape = impl.geometry.target.gdnShape();
   const uint32_t kvWidth = (shape.keyHeads + shape.valueHeads) * shape.headDimension;

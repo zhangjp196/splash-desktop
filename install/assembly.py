@@ -27,7 +27,9 @@ The paths an assembly links, and what reads each:
                          from the GGUF (server.py main)
   draft/config.json, draft/<name>.safetensors
                          the DFlash2 checkpoint (ModelDescriptor.mm,
-                         DraftCheckpoint.cpp)
+                         DraftCheckpoint.cpp), with the mask token's
+                         embedding, draft/mask_embedding.safetensors, when
+                         the release ships one
   vision/<shard>         the MLX shards holding vision_tower.*
                          (VisionLoader.cpp, through SafetensorsCheckpoint.mm)
   vision/mmproj.gguf     the GGUF vision projector (VisionLoader.cpp)
@@ -42,7 +44,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from . import gguf, hub, models
+from . import families, gguf, hub, models
 
 GGUF_VISION = "vision/mmproj.gguf"
 TARGET_FORMATS = ("mlx-affine", "gguf")
@@ -243,6 +245,14 @@ def recorded(link: Path):
     except models.ModelError:
         return None
     return record if _well_formed(record) else None
+
+
+def family(path: Path):
+    """The family the assembly path names was installed as, its record's
+    (families.FAMILIES); None without a record of the shape build writes, or
+    for a family this release does not serve."""
+    record = recorded(path)
+    return record and families.named(record["family"])
 
 
 def _metadata_inputs(files):

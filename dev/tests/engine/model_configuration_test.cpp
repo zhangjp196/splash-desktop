@@ -18,6 +18,7 @@
 #include "model/WeightStore.hpp"
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <filesystem>
 #include <initializer_list>
@@ -70,7 +71,13 @@ constexpr std::string_view kDenseGgufConfig =
 constexpr std::string_view kMoeGgufConfig =
     R"({"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":2048,)"
     R"("max_position_embeddings":262144,"num_attention_heads":16,"num_key_value_heads":2,)"
-    R"("head_dim":256,"num_hidden_layers":40,"vocab_size":248320}})";
+    R"("head_dim":256,"num_experts":256,"num_hidden_layers":40,"vocab_size":248320}})";
+// Qwen3.5-122B-A10B's, of the same model type, from unsloth's
+// Ornith-1.5-122B GGUF (its MTP layer left out of the layers).
+constexpr std::string_view kLargeMoeGgufConfig =
+    R"({"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":3072,)"
+    R"("max_position_embeddings":262144,"num_attention_heads":32,"num_key_value_heads":2,)"
+    R"("head_dim":256,"num_experts":256,"num_hidden_layers":48,"vocab_size":248320}})";
 
 // The descriptor inspection makes of model's assembly.
 model::ModelDescriptor inspect(const SourceModel &model) {
@@ -111,6 +118,15 @@ void testFamilies(const std::filesystem::path &fixtures) {
               moeDescriptor.visionSource == model::VisionSource::Safetensors &&
               moeDescriptor.draft == test::qwen3_6MoeDraft(),
           "an MLX Qwen3.6-35B-A3B made another descriptor");
+  // Qwen3.5-122B-A10B's model type is the Qwen3.6-35B-A3B's: its sizes
+  // name its family (describeSourceModel).
+  const model::ModelDescriptor largeMoeDescriptor =
+      inspect(mlxModel(fixtures, "qwen3.5-122b-a10b").with(&SourceModel::record, R"("none")", R"("safetensors")"));
+  require(largeMoeDescriptor.target == model::TargetLayout{model::kQwen3_5_122BLayout} &&
+              largeMoeDescriptor.visionSource == model::VisionSource::Safetensors &&
+              largeMoeDescriptor.vision.outputHiddenSize == 3072 &&
+              largeMoeDescriptor.draft == test::qwen3_5_122BDraft(),
+          "an MLX Qwen3.5-122B-A10B made another descriptor");
   // Qwen3.8-Flash-Next's GGUF config, with its draft's.
   const model::ModelDescriptor flashDescriptor =
       inspect(mlxModel(fixtures, "qwen3.8-flash-next").with(&SourceModel::record, R"("mlx-affine")", R"("gguf")"));
@@ -161,7 +177,7 @@ void testFamilies(const std::filesystem::path &fixtures) {
   // tell its target from other models of the architecture, which Splash does
   // not serve, such as Qwen3.5-4B.
   constexpr std::string_view supported =
-      "; supported: Qwen3.8-27B, Qwen3.6-35B-A3B, Qwen3.8-Flash-Next";
+      "; supported: Qwen3.8-27B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next";
   struct Refused final {
     std::string_view from, to, difference;
   };
@@ -176,6 +192,22 @@ void testFamilies(const std::filesystem::path &fixtures) {
             "no supported model has this architecture (" + std::string(refused.difference) + ")" +
                 std::string(supported),
             "a config of another model was accepted with " + std::string(refused.to));
+  // A config of a model type of several families and the sizes of none is
+  // refused as it differs from the one it matches furthest.
+  refuses(mlxModel(fixtures, "qwen3.5-122b-a10b")
+              .with(&SourceModel::config, R"("num_hidden_layers": 48)", R"("num_hidden_layers": 40)"),
+          "no supported model has this architecture (text config num_hidden_layers: safetensors 40, "
+          "Qwen3.5-122B-A10B 48)" +
+              std::string(supported),
+          "a config of no family's sizes was accepted");
+  // One that differs from every family in the first size, the hidden size,
+  // matches none further than the first family of its model type, and is
+  // refused as it differs from that one.
+  refuses(moe.with(&SourceModel::config, R"("hidden_size": 2048)", R"("hidden_size": 4096)"),
+          "no supported model has this architecture (text config hidden_size: safetensors 4096, "
+          "Qwen3.6-35B-A3B 2048)" +
+              std::string(supported),
+          "a config of no family's hidden size was accepted");
 }
 
 // A descriptor states where its weights come from: one that leaves either
@@ -544,6 +576,58 @@ void testVisionConfig(const std::filesystem::path &fixtures) {
             "a vision config was accepted with " + std::string(refused.to));
 }
 
+// A GGUF MoE target is served by the routed experts its config states, which
+// the installer derives from the header, fewer than its family's in a pruned
+// release: a multiple of 8 from the experts each token takes to the family's
+// (ggufRoutedExperts). Every other dimension stays the family's, and a config
+// without the count, which an earlier release derived, states the family's.
+// An MLX target's count is the family's.
+void testPrunedExperts(const std::filesystem::path &fixtures) {
+  // The family's layout with `experts` routed experts.
+  const auto withExperts = [](auto layout, uint32_t experts) -> model::TargetLayout {
+    layout.experts = experts;
+    return layout;
+  };
+  const SourceModel flash =
+      mlxModel(fixtures, "qwen3.8-flash-next").with(&SourceModel::record, R"("mlx-affine")", R"("gguf")");
+  const auto flashWith = [&](uint32_t experts) {
+    return flash.with(&SourceModel::config, R"("num_experts": 512)",
+                      R"("num_experts": )" + std::to_string(experts));
+  };
+  const model::ModelDescriptor pruned = inspect(flashWith(256));
+  require(pruned.valid() && pruned.target == withExperts(model::Qwen4ExpLayout{}, 256) &&
+              pruned.draft == test::flashNextDraft(),
+          "a pruned Qwen3.8-Flash-Next GGUF was not described as its family with its experts");
+  for (const uint32_t experts : {16U, 512U})
+    require(inspect(flashWith(experts)).target == withExperts(model::Qwen4ExpLayout{}, experts),
+            "a Qwen3.8-Flash-Next GGUF of " + std::to_string(experts) + " experts was not served by them");
+  require(inspect(flash.with(&SourceModel::config, R"("num_experts": 512,)", "")).target ==
+              model::TargetLayout{model::Qwen4ExpLayout{}},
+          "a GGUF config without its experts did not state the family's");
+  for (const uint32_t experts : {8U, 12U, 520U})
+    refuses(flashWith(experts),
+            "(text config num_experts: GGUF " + std::to_string(experts) +
+                ", Qwen3.8-Flash-Next a multiple of 8 from 16 to 512)",
+            "a Qwen3.8-Flash-Next GGUF of " + std::to_string(experts) + " experts was accepted");
+  refuses(flash.with(&SourceModel::config, R"("num_experts": 512)", R"("num_experts": true)"),
+          "text config num_experts must be a number", "a GGUF config's experts were read from a boolean");
+  // Qwen3.6-35B-A3B's, by its own experts and the experts each token takes.
+  SourceModel moe = mlxModel(fixtures, "qwen3.6-35b-a3b").with(&SourceModel::record, R"("mlx-affine")", R"("gguf")");
+  moe.config = kMoeGgufConfig;
+  const auto moeWith = [&](uint32_t experts) {
+    return moe.with(&SourceModel::config, R"("num_experts":256)", R"("num_experts":)" + std::to_string(experts));
+  };
+  for (const uint32_t experts : {8U, 128U})
+    require(inspect(moeWith(experts)).target == withExperts(model::Qwen3_6MoeLayout{}, experts),
+            "a Qwen3.6-35B-A3B GGUF of " + std::to_string(experts) + " experts was not served by them");
+  refuses(moeWith(264), "(text config num_experts: GGUF 264, Qwen3.6-35B-A3B a multiple of 8 from 8 to 256)",
+          "a Qwen3.6-35B-A3B GGUF of more experts than its family's was accepted");
+  refuses(mlxModel(fixtures, "qwen3.6-35b-a3b")
+              .with(&SourceModel::config, R"("num_experts": 256)", R"("num_experts": 128)"),
+          "text config num_experts mismatch: safetensors 128, runtime 256",
+          "an MLX target of other experts than its family's was accepted");
+}
+
 // The installer's check before any weight download (the engine's
 // model-check): the family of a target's configuration, alone while its
 // draft is not chosen and then with the draft's, by the rules a start
@@ -580,12 +664,30 @@ void testConfigurationCheck(const std::filesystem::path &fixtures) {
   require(check("gguf", "none", kDenseGgufConfig, denseMetadata, dense.draft) == "Qwen3.8-27B" &&
               check("gguf", "none", kMoeGgufConfig, moeMetadata, std::nullopt) == "Qwen3.6-35B-A3B",
           "a GGUF's derived config and metadata were not found to be its family");
+  // Qwen3.5-122B-A10B, of the same model type and GGUF architecture as the
+  // Qwen3.6-35B-A3B, as its sizes tell; its draft, trained to fill a block
+  // of 16, drafts the kernels' eight rows, and a block of fewer is refused.
+  // Each family refuses the other's draft.
+  const SourceModel largeMoe = mlxModel(fixtures, "qwen3.5-122b-a10b");
+  const std::string largeMoeMetadata = text(fixtures / "qwen3.5-122b-a10b" / "gguf-metadata.json");
+  require(check("mlx-affine", "safetensors", largeMoe.config, std::nullopt, largeMoe.draft) == "Qwen3.5-122B-A10B" &&
+              check("gguf", "none", kLargeMoeGgufConfig, largeMoeMetadata, largeMoe.draft) == "Qwen3.5-122B-A10B",
+          "a Qwen3.5-122B-A10B's configuration was not found to be its family");
+  rejects([&] { static_cast<void>(check("mlx-affine", "none", moe.config, std::nullopt, largeMoe.draft)); },
+          "draft config hidden_size mismatch: checkpoint 3072, runtime 2048", "a larger family's draft was accepted");
+  rejects([&] { static_cast<void>(check("mlx-affine", "none", largeMoe.config, std::nullopt, moe.draft)); },
+          "draft config hidden_size mismatch: checkpoint 2048, runtime 3072", "a smaller family's draft was accepted");
+  rejects([&] {
+    static_cast<void>(check("mlx-affine", "none", largeMoe.config, std::nullopt,
+                            largeMoe.with(&SourceModel::draft, R"("block_size": 16)", R"("block_size": 4)").draft));
+  }, "draft config dflash_config block_size is less than the 8 rows a cycle drafts",
+          "a draft of a block shorter than the kernels' rows was accepted");
   rejects([&] { static_cast<void>(check("gguf", "none", kDenseGgufConfig, std::nullopt, std::nullopt)); },
           "a GGUF target is checked with its metadata", "a GGUF was checked without its metadata");
-  const auto replaced = [](std::string metadata, std::string_view from, std::string_view to) {
-    const size_t at = metadata.find(from);
-    require(at != std::string::npos, "the GGUF metadata has no " + std::string(from));
-    return metadata.replace(at, from.size(), to);
+  const auto replaced = [](std::string json, std::string_view from, std::string_view to) {
+    const size_t at = json.find(from);
+    require(at != std::string::npos, "the config or metadata has no " + std::string(from));
+    return json.replace(at, from.size(), to);
   };
   // Qwen3.8-Flash-Next loads from a GGUF only; its metadata also states the
   // hyper-connections, the QSA indexer and the PLE n-gram embedding.
@@ -624,6 +726,18 @@ void testConfigurationCheck(const std::filesystem::path &fixtures) {
     rejects([&] { static_cast<void>(check("gguf", "none", flashConfig, metadata, std::nullopt)); }, error,
             "Qwen3.8-Flash-Next accepted metadata the kernels do not compute");
   }
+  // A pruned release, such as its Coder GGUF of 256 of the 512 routed
+  // experts: the config derived from the header states the header's count,
+  // which the header holds it to, and every other value stays the family's.
+  const std::string coderConfig = replaced(flashConfig, R"("num_experts": 512)", R"("num_experts": 256)");
+  const std::string coderMetadata =
+      replaced(flashMetadata, R"("qwen4exp.expert_count": 512)", R"("qwen4exp.expert_count": 256)");
+  require(check("gguf", "none", coderConfig, coderMetadata, std::nullopt) == "Qwen3.8-Flash-Next" &&
+              check("gguf", "none", coderConfig, coderMetadata, flashDraft) == "Qwen3.8-Flash-Next",
+          "a pruned Qwen3.8-Flash-Next GGUF's config and metadata were not found to be its family");
+  rejects([&] { static_cast<void>(check("gguf", "none", coderConfig, flashMetadata, std::nullopt)); },
+          "GGUF metadata does not match the target: expert_count 512 (expected 256)",
+          "a config of other experts than its header's was accepted");
   struct RefusedMetadata final {
     std::string_view config;
     const std::string &metadata;
@@ -753,6 +867,66 @@ void testYarn(const std::filesystem::path &fixtures) {
           "YaRN's attention factor is not 0.1 ln(factor) + 1");
 }
 
+// Flint's configs are flat, its GGUF config the release's config.json or
+// one the installer derives with the release's keys of it: the layout's
+// values hold each key to it by name, and its draft names the mask token,
+// one of Flint's reserved tokens, which the descriptor's layout then holds.
+void testFlint(const std::filesystem::path &fixtures) {
+  const SourceModel flint =
+      mlxModel(fixtures, "flint").with(&SourceModel::record, R"("mlx-affine")", R"("gguf")");
+  const model::ModelDescriptor descriptor = inspect(flint);
+  const auto *layout = std::get_if<model::FlintLayout>(&descriptor.target);
+  require(layout && descriptor.targetSource == model::TargetSource::Gguf && descriptor.family() == "Flint" &&
+              layout->maskToken == 150019 && descriptor.draft == test::flintDraft() && descriptor.valid(),
+          "a GGUF Flint made another descriptor");
+  // Its 35 sliding layers read a window of the 512 keys before a row's, its
+  // 14 others every key, the 49 attention layers' K/V in one page.
+  require(descriptor.targetKvLayout.attentionLayers == 49 && descriptor.targetKvLayout.windowTokens == 512 &&
+              std::popcount(descriptor.targetKvLayout.windowedLayers) == 35 && !descriptor.stateLayout.target.layers,
+          "Flint's KV and state layouts are not its layers'");
+  const auto masked = [&](uint32_t token) {
+    return flint.with(&SourceModel::draft, R"("mask_token_id": 150019)",
+                      R"("mask_token_id": )" + std::to_string(token));
+  };
+  require(std::get<model::FlintLayout>(inspect(masked(150143)).target).maskToken == 150143,
+          "a Flint draft's last reserved mask token was not its layout's");
+  for (const uint32_t token : {150018u, 150144u, 248077u})
+    refuses(masked(token), "is not one of the target's reserved tokens 150019 to 150143",
+            "a Flint draft's mask token outside the reserved tokens was accepted");
+  refuses(flint.with(&SourceModel::record, R"("gguf")", R"("mlx-affine")"), "Flint loads from a GGUF only",
+          "an MLX Flint was accepted");
+  // Each key Flint's values make is held to them by name.
+  struct Refused final {
+    std::string_view from, to, error;
+  };
+  for (const Refused &refused : std::initializer_list<Refused>{
+           {R"("sliding_window": 513)", R"("sliding_window": 512)", "text config sliding_window mismatch"},
+           {R"("sliding_attention")", R"("full_attention")", "text config layer_types 2 must be sliding_attention"},
+           {"\n    48\n  ]", "\n    47\n  ]", "text config no_rope_layer_indices mismatch"},
+           {R"("softmax_type": "learnable")", R"("softmax_type": "vanilla")", "text config softmax_type mismatch"},
+           {R"("router_score_function": "sigmoid")", R"("router_score_function": "softmax")",
+            "text config router_score_function mismatch"},
+           {R"("norm_topk_prob": true)", R"("norm_topk_prob": false)", "text config norm_topk_prob must be true"},
+           {R"("shared_expert_intermediate_size": 1024)", R"("shared_expert_intermediate_size": 512)",
+            "text config shared_expert_intermediate_size mismatch"},
+           {R"("intermediate_size": 6144)", R"("intermediate_size": 4096)", "text config intermediate_size mismatch"},
+           {"\n    0,\n    1\n  ],", "\n    0\n  ],", "text config mlp_only_layers mismatch"},
+           {"150018\n  ]", "150017\n  ]", "text config eos_token_id mismatch"},
+           {R"("rope_theta": 10000.0)", R"("rope_theta": 1000000.0)", "text config rope_theta mismatch"},
+           {R"("tie_word_embeddings": false)", R"("tie_word_embeddings": true)",
+            "text config tie_word_embeddings must be false"}})
+    refuses(flint.with(&SourceModel::config, refused.from, refused.to), refused.error,
+            "a Flint config with " + std::string(refused.to) + " was accepted");
+  // A flat config is read only for a family whose configs are flat, and
+  // Flint's only flat.
+  refuses(flint.with(&SourceModel::config, R"("model_type": "flint")", R"("model_type": "qwen3_5_moe_text")"),
+          "its config has no text_config", "a flat Qwen config was accepted");
+  SourceModel nested = flint;
+  nested.config = R"({"model_type":"flint_vl","text_config":)" + flint.config + "}";
+  refuses(nested, "no supported model has this architecture (text model type flint)",
+          "a Flint config under text_config was accepted");
+}
+
 int main(int argc, char **argv) {
   try {
     if (argc != 2) throw std::invalid_argument("usage: model-configuration FIXTURES");
@@ -761,10 +935,12 @@ int main(int argc, char **argv) {
     testOneRulePerValue(argv[1]);
     testQuantization(argv[1]);
     testVisionConfig(argv[1]);
+    testPrunedExperts(argv[1]);
     testConfigurationCheck(argv[1]);
     testYarn(argv[1]);
-    std::cout << "model configuration: every family, sources, one rule per value, quantization, vision, the "
-                 "installer's check, YaRN PASS\n";
+    testFlint(argv[1]);
+    std::cout << "model configuration: every family, sources, one rule per value, quantization, vision, pruned "
+                 "experts, the installer's check, YaRN, Flint PASS\n";
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';
     return 1;

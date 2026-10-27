@@ -279,7 +279,12 @@ void GgufFile::parse(WeightSource &source, uint32_t file) {
     tensors_.push_back(std::move(tensor));
   }
   const uint64_t headerEnd = reader.position();
-  const uint64_t padding = (alignment - headerEnd % alignment) % alignment;
+  // A part of no tensors may end at its header, as the first part of a split
+  // GGUF that holds the metadata alone does: its data section is empty, and
+  // the padding before it is not written.
+  const uint64_t padding = tensors_.size() == firstTensor && headerEnd == source.bytes()
+                               ? 0
+                               : (alignment - headerEnd % alignment) % alignment;
   if (padding > source.bytes() - headerEnd) throw GgufError("GGUF data section is truncated");
   source.setDataOffset(headerEnd + padding);
   const uint64_t dataBytes = source.bytes() - source.dataOffset();

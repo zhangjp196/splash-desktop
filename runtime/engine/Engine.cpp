@@ -1447,6 +1447,12 @@ void Engine::publishReachedStateBoundaries(
     materialized = true;
     endedAtBoundary = objective.tokens == promptProcessed;
     const uint64_t block = cache_.blockAt(active.request.id, objective.tokens);
+    // A windowed layout's state restores only through a Full tail, which
+    // the command that computed it, or held it in its window, leaves so.
+    if (!cache_.stateTailFull(block)) {
+      ++failures;
+      continue;
+    }
     // The state is in use before any of the ways below keeps it, so each of
     // them makes room as work in use.
     if (replay)
@@ -1545,6 +1551,12 @@ Engine::Prepared Engine::prepare(BatchPlan &plan, std::vector<ModelBatchItem> &i
                                  std::vector<std::vector<Capture>> &captures, double now) {
   const bool prefill = plan.kind == WorkKind::Prefill;
   const bool spill = config_.spill.capable;
+  // Whether a lane, of the given KV mode if one is named, is in service.
+  const auto inService = [&](std::optional<KvMode> mode) {
+    return std::any_of(requests_.begin(), requests_.end(), [&](const auto &entry) {
+      return entry.second.lane && (!mode || entry.second.kvMode == *mode);
+    });
+  };
   // Pages whose copies have landed leave memory before any lane grows; the
   // Index runway they draw on refills if memory allows. The Full extents
   // they empty leave memory too, but one, the runway, while a spilling
@@ -1556,11 +1568,19 @@ Engine::Prepared Engine::prepare(BatchPlan &plan, std::vector<ModelBatchItem> &i
   if (spill) {
     const SpilledExtents extents =
         spillingPrompt() || config_.growthPaused() ? SpilledExtents::KeepRunway : SpilledExtents::Released;
-    const bool inService = std::any_of(requests_.begin(), requests_.end(), [](const auto &entry) {
-      return entry.second.lane && entry.second.kvMode == KvMode::Spill;
-    });
-    static_cast<void>(allocate([&] { return cache_.spillWritten(extents); }, inService,
+    static_cast<void>(allocate([&] { return cache_.spillWritten(extents); }, inService(KvMode::Spill),
                                ReclaimClass::Ordinary, {}, true));
+  }
+  // So do a windowed layout's windowed layers' K/V of the pages every
+  // window has passed, the processed rows' (Cache::trimWindows): into the
+  // Slim runway and what memory allows, the rest Full for a later pass. A
+  // Slim page takes a fraction of the Full page it frees for the lanes to
+  // grow into, so the Slim extents are memory the lanes in service need: the
+  // host's pause holds them back only while none is, and a long prompt's
+  // pages trim as it prefills rather than filling the budget Full.
+  {
+    const Serving mark(config_.serving, inService(std::nullopt));
+    static_cast<void>(cache_.trimWindows());
   }
   // A command's later passes run its item again: the lane holds what it
   // needs, and only its page table may have changed, as moves between
@@ -2096,15 +2116,21 @@ CacheReclaimResult Engine::reclaimForState(ReclaimClass upTo, bool forLater) {
 }
 
 // The reclaim step for KV pages the engine's limit refused. Allocated extents
-// stay for the pages to reuse; idle state memory goes first, then the cache
-// gives up what covers the shortfall, of the pages' form, in one step.
+// stay for the pages to reuse; idle state memory beyond the lane's pooled
+// buffers goes first, then the cache gives up what covers the shortfall, of
+// the pages' form, in one step, and the lane's buffers go last. Their draft
+// ring is the one buffer no cached state holds: while it stays, a request
+// that waits can start beside this one from cached states' cells and windows.
 CacheReclaimResult Engine::reclaimForKv(const TokenAdmission &admission, ReclaimClass upTo) {
-  if (reclaimIdleState(false, model::IdleMemory::BuffersThenCaches))
+  if (reclaimIdleState(true, model::IdleMemory::BuffersThenCaches))
     return {true, 0};
   const CacheReclaimResult reclaimed = cache_.reclaimForPages(
       admission.additionalPages, CacheReclaimMode::KeepExtents, upTo, admission.form);
   if (reclaimed.madeProgress)
     signalResourceProgress();
+  if (!reclaimed.madeProgress && !reclaimed.pending &&
+      reclaimIdleState(false, model::IdleMemory::Buffers))
+    return {true, 0};
   return reclaimed;
 }
 

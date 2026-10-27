@@ -13,6 +13,7 @@
 
 #include "LinearNumerics.hpp"
 #include "NormReference.hpp"
+#include "TestFamilies.hpp"
 
 #import <Foundation/Foundation.h>
 
@@ -771,9 +772,7 @@ void bufferExtents(MetalBackend &backend, const GdnShape &shape, bool float32,
 
 void run(const std::string &metallib) {
   MetalBackend backend(metallib);
-  for (const GdnShape &shape :
-       {GdnShape{16, 48, 128, 10240, 16640}, GdnShape{16, 32, 128, 8192, 12544},
-        GdnShape{16, 48, 128, 10240, 16512, true}}) {
+  for (const GdnShape &shape : splash::test::familyGdnShapes()) {
     for (bool float32 : {false, true})
       bufferExtents(backend, shape, float32, GdnStateFormat::Float32);
     bufferExtents(backend, shape, false, GdnStateFormat::BFloat16);

@@ -2,12 +2,16 @@
 
 // The options with which the native tools that load a model (the runtime
 // oracle, weight-digests, decode-profile and teacher-logits) stream parts of
-// its weights from their files, named as splash serve's.
+// its weights from their files, named as splash serve's, and what a load with
+// them holds.
 
 #include "model/ModelFactory.hpp"
+#include "model/ModelSizing.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -48,6 +52,19 @@ namespace splash::tools {
   bytes = parseBytes(value);
   if (!bytes) throw std::invalid_argument(std::string(option) + " takes a size such as " + (experts ? "16G" : "2G"));
   return true;
+}
+
+// What a load of the model in `root` with `options` holds, sized from its
+// files before it loads (model::streamableWeights): the images that load,
+// and the store of each part that streams, of the SIZE it was given, but no
+// more than the part whole, which is all a store holds.
+[[nodiscard]] inline uint64_t weightBytes(const std::filesystem::path &root, const model::ModelDescriptor &descriptor,
+                                          const model::ModelLoadOptions &options) {
+  const model::StreamableWeights streamable = model::streamableWeights(
+      root, descriptor,
+      {.streamExperts = options.expertMemoryBytes != 0, .streamTable = options.streamedTableBytes != 0});
+  return streamable.loadedBytes + std::min(options.expertMemoryBytes, streamable.expertBytes) +
+         std::min(options.streamedTableBytes, streamable.tableBytes);
 }
 
 } // namespace splash::tools

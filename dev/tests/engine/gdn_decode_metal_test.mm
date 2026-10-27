@@ -15,6 +15,7 @@
 // decode over a bf16 state is checked against the fp32 decode.
 #include "TestBuffers.hpp"
 #include "TestChecks.hpp"
+#include "TestFamilies.hpp"
 #include "metal/MetalBackend.hpp"
 #include "metal/abi/ExecutionGeometry.h"
 #include "metal/abi/GDN.h"
@@ -58,12 +59,9 @@ constexpr uint32_t kTaps = SPLASH_GDN_CONVOLUTION_TAPS, kCarried = kTaps - 1;
 constexpr uint32_t kLayers = 2;
 // The scales of the normalized q and k rows.
 constexpr double kQueryScale = 0.0078125, kKeyScale = 0.08838834765;
-// Qwen3.6-35B-A3B's, Qwen3.8-27B's and Qwen3.8-Flash-Next's, whose 16512-column
-// packed rows have kernel variants of their own (_p16512) and whose output
-// gate is sigmoid(z), the others' silu(z).
-constexpr std::array kShapes{GdnShape{16, 48, 128, 10240, 16640},
-                             GdnShape{16, 32, 128, 8192, 12544},
-                             GdnShape{16, 48, 128, 10240, 16512, true}};
+// Every family's shape (Qwen3.8-Flash-Next's gate is sigmoid(z), the others'
+// silu(z)).
+const std::vector<GdnShape> kShapes = splash::test::familyGdnShapes();
 
 double roundBfloat(double value) {
   return bf16ToFloat(floatToBf16(static_cast<float>(value)));
@@ -1051,7 +1049,7 @@ void gateMatchesPrefill(MetalBackend &backend, const GdnShape &shape, bool float
 }
 
 void rejectsInvalid(MetalBackend &backend) {
-  const GdnShape &shape = kShapes[1];
+  const GdnShape &shape = kShapes.front();
   Fixture fixture(backend, shape, 1);
   CommandGraph graph;
   for (const uint32_t lanes : {0U, kMaxLanes + 1})

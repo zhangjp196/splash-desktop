@@ -770,38 +770,60 @@ class ServerRecoveryTests(HarnessTestCase):
             transport = json.loads(harness.request("GET", "/status")[2])["transport"]
             self.assertNotIn("error", transport)
 
-    def test_startup_protocol_failure_ends_with_one_error_line(self):
-        runtime_type = engine_runtime.MultiplexedRuntime
-        factory = FakeFactory(
-            initial_output=b"not a frame".ljust(wire.FRAME_HEADER_BYTES, b"\0")
+    def test_startup_failure_ends_with_one_error_line(self):
+        # A broken stream, and an engine that says why its start failed.
+        refusal = (
+            "--max-context 1000000 exceeds the 790521 tokens the model and "
+            "this Mac's memory allow; omit it or pass at most 790521"
         )
-        with (
-            mock.patch.object(api, "parse_args", return_value=main_args()),
-            unprepared_hold(),
-            mock.patch.object(api, "load_thinking_key", return_value=None),
-            mock.patch.object(
-                api.AutoTokenizer, "from_pretrained", return_value=object()
+        runtime_type = engine_runtime.MultiplexedRuntime
+        for initial_output, reason in (
+            (
+                b"not a frame".ljust(wire.FRAME_HEADER_BYTES, b"\0"),
+                "protocol_fatal:bad_magic",
             ),
-            mock.patch.object(api, "validate_tokenizer"),
-            mock.patch.object(api, "ChatTemplates"),
-            mock.patch.object(
-                api.engine_runtime,
-                "MultiplexedRuntime",
-                side_effect=lambda _command, **options: runtime_type(
-                    process_factory=factory, **options
+            (
+                native_peer.serialize_event(
+                    wire.ErrorEvent(
+                        wire.FailureClass.ENGINE_UNHEALTHY,
+                        0,
+                        False,
+                        b"bootstrap_failed",
+                        refusal.encode(),
+                    )
                 ),
+                refusal,
             ),
-            mock.patch.object(api, "FrontendServer"),
-            mock.patch.object(api.signal, "signal"),
-            mock.patch("sys.stdout", new_callable=io.StringIO),
-            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
-            self.assertRaisesRegex(SystemExit, "1"),
         ):
-            api.main()
-        (line,) = stderr.getvalue().splitlines()
-        self.assertIn("Error · ", line)
-        self.assertIn("bad_magic", line)
-        self.assertIsNotNone(factory.processes[0].poll())
+            with self.subTest(reason=reason):
+                factory = FakeFactory(initial_output=initial_output)
+                with (
+                    mock.patch.object(api, "parse_args", return_value=main_args()),
+                    unprepared_hold(),
+                    mock.patch.object(api, "load_thinking_key", return_value=None),
+                    mock.patch.object(
+                        api.AutoTokenizer, "from_pretrained", return_value=object()
+                    ),
+                    mock.patch.object(api, "validate_tokenizer"),
+                    mock.patch.object(api, "ChatTemplates"),
+                    mock.patch.object(
+                        api.engine_runtime,
+                        "MultiplexedRuntime",
+                        side_effect=lambda _command, **options: runtime_type(
+                            process_factory=factory, **options
+                        ),
+                    ),
+                    mock.patch.object(api, "FrontendServer"),
+                    mock.patch.object(api.signal, "signal"),
+                    mock.patch("sys.stdout", new_callable=io.StringIO),
+                    mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                    self.assertRaisesRegex(SystemExit, "1"),
+                ):
+                    api.main()
+                (line,) = stderr.getvalue().splitlines()
+                self.assertIn(f"Error · {reason}", line)
+                self.assertNotIn("reached EOF", line)
+                self.assertIsNotNone(factory.processes[0].poll())
 
     def test_restarted_native_must_match_the_original_ready_event(self):
         for restarted in (

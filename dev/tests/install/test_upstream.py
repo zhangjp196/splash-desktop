@@ -44,7 +44,7 @@ from install import assembly, families, hub, models, paths, upstream
 # tells it apart.
 UNSUPPORTED = (
     "no supported model has this architecture [(]{}[)]; "
-    "supported: Qwen3.8-27B, Qwen3.6-35B-A3B, Qwen3.8-Flash-Next"
+    "supported: Qwen3.8-27B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next"
 )
 
 
@@ -97,19 +97,28 @@ class UpstreamTest(unittest.TestCase):
                     ),
                     family,
                 )
-        # Qwen3.8-Flash-Next loads from a GGUF: the config and metadata the
-        # installer derives from it name it, with and without its draft, and
+        # Qwen3.8-Flash-Next and Flint load from a GGUF: the config and
+        # metadata the installer derives from it name the family, with and
+        # without its draft (Flint's flat config, its release's keys, and a
+        # test draft naming one of its reserved tokens as its mask), and
         # another family's draft is refused.
+        for family in GGUF_ONLY:
+            configs = CONFIGS / family.name.lower()
+            gguf_check = {"gguf_metadata": configs / "gguf-metadata.json"}
+            for arguments in ({}, {"draft": configs / "draft" / "config.json"}):
+                self.assertIs(
+                    upstream.check_model(
+                        "gguf",
+                        "none",
+                        configs / "config.json",
+                        **gguf_check,
+                        **arguments,
+                    ),
+                    family,
+                )
         flash = families.named("Qwen3.8-Flash-Next")
         configs = CONFIGS / flash.name.lower()
         gguf_check = {"gguf_metadata": configs / "gguf-metadata.json"}
-        for arguments in ({}, {"draft": configs / "draft" / "config.json"}):
-            self.assertIs(
-                upstream.check_model(
-                    "gguf", "none", configs / "config.json", **gguf_check, **arguments
-                ),
-                flash,
-            )
         with self.assertRaisesRegex(
             models.ModelError, "draft config hidden_size mismatch: checkpoint 5120"
         ):
@@ -728,6 +737,28 @@ class UpstreamTest(unittest.TestCase):
                 self.assertFalse(chosen.models_root.exists())
                 shutil.rmtree(fake.remote)
 
+    def test_a_draft_that_ships_its_mask_embedding_installs_it(self):
+        # A release may ship its mask token's embedding beside its weights,
+        # which the draft reads in place of the target's token table row.
+        fake = FakeHub(self, self.cache)
+        fake.publish(MODEL, "a" * 40, lambda p: mlx_target(p, DENSE))
+
+        def release(root):
+            draft_dir(root, DENSE)
+            (root / upstream.DRAFT_MASK_EMBEDDING).write_bytes(b"mask")
+
+        fake.publish(DENSE.draft_repo, DRAFT_COMMIT, release)
+        chosen = selection(self.root)
+        self.prepare(chosen)
+        self.assertEqual(
+            (chosen.link / "draft" / upstream.DRAFT_MASK_EMBEDDING).read_bytes(),
+            b"mask",
+        )
+        self.assertIn(
+            "draft/" + upstream.DRAFT_MASK_EMBEDDING,
+            assembly.verify(chosen.link)["files"],
+        )
+
     def test_source_assembly_pairs_the_draft_by_architecture(self):
         fake = FakeHub(self, self.cache)
         fake.publish(
@@ -911,8 +942,34 @@ class UpstreamTest(unittest.TestCase):
             ],
         )
         self.assertNotIn(f"{MODEL}/optiq/optiq_vision.safetensors", fake.downloads)
-        with self.assertRaisesRegex(models.ModelError, "missing or unsupported shards"):
-            self.prepare(selection(self.root, language_only=False))
+
+        # A tower's shard the engine cannot read, or one the index names but
+        # the release never published, refuses the vision alone.
+        def unpublished(root):
+            target(root)
+            tower = {
+                "vision_tower.blocks.0.attn.qkv.weight": "model-vision.safetensors"
+            }
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps({"weight_map": shards | tower})
+            )
+
+        fake.publish("someone/no-tower-shard", "b" * 40, unpublished)
+        for model, shard in (
+            (MODEL, "optiq/optiq_vision.safetensors"),
+            ("someone/no-tower-shard", "model-vision.safetensors"),
+        ):
+            with (
+                self.subTest(model=model),
+                self.assertRaisesRegex(
+                    models.VisionError,
+                    f"missing or unsupported shards: {shard}; use --language-only",
+                ),
+            ):
+                self.prepare(selection(self.root, model, language_only=False))
+        self.assertNotIn(
+            "someone/no-tower-shard/model-00001-of-00002.safetensors", fake.downloads
+        )
 
     def test_a_shard_name_read_as_a_glob_is_never_downloaded(self):
         def target(root):
@@ -1115,7 +1172,7 @@ class UpstreamTest(unittest.TestCase):
             f"Warning: keeping the installed {MODEL}@{'a' * 12}; cannot install "
             f"{MODEL}@{'b' * 40}: no supported model has this architecture (text "
             "config head_dim: safetensors 128, Qwen3.8-27B 256); supported: Qwen3.8-27B, "
-            "Qwen3.6-35B-A3B, Qwen3.8-Flash-Next",
+            "Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next",
             warnings,
         )
         self.assertEqual(chosen.link.resolve(), installed)
@@ -1263,13 +1320,13 @@ class UpstreamTest(unittest.TestCase):
 
     def test_a_new_draft_of_another_architecture_keeps_the_installed_draft(self):
         warnings = self.move_target_and_draft(
-            lambda p: draft_dir(p, DENSE, **{"dflash_config.block_size": 16})
+            lambda p: draft_dir(p, DENSE, **{"dflash_config.block_size": 4})
         )
         self.assertIn(
             f"Warning: cannot use the {DENSE.name} draft {DENSE.draft_repo}@"
             f"{'e' * 12}; keeping the installed one: {DENSE.draft_repo}'s draft "
             f"configuration is incompatible with {DENSE.name}: draft config "
-            "dflash_config block_size mismatch: checkpoint 16, runtime 8",
+            "dflash_config block_size is less than the 8 rows a cycle drafts",
             warnings,
         )
 

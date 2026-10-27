@@ -30,10 +30,13 @@ class InstallerTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.fixture_number = 0
-        # Never use real user credentials or contact the network in these tests.
+        # Never use real user credentials or contact the network in these
+        # tests. huggingface_hub read HF_HUB_OFFLINE when it was imported, so
+        # clearing os.environ leaves the caller's setting in force.
         for patch in (
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch("huggingface_hub.get_token", return_value=None),
+            mock.patch("huggingface_hub.constants.HF_HUB_OFFLINE", False),
         ):
             patch.start()
             self.addCleanup(patch.stop)

@@ -187,8 +187,7 @@ verify-models: preflight $(TARGET) $(WEIGHT_DIGESTS) $(LIB)
 	@$(PYTHON) dev/tools/installer_restarts.py $(MODEL_ARGS)
 	@mkdir -p "$(MODEL_RESULTS)"
 	@$(WEIGHT_DIGESTS) $(LIB) "$(MODEL_ROOT)" $(WEIGHT_DIGESTS_ARGS) \
-		> "$(MODEL_RESULTS)/weights.json.tmp"
-	@mv "$(MODEL_RESULTS)/weights.json.tmp" "$(MODEL_RESULTS)/weights.json"
+		> "$(MODEL_RESULTS)/weights.json"
 	@echo "weight images: $(MODEL_RESULTS)/weights.json"
 
 # One model on this machine against BASELINE, a retained build that loads it

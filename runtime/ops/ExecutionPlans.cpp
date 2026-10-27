@@ -24,17 +24,18 @@ void include(Workspace &bound, const Workspace &required,
 } // namespace
 
 ExecutionPlans::ExecutionPlans(const DeviceCapabilities &device)
-    : linear_(device), family_(gpuFamilyClass(device.appleGpuFamily)) {}
+    : linear_(device), family_(gpuFamilyClass(device.appleGpuFamily)),
+      gpuCores_(plannedGpuCores(device)) {}
 
 PrefillAttentionPlan ExecutionPlans::prefillAttention(
-    uint32_t rows, uint32_t queryHeads, kv::Layout layout) const {
-  return PagedAttention::prefillPlan(rows, queryHeads, layout);
+    uint32_t rows, uint32_t queryHeads, kv::Layout layout, AttentionVariant variant) const {
+  return PagedAttention::prefillPlan(rows, queryHeads, layout, variant);
 }
 
 VerifyAttentionPlan ExecutionPlans::verifyAttention(
     uint32_t lanes, uint32_t queryHeads, kv::Layout layout,
-    std::span<const uint32_t> historyTokens) const {
-  return PagedAttention::verifyPlan(lanes, queryHeads, layout, historyTokens);
+    std::span<const uint32_t> historyTokens, AttentionVariant variant) const {
+  return PagedAttention::verifyPlan(lanes, queryHeads, layout, historyTokens, variant);
 }
 
 DraftAttentionPlan ExecutionPlans::draftAttention(DraftAttentionShape shape,
@@ -43,13 +44,14 @@ DraftAttentionPlan ExecutionPlans::draftAttention(DraftAttentionShape shape,
 }
 
 // The expert tiles and their rows, and the router's tile. Apple9 decodes on
-// the register tile, which keeps the decode numerics of its dense projections;
-// prefill runs the staged 32-row tiles on every family, which stream an
-// expert's weights once for up to 32 of its rows (16% faster than the register
-// tile on the 35B's Q4_K/Q5_K experts and a 40-core M3 Max).
+// the register tile, which keeps the decode numerics of its dense projections,
+// while GPUs of 10 cores or fewer stage decode in every format; prefill runs
+// the staged 32-row tiles on every family, which stream an expert's weights
+// once for up to 32 of its rows (16% faster than the register tile on the 35B's
+// Q4_K/Q5_K experts and a 40-core M3 Max).
 MoeConfig ExecutionPlans::moeConfig(MoeShape shape, uint32_t rows, MoePhase phase) const {
   MoeConfig config;
-  config.ggufTile = phase == MoePhase::Prefill ? MoeGgufTile::Staged : moeGgufTile(family_, shape);
+  config.ggufTile = phase == MoePhase::Prefill ? MoeGgufTile::Staged : moeGgufTile(family_, gpuCores_, shape);
   config.expertTile =
       phase == MoePhase::Prefill ? moeGgufPrefillTile(shape, rows, config.ggufTile) : MoeExpertTile::M8;
   config.ggufRouterTile = linear_.ggufFloatTile(rows, shape.experts);

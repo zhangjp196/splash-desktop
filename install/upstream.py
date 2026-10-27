@@ -45,6 +45,10 @@ VISION_TOWER = ("vision_tower.", "model.visual.")
 # its own, or the image_processor object of processor_config.json, where newer
 # Transformers releases save it.
 PROCESSOR_FILES = ("preprocessor_config.json", "processor_config.json")
+# A DFlash2 release's BF16 embedding of its mask token, beside its weights,
+# which its draft reads in place of the target's token table row
+# (DraftCheckpoint.hpp kDraftMaskEmbedding; DEVELOPMENT.md, Drafts).
+DRAFT_MASK_EMBEDDING = "mask_embedding.safetensors"
 
 
 @dataclass(frozen=True)
@@ -346,7 +350,8 @@ def gguf_target(repo, names, scratch, *, projector=None):
     parts in split order, its configuration and metadata written into
     scratch. projector, for a model that serves images, gives the name and
     header of its vision projector in repo (select_vision): called once the
-    text configuration passed."""
+    text configuration passed, for a family whose models have a vision
+    tower; the others serve text only."""
     headers = []
     for part in names:
         with repo.open(part) as stream:
@@ -362,7 +367,7 @@ def gguf_target(repo, names, scratch, *, projector=None):
     family = check_model("gguf", "none", config, gguf_metadata=metadata)
     gguf.require_loadable(header)
     vision_format = "none"
-    if projector is not None:
+    if projector is not None and family.vision:
         name, vision_header = projector(repo)
         try:
             _validate_processor(gguf.processor_config(vision_header))
@@ -400,15 +405,19 @@ def mlx_target(repo, language_only):
         for path in ("config.json", "target/config.json", "tokenizer/config.json")
     }
     files |= {"tokenizer/" + n: n for n in TOKENIZER_FILES if n in repo.files}
+    # The target's shards: those holding a tensor other than the tower's. A
+    # tower in a shard of its own is not the target's (an OptiQ checkpoint
+    # keeps it in a subdirectory).
+    files |= {"target/" + n: n for n in _weight_files(repo, exclude=VISION_TOWER)}
     vision_format = "none"
     if not language_only:
-        # A refusal of the tower's processor or configuration refuses the
-        # vision alone; its shards are the checkpoint's, read as the text's.
+        # The text passed, so a refusal of the tower's processor, shards or
+        # configuration refuses the vision alone.
         try:
             _validate_processor(_image_processor(repo))
+            shards = _weight_files(repo, VISION_TOWER)
         except models.ModelError as error:
             raise models.VisionError(str(error)) from None
-        shards = _weight_files(repo, VISION_TOWER)
         if not shards:
             raise models.VisionError(f"{repo.name} has no vision tower")
         vision_format = "safetensors"
@@ -418,10 +427,6 @@ def mlx_target(repo, language_only):
             raise models.VisionError(str(error)) from None
         files["vision/config.json"] = "config.json"
         files |= {"vision/" + n: n for n in shards}
-    # The target's shards: those holding a tensor other than the tower's. A
-    # tower in a shard of its own is not the target's (an OptiQ checkpoint
-    # keeps it in a subdirectory).
-    files |= {"target/" + n: n for n in _weight_files(repo, exclude=VISION_TOWER)}
     return Target("mlx-affine", vision_format, config, None, family, files)
 
 
@@ -763,10 +768,10 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
         if draft is None:
             draft = _resolve_draft(target.family, selection, installed, repo)
         draft, files = _draft(target, installed, draft)
+        vision = "disabled" if target.vision_format == "none" else "enabled"
         print(
             f"Installing {selection.model} as {target.family.name} ({target.format}); "
-            f"draft {draft.name}; "
-            f"vision {'disabled' if selection.language_only else 'enabled'}.",
+            f"draft {draft.name}; vision {vision}.",
             flush=True,
         )
         downloaded = repo.download(set(target.files.values()))
@@ -945,10 +950,11 @@ def _at(repo):
 def draft_files(repo, target):
     """The DFlash2 draft in repo for target's family, downloaded, by assembly
     path: its config.json and safetensors weights, model.safetensors or the
-    shards its index names, at the root of the repository or --draft-model
-    directory, as a DFlash2 release holds them. The weights download only
-    once the engine accepts its configuration with the target's
-    (check_model)."""
+    shards its index names, and the mask token's embedding when the release
+    ships one (DRAFT_MASK_EMBEDDING), at the root of the repository or
+    --draft-model directory, as a DFlash2 release holds them. The weights
+    download only once the engine accepts its configuration with the
+    target's (check_model)."""
     family = target.family
     try:
         if "config.json" not in repo.files:
@@ -973,5 +979,6 @@ def draft_files(repo, target):
             f"{repo.name}'s draft configuration is incompatible with {family.name}: "
             f"{error}"
         ) from error
-    downloaded = repo.download({"config.json", *weights})
+    mask = {DRAFT_MASK_EMBEDDING} & set(repo.files)
+    downloaded = repo.download({"config.json", *weights, *mask})
     return {"draft/" + name: path for name, path in downloaded.items()}

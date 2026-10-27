@@ -219,6 +219,9 @@ struct DFlashDraftWeights final {
   ops::Projection selectorProjection;
   metal::MetalBuffer predecessorCodebook;
   metal::MetalBuffer successorCodebook;
+  // The mask token's BF16 embedding the checkpoint ships, or none
+  // (kDraftMaskEmbedding).
+  metal::MetalBuffer maskEmbedding;
   std::vector<WeightFileRecord> files;
   uint64_t actualAllocatedBytes = 0;
 };
@@ -264,6 +267,11 @@ public:
                     const ops::DraftSelectorBuffers &buffers,
                     std::span<const uint32_t> anchors,
                     std::span<const ops::SamplingPolicy> policies) const;
+  // Sets each of `lanes` lanes' mask rows of the draft input `rows` (all but
+  // its anchor's, row 0 of its draftQueryRows) to the mask embedding the
+  // checkpoint ships; without one they keep the target table's row.
+  void addMaskRows(metal::CommandGraph &graph, metal::MetalBuffer rows, uint32_t lanes) const;
+
   void addContextCommit(metal::CommandGraph &graph,
                         DFlashContextBuffers buffers,
                         std::span<const uint32_t> startPositions) const;

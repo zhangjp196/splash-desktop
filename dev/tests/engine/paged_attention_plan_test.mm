@@ -8,6 +8,7 @@
 #include "HostKvExtents.hpp"
 #include "LinearNumerics.hpp"
 #include "NormReference.hpp"
+#include "TestFamilies.hpp"
 
 #include <algorithm>
 #include <array>
@@ -45,25 +46,24 @@ static_assert(!std::is_aggregate_v<ops::VerifyAttentionPlan> &&
 using splash::test::rejects;
 using splash::test::require;
 
-// The production attention geometries: query heads over the KV heads of a
-// layout, whose values the group of twelve keeps token-major for its sparse
-// kernels.
-struct Geometry final {
-  uint32_t queryHeads;
-  uint32_t kvHeads;
-  bool valuesTokenMajor;
+// The production attention geometries, every family's: query heads over the
+// KV heads of a layout, whose values a QSA family keeps token-major for its
+// sparse kernels.
+using Geometry = splash::test::AttentionGeometry;
+const std::vector<Geometry> kGeometries = splash::test::familyAttentionGeometries();
 
-  [[nodiscard]] kv::Layout layout(kv::Format format) const {
-    return {.attentionLayers = 1, .kvHeads = kvHeads, .headDimension = 256, .format = format,
-            .valuesTokenMajor = valuesTokenMajor};
-  }
-};
-constexpr std::array<Geometry, 3> kGeometries{{{24, 4, false}, {16, 2, false}, {24, 2, true}}};
+// The parts of a layout's tiles, each a threadgroup of the split grid's x
+// beside its KV head.
+uint32_t tileParts(uint32_t queryHeads, kv::Layout layout) {
+  return layout.valuesTokenMajor ? 1 : SPLASH_ATTENTION_TILE_PARTS(queryHeads / layout.kvHeads);
+}
 
 // A layout's split or reduce pipeline of a phase ("prefill" or "verify").
 std::string pipelineName(std::string_view phase, bool split, uint32_t queryHeads, kv::Layout layout) {
   const bool sparse = layout.valuesTokenMajor;
-  const std::string suffix = layout.kvHeads == 4 ? "" : queryHeads == 24 ? "_kv2_g12" : "_kv2_g8";
+  // The kernels of four KV heads, the first compiled, have no suffix.
+  const std::string suffix = layout.kvHeads == 4 ? "" : "_kv" + std::to_string(layout.kvHeads) + "_g" +
+                                                            std::to_string(queryHeads / layout.kvHeads);
   const std::string format = layout.format == kv::Format::Int8 ? "q8_" : "bf16_";
   return std::string(phase) + "_attention_" +
          (split ? format + (sparse ? "sparse" : "split") : std::string(sparse ? "sparse_reduce" : "reduce")) +
@@ -79,31 +79,34 @@ std::string locatedSplitName(kv::Layout layout) {
 
 void checkPrefillSlotOrientation(uint32_t queryHeads, kv::Layout layout) {
   bool unequalAxes = false, partialTile = false, multipleSplits = false;
+  // The split grid's x: each KV head's tile parts.
+  const uint32_t headParts = layout.kvHeads * tileParts(queryHeads, layout);
   // Enumerate nonsquare grids and partial final tiles. Each logical partial
-  // belongs to exactly one query tile, KV head and balanced history split.
+  // belongs to exactly one query tile, KV head part and balanced history
+  // split.
   for (const uint32_t rows : {17U, 257U, 2048U}) {
     const auto plan = ops::PagedAttention::prefillPlan(rows, queryHeads, layout);
     const uint32_t tiles = (rows + 7) / 8;
-    require(plan.splitGroups.x == layout.kvHeads &&
+    require(plan.splitGroups.x == headParts &&
                 plan.splitGroups.y == tiles && plan.splitGroups.z == plan.splits,
-            "prefill split axes must be KV head, query tile, split");
+            "prefill split axes must be KV head part, query tile, split");
     unequalAxes |= tiles != plan.splits;
     partialTile |= rows % 8 != 0;
     multipleSplits |= plan.splits > 1;
-    const uint64_t slots = uint64_t{tiles} * layout.kvHeads * plan.splits;
+    const uint64_t slots = uint64_t{tiles} * headParts * plan.splits;
     std::vector<uint8_t> visits(slots, 0);
     for (uint32_t z = 0; z < plan.splitGroups.z; ++z)
       for (uint32_t y = 0; y < plan.splitGroups.y; ++y)
         for (uint32_t x = 0; x < plan.splitGroups.x; ++x) {
           // group.y selects the query tile and group.z its balanced split;
-          // scratch is [tile][KV head][split].
-          const uint64_t slot = (uint64_t{y} * layout.kvHeads + x) * plan.splits + z;
+          // scratch is [tile][KV head][part][split].
+          const uint64_t slot = (uint64_t{y} * headParts + x) * plan.splits + z;
           require(slot < visits.size() && visits[slot] == 0,
                   "prefill grid aliases or exceeds a logical partial slot");
           ++visits[slot];
           require(slot % plan.splits == z &&
-                      (slot / plan.splits) % layout.kvHeads == x &&
-                      slot / (uint64_t{plan.splits} * layout.kvHeads) == y,
+                      (slot / plan.splits) % headParts == x &&
+                      slot / (uint64_t{plan.splits} * headParts) == y,
                   "prefill dispatch orientation changed logical scratch ownership");
         }
     require(std::all_of(visits.begin(), visits.end(),
@@ -126,7 +129,7 @@ void checkPlans(uint32_t queryHeads, kv::Layout layout) {
     require(plan.rows == rows && plan.splits == splits, "prefill plan lost actual rows");
     require(plan.splitPipeline == prefillSplit && plan.reducePipeline == prefillReduce,
             "prefill plan runs the wrong pipelines");
-    require(plan.splitGroups.x == layout.kvHeads &&
+    require(plan.splitGroups.x == layout.kvHeads * tileParts(queryHeads, layout) &&
                 plan.splitGroups.y == tiles && plan.splitGroups.z == splits &&
                 plan.reduceGroups.x == layout.kvHeads &&
                 plan.reduceGroups.y == 8 * queryHeads / layout.kvHeads &&
@@ -165,7 +168,8 @@ void checkPlans(uint32_t queryHeads, kv::Layout layout) {
     require(plan.splits == maximum &&
                 plan.workspace.partialsBytes == fused * 256 * 4 &&
                 plan.workspace.statisticsBytes == fused * 2 * 4 &&
-                plan.splitGroups.x == (sparse ? layout.kvHeads * plan.splits : layout.kvHeads) &&
+                plan.splitGroups.x ==
+                    (sparse ? layout.kvHeads * plan.splits : layout.kvHeads * tileParts(queryHeads, layout)) &&
                 plan.splitGroups.y == (sparse ? 1 : plan.splits) &&
                 plan.splitGroups.z == lanes &&
                 plan.reduceGroups.y == 8 * queryHeads / layout.kvHeads &&

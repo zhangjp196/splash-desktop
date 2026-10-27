@@ -40,8 +40,6 @@ namespace splash::model {
 struct SparseRowStoreOptions;
 
 struct Qwen4ExpLayout final : QwenHybridLayout {
-  // The family's name, as the installer pairs its draft (install/families.py).
-  static constexpr std::string_view family = "Qwen3.8-Flash-Next";
   // Its config's text model type and its GGUFs' architecture; no safetensors
   // checkpoint of it loads.
   static constexpr std::string_view modelType = "qwen4_exp_text";
@@ -51,9 +49,10 @@ struct Qwen4ExpLayout final : QwenHybridLayout {
   // cuts an n-gram short; and the token it reads at every position of an
   // image, which a prompt holds there (<|image_pad|>, server/frontend.py). A
   // GGUF states both (ple.eos_token_id, ple.image_token_id).
-  uint32_t pleEosToken = stopTokens[0];
+  uint32_t pleEosToken = stopTokens.ids[0];
   uint32_t pleImageToken = 248056;
 
+  // Qwen3.8-Flash-Next's, its first family (kFamilies).
   constexpr Qwen4ExpLayout()
       : QwenHybridLayout{{.nativeContextTokens = 262'144,
                           .yarnContextTokens = 1'010'000,
@@ -91,7 +90,10 @@ struct Qwen4ExpLayout final : QwenHybridLayout {
                           .pleNgram = 3,
                           .pleHeadsPerNgram = 8,
                           .pleHeadDimension = 160,
-                          .pleConvolutionTaps = 4}} {}
+                          .pleConvolutionTaps = 4},
+                         "Qwen3.8-Flash-Next"} {}
+  // A family of the architecture.
+  constexpr explicit Qwen4ExpLayout(const QwenHybridLayout &family) : QwenHybridLayout(family) {}
   bool operator==(const Qwen4ExpLayout &) const = default;
 };
 

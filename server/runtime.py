@@ -1201,7 +1201,12 @@ class MultiplexedRuntime:
         with self._state_lock:
             if generation != self._generation or self._terminal_error is not None:
                 return
-            if self._ready_message is None:
+            # Before its ReadyEvent an engine sends nothing but why its start
+            # failed (runtime/main.mm reportStartFailure).
+            if self._ready_message is None and not (
+                isinstance(message, wire.ErrorEvent)
+                and message.failure_class is wire.FailureClass.ENGINE_UNHEALTHY
+            ):
                 raise ProtocolFatal("native event arrived before ReadyEvent")
 
         if isinstance(message, wire.StatusJsonEvent):

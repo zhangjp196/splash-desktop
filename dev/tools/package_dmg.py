@@ -229,7 +229,7 @@ def overlay_source(runtime: Path) -> None:
         shutil.copytree(
             source,
             destination,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "models"),
         )
 
 

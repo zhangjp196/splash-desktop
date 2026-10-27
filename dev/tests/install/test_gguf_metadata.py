@@ -673,7 +673,8 @@ class GgufMetadataTests(unittest.TestCase):
                 derive(metadata)
 
     def test_the_engine_checks_a_gguf_by_its_config_and_metadata(self):
-        # The derived config holds the sizes the engine reads in it; the rest
+        # The derived config holds the sizes the engine reads in it and a MoE's
+        # routed experts, fewer than its family's in a pruned release; the rest
         # of what the planner checks in the GGUF at every start, the engine
         # checks in the metadata copied from the header.
         values = fixture(native=True)
@@ -689,25 +690,42 @@ class GgufMetadataTests(unittest.TestCase):
                 "num_attention_heads",
                 "num_key_value_heads",
                 "head_dim",
+                "num_experts",
             },
         )
+        # Qwen3.8-Flash-Next's fixture config, which the native configuration
+        # test reads, is the one derived from its fixture header.
+        self.assertEqual(
+            gguf.model_config(self.metadata(fixture(native=True, family=FLASH_NEXT))),
+            family_config(FLASH_NEXT),
+        )
         path, metadata = self.root / "config.json", self.root / "gguf-metadata.json"
-        path.write_bytes(models.json_bytes(config))
+        mismatch = "GGUF metadata does not match the target: "
         for changes, refusal in (
             ({}, None),
-            ({"qwen35moe.expert_used_count": 16}, "expert_used_count 16 [(]expected 8"),
-            ({"qwen35moe.rope.scaling.type": "yarn"}, "rope.scaling.type yarn"),
+            ({"qwen35moe.expert_count": 128}, None),
+            ({"qwen35moe.expert_count": 264}, "text config num_experts: GGUF 264"),
+            (
+                {"qwen35moe.expert_used_count": 16},
+                mismatch + "expert_used_count 16 [(]expected 8",
+            ),
+            (
+                {"qwen35moe.rope.scaling.type": "yarn"},
+                mismatch + "rope.scaling.type yarn",
+            ),
             (
                 {"qwen35moe.attention.layer_norm_rms_epsilon": 1e-5},
-                "attention.layer_norm_rms_epsilon 1e-05 [(]expected 1e-06",
+                mismatch + "attention.layer_norm_rms_epsilon 1e-05 [(]expected 1e-06",
             ),
             (
                 {"qwen35moe.expert_feed_forward_length": 768},
-                "expert_feed_forward_length 768 [(]expected 512",
+                mismatch + "expert_feed_forward_length 768 [(]expected 512",
             ),
         ):
             with self.subTest(changes=changes):
+                # Both from one header, as the installer derives them.
                 header = self.metadata(values | changes)
+                path.write_bytes(models.json_bytes(gguf.model_config(header)))
                 metadata.write_bytes(models.json_bytes(gguf.scalar_metadata(header)))
                 if refusal is None:
                     family = upstream.check_model(
@@ -715,10 +733,7 @@ class GgufMetadataTests(unittest.TestCase):
                     )
                     self.assertEqual(family.name, "Qwen3.6-35B-A3B")
                     continue
-                with self.assertRaisesRegex(
-                    models.ModelError,
-                    "GGUF metadata does not match the target: " + refusal,
-                ):
+                with self.assertRaisesRegex(models.ModelError, refusal):
                     upstream.check_model("gguf", "none", path, gguf_metadata=metadata)
 
     def test_metadata_is_typed_as_the_native_reader_keeps_it(self):
