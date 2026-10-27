@@ -226,9 +226,21 @@ class FlintGgufTests(unittest.TestCase):
             },
         )
 
+    def test_a_conversion_without_the_eog_array_derives_flint_s_turn_ends(self):
+        values = header_values()
+        del values["tokenizer.ggml.eog_token_ids"]
+        config = gguf.model_config(self.metadata(values))
+        self.assertEqual(config["eos_token_id"], [150001, 150003, 150005, 150018])
+        values["tokenizer.ggml.tokens"] = [
+            token
+            for token in values["tokenizer.ggml.tokens"]
+            if token != "<|developer|>"
+        ]
+        with self.assertRaisesRegex(models.ModelError, "tokenizer.ggml.eog_token_ids"):
+            gguf.model_config(self.metadata(values))
+
     def test_metadata_the_config_cannot_state_is_refused(self):
         for key, value, reason in (
-            ("tokenizer.ggml.eog_token_ids", None, "tokenizer.ggml.eog_token_ids"),
             ("tokenizer.ggml.eog_token_ids", [], "tokenizer.ggml.eog_token_ids"),
             (
                 "flint.attention.sliding_window_pattern",

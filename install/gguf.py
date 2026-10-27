@@ -424,6 +424,31 @@ def layer_pattern(metadata, arch, name):
 EXPERT_GATING_FUNCTIONS = {1: "softmax", 2: "sigmoid"}
 
 
+# The tokens that end a Flint turn, as its tokenizer names them: the end of
+# text and the role openers that close the turn before them.
+FLINT_TURN_ENDS = ("<|end_of_text|>", "<|user|>", "<|observation|>", "<|developer|>")
+
+
+def flint_stop_tokens(metadata):
+    """The tokenizer.ggml.eog_token_ids of a Flint header. A conversion older
+    than llama.cpp b11803 wrote only the scalar eos id; Flint's turn still
+    ends at its tokenizer's end-of-text and role tokens, so derive them by
+    name. A header with the array, even an empty one, is held to it."""
+    stops = metadata.values.get("tokenizer.ggml.eog_token_ids")
+    if stops is None:
+        tokens = metadata.require("tokenizer.ggml.tokens", list)
+        indexes = {token: index for index, token in enumerate(tokens)}
+        try:
+            stops = [indexes[name] for name in FLINT_TURN_ENDS]
+        except KeyError:
+            raise ModelError(
+                "missing GGUF metadata: tokenizer.ggml.eog_token_ids"
+            ) from None
+    if type(stops) is not list or not stops or any(type(token) is not int for token in stops):
+        raise ModelError("invalid GGUF metadata: tokenizer.ggml.eog_token_ids")
+    return stops
+
+
 def flint_text_config(metadata, arch):
     """What Flint's config.json states beyond the sizes every architecture's
     does, from its header: the dense, routed and shared experts' FFN widths,
@@ -436,9 +461,7 @@ def flint_text_config(metadata, arch):
     gating = metadata.require(arch + ".expert_gating_func", int)
     if gating not in EXPERT_GATING_FUNCTIONS:
         raise ModelError(f"unsupported GGUF expert gating function: {gating}")
-    stops = metadata.require("tokenizer.ggml.eog_token_ids", list)
-    if not stops or any(type(token) is not int for token in stops):
-        raise ModelError("invalid GGUF metadata: tokenizer.ggml.eog_token_ids")
+    stops = flint_stop_tokens(metadata)
     sliding = layer_pattern(metadata, arch, "attention.sliding_window_pattern")
     rotated = layer_pattern(metadata, arch, "attention.rope_pattern")
     return {

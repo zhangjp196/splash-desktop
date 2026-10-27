@@ -1935,7 +1935,9 @@ router (`router_score_function` from `expert_gating_func`, `norm_topk_prob`),
 `mlp_only_layers`, `sliding_window`, `layer_types` from
 `attention.sliding_window_pattern`, `no_rope_layer_indices` from
 `attention.rope_pattern`, and `eos_token_id` from
-`tokenizer.ggml.eog_token_ids`; the engine's check holds each to the family's,
+`tokenizer.ggml.eog_token_ids` (or, for a conversion older than llama.cpp
+b11803 that wrote only the scalar eos id, the tokenizer's end-of-text and role
+tokens by name); the engine's check holds each to the family's,
 the two layer patterns included, which the scalar metadata leaves out. The
 token table must be of a format: RecursiveSI's int4 GGUF, whose table is F32,
 is refused before its download.
