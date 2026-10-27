@@ -313,8 +313,9 @@ holds), so a larger one hits no more often and leaves streamed experts less.
 The engine refuses a SIZE that holds no row, and a SIZE that holds the
 whole table loads it with the weights instead, as `--ple-memory off` does. A
 table whose rows the GGUF does not store as the gathers read them (NVFP4,
-which the loader rebuilds, or any table of a rotated GGUF) loads with the
-weights, and the engine refuses a SIZE for it.
+which the loader rebuilds, or a table the rotation itself names) loads with the
+weights, and the engine refuses a SIZE for it. A sparse target's rotation names
+its routed experts alone, so its PLE table streams as an unrotated one's does.
 This reservation is not a strict bound on host allocations: prefetch scratch,
 excess vector capacity, job metadata, allocator overhead and reader stacks are
 additional, and oversized stages grow their scratch. Other models ignore a

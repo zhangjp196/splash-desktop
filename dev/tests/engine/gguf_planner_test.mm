@@ -545,6 +545,44 @@ void checkPleTableRows(const std::filesystem::path &directory) {
         "an F32 PLE table does not stream");
   check(planned(kIQ4_NL, 128, 10, 72, rows, table).find("unexpected shape") != std::string::npos,
         "a PLE table of another width does not stream");
+  // A rotated GGUF's table streams unless the rotation itself names it: a
+  // sparse target's rotation names its routed experts alone, so its PLE table
+  // is stored as the gathers read it.
+  const auto rotated = [&](const std::vector<std::string> &inverse, std::optional<model::gguf::StreamedRows> &out) {
+    const auto path = directory / "ple-rotated.gguf";
+    test_gguf::Bytes table(100 * 72), expert(2 * 72);
+    for (uint8_t &byte : table) byte = uint8_t(rng());
+    for (uint8_t &byte : expert) byte = uint8_t(rng());
+    std::vector<test_gguf::Key> keys;
+    const auto key = [](const char *name) { return std::string("prism.hadamard.") + name; };
+    keys.push_back(test_gguf::uint32Key(key("version"), 1));
+    keys.push_back(test_gguf::uint32Key(key("block_size"), 128));
+    keys.push_back(test_gguf::stringKey(key("transform"), "normalized-sylvester-walsh-hadamard"));
+    keys.push_back(test_gguf::stringKey(key("axis"), "input-last-dimension"));
+    keys.push_back(test_gguf::stringKey(key("sign_mode"), "explicit"));
+    keys.push_back(test_gguf::int32ArrayKey(key("sign_widths"), {128}));
+    keys.push_back(test_gguf::int32ArrayKey(key("sign_values"), std::vector<int32_t>(128, 1)));
+    keys.push_back(test_gguf::stringArrayKey(key("weight_names"), {"blk.0.ffn_gate_exps.weight"}));
+    if (!inverse.empty()) keys.push_back(test_gguf::stringArrayKey(key("inverse_weight_names"), inverse));
+    splash::test::writeFile(path,
+                            test_gguf::file(keys, {{"blk.0.ffn_gate_exps.weight", {128, 2}, kIQ4_NL, expert},
+                                                   {"per_layer_token_embd.weight", {128, 100}, kIQ4_NL, table}}));
+    model::WeightSource source(path);
+    const model::GgufFile gguf(source);
+    try {
+      out = model::gguf::tableRows(gguf, "per_layer_token_embd.weight", 128);
+      return std::string();
+    } catch (const model::GgufError &error) {
+      return std::string(error.what());
+    }
+  };
+  rows.reset();
+  check(rotated({}, rows).empty() && rows && rows->rows == 100 && rows->rowBytes == 72,
+        "a rotated GGUF's PLE table streams when the rotation does not name it");
+  rows.reset();
+  check(rotated({"per_layer_token_embd.weight"}, rows).find("a table the rotation names does not stream") !=
+            std::string::npos,
+        "a table the rotation itself names does not stream");
 }
 
 // The plan's repack of the named tensor in any image, or nullptr.

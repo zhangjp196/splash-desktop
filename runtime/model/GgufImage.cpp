@@ -771,7 +771,11 @@ std::vector<Image> planImages(const GgufFile &file, std::string_view architectur
 
 StreamedRows tableRows(const GgufFile &file, const std::string &name, uint64_t columns) {
   const GgufTensor &tensor = file.require(name);
-  if (file.rotation()) throw GgufError("the tables of a rotated GGUF do not stream: " + name);
+  // Only a table the rotation itself names is stored for decoded rows; the
+  // other tables of a rotated GGUF (the PLE table, which a sparse target keeps
+  // unrotated) are stored as the gathers read them.
+  if (const std::optional<GgufRotation> &rotation = file.rotation(); rotation && rotation->tables.contains(name))
+    throw GgufError("a table the rotation names does not stream: " + name);
   // A table's image holds its rows as stored (Builder::nativeTable,
   // copiedRows), but for NVFP4's, which the writer rebuilds.
   if (!embeddingType(tensor.type) || tensor.type == ggml::kNVFP4)
