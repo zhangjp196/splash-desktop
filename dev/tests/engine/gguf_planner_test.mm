@@ -638,6 +638,30 @@ void checkHyperConnections(const std::filesystem::path &directory) {
   check(names(planned({{"hc_ffn_up.weight", model::ggml::kF32}}, tensors),
               {"blk.0.hc_ffn_up.weight (F32)", "blk.1.hc_ffn_up.weight (F32)"}),
         "planner refuses an F32 hyper-connection projection by name");
+
+  // A quantized injection weight (Gyro keeps them Q6_K): the planner decodes
+  // it to the F32 rows the mix reads, the section sized as the loader reads it
+  // (hyper_connection.count rows of streams F32 values), not as its native
+  // bytes (the bug a Q6_K source first hit).
+  const Plan quantized = planned({{"hc_attn_inject.weight", kQ6_K},
+                                  {"hc_attn_down.weight", kQ8_0},
+                                  {"hc_attn_up.weight", kQ8_0},
+                                  {"hc_ffn_down.weight", kQ8_0},
+                                  {"hc_ffn_up.weight", kQ8_0},
+                                  {"output_hc_down.weight", kQ8_0},
+                                  {"output_hc_up.weight", kQ8_0}},
+                                 tensors);
+  check(!quantized.error, "planner plans a Q6_K hyper-connection injection" +
+                              (quantized.error ? ": " + *quantized.error : ""));
+  if (!quantized.error) {
+    const uint64_t rows = g.hyperConnections, columns = g.streamWidth();
+    const auto *inject = copyIn(quantized, "blk.0.hc_attn_inject.weight");
+    const bool decoded = inject && inject->conversion == model::gguf::Conversion::DequantizeToFloat32 &&
+                         model::gguf::convertedBytes(inject->source, inject->conversion,
+                                                     inject->source.rows * inject->source.rowBytes) ==
+                             rows * columns * sizeof(float);
+    check(decoded, "planner's Q6_K injection section holds the F32 rows the loader reads");
+  }
 }
 
 // Qwen3.8-Flash-Next's PLE embedding on the small qwen4exp target

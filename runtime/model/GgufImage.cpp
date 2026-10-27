@@ -259,11 +259,14 @@ public:
     if (tensor->rows() != rows || tensor->columns() != columns)
       throw GgufError("expected an F32, BF16 or Q8_0 [" + std::to_string(rows) + ", " + std::to_string(columns) +
                       "] tensor: " + name);
-    const bool widen = tensor->type == ggml::kBF16, dequantize = tensor->type == ggml::kQ8_0;
+    // F32 rows as stored; BF16 and F16 widen, a quantized tensor decodes.
+    const bool widen = tensor->type == ggml::kBF16, half = tensor->type == ggml::kF16;
+    const bool dequantize = !floatType(tensor->type) && !widen && !half;
     if (withDescriptor)
       image_.descriptor(ggml::kF32, rows, columns, {}, {rows * columns * sizeof(float), 0, 0}, name);
     image_.copy(tensorRows(*tensor, rows, tensor->bytes / rows),
                 widen        ? Conversion::WidenToFloat32
+                : half       ? Conversion::WidenHalfToFloat32
                 : dequantize ? Conversion::DequantizeToFloat32
                              : Conversion::None);
   }
