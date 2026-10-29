@@ -22,6 +22,7 @@
 "kv.bf16" = "BF16";
 "field.neural_engine" = "Use Neural Engine (ANE)";
 "help.lan_access.no_key" = "No API key is set: anyone who can reach this Mac can use the model.";
+"help.mmproj.text_only" = "Text only ignores this path: it is kept for when vision is turned back on.";
 "field.max_memory" = "Max memory (e.g. 28G)";
 "field.max_context" = "Max context (e.g. 100K, up to 1M)";
 "field.expert_memory" = "Routed experts in memory (e.g. 16G, off loads every expert)";

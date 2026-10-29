@@ -22,6 +22,7 @@
 "kv.bf16" = "BF16";
 "field.neural_engine" = "使用神经引擎（ANE）";
 "help.lan_access.no_key" = "未设置 API 密钥：任何能连到这台 Mac 的人都能使用模型。";
+"help.mmproj.text_only" = "仅文本会忽略此路径：它保留下来，等重新开启视觉时使用。";
 "field.max_memory" = "最大内存（如 28G）";
 "field.max_context" = "最大上下文（如 100K，最高 1M）";
 "field.expert_memory" = "专家驻留内存（如 16G，off 全部载入）";

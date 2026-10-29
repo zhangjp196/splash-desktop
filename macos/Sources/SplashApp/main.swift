@@ -133,13 +133,23 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries("--sparse-kv-memory", "1200M")
             && carries("--verify-rows", "all")
             && carries("--max-context", "100K")
-            && carries("--mmproj", "/tmp/selfcheck-mmproj.gguf")
+            // Text only loads no tower, so this configuration names no
+            // projector even though the form still holds one; turning vision
+            // back on puts the same path back on the command.
+            && !launch.contains("--mmproj")
+            && launch.contains("--language-only")
             // The switch is off in this configuration, so the command turns
             // the disk tier off instead of passing the quota or write budget;
             // nothing here asks for a cache that survives the server.
             && carries("--max-cache-disk", "0")
             && !launch.contains("--persistent-cache")
             && !launch.contains("--max-cache-disk-writes")
+        reloaded.languageOnly = false
+        let vision = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed
+            && vision.contains("--mmproj")
+            && vision.contains("/tmp/selfcheck-mmproj.gguf")
+            && !vision.contains("--language-only")
         reloaded.restoreDefaultSettings()
         let restored = AppModel()
         passed = passed

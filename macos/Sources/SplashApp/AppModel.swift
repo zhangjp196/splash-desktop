@@ -560,8 +560,13 @@ final class AppModel: ObservableObject {
             arguments += ["--model-dir", modelDirectory]
             let draft = draftDirectory.trimmingCharacters(in: .whitespaces)
             if !draft.isEmpty { arguments += ["--draft-model", draft] }
+            // Text only loads no tower, so it names no projector: the launcher
+            // refuses the two together, and the form keeps the path for the
+            // configuration that turns vision back on.
             let projector = mmproj.trimmingCharacters(in: .whitespaces)
-            if !projector.isEmpty { arguments += ["--mmproj", projector] }
+            if !projector.isEmpty && !languageOnly {
+                arguments += ["--mmproj", projector]
+            }
         }
         arguments += ["--port", String(port)]
         // Loopback unless the configuration asks for the LAN; the extra Host

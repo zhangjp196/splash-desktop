@@ -100,6 +100,14 @@ struct SettingsTabs: View {
                     disabled: disabled || settings.languageOnly,
                     files: true
                 )
+                if settings.languageOnly {
+                    // The path is kept for the configuration that turns vision
+                    // back on, but text only loads no tower, so the launcher is
+                    // not given one.
+                    Text(L10n.string("help.mmproj.text_only"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
