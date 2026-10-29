@@ -204,3 +204,30 @@
 "live.hottest" = "最高温度";
 "live.duty" = "预填充占时";
 "live.caption.rpm" = "RPM";
+
+// 内嵌对话：页面持有会话，应用只显示顶部历史菜单。
+"chat.new" = "新对话";
+"chat.history" = "会话历史";
+"chat.no_history" = "还没有保存的对话";
+"chat.delete" = "删除对话";
+"chat.delete.title" = "删除这个对话？";
+"chat.delete.message" = "“%@”将被删除，且无法恢复。";
+"chat.empty.title" = "还没有对话";
+"chat.empty.message" = "启动服务器后即可在这里与模型对话。";
+"split.divider" = "调整面板与对话的宽度";
+
+// 面板标题。
+"models.none" = "未选择模型";
+"models.count" = "%d 个配置";
+"models.empty.subtitle" = "选择这台 Mac 要服务的模型，以及它如何运行";
+"live.subtitle" = "吞吐与显存，每秒刷新";
+"thermal.subtitle" = "这台 Mac 的热量，以及它允许工作得多用力";
+"log.live" = "实时输出";
+
+"mode.upstream.short" = "上游模型";
+"mode.local.short" = "本地目录";
+
+"view.chat" = "对话";
+"chat.clear" = "清空历史";
+"chat.cleared" = "历史已清空";
+"chat.undo" = "撤销";

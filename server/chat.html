@@ -10,54 +10,97 @@
   * { box-sizing: border-box }
   :root {
     color-scheme: light dark;
-    --sidebar: 260px;
+    --sidebar: 264px;
     --sidebar-duration: .22s;
-    --bg: #fff;
-    --side: #f9f9f9;
-    --text: #171717;
-    --muted: #727272;
+    --bg: #ffffff;
+    --side: #f7f7f8;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
     --link: #2563eb;
-    --hover: #ececec;
-    --bubble: #f1f1f1;
-    --composer: #fff;
-    --border: #e5e5e5;
-    --shadow: 0 8px 28px #00000012;
+    --accent: #2563eb;
+    --hover: #ededf0;
+    --bubble: #f1f1f3;
+    --composer: #ffffff;
+    --border: #e3e3e6;
+    --shadow: 0 12px 40px #00000010, 0 2px 8px #00000008;
+    --radius: 12px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #212121;
-      --side: #181818;
-      --text: #ececec;
-      --muted: #9b9b9b;
-      --link: #60a5fa;
-      --hover: #2b2b2b;
-      --bubble: #303030;
-      --composer: #2f2f2f;
-      --border: #424242;
-      --shadow: 0 8px 28px #0005;
+      --bg: #1c1c1e;
+      --side: #161618;
+      --text: #f2f2f7;
+      --muted: #9a9aa1;
+      --link: #6ea8fe;
+      --accent: #0a84ff;
+      --hover: #2a2a2d;
+      --bubble: #2b2b2f;
+      --composer: #242427;
+      --border: #38383d;
+      --shadow: 0 12px 40px #00000055, 0 2px 8px #00000033;
     }
   }
-  body { margin: 0; color: var(--text); background: var(--bg); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif }
+  body {
+    margin: 0;
+    color: var(--text);
+    background:
+      radial-gradient(1100px 520px at 50% -12%, color-mix(in srgb, var(--accent) 6%, transparent), transparent 70%),
+      var(--bg);
+    background-attachment: fixed;
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection { background: color-mix(in srgb, var(--accent) 22%, transparent) }
   button, input, textarea, select { color: inherit; font: inherit }
   button { border: 0; background: none; cursor: pointer }
   button:disabled { cursor: default; opacity: .45 }
+  button:focus-visible, a:focus-visible, summary:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
   svg { display: block }
 
-  aside { position: fixed; inset: 0 auto 0 0; z-index: 20; overflow-y: auto; width: 260px; padding: 12px 8px; background: var(--side); border-right: 1px solid var(--border); transition: transform var(--sidebar-duration) ease, visibility 0s }
-  .brand { display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 10px; font-size: 17px; font-weight: 650; letter-spacing: -.02em }
-  .brand img { width: 19px; height: 19px }
-  #sidebar-close, #sidebar-open { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border-radius: 9px; color: var(--muted) }
+  ::-webkit-scrollbar { width: 11px; height: 11px }
+  ::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--muted) 38%, transparent);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted) 60%, transparent); background-clip: content-box }
+  ::-webkit-scrollbar-track { background: transparent }
+
+  aside { position: fixed; inset: 0 auto 0 0; z-index: 20; overflow-y: auto; width: var(--sidebar); padding: 14px 10px; background: var(--side); border-right: 1px solid var(--border); transition: transform var(--sidebar-duration) ease, visibility 0s }
+  .brand { display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 9px; font-size: 16.5px; font-weight: 650; letter-spacing: -.02em }
+  .brand img { width: 20px; height: 20px; border-radius: 6px }
+  #sidebar-close, #sidebar-open { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border-radius: 8px; color: var(--muted) }
   #sidebar-close { margin-left: auto }
-  #sidebar-open { position: fixed; top: 14px; left: 18px; z-index: 12; display: none }
+  #sidebar-open { position: fixed; top: 14px; left: 16px; z-index: 12; display: none }
   #sidebar-close:hover, #sidebar-open:hover { color: var(--text); background: var(--hover) }
-  #new-chat { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: 9px; padding: 9px 10px; border-radius: 9px; text-align: left }
-  #new-chat:hover { background: var(--hover) }
-  #new-chat svg { width: 18px; height: 18px }
-  .recent-label { margin: 22px 10px 7px; color: var(--muted); font-size: 12px; font-weight: 600 }
+  #new-chat {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin-top: 10px;
+    padding: 10px 11px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+    font-weight: 500;
+    box-shadow: 0 1px 2px #00000008;
+    transition: background .15s, border-color .15s;
+  }
+  #new-chat:hover { background: var(--hover); border-color: color-mix(in srgb, var(--border) 60%, var(--muted)) }
+  #new-chat svg { width: 17px; height: 17px }
+  .recent-label { margin: 26px 10px 8px; color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase }
   #recents { display: grid; gap: 2px }
   .recent { position: relative; display: flex; align-items: center; width: 100%; border-radius: 9px; overflow: hidden }
   .recent:hover, .recent.active { background: var(--hover) }
-  .recent-open { flex: 1; min-width: 0; padding: 8px 10px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap }
+  .recent.active .recent-open { font-weight: 550 }
+  .recent-open { flex: 1; min-width: 0; padding: 8px 10px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px }
   .recent-delete { position: absolute; top: 50%; right: 5px; transform: translateY(-50%); display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; color: var(--muted); opacity: 0; pointer-events: none }
   .recent:hover .recent-open, .recent:focus-within .recent-open { padding-right: 38px }
   .recent:hover .recent-delete, .recent:focus-within .recent-delete { opacity: 1; pointer-events: auto }
@@ -67,73 +110,153 @@
     .recent-delete { opacity: 1; pointer-events: auto }
   }
 
-  .credentials { display: block; margin: 18px 10px; color: var(--muted); font-size: 12px }
-  #api-key { width: 100%; margin-top: 6px; padding: 6px 8px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px }
+  .credentials { display: block; margin: 20px 10px 8px; color: var(--muted); font-size: 12px }
+  #api-key { width: 100%; margin-top: 6px; padding: 7px 9px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px }
+  #api-key:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 55%, var(--border)) }
 
   main { min-height: 100vh; margin-left: var(--sidebar); transition: margin-left var(--sidebar-duration) ease }
-  #chat { width: min(760px, 100%); margin: auto; padding: 38px 20px 150px }
-  #empty { position: fixed; top: calc(50% - 58px); left: calc(var(--sidebar) + (100vw - var(--sidebar)) / 2); transform: translateX(-50%); font-size: 25px; font-weight: 600; letter-spacing: -.025em; transition: left var(--sidebar-duration) ease }
-  .message { margin: 28px 0; overflow-wrap: anywhere }
-  .user { width: fit-content; max-width: 80%; margin-left: auto; padding: 10px 16px; border-radius: 20px; background: var(--bubble); white-space: pre-wrap }
+  #chat { width: min(820px, 100%); margin: auto; padding: 34px 24px 168px }
+  #empty {
+    position: fixed;
+    top: 45%;
+    left: calc(var(--sidebar) + (100vw - var(--sidebar)) / 2);
+    transform: translate(-50%, -50%);
+    width: min(640px, calc(100vw - var(--sidebar) - 56px));
+    text-align: center;
+    pointer-events: none;
+    transition: left var(--sidebar-duration) ease;
+  }
+  .empty-mark {
+    display: grid;
+    place-items: center;
+    width: 54px;
+    height: 54px;
+    margin: 0 auto 18px;
+    border-radius: 16px;
+    background: linear-gradient(135deg, #2f63f6, #18c7c2);
+    box-shadow: 0 12px 30px #2f63f61f, inset 0 1px 0 #ffffff33;
+  }
+  .empty-mark svg { width: 27px; height: 27px; color: #fff }
+  .empty-title { font-size: 28px; font-weight: 650; letter-spacing: -.03em; line-height: 1.2 }
+  .empty-sub { margin-top: 9px; color: var(--muted); font-size: 14px }
+  .suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 22px; pointer-events: auto }
+  .suggestion {
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg) 72%, transparent);
+    color: var(--muted);
+    font-size: 13px;
+    transition: color .15s, background .15s, border-color .15s, transform .15s;
+  }
+  .suggestion:hover {
+    color: var(--text);
+    background: var(--hover);
+    border-color: color-mix(in srgb, var(--border) 50%, var(--muted));
+    transform: translateY(-1px);
+  }
+  .message { margin: 30px 0; overflow-wrap: anywhere }
+  .message:first-child { margin-top: 4px }
+  .user { width: fit-content; max-width: 78%; margin-left: auto; padding: 9px 15px; border-radius: 18px; background: var(--bubble); white-space: pre-wrap; line-height: 1.55 }
   .user-images { display: flex; flex-wrap: wrap; gap: 8px }
   .user-text + .user-images { margin-top: 9px }
   .user-images img { display: block; width: min(240px, 100%); max-height: 240px; border-radius: 12px; object-fit: cover }
-  .assistant { padding: 0 4px }
-  .content blockquote { margin: 0 0 1em; padding-left: 14px; border-left: 2px solid var(--border); color: var(--muted) }
-  .content hr { margin: 1.5em 0; border: 0; border-top: 1px solid var(--border) }
-  .content a { color: var(--link); text-underline-offset: 2px }
-  .content :not(pre) > code { padding: .15em .35em; border-radius: 6px; background: var(--bubble); font-size: .9em }
+  .assistant { padding: 0 2px; line-height: 1.68 }
+  .content > :first-child { margin-top: 0 }
+  .content > :last-child { margin-bottom: 0 }
+  .content p { margin: 0 0 1em }
+  .content blockquote { margin: 0 0 1em; padding-left: 15px; border-left: 2px solid color-mix(in srgb, var(--muted) 40%, transparent); color: var(--muted) }
+  .content hr { margin: 1.6em 0; border: 0; border-top: 1px solid var(--border) }
+  .content a { color: var(--link); text-underline-offset: 2px; text-decoration-thickness: 1px }
+  .content :not(pre) > code { padding: .16em .38em; border-radius: 6px; background: var(--bubble); font-size: .88em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace }
   .table-wrap { overflow-x: auto; margin: 0 0 1em }
-  .content table { border-collapse: collapse; width: 100%; overflow-wrap: normal; font-size: .95em }
-  .content th, .content td { padding: 7px 12px; border-bottom: 1px solid var(--border); text-align: left }
+  .content table { border-collapse: collapse; width: 100%; overflow-wrap: normal; font-size: .94em }
+  .content th, .content td { padding: 8px 13px; border-bottom: 1px solid var(--border); text-align: left }
   .content th { color: var(--muted); font-weight: 600 }
-  .code-block { margin: 12px 0; overflow: hidden; border: 1px solid var(--border); border-radius: 20px; font-size: 13px }
-  .code-block > pre { margin: 0; padding: 0; border-radius: 0; background: transparent; font-size: inherit; line-height: 1.55; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace }
-  .code-block > pre > code { display: block; overflow-x: auto; padding: 0 13px 13px 13px; background: transparent }
-  .code-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 8px }
-  .code-language { min-width: 0; overflow: hidden; padding: 0 8px; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap }
-  .copy-code, .copy-markdown { display: grid; place-items: center; width: 34px; height: 34px; flex: none; padding: 6px; border-radius: 20px; color: var(--muted) }
+  .code-block { margin: 14px 0; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; font-size: 13px; background: color-mix(in srgb, var(--bubble) 30%, transparent) }
+  .code-block > pre { margin: 0; padding: 0; border-radius: 0; background: transparent; font-size: inherit; line-height: 1.6; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace }
+  .code-block > pre > code { display: block; overflow-x: auto; padding: 2px 14px 14px; background: transparent }
+  .code-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--border) }
+  .code-language { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11.5px; font-weight: 550; letter-spacing: .02em; text-overflow: ellipsis; white-space: nowrap }
+  .copy-code, .copy-markdown { display: grid; place-items: center; width: 32px; height: 32px; flex: none; padding: 6px; border-radius: 8px; color: var(--muted); transition: color .15s, background .15s }
   .copy-code:hover, .copy-markdown:hover { color: var(--text); background: var(--hover) }
   .copy-markdown[hidden] { display: none }
   .waiting { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--text); border-radius: 50%; animation: spin .8s linear infinite }
   @keyframes spin { to { transform: rotate(360deg) } }
-  details { margin-bottom: 12px; color: var(--muted); font-size: 14px }
+  details { margin-bottom: 12px; color: var(--muted); font-size: 13.5px }
   summary { width: fit-content; cursor: pointer; user-select: none; font-weight: 500 }
-  .reasoning { max-height: 300px; overflow-y: auto; margin-top: 8px; padding-left: 12px; border-left: 2px solid var(--border); white-space: pre-wrap }
+  .reasoning { max-height: 300px; overflow-y: auto; margin-top: 9px; padding-left: 13px; border-left: 2px solid var(--border); white-space: pre-wrap }
   .reasoning.fade-top { --fade-top: transparent }
   .reasoning.fade-bottom { --fade-bottom: transparent }
   .reasoning.fade-top, .reasoning.fade-bottom { mask-image: linear-gradient(to bottom, var(--fade-top, #000), #000 20px, #000 calc(100% - 20px), var(--fade-bottom, #000)) }
-  .message-footer { display: flex; align-items: center; gap: 12px; margin-top: 12px; white-space: normal }
+  .message-footer { display: flex; align-items: center; gap: 10px; margin-top: 10px; white-space: normal; opacity: .75; transition: opacity .15s }
+  .message:hover .message-footer, .message:focus-within .message-footer { opacity: 1 }
   .message-footer[hidden] { display: none }
-  .stats { color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap }
+  .stats { color: var(--muted); font-size: 11.5px; line-height: 1.5; white-space: nowrap; font-variant-numeric: tabular-nums }
   .error { color: #d33 }
 
-  form { position: fixed; left: calc(var(--sidebar) + (100vw - var(--sidebar)) / 2); bottom: max(18px, env(safe-area-inset-bottom)); z-index: 10; display: flex; align-items: flex-end; gap: 8px; width: min(720px, calc(100vw - var(--sidebar) - 28px)); min-height: 54px; transform: translateX(-50%); padding: 9px; border: 1px solid var(--border); border-radius: 28px; background: var(--composer); box-shadow: var(--shadow); transition: left var(--sidebar-duration) ease, width var(--sidebar-duration) ease }
-  #scroll-bottom { position: absolute; right: 8px; bottom: calc(100% + 12px); padding: 7px 13px; border: 1px solid var(--border); border-radius: 20px; background: var(--composer); box-shadow: var(--shadow); font-size: 13px }
+  form {
+    position: fixed;
+    left: calc(var(--sidebar) + (100vw - var(--sidebar)) / 2);
+    bottom: max(20px, env(safe-area-inset-bottom));
+    z-index: 10;
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    width: min(760px, calc(100vw - var(--sidebar) - 36px));
+    min-height: 56px;
+    transform: translateX(-50%);
+    padding: 9px 9px 9px 11px;
+    border: 1px solid var(--border);
+    border-radius: 19px;
+    background: var(--composer);
+    box-shadow: var(--shadow);
+    transition: left var(--sidebar-duration) ease, width var(--sidebar-duration) ease, border-color .15s, box-shadow .15s;
+  }
+  form:focus-within {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 11%, transparent), var(--shadow);
+  }
+  #scroll-bottom { position: absolute; right: 8px; bottom: calc(100% + 14px); padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--composer); box-shadow: var(--shadow); font-size: 12.5px; color: var(--muted) }
   #scroll-bottom[hidden] { display: none }
-  #scroll-bottom:hover { background: var(--hover) }
-  body.empty form { top: 50%; bottom: auto }
+  #scroll-bottom:hover { color: var(--text); background: var(--hover) }
+  body.empty form { top: calc(50% + 112px); bottom: auto }
   .composer { min-width: 0; flex: 1 }
   #attachments { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 8px }
   #attachments:empty { display: none }
   .attachment { position: relative; width: 58px; height: 58px; flex: none }
-  .attachment img, .attachment-status { width: 100%; height: 100%; border: 1px solid var(--border); border-radius: 12px; object-fit: cover }
+  .attachment img, .attachment-status { width: 100%; height: 100%; border: 1px solid var(--border); border-radius: 11px; object-fit: cover }
   .attachment-status { display: grid; place-items: center; padding: 4px; background: var(--bubble); text-align: center; font-size: 11px; line-height: 1.2 }
-  .remove-image { position: absolute; top: -5px; right: -5px; display: grid; width: 20px; height: 20px; place-items: center; border-radius: 50%; color: #fff; background: #333; font-size: 15px; line-height: 1 }
-  textarea { display: block; width: 100%; max-height: 180px; padding: 6px 0; resize: none; border: 0; outline: 0; background: transparent }
+  .remove-image { position: absolute; top: -5px; right: -5px; display: grid; width: 20px; height: 20px; place-items: center; border-radius: 50%; color: #fff; background: #333; font-size: 15px; line-height: 1; box-shadow: 0 1px 3px #0004 }
+  textarea { display: block; width: 100%; max-height: 180px; padding: 7px 3px; resize: none; border: 0; outline: 0; background: transparent; line-height: 1.5 }
   textarea::placeholder { color: var(--muted) }
-  .toolbar { display: flex; flex: none; align-items: center; gap: 5px }
+  .toolbar { display: flex; flex: none; align-items: center; gap: 6px }
   #attach[hidden] { display: none }
-  #attach { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 50%; color: var(--muted) }
+  #attach { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 9px; color: var(--muted); transition: color .15s, background .15s }
   #attach:hover { color: var(--text); background: var(--hover) }
-  .effort { position: relative; display: flex; align-items: center; gap: 5px; padding: 5px 8px; border-radius: 10px; color: var(--muted); font-size: 13px; line-height: 24px }
+  .effort { position: relative; display: flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 9px; color: var(--muted); font-size: 12.5px; line-height: 22px; transition: color .15s, background .15s }
   .effort:hover, .effort:focus-within { color: var(--text); background: var(--hover) }
-  .effort-chevron { position: absolute; right: 10px; top: 50%; width: 12px; height: 12px; transform: translateY(-50%); pointer-events: none }
+  .effort-chevron { position: absolute; right: 11px; top: 50%; width: 11px; height: 11px; transform: translateY(-50%); pointer-events: none }
   select { appearance: none; padding: 0; border: 0; outline: 0; background: transparent; cursor: pointer }
-  #effort { padding-right: 18px }
-  #send { width: 34px; height: 34px; flex: none; border-radius: 50%; color: var(--bg); background: var(--text); font-size: 17px }
-  #send:disabled { color: var(--muted); background: var(--hover) }
+  #effort { padding-right: 17px }
+  #send { width: 34px; height: 34px; flex: none; border-radius: 10px; color: #fff; background: var(--accent); font-size: 16px; transition: filter .15s, background .15s }
+  #send:hover:not(:disabled) { filter: brightness(1.06) }
+  #send:disabled { color: var(--muted); background: var(--hover); opacity: 1 }
   #mobile-header, #scrim { display: none }
+
+  /* Embedded in the desktop app: the app owns navigation and history, so the
+     page keeps only the conversation and the composer. */
+  body.embed { --sidebar: 0px }
+  body.embed aside,
+  body.embed #sidebar-open,
+  body.embed #scrim,
+  body.embed #mobile-header { display: none }
+  body.embed main { margin-left: 0 }
+  body.embed #chat { padding: 30px 24px 156px }
+  body.embed #empty { left: 50% }
+  body.embed form { left: 50%; width: min(760px, calc(100vw - 40px)) }
+  body.embed .message { margin: 26px 0 }
+  body.embed .user { max-width: 82% }
 
   @media (min-width: 721px) {
     body.sidebar-collapsed { --sidebar: 0px }
@@ -147,22 +270,27 @@
     body.menu-open aside { transform: none }
     #scrim { position: fixed; inset: 0; z-index: 15; background: #0005 }
     body.menu-open #scrim { display: block }
-    #mobile-header { position: fixed; inset: 0 0 auto; z-index: 12; display: flex; align-items: center; justify-content: space-between; height: 52px; padding: 0 12px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(12px) }
+    #mobile-header { position: fixed; inset: 0 0 auto; z-index: 12; display: flex; align-items: center; justify-content: space-between; height: 52px; padding: 0 12px; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(14px); border-bottom: 1px solid var(--border) }
     #menu, #mobile-new { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 9px }
     #menu:hover, #mobile-new:hover { background: var(--hover) }
     #mobile-header .brand { padding: 0; font-size: 16px }
-    #chat { padding: 66px 16px 140px }
-    #empty { top: calc(50% - 58px); left: 50%; font-size: 23px }
+    #chat { padding: 66px 16px 150px }
+    #empty { top: 38%; left: 50%; width: calc(100vw - 36px) }
+    .empty-title { font-size: 23px }
+    .empty-sub { font-size: 13px }
+    .suggestions { margin-top: 18px }
+    body.empty form { top: auto; bottom: max(8px, env(safe-area-inset-bottom)) }
     form { left: 50%; bottom: max(8px, env(safe-area-inset-bottom)); width: calc(100% - 16px) }
     textarea { max-height: 140px }
   }
   @media (max-width: 430px) {
-    .effort { padding-left: 5px }
+    .effort { padding-left: 6px }
     .effort > span { display: none }
     .user { max-width: 88% }
   }
   @media (prefers-reduced-motion: reduce) {
     :root { --sidebar-duration: 0s }
+    .suggestion:hover { transform: none }
   }
 </style>
 
@@ -222,6 +350,13 @@
 <script src="/chat-assets/markdown-it-15.0.2.min.js"></script>
 <script src="/chat-assets/highlight-11.12.0.min.js"></script>
 <script>
+  // The desktop app loads this page with ?embed=1 and drives history through
+  // the messages it posts back, so the page keeps one rendering for both.
+  const EMBED = new URLSearchParams(location.search).has('embed');
+  if (EMBED) document.body.classList.add('embed');
+  // WebKit's handler is absent in a browser tab, where every call is a no-op.
+  const host = window.webkit?.messageHandlers?.splash;
+
   const $ = selector => document.querySelector(selector);
   const chat = $('#chat');
   const form = $('#form');
@@ -282,8 +417,31 @@
   let attachments = [];
   let controller;
   let followResponse = false;
+  // What Clear history last removed, so the app can offer one undo.
+  let clearedSnapshot = null;
   // Until /v1/models says otherwise; a text-only model takes no images.
   let imagesAccepted = true;
+
+  // What the app's history menu reads, and the calls behind its rows.
+  window.splash = {
+    open: id => openChat(id),
+    remove: id => removeChat(id),
+    newChat: () => newChat(),
+    clearHistory: () => clearHistory(),
+    undoClear: () => undoClear(),
+  };
+
+  function publish() {
+    if (!host) return;
+    host.postMessage({
+      type: 'state',
+      title: activeId ? (conversations.find(item => item.id === activeId)?.title || '') : '',
+      active: activeId,
+      running: Boolean(controller),
+      canUndo: Boolean(clearedSnapshot),
+      recents: conversations.map(item => ({id: item.id, title: item.title, updated: item.updated}))
+    });
+  }
 
   const savedEffort = storageGet(effortKey);
   effort.value = allowedEfforts.has(savedEffort) ? savedEffort : '';
@@ -556,7 +714,31 @@
     if (!messages.length) {
       const empty = document.createElement('div');
       empty.id = 'empty';
-      empty.textContent = 'How can I help?';
+      empty.innerHTML =
+        '<div class="empty-mark"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+        '<path d="M12 2.5c3.6 4.1 6.5 7.6 6.5 11a6.5 6.5 0 1 1-13 0c0-3.4 2.9-6.9 6.5-11Z"/></svg></div>' +
+        '<div class="empty-title">How can I help?</div>' +
+        '<div class="empty-sub">Ask anything — the model runs on this Mac.</div>' +
+        '<div class="suggestions"></div>';
+      const suggestions = [
+        'Explain speculative decoding simply',
+        'Write a SwiftUI settings form',
+        'Review this code for bugs',
+      ];
+      const row = empty.querySelector('.suggestions');
+      for (const text of suggestions) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'suggestion';
+        chip.textContent = text;
+        chip.addEventListener('click', () => {
+          input.value = text;
+          resize();
+          updateComposer();
+          input.focus();
+        });
+        row.append(chip);
+      }
       chat.append(empty);
     } else messages.forEach(message => addMessage(message));
     scrollToLatest();
@@ -585,6 +767,39 @@
       item.append(open, remove);
       recents.append(item);
     });
+    publish();
+  }
+
+  /// Deleting from the app's history menu: the app confirms first, so this
+  /// path never opens the page's own dialog.
+  function removeChat(id) {
+    if (controller) return;
+    conversations = conversations.filter(conversation => conversation.id !== id);
+    if (activeId === id) newChat();
+    else save();
+  }
+
+  /// Clears every saved conversation, keeping the last list so the app's one
+  /// undo can put it back. The open page keeps nothing either.
+  function clearHistory() {
+    if (controller) return;
+    clearedSnapshot = conversations.slice();
+    conversations = [];
+    activeId = null;
+    messages = [];
+    clearAttachments();
+    updateSidebar();
+    renderChat();
+    save();
+    input.focus({preventScroll: true});
+  }
+
+  function undoClear() {
+    if (!clearedSnapshot) return;
+    conversations = clearedSnapshot;
+    clearedSnapshot = null;
+    save();
+    renderRecents();
   }
 
   function deleteChat(id) {
@@ -901,5 +1116,8 @@
   renderRecents();
   updateComposer();
   loadModalities();
+  // The app opens on the conversation last used; a browser tab still opens
+  // on a new one, as its own sidebar lists the rest.
+  if (EMBED && conversations.length) openChat(conversations[0].id);
 </script>
 </html>

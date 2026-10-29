@@ -100,10 +100,15 @@ struct SplashApp: App {
         WindowGroup("Splash Desktop", id: "main") {
             RootView()
                 .environmentObject(model)
-                .frame(minWidth: 860, minHeight: 620)
+                .frame(minWidth: 1080, minHeight: 720)
         }
+        .defaultSize(width: 1320, height: 880)
+        .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            // The sidebar is the app's navigation and stays put; the standard
+            // Hide/Show Sidebar commands would leave an empty window.
+            CommandGroup(replacing: .sidebar) {}
         }
 
         MenuBarExtra {

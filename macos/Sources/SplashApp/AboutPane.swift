@@ -30,9 +30,9 @@ struct AboutPane: View {
                     )
                 }
             }
-            .padding(20)
+            .padding(Theme.pagePadding)
             .frame(maxWidth: 720, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
         .background(.background)
     }

@@ -204,3 +204,30 @@
 "live.hottest" = "Hottest sensor";
 "live.duty" = "Prefill share";
 "live.caption.rpm" = "RPM";
+
+// The embedded conversation: the page owns it, the app shows its history band.
+"chat.new" = "New chat";
+"chat.history" = "Conversation history";
+"chat.no_history" = "No saved chats";
+"chat.delete" = "Delete chat";
+"chat.delete.title" = "Delete this chat?";
+"chat.delete.message" = "“%@” will be removed. This cannot be undone.";
+"chat.empty.title" = "No conversation";
+"chat.empty.message" = "Start the server to chat with the model here.";
+"split.divider" = "Resize the pane and conversation";
+
+// Pane headers.
+"models.none" = "No model";
+"models.count" = "%d configurations";
+"models.empty.subtitle" = "Choose the model this Mac serves and how it runs";
+"live.subtitle" = "Throughput and memory, refreshed every second";
+"thermal.subtitle" = "The heat this Mac reports, and how hard it may work";
+"log.live" = "Live output";
+
+"mode.upstream.short" = "Upstream";
+"mode.local.short" = "Local";
+
+"view.chat" = "Chat";
+"chat.clear" = "Clear history";
+"chat.cleared" = "History cleared";
+"chat.undo" = "Undo";

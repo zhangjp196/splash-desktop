@@ -4316,8 +4316,12 @@ write budget). A stored value the launcher would reject falls
 back to its first-launch default rather than starting a server that refuses to
 run. `swift run --selfcheck-settings` exercises the store and that round trip
 headlessly against a temporary database. The
-conversation is the server's own web page: a conspicuous button opens
-`chat.html` in the browser, and the main window holds no chat. Its labels and
+conversation is the server's own web page, embedded in the **Chat** tab: the
+app loads `chat.html?embed=1`, where the page keeps only the conversation and
+posts its history and state to the view, so the native band can list chats,
+start a new one, and clear them with one undo. The same page without `embed`
+still opens in a browser, sidebar and all, for anyone using the server
+directly. Its labels and
 the chat page follow the system interface language (English and Simplified
 Chinese are bundled). The model
 section offers three modes — a Splash package (its draft is built in), an

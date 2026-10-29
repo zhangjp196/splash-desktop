@@ -8,44 +8,50 @@ struct LivePane: View {
     var body: some View {
         ScrollView {
             let live = model.live
-            if !live.updated {
-                ContentUnavailableView(
-                    L10n.string("live.empty.title"),
-                    systemImage: "chart.line.uptrend.xyaxis",
-                    description: Text(verbatim: L10n.string("live.empty.description"))
-                )
-                .padding(.top, 80)
-            } else {
-                VStack(alignment: .leading, spacing: 22) {
-                    throughput(live)
-                    MetricSection(
-                        title: L10n.string("live.serving"),
-                        systemImage: "bolt.fill",
-                        cards: serving(live)
+            VStack(alignment: .leading, spacing: 18) {
+                PaneHeader(title: L10n.string("view.live"), subtitle: L10n.string("live.subtitle"))
+                if !live.updated {
+                    PaneEmpty(
+                        title: L10n.string("live.empty.title"),
+                        message: L10n.string("live.empty.description"),
+                        systemImage: "chart.line.uptrend.xyaxis",
+                        actionTitle: model.canStart ? L10n.string("start") : nil,
+                        action: model.canStart ? { model.start() } : nil
                     )
-                    MetricSection(
-                        title: L10n.string("live.requests"),
-                        systemImage: "tray.full.fill",
-                        cards: requests(live)
-                    )
-                    MetricSection(
-                        title: L10n.string("live.memory"),
-                        systemImage: "memorychip.fill",
-                        cards: memory(live)
-                    )
-                    MetricSection(
-                        title: L10n.string("live.caches"),
-                        systemImage: "externaldrive.fill",
-                        cards: caches(live)
-                    )
-                    MetricSection(
-                        title: L10n.string("live.thermal"),
-                        systemImage: "fan.fill",
-                        cards: thermal(live)
-                    )
+                    .frame(minHeight: 300)
+                } else {
+                    VStack(alignment: .leading, spacing: 20) {
+                        throughput(live)
+                        MetricSection(
+                            title: L10n.string("live.serving"),
+                            systemImage: "bolt.fill",
+                            cards: serving(live)
+                        )
+                        MetricSection(
+                            title: L10n.string("live.requests"),
+                            systemImage: "tray.full.fill",
+                            cards: requests(live)
+                        )
+                        MetricSection(
+                            title: L10n.string("live.memory"),
+                            systemImage: "memorychip.fill",
+                            cards: memory(live)
+                        )
+                        MetricSection(
+                            title: L10n.string("live.caches"),
+                            systemImage: "externaldrive.fill",
+                            cards: caches(live)
+                        )
+                        MetricSection(
+                            title: L10n.string("live.thermal"),
+                            systemImage: "fan.fill",
+                            cards: thermal(live)
+                        )
+                    }
                 }
-                .padding(18)
             }
+            .padding(Theme.pagePadding)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .background(.background)
     }

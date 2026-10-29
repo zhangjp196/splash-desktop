@@ -49,7 +49,8 @@ struct ThermalPane: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 18) {
+                PaneHeader(title: L10n.string("view.thermal"), subtitle: L10n.string("thermal.subtitle"))
                 ladder
                 if model.live.updated {
                     MetricSection(
@@ -68,15 +69,18 @@ struct ThermalPane: View {
                         cards: pacingCards
                     )
                 } else {
-                    ContentUnavailableView(
-                        L10n.string("thermal.empty.title"),
+                    PaneEmpty(
+                        title: L10n.string("thermal.empty.title"),
+                        message: L10n.string("thermal.empty.description"),
                         systemImage: "fan",
-                        description: Text(verbatim: L10n.string("thermal.empty.description"))
+                        actionTitle: model.canStart ? L10n.string("start") : nil,
+                        action: model.canStart ? { model.start() } : nil
                     )
-                    .padding(.top, 40)
+                    .frame(minHeight: 260)
                 }
             }
-            .padding(18)
+            .padding(Theme.pagePadding)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .background(.background)
     }

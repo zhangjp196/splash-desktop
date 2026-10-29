@@ -496,10 +496,16 @@ final class AppModel: ObservableObject {
     }
     var isBusy: Bool { phase == .starting || phase == .stopping }
 
-    // The chat is the server's own web page, opened in the browser; the API
-    // address stays one keystroke away for tools that talk to it directly.
+    // The chat is the server's own web page. The app embeds it in embed mode,
+    // where the page keeps only the conversation; the browser gets the full
+    // page, history sidebar and all.
     var chatURL: URL? { URL(string: "http://127.0.0.1:\(port)/") }
+    var chatEmbedURL: URL? { URL(string: "http://127.0.0.1:\(port)/?embed=1") }
     var apiBaseURL: String { "http://127.0.0.1:\(port)/v1" }
+
+    var activeConfig: ModelConfig? {
+        configs.first { $0.id == activeConfigID }
+    }
 
     func copyToClipboard(_ text: String) {
         let pasteboard = NSPasteboard.general

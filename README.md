@@ -29,8 +29,8 @@ installing it nor its first run needs anything but the model you choose.
 3. In the **Models** pane, pick a configuration and press **Start**. The
    first run downloads the model and its DFlash2 draft and serves on
    `127.0.0.1:8000`; later starts reuse the downloads.
-4. Open <http://127.0.0.1:8000> in your browser, or point a coding agent at
-   the server.
+4. Open the **Chat** tab, open <http://127.0.0.1:8000> in your browser, or
+   point a coding agent at the server.
 
 To reach the server from another device on the same network, turn on **Allow
 access from other devices** in the configuration's **Server** section: it
@@ -41,10 +41,13 @@ it over a name rather than an IP, such as `mymac.local` or a tunnel domain,
 also lists that name in **Extra host names** (each becomes `--allowed-host`).
 These edits apply to the next start.
 
-The window is a sidebar of **Models**, **Live**, **Thermal**, **Log**, and
-**About**, with
-the run state and Start and Stop pinned beneath it:
+The window is a sidebar of **Chat**, **Models**, **Live**, **Thermal**,
+**Log**, and **About**, with the run state and Start and Stop pinned beneath
+it:
 
+- **Chat** — the conversation, in the window: history, a new chat, and one
+  click to clear it. The same page still opens in a browser for anyone using
+  the server directly.
 - **Models** — the configurations you have saved, each holding the whole set
   of server settings: add, edit, and switch between them, or aim one at a
   model folder on your disk.
