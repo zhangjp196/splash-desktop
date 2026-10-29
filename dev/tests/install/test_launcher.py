@@ -505,6 +505,26 @@ class LauncherTests(unittest.TestCase):
                     ):
                         launcher.parse_args([*arguments, "--port", value])
 
+    def test_serve_refuses_abbreviated_options(self):
+        # serve takes its options by their full names, as the desktop app
+        # passes every one: an abbreviation would change meaning as options are
+        # added.
+        for arguments in (
+            ["--po", "9000"],
+            ["--po=9000"],
+            ["--api-k", "k"],
+            ["--hos", "0.0.0.0"],
+            ["--mod=" + MODEL_ID],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                mock.patch("sys.stderr", io.StringIO()) as error,
+                self.assertRaises(SystemExit) as failed,
+            ):
+                launcher.parse_args(["serve", "--model", MODEL_ID, *arguments])
+            self.assertEqual(failed.exception.code, 2)
+            self.assertIn("unrecognized arguments", error.getvalue())
+
     def test_client_port_selection_preserves_agent_arguments(self):
         cases = (
             (["--port", "2268", "--help"], 2268, ["--help"]),
@@ -743,8 +763,14 @@ class LauncherTests(unittest.TestCase):
                 worker.join(timeout=5)
             self.assertEqual(
                 requests,
-                [("/v1/models", "Bearer test-key")]
-                * (2 * len(launcher.clients.INSTALL_URLS)),
+                [
+                    request
+                    for name in launcher.clients.INSTALL_URLS
+                    for _ in range(2)
+                    # Pi also asks how the server renders later system messages.
+                    for request in [("/v1/models", "Bearer test-key")]
+                    + [("/status", "Bearer test-key")] * (name == "pi")
+                ],
             )
 
     def test_only_a_given_port_that_finds_no_server_mentions_the_agents_own(self):
@@ -1289,6 +1315,44 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(command[0], str(launcher.paths.PYTHON))
         self.assertIn("prepare", command)
         self.assertNotIn("make", command)
+
+    def test_python_programs_write_bytecode_only_as_the_launcher_does(self):
+        # A runtime inside a signed app must not gain __pycache__ folders: a
+        # launcher run with -B or PYTHONDONTWRITEBYTECODE gives the installer
+        # and the server PYTHONDONTWRITEBYTECODE, which the server's PDF
+        # workers inherit from it.
+        for flag in (False, True):
+            with (
+                self.subTest(dont_write_bytecode=flag),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                runtime = Path(temporary)
+                os.environ.pop("PYTHONDONTWRITEBYTECODE", None)
+                seen = {}
+
+                def install(selection):
+                    seen["installer"] = os.environ.get("PYTHONDONTWRITEBYTECODE")
+
+                with (
+                    mock.patch.object(launcher.sys, "dont_write_bytecode", flag),
+                    mock.patch.object(launcher, "RUNTIME_DIR", runtime),
+                    mock.patch.object(launcher.socket, "socket"),
+                    mock.patch.object(
+                        launcher, "_ensure_installed", side_effect=install
+                    ),
+                    mock.patch.object(
+                        launcher.model_artifacts,
+                        "selection_link",
+                        return_value=runtime / "selected",
+                    ),
+                    mock.patch.object(launcher.os, "execve") as execute,
+                ):
+                    launcher.main(["serve", "--model", MODEL_ID])
+                argv, environment = execute.call_args.args[1:]
+                expected = "1" if flag else None
+                self.assertEqual(seen, {"installer": expected})
+                self.assertEqual(environment.get("PYTHONDONTWRITEBYTECODE"), expected)
+                self.assertNotIn("-B", argv)
 
     def test_unsupported_mac_is_refused_before_any_download(self):
         reason = (

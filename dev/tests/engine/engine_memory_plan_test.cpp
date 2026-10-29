@@ -178,7 +178,7 @@ void testUserCeilingAndFailure() {
 void testDiskTierStateStagingIsBudgeted() {
   const EngineMemoryPlan without = test::requireMemoryPlan(device(), model());
   ModelMemoryProfile tiered = model();
-  // One Qwen3.8-27B state (DEVELOPMENT.md, SSD cache).
+  // One Qwen3.8-27B state (docs/server.md, SSD cache).
   const uint64_t staging = 187 * kMiB;
   tiered.footprint.stateStagingBytes = staging;
   const EngineMemoryPlan with = test::requireMemoryPlan(device(), tiered);
@@ -219,7 +219,7 @@ void testDiskTierStateStagingIsBudgeted() {
 void testNeuralEngineSplitIsBudgeted() {
   const EngineMemoryPlan without = test::requireMemoryPlan(device(), model());
   ModelMemoryProfile split = model();
-  // Qwen3.8-27B's split at the M6's share (DEVELOPMENT.md, Neural Engine prefill).
+  // Qwen3.8-27B's split at the M6's share (docs/internals.md, Neural Engine prefill).
   const uint64_t surfaces = 508 * kMiB;
   split.footprint.aneFfnBytes = surfaces;
   const EngineMemoryPlan with = test::requireMemoryPlan(device(), split);

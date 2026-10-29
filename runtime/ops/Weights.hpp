@@ -27,10 +27,15 @@ struct ProjectionShape final {
   // (quant_four_bits); Apple10 runs the register tile on narrower grids of
   // fewer (Linear::decodeStorageRows).
   bool fourBits = true;
-  // Its quantized segments, together, store fewer than four and a half bits
-  // per weight, its float ones aside; Apple10 may decode a lane of it on the
-  // staged 16-row tile (Linear::decodeStorageRows).
-  bool underFourAndHalfBits = false;
+  // The bits per weight its quantized segments store together, its float
+  // ones aside, in sixteenths, rounded down; 0 where it has none or they are
+  // unknown, which plans take for the most a format stores. Apple10's staged
+  // split law weighs a split's partials against the weights (LinearGguf.cpp).
+  uint32_t weightBits16 = 0;
+  // Whether its quantized segments, together, store fewer than four and a
+  // half bits per weight; Apple10 may decode a lane of it on the staged
+  // 16-row tile (Linear::decodeStorageRows).
+  [[nodiscard]] constexpr bool underFourAndHalfBits() const noexcept { return weightBits16 && weightBits16 < 72; }
   auto operator<=>(const ProjectionShape &) const = default;
 };
 
@@ -59,25 +64,37 @@ enum class FloatOutput : uint8_t { BFloat16, Float32 };
   return type == FloatOutput::Float32 ? sizeof(float) : sizeof(uint16_t);
 }
 
-// A prepared GGUF tensor occupying a projection's output columns
-// [columnOffset, columnOffset + outputSize): repacked planes in the GGUF_FMT_*
-// format formatId (metal/abi/QuantFormat.h), or a float tensor the GGUF keeps
-// unquantized (as quantized GGUFs keep the MoE router: F32, or BF16 as some
-// store it), whose plane0 holds [outputSize][inputSize] values multiplied
-// unrounded in fp32 (kernels/shared/gguf_float.metal). The source container
+// A prepared tensor occupying a projection's output columns
+// [columnOffset, columnOffset + outputSize), in one of two layouts. Planes:
+// repacked planes in the GGUF_FMT_* format formatId (metal/abi/QuantFormat.h),
+// which the block tiles read. Rows: the tensor's rows as stored, a row of
+// inputSize values per output column in plane0, which the float projection
+// multiplies unrounded in fp32 (kernels/shared/gguf_float.metal): F32 values
+// (formatId kFloat32, which no GGUF_FMT_* format names) or BF16 values
+// (GGUF_FMT_BF16), as a GGUF keeps a tensor unquantized, or a quantized
+// format's native blocks, each value the fp32 its decode gives, as the token
+// gather decodes it. A segment of rows is a float segment (isFloat); the MoE
+// router is one, in the format its checkpoint holds it. The source container
 // is not part of it.
 struct QuantizedSegment final {
-  // The formatIds of a float segment of F32 and of BF16 values.
-  static constexpr uint32_t kFloat32 = 0xffffffff, kBFloat16 = 0xfffffffe;
+  // The formatId of F32 rows.
+  static constexpr uint32_t kFloat32 = 0xffffffff;
+  enum class Layout : uint8_t { Planes, Rows };
 
   [[nodiscard]] static QuantizedSegment planes(uint32_t formatId, uint32_t outputSize, uint32_t inputSize,
                                                metal::MetalBuffer plane0, metal::MetalBuffer plane1,
                                                metal::MetalBuffer meta);
-  // `type` kFloat32 or kBFloat16.
-  [[nodiscard]] static QuantizedSegment floats(uint32_t outputSize, uint32_t inputSize, metal::MetalBuffer values,
-                                               uint32_t type = kFloat32) {
-    return {std::move(values), {}, {}, outputSize, inputSize, 0, type};
+  // Rows of F32 or BF16 values or of a quantized format's native blocks,
+  // whole ones each (rowBytes); throws for F16 and any other formatId.
+  [[nodiscard]] static QuantizedSegment rows(uint32_t formatId, uint32_t outputSize, uint32_t inputSize,
+                                             metal::MetalBuffer rows);
+  // Rows of F32 values.
+  [[nodiscard]] static QuantizedSegment floats(uint32_t outputSize, uint32_t inputSize, metal::MetalBuffer values) {
+    return rows(kFloat32, outputSize, inputSize, std::move(values));
   }
+  // The bytes of a row of `inputSize` values in formatId's rows; 0 for a
+  // formatId that has none, or a row of a partial native block.
+  [[nodiscard]] static uint64_t rowBytes(uint32_t formatId, uint32_t inputSize) noexcept;
 
   metal::MetalBuffer plane0;
   metal::MetalBuffer plane1;
@@ -86,14 +103,17 @@ struct QuantizedSegment final {
   uint32_t inputSize = 0;
   uint32_t columnOffset = 0;
   uint32_t formatId = kFloat32;
+  Layout layout = Layout::Rows;
 
-  [[nodiscard]] bool isFloat() const noexcept { return formatId == kFloat32 || formatId == kBFloat16; }
-  // The bytes of a float segment's value.
-  [[nodiscard]] uint32_t floatBytes() const noexcept { return formatId == kBFloat16 ? 2 : 4; }
-  // The plane geometry of a quantized segment.
+  [[nodiscard]] bool isFloat() const noexcept { return layout == Layout::Rows; }
+  // Rows of a quantized format, which the float projection decodes.
+  [[nodiscard]] bool quantizedRows() const noexcept {
+    return isFloat() && formatId != kFloat32 && formatId != GGUF_FMT_BF16;
+  }
+  // The plane geometry or native block of a GGUF_FMT_* format.
   [[nodiscard]] const QuantFormat &format() const noexcept;
-  // The kernel name suffix of its format ("f32" or "bf16" for a float
-  // segment).
+  // The kernel name suffix of its format: its kQuantFormats name, "f32" for
+  // F32 rows.
   [[nodiscard]] const char *name() const noexcept;
   // The buffer bound in plane1's slot: a format without a second plane binds
   // its meta plane there, which its kernels never read as plane1.
@@ -136,7 +156,7 @@ public:
       bytes += n * s.format().block_bytes / s.format().block_elements;
     }
     return {outputSize, inputSize, static_cast<bool>(rotation), registerFormats, fourBits,
-            weights && 16 * bytes < 9 * weights};
+            weights ? uint32_t(128 * bytes / weights) : 0};
   }
 
   // Views of a projection of one unrotated quantized tensor (Linear.cpp):

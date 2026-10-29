@@ -160,7 +160,7 @@ class ServerMainTests(unittest.TestCase):
                 self.assertIn(
                     mock.call(
                         "Ready · test-model · context 128K"
-                        + ("" if vision else " · language only")
+                        + ("" if vision else " · text only")
                         + " · http://127.0.0.1:8000"
                     ),
                     status.call_args_list,

@@ -11,10 +11,12 @@
 // token table is copied as its bf16 or fp16 rows. Norms are bf16 or fp16 as
 // MLX stores them, or the F32 1 + w of the w
 // transformers stores; the convolution and dt_bias are copied as stored, and
-// the GDN decay is float(-exp(double(A_log))). The MoE router and the
-// shared-expert gate, which the block kernels read in F32, become the F32
-// values of their quantization (or of their bf16 or fp16 weights), and so do
-// GDN alpha and beta unless both are quantized in one format.
+// the GDN decay is float(-exp(double(A_log))). The MoE router keeps the
+// format it is stored in, as native rows when quantized, which the float
+// projection decodes; the shared-expert gate, which the MoE selection reads
+// in F32, becomes the F32 values of its quantization (or of its bf16 or fp16
+// weights), and so do GDN alpha and beta unless both are quantized in one
+// format.
 
 #include "model/GgufImage.hpp"
 #include "model/QwenHybridLayout.hpp"

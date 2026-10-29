@@ -588,6 +588,12 @@ class FlintPromptTests(unittest.TestCase):
             {"<|assistant|>"},
         )
 
+    def test_models_report_no_efforts_for_a_model_that_decides_itself(self):
+        self.assertEqual(
+            self.frontend(default_reasoning_effort="high").reasoning,
+            {"thinks": None, "efforts": [], "default": None},
+        )
+
     def test_a_tool_conversation_renders_in_flint_s_markup(self):
         body = {
             "messages": [

@@ -42,6 +42,7 @@ using splash::metal::CommandGraph;
 using splash::metal::MetalBackend;
 using splash::metal::MetalBuffer;
 using splash::ops::BlockMoeWeights;
+using splash::ops::InputRotation;
 using splash::ops::MoE;
 using splash::ops::MoeBuffers;
 using splash::ops::MoeConfig;
@@ -92,7 +93,8 @@ int timing(MetalBackend &backend, const MoeShape &shape, uint32_t rounds, Fmt ga
                              {planes(gateUpFormat, E * I, H), planes(sharedFormat, shape.sharedSlices * I, H)},
                              {planes(gateUpFormat, E * I, H), planes(sharedFormat, shape.sharedSlices * I, H)},
                              {planes(downFormat, E * H, I), planes(sharedFormat, shape.sharedSlices * H, I)},
-                             splash::model::residentExpertSlots(backend, E), E};
+                             splash::model::residentExpertSlots(backend, E), E, nullptr, 0,
+                             InputRotation{}, InputRotation{}};
   // Rows whose expert e scores 4 x[e]: the first E inputs rank the experts, the row's routes at 1 - 0.05 rank and the
   // others below 0.05.
   const auto input = [&](uint32_t rows, Routing routing) {

@@ -126,8 +126,23 @@ public:
     floatRows(alpha, heads, hidden, destination + heads * rowBytes);
   }
 
-  // An F32 [rows, columns] tensor (the MoE router and the shared-expert
-  // gate, which the block kernels read unquantized).
+  // The MoE router [rows, columns], which the float projection runs in the
+  // format the checkpoint holds it (ops::QuantizedSegment): a quantized
+  // tensor's native rows, or its bf16 or F32 values, as stored.
+  void router(const std::string &module, uint64_t rows, uint64_t columns) {
+    if (const std::optional<TensorRows> source = quantized(module, rows, columns)) {
+      image_.descriptor(source->type, rows, columns, {}, {rows * source->rowBytes, 0, 0}, module);
+      image_.copy(*source);
+      return;
+    }
+    const SourceTensor &weight = require(module + ".weight", {"BF16", "F32"}, {rows, columns});
+    const uint32_t type = weight.dtype == "BF16" ? ggml::kBF16 : ggml::kF32;
+    image_.descriptor(type, rows, columns, {}, {weight.bytes, 0, 0}, module);
+    image_.copy(this->rows(module, weight, type, rows, weight.bytes / rows));
+  }
+
+  // An F32 [rows, columns] tensor (the shared-expert scalar gate, which the
+  // MoE selection reads in F32).
   void floatTensor(const std::string &module, uint64_t rows, uint64_t columns) {
     const uint64_t bytes = rows * columns * sizeof(float);
     image_.descriptor(ggml::kF32, rows, columns, {}, {bytes, 0, 0}, module);
@@ -326,6 +341,7 @@ struct QuantizedModules {
     if (modules.empty() || modules.back() != module) modules.push_back(module);
   }
   void alphaBeta(const std::string &, const std::string &) {}
+  void router(const std::string &, uint64_t, uint64_t) {}
   void floatTensor(const std::string &, uint64_t, uint64_t) {}
   void embedding(const std::string &) {}
 
@@ -363,7 +379,7 @@ void walkLayer(Walk &b, const QwenTargetDimensions &g, ModuleNames names, uint32
   const std::string mlp = prefix + "mlp.";
   if (g.ffnKind == QwenFfnKind::SparseMoe) {
     const uint64_t width = g.expertIntermediateSize;
-    b.floatTensor(mlp + "gate", g.experts, g.hiddenSize);
+    b.router(mlp + "gate", g.experts, g.hiddenSize);
     b.experts(mlp, "gate_proj", width, g.hiddenSize);
     b.experts(mlp, "up_proj", width, g.hiddenSize);
     b.experts(mlp, "down_proj", g.hiddenSize, width);

@@ -50,8 +50,10 @@ void requirePrefillStates(const QwenTargetGeometry &geometry, const QwenTargetPr
 
 void QwenTargetGeometry::finish(std::span<const ops::BlockMoeWeights *const> moeBlocks,
                                 const ops::Projection &logits) {
-  // The format of most routed expert weights, GGUF_FMT_COUNT for none.
+  // The format of most routed expert weights, GGUF_FMT_COUNT for none, and
+  // of most routers, F32 for none (counted one past the GGUF formats).
   std::array<uint64_t, GGUF_FMT_COUNT> weights{};
+  std::array<uint32_t, GGUF_FMT_COUNT + 1> routers{};
   moeRegisterFormats = true;
   moeRotationBlock = 0;
   for (const ops::BlockMoeWeights *block : moeBlocks) {
@@ -64,9 +66,13 @@ void QwenTargetGeometry::finish(std::span<const ops::BlockMoeWeights *const> moe
     for (const ops::BlockExpertProjection *projection : {&block->gate, &block->up, &block->down})
       if (!projection->routed.isFloat())
         weights[projection->routed.formatId] += uint64_t{projection->routed.outputSize} * projection->routed.inputSize;
+    ++routers[std::min<uint32_t>(block->router.formatId, GGUF_FMT_COUNT)];
   }
   const auto most = std::max_element(weights.begin(), weights.end());
   moeExpertFormat = *most ? uint32_t(most - weights.begin()) : GGUF_FMT_COUNT;
+  const auto router = std::max_element(routers.begin(), routers.end());
+  moeRouterFormat = *router && router < routers.end() - 1 ? uint32_t(router - routers.begin())
+                                                          : ops::QuantizedSegment::kFloat32;
   prefillProjections = decodeProjections;
   include(logits);
   for (auto *shapes : {&prefillProjections, &decodeProjections, &gateUpProjections}) {

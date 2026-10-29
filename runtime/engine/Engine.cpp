@@ -259,14 +259,15 @@ bool Engine::tick(double now) {
   if (progressed)
     sweepTerminal();
   if (pending_) {
-    auto forwardMaskRequests = [&] {
+    auto advance = [&] {
+      pending_->ticket->advance();
       for (ModelMaskRequest &asked : pending_->ticket->takeMaskRequests()) {
         events_.maskRequested(asked.requestId, asked.simulationTokens);
         request(asked.requestId).maskRequestedMilliseconds = now;
         progressed = true;
       }
     };
-    forwardMaskRequests();
+    advance();
     for (const BatchItem &item : pending_->plan.items) {
       Request &active = request(item.requestId);
       if (!active.pendingEnd && active.request.deadlineMilliseconds <= now) {
@@ -276,7 +277,7 @@ bool Engine::tick(double now) {
     }
     // A mask response, cancellation, or deadline can make the commit tail
     // runnable without another Metal completion wake.
-    forwardMaskRequests();
+    advance();
     if (!pending_->ticket->ready())
       return progressed;
     Pending command = std::move(*pending_);
@@ -2518,7 +2519,8 @@ void Engine::apply(const Pending &command, std::span<const ModelStepResult> resu
   scheduler_.complete(plan, schedulerResults, wallMilliseconds,
                       ticket.prefillTimingIsRepresentative(), ticket.hostMilliseconds(),
                       command.streamed ? std::optional(ticket.streamMilliseconds())
-                                       : std::nullopt);
+                                       : std::nullopt,
+                      ticket.imageEncodeMilliseconds());
   if (plan.passes > 1 && plan.pass + 1 == plan.passes)
     request(plan.items.front().requestId).passCommand.reset();
   events_.batchCompleted(plan.kind, plan.width(), inputTokens, outputTokens,

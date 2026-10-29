@@ -56,7 +56,7 @@ class Element {
 }
 
 function createChat(storage = new Map(), writable = true, models = null,
-                    crypto = require('node:crypto').webcrypto) {
+                    crypto = require('node:crypto').webcrypto, search = '') {
   const elements = {};
   const requests = [];
   const modelRequests = [];
@@ -70,7 +70,9 @@ function createChat(storage = new Map(), writable = true, models = null,
   for (const id of ['chat', 'form', 'input', 'attachments', 'image-input',
                    'attach', 'effort', 'api-key', 'send', 'recents', 'new-chat',
                    'mobile-new', 'menu', 'scrim', 'scroll-bottom', 'sidebar',
-                   'sidebar-close', 'sidebar-open']) elements[id] = new Element();
+                   'sidebar-close', 'sidebar-open', 'credentials']) elements[id] = new Element();
+  // Elements the markup hides start hidden, as in a browser.
+  for (const [, id] of html.matchAll(/<\w+ id="([^"]+)"[^>]* hidden[ >]/g)) elements[id].hidden = true;
   elements.effort.options = ['', 'xhigh', 'medium', 'low', 'none'].map(value => ({value}));
   class FileReader {
     readAsDataURL(file) {
@@ -104,6 +106,9 @@ function createChat(storage = new Map(), writable = true, models = null,
       context.scrollY = Math.min(options.top, viewport.scrollHeight - 800);
     },
     AbortController, TextDecoder, Uint8Array, console, FileReader,
+    URLSearchParams,
+    // The page reads ?embed=1 to render without its sidebar, in the app.
+    location: {search},
     navigator: {clipboard},
     confirm(message) { dialog.messages.push(message); return dialog.accept; },
     setTimeout: callback => { timers.push(callback); },
@@ -213,6 +218,46 @@ assert.equal(fresh.elements['api-key'].value, '');
 setText(fresh, 'hello');
 submit(fresh);
 assert.equal(fresh.requests[0].headers.Authorization, undefined);
+""")
+
+    def test_api_key_field_shows_only_once_the_server_answers_401(self):
+        # Only a server started with --api-key answers 401, to /v1/models or a
+        # chat, and the field stays once the key is entered.
+        self.run_chat(r"""
+(async () => {
+  const served = () => ({ok: true, json: async () => ({data: [{input_modalities: ['text']}]})});
+  const unauthorized = {ok: false, status: 401,
+    json: async () => ({error: {message: 'invalid or missing API key', type: 'authentication_error'}})};
+  for (const [name, models] of [['served', served], ['offline', null]]) {
+    const chat = createChat(new Map(), true, models);
+    await flush();
+    assert.equal(chat.elements.credentials.hidden, true, name);
+    setText(chat, 'hello');
+    submit(chat);
+    if (models) succeed(chat.requests[0]);
+    else chat.requests[0].reject(new TypeError('Failed to fetch'));
+    await flush();
+    assert.equal(chat.elements.credentials.hidden, true, name);
+  }
+  const locked = createChat(new Map(), true, headers => headers.Authorization ? served() : unauthorized);
+  await flush();
+  assert.equal(locked.elements.credentials.hidden, false, '/v1/models answered 401');
+  locked.elements['api-key'].value = 'key';
+  locked.elements['api-key'].handlers.change();
+  await flush();
+  setText(locked, 'hello');
+  submit(locked);
+  succeed(locked.requests[0]);
+  await flush();
+  assert.equal(locked.elements.credentials.hidden, false, 'the key hid its field');
+  const chat = createChat();
+  await flush();
+  setText(chat, 'hello');
+  submit(chat);
+  chat.requests[0].resolve(unauthorized);
+  await flush();
+  assert.equal(chat.elements.credentials.hidden, false, 'a chat answered 401');
+})().catch(error => { console.error(error); process.exitCode = 1; });
 """)
 
     def test_image_attachment_follows_the_served_input_modalities(self):
@@ -902,10 +947,13 @@ class ChatPageTest(HarnessTestCase):
         self.assertIn(b"/v1/chat/completions", payload)
         for effort in (b"xhigh", b"medium", b"low", b"none"):
             self.assertIn(b'value="' + effort + b'"', payload)
-        for label in (b"XHigh", b"Medium", b"Low", b"Off"):
+        for label in (b"Auto", b"Extra High", b"Medium", b"Low", b"Off"):
             self.assertIn(b">" + label + b"</option>", payload)
         for label in (b"Splash", b"New chat", b"Recents"):
             self.assertIn(label, payload)
+        self.assertIn(
+            b'<label id="credentials" hidden>This server needs an API key', payload
+        )
         self.assertIn(b"reasoning_effort", payload)
         self.assertIn(b"include_usage", payload)
         self.assertIn(b"tokens_per_second", payload)

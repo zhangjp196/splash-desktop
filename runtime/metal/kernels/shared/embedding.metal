@@ -25,42 +25,7 @@ __attribute__((always_inline)) inline void gguf_embedding(device const uint *tok
 // Two gathers per gguf_embedding_format (metal/abi/Gguf.h), named by its kQuantFormats token: gguf_embed_<token>
 // into bf16 and gguf_embed_f32_<token> into fp32.
 #define GGUF_EMBEDDING_FORMAT(f, F) GGUF_GATHER(gguf_embed_##f, F, bfloat) GGUF_GATHER(gguf_embed_f32_##f, F, float)
-GGUF_EMBEDDING_FORMAT(q4k, GgufEmbedQ4K)
-GGUF_EMBEDDING_FORMAT(q6k, GgufEmbedQ6K)
-GGUF_EMBEDDING_FORMAT(q80, GgufEmbedQ80)
-GGUF_EMBEDDING_FORMAT(q5k, GgufEmbedQ5K)
-GGUF_EMBEDDING_FORMAT(q3k, GgufEmbedQ3K)
-GGUF_EMBEDDING_FORMAT(q2k, GgufEmbedQ2K)
-GGUF_EMBEDDING_FORMAT(q40, GgufEmbedQ40)
-GGUF_EMBEDDING_FORMAT(q41, GgufEmbedQ41)
-GGUF_EMBEDDING_FORMAT(q50, GgufEmbedQ50)
-GGUF_EMBEDDING_FORMAT(q51, GgufEmbedQ51)
-GGUF_EMBEDDING_FORMAT(pq20, GgufEmbedPQ20)
-GGUF_EMBEDDING_FORMAT(q20, GgufEmbedQ20)
-GGUF_EMBEDDING_FORMAT(iq4nl, GgufEmbedIQ4NL)
-GGUF_EMBEDDING_FORMAT(iq4xs, GgufEmbedIQ4XS)
-GGUF_EMBEDDING_FORMAT(iq3s, GgufEmbedIQ3S)
-GGUF_EMBEDDING_FORMAT(iq3xxs, GgufEmbedIQ3XXS)
-GGUF_EMBEDDING_FORMAT(iq2xxs, GgufEmbedIQ2XXS)
-GGUF_EMBEDDING_FORMAT(iq2xs, GgufEmbedIQ2XS)
-GGUF_EMBEDDING_FORMAT(iq2s, GgufEmbedIQ2S)
-GGUF_EMBEDDING_FORMAT(iq1s, GgufEmbedIQ1S)
-GGUF_EMBEDDING_FORMAT(iq1m, GgufEmbedIQ1M)
-GGUF_EMBEDDING_FORMAT(mxfp4, GgufEmbedMXFP4)
-GGUF_EMBEDDING_FORMAT(nvfp4, GgufEmbedNVFP4)
-GGUF_EMBEDDING_FORMAT(fp8, GgufEmbedFP8)
-GGUF_EMBEDDING_FORMAT(bf16, GgufEmbedBF16)
-GGUF_EMBEDDING_FORMAT(f16, GgufEmbedF16)
-GGUF_EMBEDDING_FORMAT(tq2t, GgufEmbedTQ2T)
-GGUF_EMBEDDING_FORMAT(tqk6, GgufEmbedTQK6)
-GGUF_EMBEDDING_FORMAT(tqk7, GgufEmbedTQK7)
-#define GGUF_EMBEDDING_AFFINE(B)                                                                \
-  GGUF_EMBEDDING_FORMAT(af##B##g32, GgufEmbedAF##B##G32)                                        \
-  GGUF_EMBEDDING_FORMAT(af##B##g64, GgufEmbedAF##B##G64)                                        \
-  GGUF_EMBEDDING_FORMAT(af##B##g128, GgufEmbedAF##B##G128)
-GGUF_EMBEDDING_AFFINE(2) GGUF_EMBEDDING_AFFINE(3) GGUF_EMBEDDING_AFFINE(4) GGUF_EMBEDDING_AFFINE(5)
-GGUF_EMBEDDING_AFFINE(6) GGUF_EMBEDDING_AFFINE(8)
-#undef GGUF_EMBEDDING_AFFINE
+GGUF_EMBEDDING_FORMATS(GGUF_EMBEDDING_FORMAT)
 #undef GGUF_EMBEDDING_FORMAT
 #undef GGUF_GATHER
 

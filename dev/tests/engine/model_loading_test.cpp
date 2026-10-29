@@ -345,8 +345,10 @@ std::filesystem::path writeGgufTensor(const std::filesystem::path &path,
 }
 
 // GGUF image readers hold a tensor to the sizes the layout expects, read F16
-// and BF16 token rows as their formats' native rows, and a token gather
-// writes only into buffers holding its rows.
+// and BF16 token rows as their formats' native rows, read a quantized
+// tensor's native rows as a float segment only where one is read (the MoE
+// router), never as a projection, and a token gather writes only into
+// buffers holding its rows.
 void testGgufImageLayout(MetalBackend &backend, const std::filesystem::path &root) {
     constexpr uint32_t rows = 256, columns = 256;
     // Q8_0 planes and native rows as the planner lays them out.
@@ -398,6 +400,28 @@ void testGgufImageLayout(MetalBackend &backend, const std::filesystem::path &roo
             "GGUF embedding does not match the layout",
             "GGUF embedding of other sizes than the layout's was accepted");
     }
+    // Native Q8_0 rows read as the router's float segment, its rows as stored;
+    // a projection refuses them, and the router refuses planes.
+    {
+        WeightFile file = loaded(embedding);
+        const splash::ops::QuantizedSegment router = splash::model::readFloatSegment(file, "router");
+        file.finish();
+        require(router.isFloat() && router.quantizedRows() && router.formatId == GGUF_FMT_Q80 &&
+                    router.outputSize == rows && router.inputSize == columns,
+                "GGUF native rows did not read as a float segment");
+    }
+    rejects(
+        [&] {
+            WeightFile file = loaded(embedding);
+            (void)splash::model::readBlockProjection(file, rows, columns, "projection");
+        },
+        "GGUF section sizes are inconsistent", "GGUF native rows were read as a projection");
+    rejects(
+        [&] {
+            WeightFile file = loaded(projection);
+            (void)splash::model::readFloatSegment(file, "router");
+        },
+        "GGUF rows are inconsistent", "GGUF planes were read as a float segment");
     // A GGUF's F16 and BF16 token rows read as the native rows of their formats.
     for (const auto &[type, format] : {std::pair{splash::model::ggml::kF16, GGUF_FMT_F16},
                                        std::pair{splash::model::ggml::kBF16, GGUF_FMT_BF16}}) {
@@ -817,8 +841,8 @@ void testSyntheticFloatModel(MetalBackend &backend, const std::filesystem::path 
 // A MoE target in NVFP4 and FP8, as Model Optimizer or compressed-tensors
 // stores it, loads as block images: each layer's routed experts, modules of
 // their own, stacked in index order into the planes of their shared format,
-// the shared expert in its own, the bf16 router and shared-expert gate as
-// F32, and streamableWeights plans the bytes it loads.
+// the shared expert in its own, the bf16 router as its BF16 rows and the
+// shared-expert gate as F32, and streamableWeights plans the bytes it loads.
 void testSyntheticFloatMoeModel(MetalBackend &backend, const std::filesystem::path &root,
                                 splash::test::FloatCheckpoint checkpoint) {
     const auto target = syntheticTarget<Qwen3_6MoeLayout>();
@@ -836,8 +860,9 @@ void testSyntheticFloatMoeModel(MetalBackend &backend, const std::filesystem::pa
         require(ffn.gate.routed.formatId == GGUF_FMT_NVFP4 && ffn.up.routed.formatId == GGUF_FMT_NVFP4 &&
                     ffn.down.routed.formatId == GGUF_FMT_NVFP4 && ffn.gate.shared.formatId == GGUF_FMT_FP8 &&
                     ffn.up.shared.formatId == GGUF_FMT_FP8 && ffn.down.shared.formatId == GGUF_FMT_FP8 &&
-                    ffn.router.isFloat() && ffn.sharedScalarGate.isFloat(),
-                "a " + name + " MoE did not keep its experts' formats and its F32 router and shared-expert gate");
+                    ffn.router.isFloat() && ffn.router.formatId == GGUF_FMT_BF16 &&
+                    ffn.sharedScalarGate.formatId == splash::ops::QuantizedSegment::kFloat32,
+                "a " + name + " MoE did not keep its experts' and its router's formats and an F32 shared-expert gate");
     }
     const splash::model::SafetensorsCheckpoint safetensors(root / "target");
     uint32_t stacks = 0;
@@ -857,9 +882,10 @@ void testSyntheticFloatMoeModel(MetalBackend &backend, const std::filesystem::pa
 }
 
 // An MLX MoE target loads as block images: the experts in mixed formats, the
-// routed down projection mxfp4, and the 8-bit affine router and bf16
-// shared-expert gate as the F32 values the block MoE reads; streamableWeights
-// plans the bytes it loads.
+// routed down projection mxfp4, the 8-bit affine router as its native rows,
+// which the float projection decodes, and the bf16 shared-expert gate as the
+// F32 values the MoE selection reads; streamableWeights plans the bytes it
+// loads.
 void testSyntheticBlockMoeModel(MetalBackend &backend, const std::filesystem::path &root) {
     const auto target = syntheticTarget<Qwen3_6MoeLayout>();
     // Bits and group size of each FFN module (mxfp4's for the routed down
@@ -908,9 +934,13 @@ void testSyntheticBlockMoeModel(MetalBackend &backend, const std::filesystem::pa
                     ffn.up.shared.formatId == format("shared_expert.up_proj") &&
                     ffn.down.shared.formatId == format("shared_expert.down_proj"),
                 "a block MoE did not keep its experts' formats");
-        require(ffn.router.isFloat() && ffn.router.outputSize == target.experts && ffn.sharedScalarGate.isFloat() &&
+        require(ffn.router.quantizedRows() && ffn.router.formatId == format("gate") &&
+                    ffn.router.outputSize == target.experts && ffn.router.inputSize == target.hiddenSize &&
+                    ffn.router.plane0.sizeBytes() >= uint64_t{target.experts} *
+                        splash::ops::QuantizedSegment::rowBytes(ffn.router.formatId, target.hiddenSize) &&
+                    ffn.sharedScalarGate.formatId == splash::ops::QuantizedSegment::kFloat32 &&
                     ffn.sharedScalarGate.outputSize == 1,
-                "a block MoE did not read its router and shared-expert gate as F32");
+                "a block MoE did not read its router as its native rows and its shared-expert gate as F32");
     }
     require(declaredBytes(weights.files) + declaredBytes(model.draft.files) == planned,
             "streamableWeights is not what an MLX block MoE target loads");

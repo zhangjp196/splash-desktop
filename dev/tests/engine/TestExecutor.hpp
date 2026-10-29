@@ -533,6 +533,8 @@ public:
       heldCompletion = std::move(completion);
       ticket = std::make_unique<HeldTicket>(decode(plan, items), holdDecodeUntil,
                                             1.0);
+    } else if (plan.kind == WorkKind::Prefill && stagePrefillUntil) {
+      ticket = std::make_unique<StagedTicket>(prefill(plan, items), stagePrefillUntil);
     } else if (plan.kind == WorkKind::Prefill && holdPrefillUntil) {
       heldCompletion = std::move(completion);
       ticket = std::make_unique<HeldTicket>(prefill(plan, items),
@@ -851,6 +853,9 @@ public:
   bool firstTokens = false;
   std::shared_ptr<std::atomic<bool>> holdDecodeUntil;
   std::shared_ptr<std::atomic<bool>> holdPrefillUntil;
+  // Set, each prefill command is two: the first runs until the flag is
+  // true, and the engine's advance() then runs the second (StagedTicket).
+  std::shared_ptr<std::atomic<bool>> stagePrefillUntil;
   // The completion of the latest held command, for the test to call as
   // Metal's completion handler would.
   std::function<void()> heldCompletion;

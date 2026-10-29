@@ -39,6 +39,7 @@ from .api_shapes import (
     compaction_dict,
     completion_response,
     finish_reason,
+    is_custom_call,
     responses_item,
     responses_item_id,
     responses_output,
@@ -593,6 +594,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                     "context_length": self.app.max_context,
                     "vision": self.app.vision,
                     "input_modalities": self.app.input_modalities,
+                    "reasoning": self.app.reasoning,
                     **(
                         {"root": self.app.response_model}
                         if name != self.app.response_model
@@ -1188,7 +1190,11 @@ class FrontendHandler(BaseHTTPRequestHandler):
                     ),
                     "stop_sequence": result.stop_sequence,
                 },
-                "usage": {"output_tokens": result.completion_tokens},
+                "usage": {
+                    "output_tokens": result.completion_tokens,
+                    "output_tokens_details": {"thinking_tokens": job.reasoning_tokens},
+                },
+                "timings": timings_dict(result),
             }
             if (compaction := compaction_dict(job)) is not None:
                 delta_payload["compaction"] = compaction
@@ -1341,6 +1347,10 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 )
 
         def item_delta(index, block, text):
+            if is_custom_call(job, block):
+                # A custom tool's input is the string inside the arguments;
+                # it streams whole when the call closes.
+                return
             if block.kind == "tool":
                 event, extra = "response.function_call_arguments.delta", {}
             elif block.kind == "reasoning":
@@ -1363,7 +1373,15 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
         def close_item(index, block):
             item = responses_item(job, block, index)
-            if block.kind == "tool":
+            if is_custom_call(job, block):
+                for event, field in (("delta", "delta"), ("done", "input")):
+                    send(
+                        f"response.custom_tool_call_input.{event}",
+                        item_id=item["id"],
+                        output_index=index,
+                        **{field: item["input"]},
+                    )
+            elif block.kind == "tool":
                 send(
                     "response.function_call_arguments.done",
                     item_id=item["id"],
@@ -1918,7 +1936,7 @@ def main():
             if effective_context % 1024 == 0
             else f"{effective_context:,}"
         )
-        mode = "" if readiness.vision else " · language only"
+        mode = "" if readiness.vision else " · text only"
         print_status(f"Ready · {args.model} · context {context}{mode} · {address}")
         server.serve_forever()
     except (

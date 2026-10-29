@@ -57,16 +57,28 @@ public:
   // Runs once the command has completed, and may add work of its own to its
   // timing, as a rerun of the command does.
   using Completion = std::function<std::vector<ModelStepResult>(CommandTiming &)>;
+  // Submits the command.
+  using Submission = std::function<CommandTicket()>;
 
   // `reads` are the command's reads of spilled K/V, which its completion
   // ends.
   DeferredMetalTicket(CommandTicket ticket, Completion completion,
-                      bool representativePrefillTiming = true,
                       std::shared_ptr<const SpilledKvReads> reads = {})
-      : completion_(std::move(completion)), reads_(std::move(reads)), ticket_(std::move(ticket)),
-        representativePrefillTiming_(representativePrefillTiming) {}
+      : completion_(std::move(completion)), reads_(std::move(reads)), ticket_(std::move(ticket)) {}
 
-  bool ready() const noexcept override { return ticket_.ready(); }
+  // A command submitted once `encodes`, the command of the image encodes
+  // ahead of it, has completed (Runtime::prefillAsync).
+  DeferredMetalTicket(CommandTicket encodes, Submission submit, Completion completion,
+                      std::shared_ptr<const SpilledKvReads> reads)
+      : completion_(std::move(completion)), reads_(std::move(reads)), submit_(std::move(submit)),
+        ticket_(std::move(encodes)) {}
+
+  void advance() override {
+    if (submit_ && ticket_.ready())
+      submitAfterEncodes();
+  }
+
+  bool ready() const noexcept override { return !submit_ && ticket_.ready(); }
 
   // What the command holds goes with the completion and the reads once it
   // ran, before the engine applies the results: the page sources of its
@@ -75,7 +87,13 @@ public:
     if (!completion_) {
       throw std::logic_error("Metal ticket was already consumed");
     }
+    if (submit_)
+      submitAfterEncodes();
     CommandTiming timing = ticket_.wait();
+    // The command's time counts its encodes', which it also reports apart.
+    timing.gpuSeconds += encodes_.gpuSeconds;
+    timing.wallSeconds += encodes_.wallSeconds;
+    imageEncodeMilliseconds_ = encodes_.wallSeconds * 1000.0;
     const double commandSeconds = timing.wallSeconds;
     Completion completion = std::move(completion_);
     std::vector<ModelStepResult> results = completion(timing);
@@ -95,22 +113,35 @@ public:
   }
   double hostMilliseconds() const noexcept override { return hostMilliseconds_; }
   double streamMilliseconds() const noexcept override { return streamMilliseconds_; }
+  double imageEncodeMilliseconds() const noexcept override { return imageEncodeMilliseconds_; }
   bool prefillTimingIsRepresentative() const noexcept override {
     return representativePrefillTiming_;
   }
 
 private:
+  // Waits for the encodes, which lets the backend take the next command, and
+  // submits the command.
+  void submitAfterEncodes() {
+    encodes_ = ticket_.wait();
+    ticket_ = submit_();
+    submit_ = {};
+  }
+
   // Before the ticket, which goes first: a ticket dropped unconsumed waits for
   // its command before the completion lets go of what the command writes,
   // such as the state reservations of its items and the staging its reads
   // of spilled K/V fill.
   Completion completion_;
   std::shared_ptr<const SpilledKvReads> reads_;
+  // The command's submission, while the ticket is its encodes'.
+  Submission submit_;
   CommandTicket ticket_;
+  CommandTiming encodes_;
   double wallMilliseconds_ = 0.0;
   double hostMilliseconds_ = 0.0;
   double streamMilliseconds_ = 0.0;
-  bool representativePrefillTiming_;
+  double imageEncodeMilliseconds_ = 0.0;
+  bool representativePrefillTiming_ = true;
 };
 
 using kv::ChunkedPrefillParams;
@@ -811,13 +842,12 @@ struct Runtime::Impl {
     });
   }
 
-  // Encodes every image whose rows first appear in this chunk and overwrites
-  // the chunk's placeholder embedding rows, the item's from row `rowBegin` of
-  // `hidden` on, with the image rows; true when it encoded one. Text-only
-  // requests add no dispatches.
-  bool addImageRows(CommandGraph &graph, Request &entry, const ModelBatchItem &item, const MetalBuffer &hidden,
-                    uint32_t rowBegin) {
-    bool encodes = false;
+  // Encodes in `encodes` every image whose rows first appear in this chunk
+  // and overwrites the chunk's placeholder embedding rows, the item's from
+  // row `rowBegin` of `hidden` on, with the image rows. Text-only requests
+  // add no dispatches.
+  void addImageRows(CommandGraph &graph, CommandGraph &encodes, Request &entry, const ModelBatchItem &item,
+                    const MetalBuffer &hidden, uint32_t rowBegin) {
     const uint64_t chunkBegin = item.logicalPosition;
     const uint64_t chunkEnd = chunkBegin + item.tokenCount;
     for (ImageState &image : entry.images) {
@@ -831,9 +861,8 @@ struct Runtime::Impl {
       if (!rows.encoded && !rows.encoding) {
         if (!vision)
           throw std::logic_error("image request has no vision encoder");
-        vision->encode(graph, image.span.grid(), rows.pixels, rows.embeddings);
+        vision->encode(encodes, image.span.grid(), rows.pixels, rows.embeddings);
         rows.encoding = true;
-        encodes = true;
         ++counters.imageEncodes;
       }
       const uint32_t width = model.vision.tensors.layout.outputHiddenSize;
@@ -843,7 +872,6 @@ struct Runtime::Impl {
           {rowBegin + static_cast<uint32_t>(begin - chunkBegin), width, 0},
           static_cast<uint32_t>(end - begin), width);
     }
-    return encodes;
   }
 
   static float nextUniform(Request &entry) noexcept {
@@ -1700,7 +1728,8 @@ struct Runtime::Impl {
   // A prefill command (preparePrefill), or the pass of it that runs
   // `layers` (BatchPlan::passes): with the first layer, a restored lane's
   // draft rings (DFlash2) first and each chunk's RoPE tables, embedding and
-  // image rows in its own tensors; the target's layers over the chunks
+  // image rows in its own tensors, the images it begins encoded in
+  // `encodes`; the target's layers over the chunks
   // (QwenTarget::addPrefill), which read spilled history through `reads`;
   // with the last layer, the draft's context of each chunk's captured rows,
   // the first token of each lane whose rows end its prompt, and each lane's
@@ -1711,7 +1740,8 @@ struct Runtime::Impl {
   // the arena's scratch cell, whichever the part after it does not write. So
   // no part writes the cell it reads, and none the lane's current cell; with
   // one scratch cell, at most one lane's rows run past a chunk.
-  PrefillOutputs encodePrefillGraph(CommandGraph &graph, std::span<const ModelBatchItem> items,
+  PrefillOutputs encodePrefillGraph(CommandGraph &graph, CommandGraph &encodes,
+                                    std::span<const ModelBatchItem> items,
                                     std::array<Request *, kLaneCount> &entries, SpilledKvReads &reads,
                                     QwenPrefillLayers layers) {
     const bool begins = !layers.first, ends = layers.end == geometry.target.layers;
@@ -1763,7 +1793,6 @@ struct Runtime::Impl {
     inside.reserve(uint64_t{chunks.size()} * kLaneCount);
     std::vector<QwenTargetPrefillChunk> modelChunks;
     modelChunks.reserve(chunks.size());
-    bool encodesImages = false;
     for (uint32_t c = 0; c < chunks.size(); ++c) {
       const PrefillChunk &chunk = chunks[c];
       const auto p = [&](PrefillTensor tensor) { return prefillArena->get(tensor, c); };
@@ -1779,7 +1808,7 @@ struct Runtime::Impl {
       for (uint32_t s = 0; s < chunk.sequences.size(); ++s) {
         const PrefillSequence &sequence = chunk.sequences[s];
         const ModelBatchItem &part = sequence.part;
-        if (begins) encodesImages |= addImageRows(graph, *sequence.entry, part, model.buffers.hidden[0], sequence.rowBegin);
+        if (begins) addImageRows(graph, encodes, *sequence.entry, part, model.buffers.hidden[0], sequence.rowBegin);
         const GdnParityBuffers &in = *from[sequence.lane], &out = *written[c][s];
         from[sequence.lane] = &out;
         QwenTargetPrefillSequence &destination = sequences[c].emplace_back();
@@ -1813,13 +1842,8 @@ struct Runtime::Impl {
       }
       model.sequences = sequences[c];
     }
-    // A command that encodes an image runs on the GPU alone: the encode, ahead
-    // of the command's waits for the Neural Engine, takes seconds for a large
-    // image on a small GPU (about 8 s for 2048 x 1792 on an M6), and Metal
-    // fails a command buffer whose event wait stays unmet for 5 s
-    // (ops/AneFfn.cpp), which fails the engine.
     const std::vector<MetalBuffer> finalHidden =
-        targetModel->addPrefill(graph, modelChunks, kvPages, reads, layers, encodesImages ? nullptr : aneFfn);
+        targetModel->addPrefill(graph, modelChunks, kvPages, reads, layers, aneFfn);
     for (uint32_t c = 0; ends && c < chunks.size(); ++c) addDraftContext(graph, chunks, c);
 
     PrefillOutputs outputs;
@@ -2365,8 +2389,7 @@ struct Runtime::Impl {
       submit(draft);
     }
 
-    std::vector<ModelMaskRequest> takeMaskRequests() override {
-      std::vector<ModelMaskRequest> requests;
+    void advance() override {
       if (stage_ == Stage::Draft && command_.ready()) {
         addTiming(command_.wait());
         std::array<Request *, kLaneCount> entries{};
@@ -2390,7 +2413,7 @@ struct Runtime::Impl {
             request.simulationTokens.insert(request.simulationTokens.end(),
                                             proposed,
                                             proposed + kDraftProposalTokens);
-            requests.push_back(std::move(request));
+            requests_.push_back(std::move(request));
           }
         }
 
@@ -2446,8 +2469,9 @@ struct Runtime::Impl {
           stage_ = Stage::Commit;
         }
       }
-      return requests;
     }
+
+    std::vector<ModelMaskRequest> takeMaskRequests() override { return std::exchange(requests_, {}); }
 
     bool ownsMaskWait(uint64_t requestId) const noexcept override {
       if (stage_ == Stage::Draft || stage_ == Stage::Done)
@@ -2532,6 +2556,8 @@ struct Runtime::Impl {
     Stage stage_ = Stage::Draft;
     CommandTicket command_;
     CommandTiming timing_;
+    // The mask requests of the draft's lanes, until takeMaskRequests().
+    std::vector<ModelMaskRequest> requests_;
     std::array<bool, kLaneCount> abandoned_{};
     double targetForwardGpuSeconds_ = 0.0;
     double maskWaitSeconds_ = 0.0;
@@ -2757,14 +2783,8 @@ Runtime::prefillAsync(const BatchPlan &plan,
     impl_->aneFfn->begin();
   }
   const std::shared_ptr<SpilledKvReads> reads = impl_->prefillReads(items);
-  const auto outputs = impl_->encodePrefillGraph(graph, items, entries, *reads, layers);
-  const bool encodesImages = std::any_of(
-      entries.begin(), entries.begin() + items.size(), [](const auto *entry) {
-        return std::any_of(entry->images.begin(), entry->images.end(),
-                           [](const auto &image) {
-                             return image.rows && image.rows->encoding;
-                           });
-      });
+  CommandGraph encodes;
+  const auto outputs = impl_->encodePrefillGraph(graph, encodes, items, entries, *reads, layers);
   // A state captured inside the command starts from the lane's context
   // window as the command finds it, whose older rows the command's own rows
   // overwrite. It is copied once, before the command's first pass runs: a
@@ -2776,9 +2796,6 @@ Runtime::prefillAsync(const BatchPlan &plan,
   // The completion's items hold the states' reservations until the ticket
   // has waited for every run of the command.
   std::vector<ModelBatchItem> copiedItems(items.begin(), items.end());
-  CommandTicket command =
-      impl_->aneFfn ? impl_->aneFfn->commit(graph, std::move(completion))
-                    : impl_->backend.submitCommandAsync(graph.command(), std::move(completion));
   Impl *impl = impl_.get();
   auto finish = [impl, entries, outputs, draws, reads, ends,
                  items = std::move(copiedItems)](CommandTiming &timing) mutable {
@@ -2794,7 +2811,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
     // captures again, and that capture overwrites the ring slot after the
     // rebuild; clearForColdStart clears the current state again, which
     // neither command writes; synchronizedTables writes nothing at the
-    // same revision; image rows the first command encoded are still
+    // same revision; image rows encoded ahead of the first run are still
     // `encoding` and are copied, not encoded again; the requests' draws
     // restored, a sampled first token draws the same uniform; and the reads
     // of spilled history end before the rerun reads it again, keeping what
@@ -2805,8 +2822,9 @@ Runtime::prefillAsync(const BatchPlan &plan,
       for (uint32_t lane = 0; lane < items.size(); ++lane)
         entries[lane]->rngCounter = draws[lane];
       reads->end();
-      CommandGraph again;
-      static_cast<void>(impl->encodePrefillGraph(again, items, entries, *reads, {0, impl->geometry.target.layers}));
+      CommandGraph again, encodes;
+      static_cast<void>(
+          impl->encodePrefillGraph(again, encodes, items, entries, *reads, {0, impl->geometry.target.layers}));
       const CommandTiming rerun = impl->backend.submitCommandAsync(again.command()).wait();
       timing.gpuSeconds += rerun.gpuSeconds;
       timing.wallSeconds += rerun.wallSeconds;
@@ -2977,8 +2995,20 @@ Runtime::prefillAsync(const BatchPlan &plan,
     impl->counters.totalPrefillGpuSeconds += timing.gpuSeconds;
     return results;
   };
+  const auto submit = [impl, graph = std::make_shared<CommandGraph>(std::move(graph)), completion] {
+    return impl->aneFfn ? impl->aneFfn->commit(*graph, completion)
+                        : impl->backend.submitCommandAsync(graph->command(), completion);
+  };
+  if (encodes.empty())
+    return std::make_unique<DeferredMetalTicket>(submit(), std::move(finish), reads);
+  // Metal fails an event wait unmet 5 s after its queue reached it, which it
+  // does for a command's first host step or Neural Engine wait as the
+  // command is submitted, whatever work runs ahead of it (MetalBackend.hpp,
+  // EventStep): the images' encodes, seconds of GPU work on a small GPU, run
+  // as a command of their own, and the command is submitted once they have
+  // completed.
   return std::make_unique<DeferredMetalTicket>(
-      std::move(command), std::move(finish), !encodesImages, reads);
+      impl_->backend.submitCommandAsync(encodes.command(), completion), submit, std::move(finish), reads);
 }
 
 std::vector<ModelStepResult>

@@ -76,7 +76,7 @@ MoeExperts openMoeExperts(metal::MetalBackend &backend, const QwenTargetFiles &f
 ops::BlockMoeWeights readMoeBlock(WeightFile &file, const QwenTargetDimensions &target, const MoeExperts &experts,
                                   uint32_t block) {
   ops::BlockMoeWeights ffn;
-  ffn.router = readQuantizedSegment(file, "router");
+  ffn.router = readFloatSegment(file, "router");
   if (!experts.store) {
     ffn.gate.routed = readQuantizedSegment(file, "experts-gate");
     ffn.up.routed = readQuantizedSegment(file, "experts-up");

@@ -54,7 +54,7 @@ MoeConfig ExecutionPlans::moeConfig(MoeShape shape, uint32_t rows, MoePhase phas
   config.ggufTile = phase == MoePhase::Prefill ? MoeGgufTile::Staged : moeGgufTile(family_, gpuCores_, shape);
   config.expertTile =
       phase == MoePhase::Prefill ? moeGgufPrefillTile(shape, rows, config.ggufTile) : MoeExpertTile::M8;
-  config.ggufRouterTile = linear_.ggufFloatTile(rows, shape.experts);
+  config.ggufRouterTile = linear_.ggufFloatTile(rows, shape.experts, shape.routerFormat);
   return config;
 }
 

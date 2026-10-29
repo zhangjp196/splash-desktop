@@ -112,7 +112,7 @@ void testUnreportedAllocationsCountAgainstReserves() {
 // audit bounds it by that plan: it is neither charged to the reserves nor
 // counted a second time beside the backend's peak that includes it.
 void testStateStagingHasItsOwnBound() {
-  // One Qwen3.8-27B state (DEVELOPMENT.md, SSD cache).
+  // One Qwen3.8-27B state (docs/server.md, SSD cache).
   const uint64_t staging = 187 * kMiB;
   const auto memoryPlan = plan(kGiB, staging);
   const auto &budget = memoryPlan.breakdown();
@@ -141,7 +141,7 @@ void testStateStagingHasItsOwnBound() {
 // the audit bounds it by that plan, apart from the reserves, and passes a
 // start that ran without it.
 void testNeuralEngineSplitHasItsOwnBound() {
-  // Qwen3.8-27B's split at the M6's share (DEVELOPMENT.md, Neural Engine prefill).
+  // Qwen3.8-27B's split at the M6's share (docs/internals.md, Neural Engine prefill).
   const uint64_t surfaces = 508 * kMiB;
   const auto memoryPlan = plan(kGiB, 0, surfaces);
   const auto &budget = memoryPlan.breakdown();
@@ -168,7 +168,7 @@ void testNeuralEngineSplitHasItsOwnBound() {
 // audit bounds it by that plan and counts it toward the hard budget beside
 // Metal's footprint, not toward Metal's categories.
 void testStreamedTableHasItsOwnBound() {
-  // Flash-Next's PLE table cached in 2 GiB (DEVELOPMENT.md, PLE table streaming).
+  // Flash-Next's PLE table cached in 2 GiB (docs/server.md, PLE table streaming).
   const uint64_t table = 2 * kGiB;
   const auto memoryPlan = plan(kGiB, 0, 0, table);
   const auto &budget = memoryPlan.breakdown();

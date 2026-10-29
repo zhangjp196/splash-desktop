@@ -177,7 +177,7 @@ endif
 
 # The installer's restarts without the Hub, a full source hash and the
 # digests of the weight images a load of the installation holds
-# (DEVELOPMENT.md, Release check). WEIGHT_DIGESTS_ARGS, weight-digests'
+# (docs/validate.md, Release check). WEIGHT_DIGESTS_ARGS, weight-digests'
 # --expert-memory SIZE and --ple-memory SIZE as the runtime oracle takes them,
 # streams the routed experts and the PLE table from their files, here and in
 # both builds of the comparison with BASELINE, and leaves their bytes out of
@@ -191,7 +191,7 @@ verify-models: preflight $(TARGET) $(WEIGHT_DIGESTS) $(LIB)
 	@echo "weight images: $(MODEL_RESULTS)/weights.json"
 
 # One model on this machine against BASELINE, a retained build that loads it
-# (DEVELOPMENT.md, Release check); make check and test-sanitizers run once per
+# (docs/validate.md, Release check); make check and test-sanitizers run once per
 # source identity, check-native-metal and the agent clients once per machine.
 release-check: preflight
 	@test -n "$(BASELINE)" || { \

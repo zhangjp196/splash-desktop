@@ -310,9 +310,10 @@ void MoE::addRoutes(metal::CommandGraph &graph, const metal::MetalBuffer &input,
                     const QuantizedSegment &sharedScalarGate, const metal::MetalBuffer &scores,
                     const metal::MetalBuffer &selected, const metal::MetalBuffer &routingWeights, uint32_t rows,
                     MoeShape shape, FloatTile routerTile) {
-  // fp32 scores of the F32 router in rows of routerWidth() expert slots, as
-  // the select kernel of that width reads, which weights gated shared slices
-  // by the sigmoid of the input's product with the scalar gate.
+  // The router's fp32 scores, in the format its checkpoint holds it
+  // (BlockMoeWeights), in rows of routerWidth() expert slots, as the select
+  // kernel of that width reads, which weights gated shared slices by the
+  // sigmoid of the input's product with the scalar gate.
   const uint32_t width = shape.routerWidth();
   addGgufFloat(graph, input, router, scores, rows, width, 0, FloatOutput::Float32, routerTile);
   std::vector<metal::MetalBuffer> bindings{scores};

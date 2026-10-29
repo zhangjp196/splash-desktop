@@ -43,11 +43,13 @@ static_assert(kChannelUnit % ANE_FFN_WEIGHT_ROWS == 0 && kSegment % ANE_FFN_WEIG
               "the weight kernels' threadgroups take whole rows of every matrix the split stages");
 // How long an ANE evaluation may run once the GPU has raised its `ready`
 // before the split stops (ane::Handoff). An evaluation takes 10-60 ms. Metal
-// fails a command buffer whose event wait stays unmet for 5 s ("Caused GPU
-// Timeout Error", macOS 27.0 on an M5 Max), and once two have failed so it
-// ignores the process's later commands on that queue; the GPU waits on an
-// evaluation only after its own part of the layer, so the release reaches a
-// wait at most 2 s old, 3 s short of that.
+// fails a command buffer whose event wait is still unmet 5 s after its queue
+// reached it ("Caused GPU Timeout Error", macOS 27.0 on an M5 Max), and once
+// two have failed so it ignores the process's later commands on that queue.
+// The queue reaches each wait once the one before it was met, so at the
+// release a wait has waited through one layer's GPU part and at most the
+// bound; a command's first wait also through the work from the command's
+// submission, which image encodes no longer add (Runtime::prefillAsync).
 constexpr auto kHandoffBound = std::chrono::seconds(2);
 // How long the service may take to compile and load the program: four times
 // the cold compile of the largest the split compiles, calibration's at share

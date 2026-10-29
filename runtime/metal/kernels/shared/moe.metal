@@ -111,7 +111,7 @@ inline void moe_route_select(device const float *scores, device bfloat *input,
   }
 }
 
-// The GGUF router: fp32 scores (kernels/shared/gguf_float.metal) in rows of
+// The router's fp32 scores (kernels/shared/gguf_float.metal) in rows of
 // Slots expert slots and, with a gated shared expert, the F32 shared-expert
 // scalar gate, on SPLASH_MOE_EXPERT_SLOTS slots or (_e512)
 // SPLASH_MOE_WIDE_EXPERT_SLOTS, each routing a compiled routing

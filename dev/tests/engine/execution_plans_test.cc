@@ -179,17 +179,25 @@ void ggufMoePlans() {
     // Prefill: staged 8-row tiles while the routes average at most one row per
     // expert (32 rows of 8 of 256 experts), 32-row tiles beyond, on every
     // family; the register tile only decodes. The router's float tile follows
-    // Linear::ggufFloatTile (32 assumed cores: the neural accelerator from 321
-    // rows, never on Apple9).
-    for (uint32_t rows : {1U, 8U, 17U, 32U, 33U, 100U, 256U, 257U, 320U, 321U, 2048U}) {
-      const MoePlan plan = plans.moePrefill(shape, rows);
-      const uint32_t tileRows = rows <= 32 ? 8 : 32;
-      const FloatTile router = family != 9 && rows > 320 ? FloatTile::NeuralAccelerator : FloatTile::Simdgroup;
-      require(plan.configuration().ggufTile == MoeGgufTile::Staged && plan.tileRows() == tileRows &&
-                  plan.workspace().groupedSumsBytes == 0 &&
-                  plan.configuration().ggufRouterTile == router,
-              "GGUF MoE prefill plan left the staged tile");
-      covers(plans.moePrefillWorkspace(shape, 2048), plan.workspace(), 1, kMoeWorkspaceFields);
+    // Linear::ggufFloatTile and the router's format (32 assumed cores: the
+    // neural accelerator from 321 rows of BF16 values, 449 of F32 values and
+    // 705 of a quantized format's rows, never on Apple9).
+    for (const auto [routerFormat, first] :
+         {std::pair{uint32_t{GGUF_FMT_BF16}, 321U}, std::pair{QuantizedSegment::kFloat32, 449U},
+          std::pair{uint32_t{GGUF_FMT_AF8G64}, 705U}}) {
+      MoeShape routed = shape;
+      routed.routerFormat = routerFormat;
+      const MoeWorkspace bound = plans.moePrefillWorkspace(routed, 2048);
+      for (uint32_t rows : {1U, 8U, 17U, 32U, 33U, 100U, 256U, 257U, 320U, 321U, 448U, 449U, 704U, 705U, 2048U}) {
+        const MoePlan plan = plans.moePrefill(routed, rows);
+        const uint32_t tileRows = rows <= 32 ? 8 : 32;
+        const FloatTile router = family != 9 && rows >= first ? FloatTile::NeuralAccelerator : FloatTile::Simdgroup;
+        require(plan.configuration().ggufTile == MoeGgufTile::Staged && plan.tileRows() == tileRows &&
+                    plan.workspace().groupedSumsBytes == 0 &&
+                    plan.configuration().ggufRouterTile == router,
+                "GGUF MoE prefill plan left the staged tile");
+        covers(bound, plan.workspace(), 1, kMoeWorkspaceFields);
+      }
     }
     // The prefill bound holds the staged plans and nothing else: 32-row tiles
     // (26624 grouped rows at 2048 rows), not the register tile's 8-row tiles

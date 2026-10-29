@@ -27,7 +27,7 @@ grew with load: 3.8× at four concurrent 32K requests on the 35B. The
 [launch post](https://inco.ai/blog/splash/) has the method and the full
 comparison against oMLX, Lily, uzu, and Ollama.
 
-For repeatable measurements on your Mac, see [local benchmarks](../DEVELOPMENT.md#local-benchmarks).
+For repeatable measurements on your Mac, see [local benchmarks](validate.md#local-benchmarks).
 
 ## GGUF against llama.cpp
 
@@ -104,7 +104,7 @@ long request too. A streaming request receives a keepalive every 2 s while it
 waits; a non-streaming one receives nothing until its answer, so a client's
 read timeout may end it first.
 Critical memory pressure can suspend a long request; the
-[SSD cache](../DEVELOPMENT.md#ssd-cache), on by default, keeps its progress and
+[SSD cache](server.md#ssd-cache), on by default, keeps its progress and
 cached prefixes, and writes whenever memory runs short: serving
 Ternary-Bonsai-2-27B PQ2_0 to six clients' mixed traffic for 30 minutes, a
 16 GiB SSD cache on the M6 wrote 26 GB, about 50 GB an hour, and read 36 GB.

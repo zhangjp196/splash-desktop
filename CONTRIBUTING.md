@@ -9,7 +9,7 @@ Pull requests are reviewed and merged in this repository. Open them against
 approach before you build it. Describe in the pull request what changed and
 how you tested it: `make check` needs no model weights, but it runs the Metal
 tests, so it needs a Mac that Splash supports; the real-model checks a change
-may need are in [DEVELOPMENT.md](DEVELOPMENT.md#validate).
+may need are in [Validate](docs/validate.md).
 
-[DEVELOPMENT.md](DEVELOPMENT.md) covers building from source, configuration,
+[The documentation](docs/README.md) covers building from source, configuration,
 the API, the models Splash loads, its internals and the test suite.

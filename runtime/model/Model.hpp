@@ -434,6 +434,11 @@ struct ModelMaskRequest final {
 class ModelBatchTicket {
 public:
   virtual ~ModelBatchTicket() = default;
+  // Runs on the engine thread at each of its wakes while the ticket is in
+  // flight: a ticket of several Metal commands submits each once the one
+  // before it has completed, and gathers the mask requests they raise.
+  virtual void advance() {}
+  // The mask requests advance() gathered since the last call.
   [[nodiscard]] virtual std::vector<ModelMaskRequest> takeMaskRequests() {
     return {};
   }
@@ -442,6 +447,10 @@ public:
   }
   virtual void abandonMask(uint64_t) noexcept {}
   [[nodiscard]] virtual bool ready() const noexcept = 0;
+  // The results once the ticket's commands have completed. A command that
+  // waits only for the one before it is submitted here if advance() has not
+  // yet; one that waits for the engine's input, such as a mask, must have
+  // been.
   [[nodiscard]] virtual std::vector<ModelStepResult> wait() = 0;
   [[nodiscard]] virtual double wallMilliseconds() const noexcept = 0;
   // Of wallMilliseconds, the time the command's GPU work waited on its host
@@ -452,6 +461,10 @@ public:
   // spilled K/V (model::KvHistoryStream), which bound a streamed prefill
   // command's length whatever its rows.
   [[nodiscard]] virtual double streamMilliseconds() const noexcept { return 0.0; }
+  // Of wallMilliseconds, the time of the command of image encodes that ran
+  // ahead of a prefill command (Runtime::prefillAsync), which the prefill
+  // throughput estimate leaves out.
+  [[nodiscard]] virtual double imageEncodeMilliseconds() const noexcept { return 0.0; }
   // Fixed auxiliary work remains in wall latency but must not train the
   // text-prefill throughput estimate.
   [[nodiscard]] virtual bool prefillTimingIsRepresentative() const noexcept {
@@ -820,7 +833,7 @@ public:
   // (BatchPlan::passes): its layers where a command pays a cost per layer
   // whatever its rows, which keeps a command long however few they are, as
   // a streamed target's expert reads; 1 where a command runs whole. A
-  // command that encodes images or streams its history runs whole.
+  // command that streams its history runs whole.
   [[nodiscard]] virtual uint32_t prefillPasses() const noexcept { return 1; }
   // Releases one unit of idle model memory and returns its bytes; zero when
   // nothing in scope is idle. A unit is one pooled state buffer (keepLane

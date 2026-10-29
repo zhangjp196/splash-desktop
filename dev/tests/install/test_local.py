@@ -511,14 +511,8 @@ class LocalModelTest(unittest.TestCase):
                 snapshot / "model-Q4_K_M.gguf", mmproj=snapshot / "mmproj-F32.gguf"
             )
 
-        # The installation downloaded its draft by commit, which records no
-        # branch: the family's draft is the one a download of the branch left.
-        with self.assertRaisesRegex(
-            models.ModelError,
-            "the Hub cache records no commit for the default branch",
-        ):
-            prepare()
-        self.cache_main(MOE.draft_repo, DRAFT_COMMIT)
+        # The installation recorded the commit of its draft's default branch,
+        # as a download of the branch does: the family's draft is that one.
         prepared = assembly.verify(prepare())
         self.assertEqual((fake.requests, fake.downloads), (requests, downloads))
         for key in ("family", "target_format", "vision_format", "metadata", "files"):

@@ -44,6 +44,7 @@ class HttpBoundaryTests(HarnessTestCase):
         status, _, body = harness.request("GET", "/v1/models")
         self.assertEqual(status, 200)
         model = json.loads(body)["data"][0]
+        self.assertEqual(model["reasoning"], harness.app.reasoning)
         for suffix in (
             "community/example-model",
             "community%2Fexample-model?beta=true",

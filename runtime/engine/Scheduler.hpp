@@ -137,11 +137,14 @@ public:
   // cache waited streamMilliseconds of its hostMilliseconds on the reads
   // (ModelBatchTicket); none for a command that streamed nothing. A pass
   // before a command's last consumes no rows (StepResult), and the
-  // command's estimate learns from its passes' time together.
+  // command's estimate learns from its passes' time together. Of
+  // wallMilliseconds, imageEncodeMilliseconds encoded the command's images
+  // ahead of it, which decode's share counts and the estimate leaves out.
   void complete(const BatchPlan &plan, std::span<const StepResult> results,
                 double wallMilliseconds, bool representativePrefillTiming,
                 double hostMilliseconds = 0.0,
-                std::optional<double> streamMilliseconds = std::nullopt);
+                std::optional<double> streamMilliseconds = std::nullopt,
+                double imageEncodeMilliseconds = 0.0);
 
   [[nodiscard]] Phase phase(uint64_t requestId) const;
   // The stage of its decode commands, which a suspension keeps.

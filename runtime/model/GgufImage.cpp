@@ -55,6 +55,10 @@ bool normType(uint32_t type) { return floatType(type) || float16Type(type); }
 // A tensor the float projection runs in fp32 (floatTensor): F32, or BF16 as
 // stored.
 bool floatProjectionType(uint32_t type) { return floatType(type) || type == ggml::kBF16; }
+// A MoE router, which the float projection runs in fp32 as stored (router):
+// a float projection's type, or a quantized one but F16, whose native rows it
+// decodes.
+bool routerType(uint32_t type) { return floatProjectionType(type) || (quantizedType(type) && type != ggml::kF16); }
 // A tensor of F32 rows (floatRows): F32, or BF16 or a quantized format, which
 // widen or decode to it (a Q6_K hyper-connection injection, some Gyro GGUFs').
 bool floatRowType(uint32_t type) { return floatProjectionType(type) || gguf_format_of(type) != GGUF_FMT_COUNT; }
@@ -254,18 +258,26 @@ public:
   }
 
   // An F32 or BF16 tensor [rows, columns] as stored, which the float
-  // projection runs in fp32 (the MoE router, which quantized GGUFs keep
-  // unquantized and some store as BF16, and the QSA indexer's
-  // projections).
+  // projection runs in fp32 (the QSA indexer's projections).
   void floatTensor(const std::string &name, uint64_t rows, uint64_t columns) {
     const GgufTensor *tensor = find(name, floatProjectionType);
     if (!tensor) return;
     if (tensor->rows() != rows || tensor->columns() != columns)
       throw GgufError("expected an F32 or BF16 [" + std::to_string(rows) + ", " + std::to_string(columns) +
                       "] tensor: " + name);
-    // Rows of values as stored, never BF16's native rows: a row need not be
-    // whole blocks of 256 values.
-    copiedRows(*tensor, columns * (tensor->type == ggml::kBF16 ? sizeof(uint16_t) : sizeof(float)));
+    copiedRows(*tensor, floatRowBytes(*tensor));
+  }
+
+  // The MoE router [rows, columns] as stored, which the float projection runs
+  // in fp32 (ops::QuantizedSegment::rows): F32 or BF16, as quantized GGUFs
+  // keep it, or a quantized type's native rows, as an MLX checkpoint's
+  // quantized router loads (model/SafetensorsImage.hpp).
+  void router(const std::string &name, uint64_t rows, uint64_t columns) {
+    const GgufTensor *tensor = find(name, routerType);
+    if (!tensor) return;
+    if (tensor->rows() != rows || tensor->columns() != columns)
+      throw GgufError("expected a [" + std::to_string(rows) + ", " + std::to_string(columns) + "] router: " + name);
+    copiedRows(*tensor, floatProjectionType(tensor->type) ? floatRowBytes(*tensor) : nativeRowBytes(*tensor));
   }
 
   // An F32, BF16 or Q8_0 tensor [rows, columns] as F32 rows: as stored, or
@@ -373,6 +385,11 @@ private:
   static uint64_t nativeRowBytes(const GgufTensor &tensor) {
     return ggufRowBytes(kQuantFormats[imageFormat(tensor.type)], tensor.columns());
   }
+  // The bytes of a row of an F32 or BF16 tensor's values as stored, never
+  // BF16's native rows: a row need not be whole blocks of 256 values.
+  static uint64_t floatRowBytes(const GgufTensor &tensor) {
+    return tensor.columns() * (tensor.type == ggml::kBF16 ? sizeof(uint16_t) : sizeof(float));
+  }
 
   // A tensor's rows as the image holds them (tensorRows), rowBytes each,
   // after their descriptor.
@@ -423,7 +440,7 @@ void mixerImage(Builder &b, const QwenTargetDimensions &g, const std::string &p,
 void ffnImage(Builder &b, const QwenTargetDimensions &g, const std::string &p, uint32_t index) {
   if (g.isMoeLayer(index)) {
     const uint64_t routed = g.experts, width = g.expertIntermediateSize;
-    b.floatTensor(p + "ffn_gate_inp.weight", routed, g.hiddenSize);
+    b.router(p + "ffn_gate_inp.weight", routed, g.hiddenSize);
     b.routedExperts(p, routed, width, g.hiddenSize);
     b.sharedExpert(p, g.sharedExpertSlices, width, g.hiddenSize);
     if (g.sharedExpertGate) b.floatRows(p + "ffn_gate_inp_shexp.weight", 1, g.hiddenSize, true);

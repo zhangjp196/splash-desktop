@@ -53,6 +53,9 @@ class _Server:
     context: int
     input_modalities: list
     api_key: str
+    # Whether the server renders a system message after the conversation's
+    # first in place, as /status chat_template.later_system reports it.
+    later_system: bool = False
 
     @property
     def endpoint(self):
@@ -125,11 +128,13 @@ def command(
     client_args=(),
     client_version=None,
     hermes_profile=None,
+    later_system=False,
 ):
     """Return argv and a private environment; never mutate the caller's env.
     input_modalities is what the served model accepts, as /v1/models
     reports it. hermes_profile names the Hermes profile to configure, by
-    default the server's name."""
+    default the server's name. later_system is whether the server renders a
+    later system message in place."""
     if not isinstance(model, str) or not model:
         raise ClientError("The server did not report a model name")
     if type(context) is not int or context <= 0:
@@ -150,6 +155,7 @@ def command(
         context,
         input_modalities,
         environment.get("SPLASH_API_KEY") or "local",
+        later_system,
     )
     # Each launch configures the private environment copy in place.
     match name:
@@ -477,6 +483,11 @@ def _write_pi_provider(path, provider, server, environment):
             # compacts at a fixed distance from the window whatever it is.
             "maxTokens": CLIENT_RESPONSE_TOKENS,
         }
+        if server.later_system:
+            # Pi otherwise folds the system messages it adds as a session goes
+            # on, as tools change, into the first one, which changes the
+            # prompt from its start and makes the server read it all again.
+            model["compat"] = {"supportsMidConvoSystemMessages": True}
         config["providers"] = {
             **providers,
             provider: {

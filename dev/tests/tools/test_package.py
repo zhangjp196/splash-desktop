@@ -18,6 +18,30 @@ from dev.tools import package, publish_test
 from install import paths
 
 
+def write_distribution(path, names):
+    """A stand-in for the standalone Python's archive, holding empty files."""
+    with tarfile.open(path, "w:gz") as archive:
+        for name in names:
+            archive.addfile(tarfile.TarInfo(name), io.BytesIO())
+
+
+def write_source(root):
+    """A source tree holding the files stage_runtime copies, and none of the
+    optional engine files."""
+    for folder, names in (
+        ("install", package.INSTALL_FILES),
+        ("install/completions", package.COMPLETION_FILES),
+        ("server", package.SERVER_FILES),
+        ("server/chat-assets", package.CHAT_ASSET_FILES),
+        ("build", package.ENGINE_FILES),
+    ):
+        (root / folder).mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (root / folder / name).write_text("fixture")
+    for name in package.LICENSE_FILES:
+        (root / name).write_text("license")
+
+
 class PackageTests(unittest.TestCase):
     def test_build_needs_no_hub_access_and_never_ships_credentials(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -37,8 +61,7 @@ class PackageTests(unittest.TestCase):
             (root / "install/download-token").write_text("hf_legacycredential")
             cached = root / "build/release/python-runtime.tar.gz"
             cached.parent.mkdir()
-            with tarfile.open(cached, "w:gz"):
-                pass
+            write_distribution(cached, ("python/bin/python3",))
             for version, environment in (
                 ("public", {}),
                 ("private", {"HF_TOKEN": "hf_testcredential"}),
@@ -95,7 +118,6 @@ class PackageTests(unittest.TestCase):
                 "_splash",
                 "splash.bash",
                 "splash.fish",
-                "suggested-models.txt",
             }
             for name in completion_names:
                 (completions / name).write_text(f"fixture {name}\n")
@@ -164,18 +186,7 @@ class PackageTests(unittest.TestCase):
             root = Path(temporary) / "source"
             stage = Path(temporary) / "stage"
             stage.mkdir()
-            for folder, names in (
-                ("install", package.INSTALL_FILES),
-                ("install/completions", package.COMPLETION_FILES),
-                ("server", package.SERVER_FILES),
-                ("server/chat-assets", package.CHAT_ASSET_FILES),
-                ("build", package.ENGINE_FILES),
-            ):
-                (root / folder).mkdir(parents=True, exist_ok=True)
-                for name in names:
-                    (root / folder / name).write_text("fixture")
-            for name in package.LICENSE_FILES:
-                (root / name).write_text("license")
+            write_source(root)
             with mock.patch.object(package, "ROOT", root):
                 package.stage_runtime(stage, "test")
             self.assertEqual(
@@ -186,10 +197,70 @@ class PackageTests(unittest.TestCase):
                 json.loads((stage / "release.json").read_text())["version"], "test"
             )
 
-    def test_every_installer_module_ships(self):
-        # The packaged launcher and installer import these by module name.
-        modules = {path.name for path in (package.ROOT / "install").glob("*.py")}
-        self.assertLessEqual(modules, set(package.INSTALL_FILES))
+    def test_runtime_keeps_the_interpreter_and_no_script_or_bytecode(self):
+        # The release archive and Splash.app ship the stage as it is: neither
+        # filters it, and the app's signature seals it.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "source"
+            stage = Path(temporary) / "stage"
+            stage.mkdir()
+            write_source(root)
+            cached = root / "build/release/python-runtime.tar.gz"
+            cached.parent.mkdir()
+            library = "python/lib/python3.13"
+            write_distribution(
+                cached,
+                (
+                    "python/bin/python3",
+                    "python/bin/python3.13",
+                    "python/bin/python3.13-config",
+                    "python/bin/pip3",
+                    f"{library}/os.py",
+                    f"{library}/__pycache__/os.cpython-313.pyc",
+                ),
+            )
+
+            def run(command, **options):
+                # pip installs a console script naming the stage, and its own
+                # run leaves bytecode.
+                if command[1:3] == ["-m", "pip"]:
+                    (stage / "python/bin/hf").write_text(
+                        f"#!{stage}/python/bin/python3\n"
+                    )
+                    cache = stage / library / "site-packages/pip/__pycache__"
+                    cache.mkdir(parents=True)
+                    (cache / "__init__.cpython-313.pyc").write_bytes(b"")
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                mock.patch.object(package, "ROOT", root),
+                mock.patch.object(package, "PYTHON_SHA256", package.digest(cached)),
+                mock.patch.object(package.subprocess, "run", side_effect=run) as runs,
+            ):
+                package.build_runtime(stage, "test")
+            self.assertEqual(
+                {p.name for p in (stage / "python/bin").iterdir()},
+                {"python3", "python3.13"},
+            )
+            self.assertTrue((stage / library / "os.py").is_file())
+            self.assertEqual(list(stage.rglob("__pycache__")), [])
+            # The smoke tests run the stage as Splash does, writing no bytecode.
+            pip, *smoke = (call.args[0] for call in runs.call_args_list)
+            self.assertEqual(pip[1:4], ["-m", "pip", "install"])
+            self.assertEqual(len(smoke), 3)
+            for command in smoke:
+                self.assertIn("-B", command)
+
+    def test_every_installer_module_and_the_suggested_models_ship(self):
+        # The packaged launcher and installer import these by module name, and
+        # the app and shell completion read the suggested models.
+        shipped = {
+            path.name
+            for pattern in ("*.py", "*.tsv")
+            for path in (package.ROOT / "install").glob(pattern)
+        }
+        self.assertIn("suggested-models.tsv", shipped)
+        self.assertLessEqual(shipped, set(package.INSTALL_FILES))
 
     def test_packaged_paths_keep_user_data_outside_versioned_prefix(self):
         source = Path(paths.__file__).read_text()
@@ -316,12 +387,7 @@ puts SplashMacOSRequirement.check
             source = root / "source"
             assets = source / "install/completions"
             assets.mkdir(parents=True)
-            for name in (
-                "_splash",
-                "splash.bash",
-                "splash.fish",
-                "suggested-models.txt",
-            ):
+            for name in ("_splash", "splash.bash", "splash.fish"):
                 (assets / name).write_text(f"fixture {name}\n")
             (assets / "models").write_text("#!/bin/sh\nprintf '%s\\n' new/model\n")
             (assets / "models").chmod(0o755)
@@ -454,7 +520,6 @@ class InstallerTests(unittest.TestCase):
             helper = assets / "models"
             helper.write_text("#!/bin/sh\nprintf '%s\\n' fixture/model\n")
             helper.chmod(0o755)
-            (assets / "suggested-models.txt").write_text("fixture/model\n")
         archive = self.releases / f"{name}.tar.gz"
         subprocess.run(
             ["tar", "-czf", str(archive), "-C", str(staging), name], check=True

@@ -109,11 +109,12 @@ struct QwenTargetGeometry final : QwenTargetDimensions {
 
   // The format of most of the sparse MoE blocks' routed expert weights,
   // whether every routed and shared expert weight is in a format the register
-  // tile takes, and the block of the routed experts' stored input rotation
-  // (0 when they were not stored for rotated inputs), which ops::MoeShape
-  // holds.
+  // tile takes, the format of most of their routers' rows (ops::MoeShape),
+  // and the block of the routed experts' stored input rotation (0 when they
+  // were not stored for rotated inputs), which ops::MoeShape holds.
   uint32_t moeExpertFormat = GGUF_FMT_COUNT;
   bool moeRegisterFormats = true;
+  uint32_t moeRouterFormat = ops::QuantizedSegment::kFloat32;
   uint32_t moeRotationBlock = 0;
   // The layers whose output rows the DFlash2 draft reads, ascending.
   std::array<uint32_t, ExecutionLimits::maximumDraftTargetLayers> captureLayerValues{};
@@ -149,6 +150,7 @@ struct QwenTargetGeometry final : QwenTargetDimensions {
     ops::MoeShape shape = moeBlockShape();
     shape.expertFormat = moeExpertFormat;
     shape.registerFormats = moeRegisterFormats;
+    shape.routerFormat = moeRouterFormat;
     shape.rotationBlock = moeRotationBlock;
     return shape;
   }

@@ -65,6 +65,7 @@ class ClientTests(unittest.TestCase):
         client_args=(),
         client_version=None,
         input_modalities=None,
+        later_system=False,
     ):
         return clients.command(
             name,
@@ -78,6 +79,7 @@ class ClientTests(unittest.TestCase):
             input_modalities=["text", "image", "pdf"]
             if input_modalities is None
             else input_modalities,
+            later_system=later_system,
         )
 
     def test_server_key_reaches_every_provider_without_entering_argv(self):
@@ -496,6 +498,13 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(agent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(self.pi_models.stat().st_mode & 0o777, 0o600)
         self.assertEqual([path.name for path in agent.iterdir()], ["models.json"])
+
+    def test_pi_keeps_system_messages_in_place_where_the_server_renders_them(self):
+        self.command("pi", later_system=True)
+        (model,) = json.loads(self.pi_models.read_text())["providers"]["splash"][
+            "models"
+        ]
+        self.assertEqual(model["compat"], {"supportsMidConvoSystemMessages": True})
 
     def test_pi_names_a_provider_per_port(self):
         self.command("pi")
@@ -1055,8 +1064,9 @@ class ClientTests(unittest.TestCase):
 
 class ClientLifecycleTests(unittest.TestCase):
     @contextmanager
-    def ready_server(self, client, context=102400, model=None):
-        """Serve model from a ready server; yields the patched exec."""
+    def ready_server(self, client, context=102400, model=None, status=None):
+        """Serve model from a ready server reporting status; yields the
+        patched exec."""
         if model is None:
             model = {
                 "id": MODEL,
@@ -1076,7 +1086,10 @@ class ClientLifecycleTests(unittest.TestCase):
             mock.patch.object(
                 launcher,
                 "_request_json",
-                return_value={"data": [{"context_length": context, **model}]},
+                side_effect=lambda path, **_: {
+                    "/v1/models": {"data": [{"context_length": context, **model}]},
+                    "/status": status,
+                }[path],
             ),
             mock.patch.object(launcher.os, "execvpe") as execute,
             mock.patch("sys.stdout", io.StringIO()),
@@ -1164,6 +1177,31 @@ class ClientLifecycleTests(unittest.TestCase):
                 argv.index('model_reasoning_effort="low"'), argv.index("exec")
             )
             self.assertEqual(argv[-2:], ["exec", "hello"])
+
+    def test_pi_learns_from_the_server_whether_it_renders_later_system_messages(
+        self,
+    ):
+        for later_system, compat in (
+            ("native", True),
+            ("patched", True),
+            ("unsupported", False),
+            ({"default": "native", "tool_use": "patched"}, True),
+            ({"default": "native", "tool_use": "unsupported"}, False),
+            (None, False),
+        ):
+            status = (
+                None
+                if later_system is None
+                else {"chat_template": {"later_system": later_system}}
+            )
+            with (
+                self.subTest(later_system=later_system),
+                self.ready_server("pi", status=status),
+            ):
+                launcher.main(["pi"])
+                path = Path(os.environ["HOME"]) / ".pi/agent/models.json"
+                (model,) = json.loads(path.read_text())["providers"]["splash"]["models"]
+            self.assertEqual("compat" in model, compat)
 
     def test_opencode_launch_probes_the_installed_version(self):
         for version, expected in (

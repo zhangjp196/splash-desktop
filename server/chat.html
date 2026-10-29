@@ -96,6 +96,7 @@
   #new-chat:hover { background: var(--hover); border-color: color-mix(in srgb, var(--border) 60%, var(--muted)) }
   #new-chat svg { width: 17px; height: 17px }
   .recent-label { margin: 26px 10px 8px; color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase }
+  .recent-label:has(+ #recents:empty) { display: none }
   #recents { display: grid; gap: 2px }
   .recent { position: relative; display: flex; align-items: center; width: 100%; border-radius: 9px; overflow: hidden }
   .recent:hover, .recent.active { background: var(--hover) }
@@ -110,7 +111,8 @@
     .recent-delete { opacity: 1; pointer-events: auto }
   }
 
-  .credentials { display: block; margin: 20px 10px 8px; color: var(--muted); font-size: 12px }
+  #credentials { display: block; margin: 20px 10px 8px; color: var(--muted); font-size: 12px }
+  #credentials[hidden] { display: none }
   #api-key { width: 100%; margin-top: 6px; padding: 7px 9px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px }
   #api-key:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 55%, var(--border)) }
 
@@ -308,7 +310,7 @@
   </button>
   <div class="recent-label">Recents</div>
   <nav id="recents" aria-label="Recent chats"></nav>
-  <label class="credentials">API key (if required)
+  <label id="credentials" hidden>This server needs an API key
     <input id="api-key" type="password" autocomplete="off" spellcheck="false" aria-label="API key">
   </label>
 </aside>
@@ -335,8 +337,8 @@
   <div class="toolbar">
     <label class="effort"><span>Thinking</span>
       <select id="effort" aria-label="Thinking effort">
-        <option value="">Default</option>
-        <option value="xhigh">XHigh</option>
+        <option value="">Auto</option>
+        <option value="xhigh">Extra High</option>
         <option value="medium">Medium</option>
         <option value="low">Low</option>
         <option value="none">Off</option>
@@ -366,6 +368,7 @@
   const attach = $('#attach');
   const effort = $('#effort');
   const apiKey = $('#api-key');
+  const credentials = $('#credentials');
   const send = $('#send');
   const recents = $('#recents');
   const scrollBottom = $('#scroll-bottom');
@@ -450,9 +453,15 @@
     return apiKey.value ? {Authorization: `Bearer ${apiKey.value}`} : {};
   }
 
+  // Only a server started with --api-key answers 401; the key's field shows then and stays.
+  function askForKeyIfUnauthorized(response) {
+    if (response.status === 401) credentials.hidden = false;
+  }
+
   async function loadModalities() {
     try {
       const response = await fetch('/v1/models', {headers: authorization()});
+      askForKeyIfUnauthorized(response);
       if (!response.ok) return;
       const modalities = (await response.json()).data?.[0]?.input_modalities;
       if (!Array.isArray(modalities)) return;
@@ -1023,6 +1032,7 @@
         body: JSON.stringify({messages: requestMessages(), stream: true, stream_options: {include_usage: true}, ...(effort.value ? {reasoning_effort: effort.value} : {})}),
         signal: controller.signal
       });
+      askForKeyIfUnauthorized(response);
       if (!response.ok) throw new Error((await response.json()).error?.message || response.statusText);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();

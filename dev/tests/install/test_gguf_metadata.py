@@ -402,13 +402,9 @@ class GgufMetadataTests(unittest.TestCase):
                 "ffn_gate_up_exps.weight F32 [(]1 tensor[)]",
             ),
             # Floats only where the loader reads floats: not a projection, an
-            # F32 or BF16 router and an F32, BF16 or F16 norm, never a
-            # quantized one.
+            # F32 or BF16 router (or a quantized one, never F16) and an F32,
+            # BF16 or F16 norm, never a quantized one.
             ({"blk.3.attn_q.weight": GGML["F32"]}, "attn_q.weight F32"),
-            (
-                {"blk.0.ffn_gate_inp.weight": GGML["Q8_0"]},
-                "ffn_gate_inp.weight Q8_0",
-            ),
             ({"blk.0.ffn_gate_inp.weight": GGML["F16"]}, "ffn_gate_inp.weight F16"),
             ({"output_norm.weight": GGML["Q8_0"]}, "output_norm.weight Q8_0"),
             (
@@ -631,7 +627,9 @@ class GgufMetadataTests(unittest.TestCase):
         header = (runtime / "metal/abi/Gguf.h").read_text()
         low = int(re.search(r"#define GGUF_ROTATION_MIN_BLOCK (\d+)u", header)[1])
         high = int(re.search(r"#define GGUF_ROTATION_BLOCK (\d+)u", header)[1])
-        powers = {1 << shift for shift in range(low.bit_length() - 1, high.bit_length())}
+        powers = {
+            1 << shift for shift in range(low.bit_length() - 1, high.bit_length())
+        }
         self.assertLessEqual(gguf.ROTATION_BLOCKS, powers)
         self.assertLessEqual({low, high}, gguf.ROTATION_BLOCKS)
 
@@ -866,7 +864,10 @@ class GgufMetadataTests(unittest.TestCase):
             upstream.select_vision(
                 projectors(
                     **{
-                        "mmproj-q4": (vision_fixture(), [(tensors[0][0], GGML["Q4_0"]), tensors[1]]),
+                        "mmproj-q4": (
+                            vision_fixture(),
+                            [(tensors[0][0], GGML["Q4_0"]), tensors[1]],
+                        ),
                         "mmproj-x": text,
                     }
                 )

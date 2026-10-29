@@ -97,7 +97,7 @@ struct ModelMemoryFootprint final {
 };
 
 // What a spill-capable target plans for the K/V of long requests that lives
-// on the SSD cache (DEVELOPMENT.md, KV on the SSD): a target whose layout can
+// on the SSD cache (docs/server.md, KV on the SSD): a target whose layout can
 // spill (kv::Layout::spillable), whose model declares its block-sparse
 // attention (model::SparseKvShape) and whose SSD cache takes writes. A Spill
 // request's cache keeps Full the pages of its dense history (densePages), of
@@ -214,7 +214,7 @@ struct StreamedMemoryResult final {
 };
 
 // Plans the stores of the parts that stream and a spill-capable target's
-// floors from one budget (DEVELOPMENT.md, Memory and context). The floors
+// floors from one budget (docs/server.md, Memory and context). The floors
 // come first: the fixed bytes and the arenas, a lane's state and the KV
 // runway (minimumRequiredBytes), the stores at their floors and the spill
 // floors at the context spilling serves. Then the routed experts load whole

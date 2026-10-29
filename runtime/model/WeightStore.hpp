@@ -79,9 +79,13 @@ private:
 
 // GGUF image sections: a descriptor, then plane0, optional plane1
 // and metadata, each 16 KiB aligned (GgufTensorDescriptor and the layout in
-// model/GgufImageLayout.hpp).
+// model/GgufImageLayout.hpp); or, for F32 and BF16 values, the rows as stored.
 [[nodiscard]] ops::QuantizedSegment readQuantizedSegment(WeightFile &file,
                                                    std::string_view label);
+// A float segment, a descriptor and its rows as stored: F32 or BF16 values or
+// a quantized format's native rows (the MoE router, which the float
+// projection runs in fp32).
+[[nodiscard]] ops::QuantizedSegment readFloatSegment(WeightFile &file, std::string_view label);
 // A single-tensor projection; its descriptor must hold the layout's sizes.
 [[nodiscard]] ops::Projection readBlockProjection(WeightFile &file, uint32_t outputSize,
                                                   uint32_t inputSize, std::string_view label);

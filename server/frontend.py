@@ -368,6 +368,21 @@ class Frontend:
         """The one list /status, /v1/models and client setup report."""
         return ["text", "image", "pdf"] if self.vision else ["text"]
 
+    @property
+    def reasoning(self):
+        """What /v1/models reports of reasoning: the default template's
+        (ChatTemplate.reasoning), with the server's default effort in place of
+        the template's own, named by the listed effort it renders like; no
+        efforts for a model that decides itself whether to reason."""
+        if not self.chat_format.reasoning_switch:
+            return {"thinks": None, "efforts": [], "default": None}
+        template = self.chat_templates.select(None)
+        reasoning = dict(template.reasoning)
+        if (effort := self.default_reasoning_effort) is not None:
+            reasoning["thinks"] = effort != "none"
+            reasoning["default"] = template.effort_names.get(effort)
+        return reasoning
+
     def status(self):
         status = self.backend.status()
         status["vision"] = self.vision

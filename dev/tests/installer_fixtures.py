@@ -302,7 +302,9 @@ class FakeHub:
             self.downloads.append(f"{repo_id}/{name}")
         return path
 
-    def snapshot_download(self, repo_id, *, revision, allow_patterns, max_workers):
+    def snapshot_download(
+        self, repo_id, *, revision, allow_patterns, max_workers, tqdm_class=None
+    ):
         for name in allow_patterns:
             self.fetch(repo_id, name, revision)
         return str(self.snapshot(repo_id, revision))

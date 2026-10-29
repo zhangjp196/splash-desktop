@@ -61,6 +61,9 @@ struct MoeShape final {
   MoeRouter router = MoeRouter::Softmax;
   uint32_t sharedSlices = 1;
   bool sharedGate = true;
+  // The format of the router's rows (QuantizedSegment::rows), which picks its
+  // float tile (Linear::ggufFloatTile).
+  uint32_t routerFormat = QuantizedSegment::kFloat32;
   // The block of the routed experts' stored rotation (BlockMoeWeights's
   // rotation): 0 when they were not stored for rotated inputs, else the
   // gather reads H (D x) of the block's input for its routed routes and the
@@ -113,11 +116,12 @@ class MoeExpertStream;
 enum class MoePhase : uint8_t { Prefill, Decode };
 
 // The weights of one sparse MoE block, which the loaded model owns. The
-// router and the shared expert's scalar gate are float tensors (llama.cpp
-// keeps a GGUF's unquantized; an MLX target's load as their F32 values), and
-// they run in fp32; a block without the gate (!MoeShape::sharedGate) leaves
-// it empty. The routed segments hold `slots` experts, routed expert e
-// in slot slotTable[e] (one uint32 per expert): every expert and the identity
+// router is a float segment in the format its checkpoint holds it (a GGUF's
+// F32 or BF16, which llama.cpp keeps unquantized, or a quantized tensor's
+// native rows) and the shared expert's scalar gate F32 values, and both run
+// in fp32; a block without the gate (!MoeShape::sharedGate) leaves it empty.
+// The routed segments hold `slots` experts, routed expert e in slot
+// slotTable[e] (one uint32 per expert): every expert and the identity
 // table when they are all resident, or an expert store's slots and the
 // block's table there when they stream (`stream`, the block's index in it
 // `streamBlock`).
@@ -302,8 +306,8 @@ struct MoeConfig final {
   // The execution plans derive it from the GPU family, its planned core count
   // and the expert formats (moeGgufTile).
   MoeGgufTile ggufTile = MoeGgufTile::Staged;
-  // The tile of the F32 router; the execution plans derive it from the
-  // device and the plan's rows (Linear::ggufFloatTile).
+  // The router's float tile; the execution plans derive it from the device,
+  // the plan's rows and the router's format (Linear::ggufFloatTile).
   FloatTile ggufRouterTile = FloatTile::Simdgroup;
   bool operator==(const MoeConfig &) const = default;
 };

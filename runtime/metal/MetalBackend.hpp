@@ -198,6 +198,14 @@ enum class HostStepGpu : uint8_t {
 // signals, so a signal is never held back behind the dispatches that follow
 // it, and a signal is delivered even when the work before it fails.
 //
+// Metal fails a wait (a Wait, or the work after a host step) still unmet 5 s
+// after its queue reached it ("Caused GPU Timeout Error"), and the command
+// with it. The queue reaches a command's first wait as the command is
+// submitted, whatever work runs ahead of it, and each later one once the
+// wait before it was met: the work between two waits, with the agent's or
+// the step's part, must end within 5 s. Longer work, such as the encodes of
+// a prefill command's images, runs as a command of its own.
+//
 // A Host step runs `work` on the CPU once all earlier work has completed and
 // holds all later work until it returned, through two shared events the
 // backend creates for the command's host steps, one the GPU raises and one the

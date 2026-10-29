@@ -168,14 +168,29 @@ def parse_draft_model(value: str) -> str:
         ) from None
 
 
+def local_target_path(value) -> Path:
+    """value as the absolute path of a local target. A directory is resolved
+    whole; a file keeps its own name, since a GGUF may be a link to a Hub cache
+    blob and resolving the file would replace its .gguf name with the blob's
+    digest."""
+    path = Path(value).expanduser()
+    if path.is_dir():
+        return path.resolve()
+    path = Path(os.path.abspath(path))
+    return path.parent.resolve() / path.name
+
+
 def parse_model_dir(value: str) -> str:
-    # Like a local draft, a local target directory is recorded as an absolute
-    # path, so the installation it selects does not depend on the working
-    # directory.
-    path = Path(value).expanduser() if value else None
-    if path is None or not path.is_dir():
+    # Like a local draft, a local target is recorded as an absolute path, so the
+    # installation it selects does not depend on the working directory. It is a
+    # directory holding an MLX target or one GGUF, or a GGUF file itself, which
+    # local.py serves with the parts beside it.
+    path = local_target_path(value) if value else None
+    if path is None or not (path.is_dir() or path.is_file()):
         raise argparse.ArgumentTypeError(f"local model directory not found: {value}")
-    return str(path.resolve())
+    if path.is_file() and path.suffix.lower() != ".gguf":
+        raise argparse.ArgumentTypeError(f"a local model file is a GGUF: {value}")
+    return str(path)
 
 
 def parse_mmproj(value: str) -> str:
@@ -191,10 +206,11 @@ def parse_mmproj(value: str) -> str:
 
 
 def derived_model_id(directory) -> str:
-    """The API model ID a local target directory serves as: its folder name,
-    reduced to the characters a repository ID may hold. A name that reduces
-    to nothing becomes `model`."""
-    name = re.sub(r"[^A-Za-z0-9._-]", "-", Path(directory).name)
+    """The API model ID a local target serves as: its folder name, or a GGUF
+    file's name without the extension, reduced to the characters a repository
+    ID may hold. A name that reduces to nothing becomes `model`."""
+    path = Path(directory)
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", path.stem if path.is_file() else path.name)
     name = re.sub(r"\.{2,}", ".", re.sub(r"-{2,}", "-", name))
     # 96 is the repository-ID bound the server's validation enforces.
     name = name[:96].strip("-.") or "model"
@@ -336,7 +352,7 @@ class Selection:
                 raise ModelError(
                     "a local model directory and a repository ID are exclusive"
                 )
-            directory = Path(directory).expanduser().resolve()
+            directory = local_target_path(directory)
             model = derived_model_id(directory)
             repo_id = variant = None
             link = local_selection_link(
@@ -476,7 +492,11 @@ def parse_args(argv=None):
         help="skip vision preparation and loading",
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("prepare")
+    commands.add_parser("prepare").add_argument(
+        "--json-progress",
+        action="store_true",
+        help="also report download progress as JSON lines on stdout",
+    )
     commands.add_parser("verify").add_argument("--full", action="store_true")
     commands.add_parser("link", help="print the selection link")
     args = parser.parse_args(argv)
@@ -509,13 +529,15 @@ def main(argv=None):
         print(selection.link)
         return 0
     # The installers import this module, so it imports them once it exists.
-    from . import assembly, upstream
+    from . import assembly, hub, upstream
 
     try:
         # The launcher starts this with the stop signals blocked, so that one
         # sent while it starts is not lost; it arrives here.
         signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
         if args.command == "prepare":
+            if args.json_progress:
+                hub.report_json_progress()
             if selection.directory is not None:
                 upstream.prepare_local(selection)
             else:
@@ -552,4 +574,12 @@ if __name__ == "__main__":
     import importlib
 
     installer = importlib.import_module("install.models")
-    raise SystemExit(installer.main())
+    status = installer.main()
+    if status == 130:
+        # Interrupted, a download goes on in huggingface_hub's threads, which
+        # the interpreter would wait for at exit (hub._interruptible): end
+        # the process at once, its output written.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(status)
+    raise SystemExit(status)

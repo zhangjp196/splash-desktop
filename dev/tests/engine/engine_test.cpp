@@ -511,6 +511,31 @@ void testImagePromptsRunPrefillGroups() {
   }
 }
 
+// A ticket of several commands, as a prefill command whose images are
+// encoded ahead of it, runs each on the engine's wakes (advance()): the
+// second only once the first has completed, however many wakes come before.
+void testTicketAdvancesOnTheEngineWakes() {
+  test::TestKvStorage storage(64, 4096, 4);
+  KvPool pool(storage, 0);
+  engine::Cache cache(pool, nullptr, nullptr);
+  Executor model;
+  model.stagePrefillUntil = std::make_shared<std::atomic<bool>>(false);
+  Events events;
+  engine::Engine engine(test::engineConfig(), cache, model, events);
+  guardReleases(storage, engine);
+  engine.submit(request(1, std::vector<uint32_t>(100, 7)));
+  double now = 1;
+  for (uint32_t tick = 0; tick < 8; ++tick)
+    static_cast<void>(engine.tick(now++));
+  require(engine.commandInFlight() && events.completedCount == 0,
+          "a prefill command of two ran its second before its first completed");
+  *model.stagePrefillUntil = true;
+  tickUntil(engine, now, [&] { return idle(engine); },
+            "a prefill command of two did not run its second on the engine's wakes");
+  require(events.completedCount == 1 && events.failedCount == 0,
+          "a prefill command of two did not complete its request");
+}
+
 // Where the model runs a prefill command in passes over its layers, a long
 // prompt's commands run in passes, each its own command with the command's
 // rows: a decoding lane's steps run between them, its own page table goes
@@ -12171,6 +12196,7 @@ int main() {
     testSharedPrefillFailedPublicationFallsBack();
     testSharedPrefillDoesNotBlockUnrelatedWork();
     testImagePromptsRunPrefillGroups();
+    testTicketAdvancesOnTheEngineWakes();
     testPrefillPassesInterleaveDecodeAndEndAtACancel();
     testSharedPrefillHonorsPriorityAndLateArrival();
     testLateSharedPrefillExtendsTheProducerPlan();

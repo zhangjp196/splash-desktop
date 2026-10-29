@@ -267,8 +267,9 @@ public:
   // staged tile (LinearGguf.cpp), and the rotated rows of a full chunk.
   [[nodiscard]] LinearScratchSize prefillScratchSize(ProjectionShape shape) const;
   // The tile of a float projection of `rows` rows into `outputSize` columns
-  // on this device (LinearGguf.cpp).
-  [[nodiscard]] FloatTile ggufFloatTile(uint32_t rows, uint32_t outputSize) const noexcept;
+  // of rows in `formatId` (QuantizedSegment::rows) on this device
+  // (LinearGguf.cpp).
+  [[nodiscard]] FloatTile ggufFloatTile(uint32_t rows, uint32_t outputSize, uint32_t formatId) const noexcept;
   // The plan of `config` for `workload`, whether or not the device's policy
   // picks it.
   [[nodiscard]] static LinearPlan plan(LinearWorkload workload, LinearConfig config,

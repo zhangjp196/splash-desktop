@@ -526,20 +526,29 @@ void restoreActivePrefix(model::Runtime &executor, uint64_t requestId,
   executor.setDraftContextPlan(requestId, planDraftContext(boundary, promptTokens, {}));
 }
 
+// Whether a chunk encodes an image, counted on the backend that runs it.
+struct ImageEncodes final {
+  const metal::MetalBackend &backend;
+  bool encodes = false;
+};
+
 // A chunk captures the request's states at `capturedAt`, inside it or at its end, in
 // buffers reserved for them before it is submitted; a chunk that commits
-// returns them in order.
+// returns them in order. A chunk that encodes images runs their encodes as a
+// command of its own ahead of the chunk's, whose time is reported apart and
+// leaves the chunk's a sample of its rows.
 ModelStepResult prefillChunk(model::Runtime &executor, uint64_t requestId,
                              uint32_t logicalPosition,
                              std::span<const uint32_t> inputTokens,
                              const std::vector<uint32_t> &pageTable,
-                             std::optional<bool> representativeTiming = {},
+                             std::optional<ImageEncodes> images = {},
                              std::span<const uint32_t> capturedAt = {}) {
   const uint32_t tokenCount = static_cast<uint32_t>(inputTokens.size());
   BatchPlan plan{.kind = WorkKind::Prefill,
                  .items = {{requestId, tokenCount}},
                  .decodeStage = DecodeStage::Regular};
   std::unique_ptr<ModelBatchTicket> ticket;
+  const uint64_t commands = images ? BackendInstrumentation::submittedCommands(images->backend) : 0;
   {
     // The items go once the command is submitted, as the engine's do.
     ModelBatchItem item =
@@ -554,11 +563,13 @@ ModelStepResult prefillChunk(model::Runtime &executor, uint64_t requestId,
     }
     ticket = executor.submit(plan, std::span<const ModelBatchItem>(&item, 1), {});
   }
-  if (representativeTiming) {
-    require(ticket->prefillTimingIsRepresentative() == *representativeTiming,
-            "image encoding timing classification changed");
-  }
   auto result = ticket->wait();
+  if (images) {
+    require(BackendInstrumentation::submittedCommands(images->backend) - commands == (images->encodes ? 2u : 1u) &&
+                (ticket->imageEncodeMilliseconds() > 0.0) == images->encodes &&
+                ticket->prefillTimingIsRepresentative(),
+            "a chunk's image encodes did not run as a command of their own ahead of it");
+  }
   require(result.size() == 1 && result[0].consumedPromptTokens == tokenCount,
           "prefill result mismatch");
   const std::vector<std::shared_ptr<const CompositeState>> &captured = result[0].capturedStates;
@@ -627,6 +638,7 @@ beginMaskedDecode(model::Runtime &executor, const BatchPlan &plan,
   PendingMaskedDecode pending;
   pending.ticket = executor.submit(plan, items, [] {});
   while (pending.maskRequests.empty()) {
+    pending.ticket->advance();
     pending.maskRequests = pending.ticket->takeMaskRequests();
     require(!pending.ticket->ready(),
             "constrained decode completed before receiving its mask");
@@ -639,6 +651,7 @@ beginMaskedDecode(model::Runtime &executor, const BatchPlan &plan,
 std::vector<ModelStepResult>
 finishMaskedDecode(PendingMaskedDecode pending) {
   while (!pending.ticket->ready()) {
+    pending.ticket->advance();
     require(pending.ticket->takeMaskRequests().empty(),
             "constrained decode requested its mask twice");
     if (!pending.ticket->ready())
@@ -987,7 +1000,7 @@ void requireImageRowsAfterReclaim(model::Runtime &executor,
   executor.setDraftContextPlan(
       request.id, planDraftContext(0, static_cast<uint32_t>(prompt.size()), {}));
   prefillChunk(executor, request.id, 0,
-               std::span<const uint32_t>(prompt).first(64), pages, false);
+               std::span<const uint32_t>(prompt).first(64), pages, ImageEncodes{backend, true});
   // Nothing else is idle, so the pass releases exactly the encoder arena.
   uint64_t reclaimed = 0;
   while (const uint64_t bytes = executor.reclaimIdleState(false, IdleMemory::BuffersThenCaches))
@@ -998,7 +1011,7 @@ void requireImageRowsAfterReclaim(model::Runtime &executor,
   require(reclaimed == encoderBytes,
           "encoder whose only image is encoded survived reclaim");
   prefillChunk(executor, request.id, 64,
-               std::span<const uint32_t>(prompt).subspan(64), pages, true);
+               std::span<const uint32_t>(prompt).subspan(64), pages, ImageEncodes{backend, false});
   require(executor.telemetry().imageEncodes == encodesBefore + 1,
           "straddling image was not encoded exactly once");
   executor.end(request.id);
@@ -1121,11 +1134,11 @@ void requireRepeatedImagePlacements(model::Runtime &executor,
   executor.setDraftContextPlan(request.id, planDraftContext(0, prompt.size(), checkpoints));
   const uint64_t encodes = executor.telemetry().imageEncodes;
   prefillChunk(executor, request.id, 0,
-               std::span<const uint32_t>(prompt).first(64), pages, false);
+               std::span<const uint32_t>(prompt).first(64), pages, ImageEncodes{backend, true});
   auto checkpoint = executor.snapshot(request.id);
   require(checkpoint != nullptr, "image prefix checkpoint allocation failed");
   prefillChunk(executor, request.id, 64,
-               std::span<const uint32_t>(prompt).subspan(64), pages, true);
+               std::span<const uint32_t>(prompt).subspan(64), pages, ImageEncodes{backend, false});
   require(executor.telemetry().imageEncodes == encodes + 1,
           "repeated image placements encoded more than once");
   const auto expected = sampleCommittedState(backend, states, lane);
@@ -1140,7 +1153,7 @@ void requireRepeatedImagePlacements(model::Runtime &executor,
   require(restored.granted(), "repeated image restore was not admitted");
   restoreActivePrefix(executor, request.id, prompt.size(), 64, checkpoint);
   prefillChunk(executor, request.id, 64,
-               std::span<const uint32_t>(prompt).subspan(64), pages, false);
+               std::span<const uint32_t>(prompt).subspan(64), pages, ImageEncodes{backend, true});
   require(executor.telemetry().imageEncodes == encodes + 2,
           "prefix restore discarded data for a later image placement");
   // The checkpoint's rows come back into the rings from the context window.
@@ -2434,13 +2447,13 @@ void requireSuspendedLaneKeepsItsRows(model::Runtime &executor,
   executor.setDraftContextPlan(
       request.id, planDraftContext(0, static_cast<uint32_t>(prompt.size()), {}));
   const uint64_t encodes = executor.telemetry().imageEncodes;
-  prefillChunk(executor, request.id, 0, prompt.first(32), pages, false);
+  prefillChunk(executor, request.id, 0, prompt.first(32), pages, ImageEncodes{backend, true});
   executor.suspend(request.id);
   const StateAdmission resumed = executor.resume(request.modelView());
   require(resumed.granted(), "suspended image request did not resume");
   executor.setDraftContextPlan(
       request.id, planDraftContext(0, static_cast<uint32_t>(prompt.size()), {}));
-  prefillChunk(executor, request.id, 0, prompt, pages, true);
+  prefillChunk(executor, request.id, 0, prompt, pages, ImageEncodes{backend, false});
   require(executor.telemetry().imageEncodes == encodes + 1,
           "a resumed lane encoded its image again");
   executor.end(request.id);
@@ -2464,7 +2477,7 @@ void requireInjectedRowsBecomeReclaimable(model::Runtime &executor,
   executor.setDraftContextPlan(
       request.id, planDraftContext(0, static_cast<uint32_t>(request.prompt.size()), {}));
   prefillChunk(executor, request.id, 0, request.prompt, pageRange(120, 4),
-               false);
+               ImageEncodes{backend, true});
   const model::ModelTelemetry injected = executor.telemetry();
   require(injected.embeddingCacheBytes && injected.visionArenaBytes &&
               injected.imageRowsBytes == injected.embeddingCacheBytes,
@@ -2508,7 +2521,7 @@ void requireCoveredImagesAreNotStaged(model::Runtime &executor,
   prefillChunk(executor, request.id, 0, std::span<const uint32_t>(prompt).first(32), pages);
   std::shared_ptr<const CompositeState> beforeImage = executor.snapshot(request.id);
   prefillChunk(executor, request.id, 32,
-               std::span<const uint32_t>(prompt).subspan(32, 32), pages, false);
+               std::span<const uint32_t>(prompt).subspan(32, 32), pages, ImageEncodes{backend, true});
   std::shared_ptr<const CompositeState> pastImage = executor.snapshot(request.id);
   require(beforeImage && pastImage, "covered image states were not snapshotted");
   executor.end(request.id);
@@ -2536,7 +2549,7 @@ void requireCoveredImagesAreNotStaged(model::Runtime &executor,
     } else {
       restoreActivePrefix(executor, id, prompt.size(), 64, pastImage);
       prefillChunk(executor, id, 64,
-                   std::span<const uint32_t>(prompt).subspan(64), pages, true);
+                   std::span<const uint32_t>(prompt).subspan(64), pages, ImageEncodes{backend, false});
       require(executor.telemetry().imageEncodes == encodes,
               "a restore past an image encoded it");
     }
@@ -2586,7 +2599,7 @@ void requireRefusedStartKeepsItsRows(model::Runtime &executor,
   require(admitted.granted(), "refused-start fixture was not admitted");
   executor.setDraftContextPlan(cached.id, planDraftContext(0, prompt.size(), {}));
   prefillChunk(executor, cached.id, 0,
-               std::span<const uint32_t>(prompt).first(64), pages, false);
+               std::span<const uint32_t>(prompt).first(64), pages, ImageEncodes{backend, true});
 
   // A new image's start, refused one byte short: it holds the idle encoder.
   EngineRequest fresh = imageRequest(118, {16, 16, 8, 8, 193, 479});
@@ -2611,7 +2624,7 @@ void requireRefusedStartKeepsItsRows(model::Runtime &executor,
   require(executor.reclaimIdleState(false, IdleMemory::BuffersThenCaches) == arenaBytes,
           "the idle encoder was not the only cache left");
   prefillChunk(executor, cached.id, 64,
-               std::span<const uint32_t>(prompt).subspan(64), pages, true);
+               std::span<const uint32_t>(prompt).subspan(64), pages, ImageEncodes{backend, false});
   executor.end(cached.id);
   while (executor.reclaimIdleState(false, IdleMemory::Buffers)) {
   }
@@ -2669,7 +2682,7 @@ void requireReclaimTakesOneCacheUnit(model::Runtime &executor,
   const StateAdmission admission = executor.begin(request.modelView());
   require(admission.granted(), "two-image request was not admitted");
   executor.setDraftContextPlan(request.id, planDraftContext(0, prompt.size(), {}));
-  prefillChunk(executor, request.id, 0, prompt, pageRange(120, 4), false);
+  prefillChunk(executor, request.id, 0, prompt, pageRange(120, 4), ImageEncodes{backend, true});
   executor.end(request.id);
   while (executor.reclaimIdleState(false, IdleMemory::Buffers)) {
   }
@@ -2777,7 +2790,7 @@ void requireReplayPointKeepsItsImageRows(model::Runtime &executor,
   const std::array<uint32_t, 1> boundary{64};
   executor.setDraftContextPlan(request.id, planDraftContext(0, prompt.size(), boundary));
   prefillChunk(executor, request.id, 0,
-               std::span<const uint32_t>(prompt).first(64), pages, false);
+               std::span<const uint32_t>(prompt).first(64), pages, ImageEncodes{backend, true});
   std::shared_ptr<const CompositeState> replayPoint = executor.snapshot(request.id);
   require(replayPoint != nullptr, "replay point snapshot failed");
   executor.end(request.id);
@@ -2796,7 +2809,7 @@ void requireReplayPointKeepsItsImageRows(model::Runtime &executor,
   require(next.granted(), "the next turn was not admitted");
   restoreActivePrefix(executor, request.id, prompt.size(), 64, replayPoint);
   prefillChunk(executor, request.id, 64,
-               std::span<const uint32_t>(prompt).subspan(64), pages, true);
+               std::span<const uint32_t>(prompt).subspan(64), pages, ImageEncodes{backend, false});
   require(executor.telemetry().imageEncodes == encodes &&
               !executor.telemetry().visionArenaBytes,
           "resuming inside an image encoded it again");
@@ -2836,7 +2849,8 @@ void requireCapturedStateKeepsItsImageRows(model::Runtime &executor,
   const std::array<uint32_t, 1> boundary{64};
   executor.setDraftContextPlan(request.id, planDraftContext(0, prompt.size(), boundary));
   std::shared_ptr<const CompositeState> captured =
-      prefillChunk(executor, request.id, 0, prompt, pages, false, boundary).capturedStates.front();
+      prefillChunk(executor, request.id, 0, prompt, pages, ImageEncodes{backend, true}, boundary)
+          .capturedStates.front();
   executor.end(request.id);
   while (executor.reclaimIdleState(false, IdleMemory::BuffersThenCaches)) {
   }
@@ -2851,7 +2865,8 @@ void requireCapturedStateKeepsItsImageRows(model::Runtime &executor,
   resumed.restoredTokens = 64;
   require(executor.begin(resumed).granted(), "the next turn was not admitted");
   restoreActivePrefix(executor, request.id, prompt.size(), 64, captured);
-  prefillChunk(executor, request.id, 64, std::span<const uint32_t>(prompt).subspan(64), pages, true);
+  prefillChunk(executor, request.id, 64, std::span<const uint32_t>(prompt).subspan(64), pages,
+               ImageEncodes{backend, false});
   require(executor.telemetry().imageEncodes == encodes && !executor.telemetry().visionArenaBytes,
           "resuming from a captured state inside an image encoded it again");
   executor.end(request.id);
