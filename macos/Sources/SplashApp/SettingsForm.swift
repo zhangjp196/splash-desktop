@@ -122,6 +122,7 @@ struct SettingsTabs: View {
                 .disabled(disabled)
             Picker(L10n.string("field.kv"), selection: $settings.kvFormat) {
                 Text(verbatim: L10n.string("kv.int8")).tag("int8")
+                Text(verbatim: L10n.string("kv.int4")).tag("int4")
                 Text(verbatim: L10n.string("kv.bf16")).tag("bf16")
             }
             .pickerStyle(.segmented)

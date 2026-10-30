@@ -92,7 +92,7 @@ paths for `--model-dir`, `--draft-model` and `--mmproj`.
 | `--no-webui` | Off | Disable the chat page. |
 | `--max-memory` | Auto | Lower the ceiling on Metal allocations, e.g. `28G`; not combined process RSS. See [memory and context](#memory-and-context). |
 | `--max-context` | Auto | Set the context limit, e.g. `100K` or `1M` (K = 1024 tokens, M = 1,000,000), up to 1,010,000 tokens; past the 256K native window it turns on YaRN. See [memory and context](#memory-and-context). |
-| `--kv-format` | `int8` | Target KV storage: `int8` or `bf16`. See [KV cache precision](#kv-cache-precision). |
+| `--kv-format` | `int8` | Target KV storage: `int8`, `int4` or `bf16`. See [KV cache precision](#kv-cache-precision). |
 | `--state-format` | `fp32` | Recurrent state storage: `fp32` or `bf16`. See [state precision](#state-precision). |
 | `--ple-memory` | Auto | Qwen3.8-Flash-Next: read the PLE n-gram table from the SSD through a host row cache of this size, e.g. `2G`; `off` loads the whole table. Auto loads it where memory holds it, else streams it through its share of the budget. See [PLE table streaming](#ple-table-streaming). |
 | `--expert-memory` | Auto | MoE targets: hold routed experts in this much memory, e.g. `16G`, and read the others from the SSD when a step routes them; `off` loads every expert. Auto loads them all where memory holds them, else gives them what the context leaves. See [streamed experts](#streamed-experts). |
@@ -423,11 +423,19 @@ Select the target KV format when starting the server:
 splash serve --model mlx-community/Qwen3.8-27B-4bit --kv-format bf16
 ```
 
-BF16 avoids target KV quantization, uses approximately twice the target KV
-memory, and can be slower at long contexts. Model weights are unchanged. Restart
-to switch formats. Omit `--kv-format` or use `--kv-format int8` for the default.
-The [SSD cache](#ssd-cache) supports both formats, preserving their stored
-bytes without further quantization.
+`int8` (the default) keeps one fp32 scale per (KV head, token) and one signed
+byte per element. `int4` keeps the same scales and packs two dimensions into
+each byte, so a page is half of `int8`'s: on a 27B (16 attention layers, 4 KV
+heads, head_dim 256) about 16.5 KiB a token against `int8`'s 32.5 KiB, which
+roughly doubles the context a given budget of KV memory reaches. It spends 7
+signed bits a value instead of `int8`'s 127, against the same per-(head, token)
+scale. `bf16` avoids quantization and uses about twice `int8`'s memory, and can
+be slower at long contexts. Model weights are unchanged. Restart to switch
+formats. Every format serves both a dense target and a block-sparse one
+(Qwen3.8-Flash-Next), whose gathered attention has its own kernels for each.
+The [SSD cache](#ssd-cache) supports every format, preserving their stored bytes
+without further quantization; a block-sparse target's slot is laid out in
+aligned block records, so `int4` halves its KV memory but not its slot size.
 
 ### State precision
 
@@ -464,11 +472,12 @@ target keeps the KV of its long requests there ([KV on the SSD](#kv-on-the-ssd))
 `--max-cache-disk` sizes it. The default, `auto`, holds at most a quarter of
 what its volume has beyond the space it keeps free (10 GiB, or 5% of a volume
 smaller than 200 GiB), its own files counted, and at most 64 GiB. The cap is a
-working set, not a drive's worth: a dense model's KV costs about 128 KiB a
-token (a 27B: 64 layers, 4 KV heads, head_dim 256, int8), so a 57K-token
-conversation is 7.3 GiB of KV beside 153 MiB of state, and the old 32 GiB cap
-held three or four of those: a handful of conversations was enough to turn a
-session over before it could be restored from. A size such
+working set, not a drive's worth: a dense model's KV costs about 32.5 KiB a
+token (a 27B: 16 attention layers of its 64 — the rest are linear-attention —
+4 KV heads, head_dim 256, int8), so a 57K-token conversation is 1.9 GiB of KV
+beside 153 MiB of state, and the old 32 GiB cap held sixteen of those: a handful
+of conversations was enough to turn a session over before it could be restored
+from. `--kv-format int4` halves the KV side of that. A size such
 as `16G` is held as given while the volume keeps that space free, so on a
 volume of its own the cache may take all but that. Free space is what `df`
 reports, without the purgeable space the Finder counts. The engine measures it

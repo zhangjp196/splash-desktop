@@ -123,9 +123,12 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         // What the form holds is what the command carries: the merge's
         // streamed stores and the verify policy included.
         let launch = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        func carries(_ arguments: [String], _ flag: String, _ value: String) -> Bool {
+            guard let index = arguments.firstIndex(of: flag) else { return false }
+            return arguments.indices.contains(index + 1) && arguments[index + 1] == value
+        }
         func carries(_ flag: String, _ value: String) -> Bool {
-            guard let index = launch.firstIndex(of: flag) else { return false }
-            return launch.indices.contains(index + 1) && launch[index + 1] == value
+            carries(launch, flag, value)
         }
         passed = passed
             && carries("--expert-memory", "16G")
@@ -150,6 +153,16 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && vision.contains("--mmproj")
             && vision.contains("/tmp/selfcheck-mmproj.gguf")
             && !vision.contains("--language-only")
+        // Every KV format the panel offers reaches the launcher, and the
+        // server's own default stays off the command.
+        for format in ServerSettings.kvFormats {
+            reloaded.kvFormat = format
+            let arguments = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+            passed = passed
+                && (format == "int8"
+                    ? !arguments.contains("--kv-format")
+                    : carries(arguments, "--kv-format", format))
+        }
         reloaded.restoreDefaultSettings()
         let restored = AppModel()
         passed = passed

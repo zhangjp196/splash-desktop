@@ -58,13 +58,24 @@ uint32_t tileParts(uint32_t queryHeads, kv::Layout layout) {
   return layout.valuesTokenMajor ? 1 : SPLASH_ATTENTION_TILE_PARTS(queryHeads / layout.kvHeads);
 }
 
+// A layout's KV format, as its kernels' names hold it, without the separator:
+// "q8", "q4" or "bf16".
+std::string kernelFormatName(kv::Layout layout) {
+  switch (layout.format) {
+  case kv::Format::BFloat16: return "bf16";
+  case kv::Format::Int4: return "q4";
+  case kv::Format::Int8: break;
+  }
+  return "q8";
+}
+
 // A layout's split or reduce pipeline of a phase ("prefill" or "verify").
 std::string pipelineName(std::string_view phase, bool split, uint32_t queryHeads, kv::Layout layout) {
   const bool sparse = layout.valuesTokenMajor;
   // The kernels of four KV heads, the first compiled, have no suffix.
   const std::string suffix = layout.kvHeads == 4 ? "" : "_kv" + std::to_string(layout.kvHeads) + "_g" +
                                                             std::to_string(queryHeads / layout.kvHeads);
-  const std::string format = layout.format == kv::Format::Int8 ? "q8_" : "bf16_";
+  const std::string format = kernelFormatName(layout) + "_";
   return std::string(phase) + "_attention_" +
          (split ? format + (sparse ? "sparse" : "split") : std::string(sparse ? "sparse_reduce" : "reduce")) +
          suffix;
@@ -73,7 +84,7 @@ std::string pipelineName(std::string_view phase, bool split, uint32_t queryHeads
 // The verify split that reads a sparse layout's listed blocks where their
 // locations name (ops::AttentionBlocks::locations).
 std::string locatedSplitName(kv::Layout layout) {
-  return std::string("verify_attention_") + (layout.format == kv::Format::Int8 ? "q8" : "bf16") +
+  return std::string("verify_attention_") + kernelFormatName(layout) +
          "_sparse_located_kv2_g12";
 }
 
@@ -214,6 +225,26 @@ void checkPlans(uint32_t queryHeads, kv::Layout layout) {
 // starts past the first one's in every extent.
 constexpr uint32_t kLayer = 1;
 
+// The signed 4-bit value a packed KV page holds at one element: the even
+// element of a byte in the low nibble, the odd one in the high nibble, which is
+// how MPP's int4b_format operand reads the slab and how splash_store_kv_row
+// writes it.
+inline int packedNibble(const uint8_t *bytes, uint64_t element) {
+  const uint8_t byte = bytes[element / 2];
+  const uint8_t nibble = element % 2 == 0 ? uint8_t(byte & 0x0F) : uint8_t(byte >> 4);
+  return nibble < 8 ? int(nibble) : int(nibble) - 16;
+}
+
+// Packs one dimension's 4-bit value into its byte, keeping the neighbour.
+inline void writePackedNibble(uint8_t *bytes, uint64_t element, int value) {
+  const uint8_t nibble = uint8_t(value) & 0x0F;
+  uint8_t &byte = bytes[element / 2];
+  if (element % 2 == 0)
+    byte = uint8_t((byte & 0xF0) | nibble);
+  else
+    byte = uint8_t((byte & 0x0F) | (nibble << 4));
+}
+
 struct Case final {
   uint32_t queryHeads;
   kv::Layout layout;
@@ -259,6 +290,9 @@ struct Case final {
     const uint64_t scale = splash_kv_scale_element(head, token % 32);
     if (layout.format == kv::Format::BFloat16)
       return bf16ToFloat(pool.slab<uint16_t>(kLayer, SPLASH_KV_KEYS, id)[index]);
+    if (layout.format == kv::Format::Int4)
+      return float(packedNibble(pool.slab<uint8_t>(kLayer, SPLASH_KV_KEYS, id), index)) *
+             pool.slab<float>(kLayer, SPLASH_KV_KEY_SCALES, id)[scale];
     return pool.slab<int8_t>(kLayer, SPLASH_KV_KEYS, id)[index] *
            pool.slab<float>(kLayer, SPLASH_KV_KEY_SCALES, id)[scale];
   }
@@ -270,6 +304,9 @@ struct Case final {
     const uint64_t scale = splash_kv_scale_element(head, token % 32);
     if (layout.format == kv::Format::BFloat16)
       return bf16ToFloat(pool.slab<uint16_t>(kLayer, SPLASH_KV_VALUES, id)[index]);
+    if (layout.format == kv::Format::Int4)
+      return float(packedNibble(pool.slab<uint8_t>(kLayer, SPLASH_KV_VALUES, id), index)) *
+             pool.slab<float>(kLayer, SPLASH_KV_VALUE_SCALES, id)[scale];
     return pool.slab<int8_t>(kLayer, SPLASH_KV_VALUES, id)[index] *
            pool.slab<float>(kLayer, SPLASH_KV_VALUE_SCALES, id)[scale];
   }
@@ -328,9 +365,9 @@ Case makeCase(metal::MetalBackend &backend, uint32_t queryHeads,
       const uint32_t id = data.page(lane, token);
       for (uint32_t head = 0; head < layout.kvHeads; ++head) {
         const uint64_t slot = splash_kv_scale_element(head, token % 32);
-        // INT8 scales differ from token to token, so that a scale read at
-        // another token's place shows.
-        if (layout.format == kv::Format::Int8) {
+        // INT8 and INT4 scales differ from token to token, so that a scale
+        // read at another token's place shows.
+        if (layout.format == kv::Format::Int8 || layout.format == kv::Format::Int4) {
           data.pool.slab<float>(kLayer, SPLASH_KV_KEY_SCALES, id)[slot] =
               0.006f * (1 + float((token + head) % 9) / 16);
           data.pool.slab<float>(kLayer, SPLASH_KV_VALUE_SCALES, id)[slot] =
@@ -346,6 +383,13 @@ Case makeCase(metal::MetalBackend &backend, uint32_t queryHeads,
           if (layout.format == kv::Format::Int8) {
             data.pool.slab<int8_t>(kLayer, SPLASH_KV_KEYS, id)[keyIndex] = key;
             data.pool.slab<int8_t>(kLayer, SPLASH_KV_VALUES, id)[valueIndex] = value;
+          } else if (layout.format == kv::Format::Int4) {
+            // A packed page spends 7 signed bits a value, so the INT8 pattern
+            // has to narrow to the nibble's range.
+            writePackedNibble(data.pool.slab<uint8_t>(kLayer, SPLASH_KV_KEYS, id),
+                              keyIndex, std::clamp(key, -7, 7));
+            writePackedNibble(data.pool.slab<uint8_t>(kLayer, SPLASH_KV_VALUES, id),
+                              valueIndex, std::clamp(value, -7, 7));
           } else {
             data.pool.slab<uint16_t>(kLayer, SPLASH_KV_KEYS, id)[keyIndex] =
                 floatToBf16(key * 0.006f);
@@ -1510,7 +1554,12 @@ void ropeTargetScaling(metal::MetalBackend &backend) {
 int main(int argc, char **argv) {
   try {
     require(argc >= 1 && argc <= 3, "usage: paged-attention-plan [METALLIB [--long]]");
-    for (auto format : {kv::Format::Int8, kv::Format::BFloat16})
+    // Every format over every geometry: the packed 4-bit format runs the same
+    // page loop and the same sparse staging as INT8, its slabs read as
+    // int4b_format operands.
+    const std::vector<kv::Format> formats{kv::Format::Int8, kv::Format::BFloat16,
+                                          kv::Format::Int4};
+    for (auto format : formats)
       for (const Geometry geometry : kGeometries)
         checkPlans(geometry.queryHeads, geometry.layout(format));
     if (argc == 1) {
@@ -1549,7 +1598,7 @@ int main(int argc, char **argv) {
       return 0;
     }
     require(argc == 2, "usage: paged-attention-plan [METALLIB [--long]]");
-    for (auto format : {kv::Format::Int8, kv::Format::BFloat16})
+    for (auto format : formats)
     for (const Geometry geometry : kGeometries) {
       const uint32_t heads = geometry.queryHeads;
       const kv::Layout layout = geometry.layout(format);

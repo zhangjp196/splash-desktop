@@ -15,7 +15,7 @@
 // usage: attention-sweep METALLIB [--histories 0,2048,...]
 //                        [--shapes 27b,35b,122b,fn,flint-window,flint-full]
 //                        [--lanes 1,4] [--repeat N] [--phases both|verify|prefill]
-//                        [--compare-metallib PATH] [--kv-format int8|bf16]
+//                        [--compare-metallib PATH] [--kv-format int8|int4|bf16]
 //                        [--extent-pages N] [--qsa shared|independent|overlapping|pages|indexer]
 //                        [--located]
 //
@@ -585,7 +585,7 @@ int main(int argc, const char *argv[]) {
       std::cerr << "usage: attention-sweep METALLIB [--histories LIST] "
                    "[--shapes 27b,35b,122b,fn,flint-window,flint-full] "
                    "[--lanes LIST] [--repeat N] [--phases both|verify|prefill] "
-                   "[--compare-metallib PATH] [--kv-format int8|bf16] "
+                   "[--compare-metallib PATH] [--kv-format int8|int4|bf16] "
                    "[--extent-pages N] [--qsa shared|independent|overlapping|pages|indexer] "
                    "[--located]\n";
       return 64;
@@ -618,9 +618,11 @@ int main(int argc, const char *argv[]) {
       else if (option == "--extent-pages")
         extentPages = parseCount(value, 1, SPLASH_KV_PAGE_INDEX_MASK, option);
       else if (option == "--kv-format") {
-        if (value != "int8" && value != "bf16")
-          throw std::invalid_argument("--kv-format takes int8 or bf16");
-        format = value == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+        if (value != "int8" && value != "int4" && value != "bf16")
+          throw std::invalid_argument("--kv-format takes int8, int4 or bf16");
+        format = value == "int8"  ? kv::Format::Int8
+                 : value == "int4" ? kv::Format::Int4
+                                   : kv::Format::BFloat16;
       }
       else if (option == "--compare-metallib") comparisonLibrary = value;
       else if (option == "--qsa") {

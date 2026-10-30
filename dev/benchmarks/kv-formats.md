@@ -1,9 +1,11 @@
 # Optional BF16 target KV
 
-`--kv-format bf16` selects unquantized BF16 target KV at startup. INT8 remains
-the default. Target weights, draft KV, GDN state, sampling, and scheduling are
-unchanged. BF16 uses about twice the target KV memory; it is a quality/memory
-choice, not a general speed improvement.
+`--kv-format bf16` selects unquantized BF16 target KV at startup, and
+`--kv-format int4` the packed 4-bit format. INT8 remains the default. Target
+weights, draft KV, GDN state, sampling, and scheduling are unchanged. BF16 uses
+about twice the target KV memory; it is a quality/memory choice, not a general
+speed improvement. INT4 uses half of INT8's: two dimensions share a byte, at
+INT8's one fp32 scale per (KV head, token) and 7 signed bits a value.
 
 ## Implementation boundaries
 
@@ -18,6 +20,14 @@ choice, not a general speed improvement.
 - The shared Metal page loop specializes on the stored element type. BF16 stores
   preserve source bits and attention omits quantization scales at compile time.
   INT8 entry points, argument order, arithmetic, and dispatch policies remain.
+- INT4 is INT8's page loop with the slabs read as `int4b_format` operands, which
+  Apple's tensor ops multiply against a bf16 left operand directly (verified at
+  runtime, see `.atlas/kv-quant/SPIKE.md`). It keeps INT8's scale regions, so
+  the page geometry, the store reduction and the softmax are unchanged; only
+  the store's write packs two dimensions into a byte. A block-sparse target's
+  gathered attention runs the same format-neutral staging: its step copies a
+  staged row byte by byte, so a packed 4-bit row moves whole and its stage is
+  read as an `int4b_format` operand like the page loop's slabs.
   Both formats share the FP32 split reduction. Format-generic code is named for
   paged KV; only the INT8 entry points, quantization and scales say q8.
 - Status reports the selected format and its actual byte geometry.
@@ -73,7 +83,7 @@ The combined Python suite ran 766 tests: 764 passed and two opt-in external CLI
 routing tests were skipped. Production/CPU/sanitizers and Python 3.12–3.14 CI
 passed, as did the full Metal gate with shader validation on M5 Pro 20.
 
-The real HTTP smoke and ABBA tools accept `--kv-format int8|bf16` and check
+The real HTTP smoke and ABBA tools accept `--kv-format int8|int4|bf16` and check
 the running format and its quantization/scale identity. M5 Pro 20 HTTP ABBA
 against main passed transcript/usage equality and the unchanged 2% regression
 limit for both models (three samples per build, 2K/8K cold and cached requests,

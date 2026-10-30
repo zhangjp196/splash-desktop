@@ -180,8 +180,10 @@ inline SplashSparseList splash_sparse_list(device const uint *lists, device cons
   }
 SPARSE_VERIFY_SPLIT(verify_attention_q8_sparse_kv2_g12, 2, 12, 256, int8_t)
 SPARSE_VERIFY_SPLIT(verify_attention_bf16_sparse_kv2_g12, 2, 12, 256, bfloat)
+SPARSE_VERIFY_SPLIT(verify_attention_q4_sparse_kv2_g12, 2, 12, 256, SplashKvInt4)
 SPARSE_VERIFY_LOCATED_SPLIT(verify_attention_q8_sparse_located_kv2_g12, 2, 12, 256, int8_t)
 SPARSE_VERIFY_LOCATED_SPLIT(verify_attention_bf16_sparse_located_kv2_g12, 2, 12, 256, bfloat)
+SPARSE_VERIFY_LOCATED_SPLIT(verify_attention_q4_sparse_located_kv2_g12, 2, 12, 256, SplashKvInt4)
 #undef SPARSE_VERIFY_LOCATED_SPLIT
 #undef SPARSE_VERIFY_SPLIT
 #undef SPARSE_VERIFY_SPLIT_BODY
@@ -249,6 +251,7 @@ SPARSE_VERIFY_REDUCE(verify_attention_sparse_reduce_kv2_g12, 2, 12, 256)
   }
 SPARSE_PREFILL_SPLIT(prefill_attention_q8_sparse_kv2_g12, 2, 12, 256, int8_t)
 SPARSE_PREFILL_SPLIT(prefill_attention_bf16_sparse_kv2_g12, 2, 12, 256, bfloat)
+SPARSE_PREFILL_SPLIT(prefill_attention_q4_sparse_kv2_g12, 2, 12, 256, SplashKvInt4)
 #undef SPARSE_PREFILL_SPLIT
 
 #define SPARSE_PREFILL_REDUCE(Name, Heads, Group, HeadDim)                     \

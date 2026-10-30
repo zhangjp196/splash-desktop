@@ -24,17 +24,30 @@ inline device uchar *splash_kv_extent(SplashKvPage page, uint index) {
 
 // One page's bytes of keys (or values) and of their scales in one layer.
 template <uint KVHeads, uint HeadDim, typename CacheElement> struct SplashKvPageBytes {
-  static constexpr constant bool Quantized = is_same<CacheElement, int8_t>::value;
+  static constexpr constant bool Quantized =
+      is_same<CacheElement, int8_t>::value || is_same<CacheElement, SplashKvInt4>::value;
   static constexpr constant uint Data =
-      KVHeads * SplashKvPageTokens * HeadDim * sizeof(CacheElement);
+      uint(KVHeads * SplashKvPageTokens * HeadDim) * SplashKvBits<CacheElement>::Value / 8;
   static constexpr constant uint Scale =
       Quantized ? KVHeads * SplashKvPageTokens * sizeof(float) : 0;
 };
 
-// One KV head's slab of each tensor of a page; BF16 has no scales.
+// What a slab's pointer addresses: bytes for the packed 4-bit format, the
+// element itself otherwise. Only the packed one is read through an MPP tensor.
+template <typename CacheElement> struct SplashKvStorage {
+  using Type = CacheElement;
+};
+template <> struct SplashKvStorage<SplashKvInt4> {
+  using Type = uchar;
+};
+
+// One KV head's slab of each tensor of a page; BF16 has no scales. With the
+// 4-bit element the pointers address bytes: two elements share one, so the
+// slab is read through a tensor<device int4b_format, ...> built from them
+// (paged_attention_tile.h), never indexed element by element.
 template <typename CacheElement> struct SplashKvPageTensors {
-  device CacheElement *keys;
-  device CacheElement *values;
+  device typename SplashKvStorage<CacheElement>::Type *keys;
+  device typename SplashKvStorage<CacheElement>::Type *values;
   device float *key_scales;
   device float *value_scales;
 };
@@ -60,11 +73,16 @@ template <uint KVHeads, uint HeadDim, typename CacheElement> struct SplashKvAddr
   SplashKvPageTensors<CacheElement> page(SplashKvPage entry) const {
     const uint index = splash_kv_page_index(entry);
     device uchar *region = splash_kv_extent(entry, index) + layer_offset;
+    using Stored = typename SplashKvStorage<CacheElement>::Type;
     SplashKvPageTensors<CacheElement> tensors{};
-    tensors.keys = reinterpret_cast<device CacheElement *>(region) +
-                   splash_kv_key_index<KVHeads, HeadDim>(index, head, 0, 0);
-    tensors.values = reinterpret_cast<device CacheElement *>(region + values_offset) +
-                     splash_kv_value_index<KVHeads, HeadDim>(index, head, 0, 0);
+    // The packed 4-bit slab advances by raw bytes (its stored type is uchar),
+    // the others by elements; splash_kv_stored gives each the right step.
+    tensors.keys = reinterpret_cast<device Stored *>(region) +
+                   splash_kv_stored<CacheElement>(
+                       splash_kv_key_index<KVHeads, HeadDim>(index, head, 0, 0));
+    tensors.values = reinterpret_cast<device Stored *>(region + values_offset) +
+                     splash_kv_stored<CacheElement>(
+                         splash_kv_value_index<KVHeads, HeadDim>(index, head, 0, 0));
     if constexpr (Bytes::Quantized) {
       const ulong scale_index = splash_q8_scale_index<KVHeads>(index, head, 0);
       tensors.key_scales =

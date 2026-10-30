@@ -3959,7 +3959,7 @@ int main(int argc, char **argv) {
     // (1); --spill-only stops after it.
     model::ModelLoadOptions loadOptions;
     if (argc < 3)
-      fail("usage: model-runtime-oracle METALLIB MODEL_ROOT [--kv-format int8|bf16] [--state-format fp32|bf16] "
+      fail("usage: model-runtime-oracle METALLIB MODEL_ROOT [--kv-format int8|int4|bf16] [--state-format fp32|bf16] "
            "[--ane-ffn-share SHARE] [--ane-ffn-fault EVALUATION] [--ple-memory SIZE] "
            "[--expert-memory SIZE] [--max-context TOKENS] [--spill-tokens N] [--spill-window PAGES] "
            "[--spill-buffers 1|2] [--images-only | --warmup-eos-only | --prefill-groups-only | --spill-only]");
@@ -3983,8 +3983,10 @@ int main(int argc, char **argv) {
       }
       else if (option == "--kv-format" && i + 1 < argc) {
         const std::string_view value(argv[++i]);
-        if (value != "int8" && value != "bf16") fail("invalid KV format");
-        format = value == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+        if (value != "int8" && value != "int4" && value != "bf16") fail("invalid KV format");
+        format = value == "int8"  ? kv::Format::Int8
+                 : value == "int4" ? kv::Format::Int4
+                                   : kv::Format::BFloat16;
       } else if (option == "--state-format" && i + 1 < argc) {
         const std::string_view value(argv[++i]);
         if (value != "fp32" && value != "bf16") fail("invalid state format");

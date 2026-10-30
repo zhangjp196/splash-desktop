@@ -109,11 +109,17 @@ class FakeServer:
 
 class SmokeRealTests(unittest.TestCase):
     def test_status_checks_selected_kv_format(self):
-        for format in ("int8", "bf16"):
+        # Each format's quantization pair, as the engine's /status reports it.
+        expected = {
+            "int8": ("symmetric_int8", "float32"),
+            "int4": ("symmetric_int4", "float32"),
+            "bf16": ("none", "none"),
+        }
+        for format, (quantization, scale_type) in expected.items():
             kv = {
                 "format": format,
-                "quantization": "symmetric_int8" if format == "int8" else "none",
-                "scale_type": "float32" if format == "int8" else "none",
+                "quantization": quantization,
+                "scale_type": scale_type,
             }
             status = {
                 "ready": True,
@@ -122,14 +128,15 @@ class SmokeRealTests(unittest.TestCase):
                 "identity": {"cache": {"block_tokens": 32}, "kv": kv},
             }
             smoke_real.validate_status(status, format)
-            with self.assertRaises(smoke_real.SmokeFailure):
-                smoke_real.validate_status(
-                    status, "bf16" if format == "int8" else "int8"
-                )
-            if format == "bf16":
-                kv["scale_type"] = "float32"
+            for other in expected:
+                if other == format:
+                    continue
                 with self.assertRaises(smoke_real.SmokeFailure):
-                    smoke_real.validate_status(status, "bf16")
+                    smoke_real.validate_status(status, other)
+            # A scale type that disagrees with the format fails too.
+            kv["scale_type"] = "none" if scale_type == "float32" else "float32"
+            with self.assertRaises(smoke_real.SmokeFailure):
+                smoke_real.validate_status(status, format)
         status["identity"] = {"cache": {"block_tokens": 32}}
         with self.assertRaises(smoke_real.SmokeFailure):
             smoke_real.validate_status(status)

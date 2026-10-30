@@ -368,19 +368,26 @@ private:
 };
 
 // Moves one block of SPLASH_ATTENTION_BLOCK_TOKENS tokens of layer `layer`,
-// every KV head's keys, values and, for INT8, their scales, from place
-// fromPlace of page fromPage of `from` to place toPlace of page toPage of
-// `to`: extents of `layout`, whose values are token-major, so that a head's
-// block is one run of each tensor. As a page whose blocks a spilled request
-// reads from its block cache no longer holds them, the source is left with
-// the complement of every byte it held: a kernel that still reads the block
-// there reads other bits.
+// every KV head's keys, values and, for the quantized formats, their scales,
+// from place fromPlace of page fromPage of `from` to place toPlace of page
+// toPage of `to`: extents of `layout`, whose values are token-major, so that a
+// head's block is one run of each tensor. As a page whose blocks a spilled
+// request reads from its block cache no longer holds them, the source is left
+// with the complement of every byte it held: a kernel that still reads the
+// block there reads other bits.
 inline void moveBlock(kv::Layout layout, uint32_t layer, const HostKvExtents &from, uint32_t fromPage,
                       uint32_t fromPlace, const HostKvExtents &to, uint32_t toPage, uint32_t toPlace) {
   if (!layout.valuesTokenMajor)
     throw std::invalid_argument("a block of values in dimension order is not one run");
   constexpr uint32_t tokens = SPLASH_ATTENTION_BLOCK_TOKENS;
-  const uint64_t elementBytes = layout.format == kv::Format::Int8 ? 1 : 2;
+  // A format's elements take 4 bits packed, 8 as INT8 and 16 as BF16. The
+  // packed format's runs start on a whole byte: a token's run of a head's
+  // dimensions is even, so no block boundary splits one.
+  const uint32_t bitsPerElement =
+      layout.format == kv::Format::Int4 ? 4 : layout.format == kv::Format::Int8 ? 8 : 16;
+  const auto bytesOf = [bitsPerElement](uint64_t elements) {
+    return elements * bitsPerElement / 8;
+  };
   const auto move = [&](uint32_t tensor, uint64_t source, uint64_t target, uint64_t bytes) {
     std::byte *moved = from.slab<std::byte>(layer, tensor, fromPage) + source;
     std::copy_n(moved, bytes, to.slab<std::byte>(layer, tensor, toPage) + target);
@@ -389,10 +396,10 @@ inline void moveBlock(kv::Layout layout, uint32_t layer, const HostKvExtents &fr
   for (uint32_t head = 0; head < layout.kvHeads; ++head) {
     // Token-major values sit where keys do (HostKvExtents::valueElement).
     for (const uint32_t tensor : {SPLASH_KV_KEYS, SPLASH_KV_VALUES})
-      move(tensor, splash_kv_key_element(head, fromPlace * tokens, 0, layout.headDimension) * elementBytes,
-           splash_kv_key_element(head, toPlace * tokens, 0, layout.headDimension) * elementBytes,
-           uint64_t{tokens} * layout.headDimension * elementBytes);
-    if (layout.format == kv::Format::Int8)
+      move(tensor, bytesOf(splash_kv_key_element(head, fromPlace * tokens, 0, layout.headDimension)),
+           bytesOf(splash_kv_key_element(head, toPlace * tokens, 0, layout.headDimension)),
+           bytesOf(uint64_t{tokens} * layout.headDimension));
+    if (kv::quantizedFormat(layout.format))
       for (const uint32_t tensor : {SPLASH_KV_KEY_SCALES, SPLASH_KV_VALUE_SCALES})
         move(tensor, splash_kv_scale_element(head, fromPlace * tokens) * sizeof(float),
              splash_kv_scale_element(head, toPlace * tokens) * sizeof(float), tokens * sizeof(float));

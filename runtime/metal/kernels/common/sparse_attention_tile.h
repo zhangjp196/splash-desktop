@@ -33,16 +33,19 @@ constant uint SplashSparseMinimumSplits = SPLASH_SPARSE_MINIMUM_SPLITS;
 constant uint SplashSparseBlockTokens = SPLASH_ATTENTION_BLOCK_TOKENS;
 
 template <typename CacheElement> struct SplashSparseStep {
-  // A step's staged keys or values take 8 KiB in either format, which leaves
+  // A step's staged keys or values take 8 KiB in INT8 and BF16, which leaves
   // the 96-row tile's scores and probabilities room in 32 KiB: 32 INT8 tokens
-  // or 16 BF16 ones.
+  // or 16 BF16 ones. The packed 4-bit format takes INT8's step of 32 tokens
+  // in 4 KiB, so that its blocks divide the partition unit whole.
+  static constexpr constant bool Packed4 = is_same<CacheElement, SplashKvInt4>::value;
   static constexpr constant uint Blocks =
-      is_same<CacheElement, int8_t>::value ? 8 : 4;
+      is_same<CacheElement, bfloat>::value ? 4 : 8;
   static constexpr constant uint Tokens = Blocks * SplashSparseBlockTokens;
 };
 
 static_assert(SplashSparsePartitionBlocks % SplashSparseStep<int8_t>::Blocks == 0 &&
-                  SplashSparsePartitionBlocks % SplashSparseStep<bfloat>::Blocks == 0,
+                  SplashSparsePartitionBlocks % SplashSparseStep<bfloat>::Blocks == 0 &&
+                  SplashSparsePartitionBlocks % SplashSparseStep<SplashKvInt4>::Blocks == 0,
               "a partition unit is whole steps of either format");
 static_assert(SplashKvPageTokens % SplashSparseBlockTokens == 0,
               "a page holds whole blocks");
@@ -76,16 +79,18 @@ inline uint splash_sparse_history_blocks(uint first_position, uint active_rows) 
 }
 
 // The scratch of a sparse tile: the step's list entries and their pages, its
-// staged keys or values [token][dimension] and, for INT8, their scales, and
-// the page loop's scores, probabilities and row statistics. A Located tile
-// keeps its blocks' places apart (splash_sparse_attention_tile), so that the
-// other tiles' scratch is no larger.
+// staged keys or values [token][dimension] and, for the quantized formats,
+// their scales, and the page loop's scores, probabilities and row statistics.
+// The stage is bytes: the packed 4-bit format has no addressable element of
+// its own. A Located tile keeps its blocks' places apart
+// (splash_sparse_attention_tile), so that the other tiles' scratch is no
+// larger.
 template <typename CacheElement, uint M, uint HeadDim> struct SplashSparseScratch {
   static constexpr constant uint Blocks = SplashSparseStep<CacheElement>::Blocks;
   static constexpr constant uint Tokens = SplashSparseStep<CacheElement>::Tokens;
   uint entries[Blocks];
   SplashKvPage pages[Blocks];
-  alignas(16) CacheElement stage[Tokens * HeadDim];
+  alignas(16) uchar stage[Tokens * HeadDim * SplashKvBits<CacheElement>::Value / 8];
   alignas(16) float key_scales[Tokens];
   alignas(16) float value_scales[Tokens];
   alignas(16) float scores[M * Tokens];
@@ -108,15 +113,19 @@ inline uint splash_sparse_place(threadgroup const uint *entries, threadgroup con
 
 // Copies one tensor's rows of the step's tokens (keys or values, both
 // token-major) into the stage, 16 bytes a thread at a time; tokens of a slot
-// past the list's end are zero, so that their products are too.
+// past the list's end are zero, so that their products are too. The copy is
+// byte-addressed, so that a packed 4-bit row (two elements a byte) moves
+// whole: its even element sits in the byte's low nibble and a chunk boundary
+// never splits a row.
 template <uint KVHeads, uint HeadDim, typename CacheElement, uint Tokens, bool Located>
 inline void splash_sparse_gather(
-    threadgroup CacheElement *stage, threadgroup const uint *entries,
+    threadgroup uchar *stage, threadgroup const uint *entries,
     threadgroup const SplashKvPage *pages, threadgroup const uint *places,
     const SplashKvAddressing<KVHeads, HeadDim, CacheElement> addressing, bool values,
     uint thread_index) {
   constexpr uint D = HeadDim;
-  constexpr uint RowChunks = D * sizeof(CacheElement) / 16;
+  constexpr uint RowBytes = D * SplashKvBits<CacheElement>::Value / 8;
+  constexpr uint RowChunks = RowBytes / 16;
   for (uint chunk = thread_index; chunk < Tokens * RowChunks; chunk += 256) {
     const uint token = chunk / RowChunks;
     const uint slot = token / SplashSparseBlockTokens;
@@ -125,11 +134,12 @@ inline void splash_sparse_gather(
       const uint page_token = splash_sparse_place<Located>(entries, places, slot) * SplashSparseBlockTokens +
                               token % SplashSparseBlockTokens;
       const SplashKvPageTensors<CacheElement> tensors = addressing.page(pages[slot]);
-      device const CacheElement *row =
-          (values ? tensors.values : tensors.keys) + ulong(page_token) * D;
+      using Stored = typename SplashKvStorage<CacheElement>::Type;
+      device const Stored *row =
+          (values ? tensors.values : tensors.keys) + splash_kv_stored<CacheElement>(ulong(page_token) * D);
       data = reinterpret_cast<device const uint4 *>(row)[chunk % RowChunks];
     }
-    reinterpret_cast<threadgroup uint4 *>(stage + token * D)[chunk % RowChunks] = data;
+    reinterpret_cast<threadgroup uint4 *>(stage + token * RowBytes)[chunk % RowChunks] = data;
   }
 }
 
@@ -242,7 +252,8 @@ inline void splash_sparse_attention_tile(
   constexpr ushort N = SplashSparseStep<CacheElement>::Tokens;
   constexpr uint Blocks = SplashSparseStep<CacheElement>::Blocks;
   constexpr ushort D = HeadDim;
-  constexpr bool Quantized = is_same<CacheElement, int8_t>::value;
+  constexpr bool Quantized = is_same<CacheElement, int8_t>::value ||
+                             is_same<CacheElement, SplashKvInt4>::value;
   constexpr uint AllRows = (1u << RowsPerTile) - 1u;
   static_assert(RowsPerTile <= SPLASH_ATTENTION_BLOCK_ROW_BITS, "an entry has a bit per row");
   const uint per_split = splash_sparse_split_entries(count, splits);
@@ -260,8 +271,13 @@ inline void splash_sparse_attention_tile(
   auto st = tensor(scratch.scores, dextents<int, 2>{N, M}, array<int, 2>{1, N});
   auto pt = tensor(scratch.probabilities, dextents<int, 2>{N, M}, array<int, 2>{1, N});
   // The stage holds the step's keys, then its values, both [token][dimension].
-  tensor<threadgroup CacheElement, dextents<int, 2>, tensor_inline> kv_stage(
-      scratch.stage, dextents<int, 2>{D, N}, array<int, 2>{1, D});
+  // Its operand type is the format's: the packed 4-bit one has no addressable
+  // element, so its bytes read as int4b_format (kv_paging.h), with dynamic
+  // extents, since a static extent(0) must be a multiple of 256 elements.
+  tensor<threadgroup typename SplashKvTensorElement<CacheElement>::Type,
+         dextents<int, 2>, tensor_inline> kv_stage(
+      reinterpret_cast<threadgroup typename SplashKvStorage<CacheElement>::Type *>(scratch.stage),
+      dextents<int, 2>{D, N});
   auto q0 = qt.slice<D, M>(0, 0);
   auto p0 = pt.template slice<N, M>(0, 0);
   auto stage0 = kv_stage.template slice<D, N>(0, 0);

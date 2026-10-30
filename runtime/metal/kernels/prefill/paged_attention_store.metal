@@ -50,4 +50,9 @@ PAGED_PREFILL_STORE(prefill_attention_bf16_store_kv4_d128, 4, 128, bfloat, false
 // Two KV heads whose values are token-major (sparse attention).
 PAGED_PREFILL_STORE(prefill_attention_q8_store_kv2_vt, 2, 256, int8_t, true)
 PAGED_PREFILL_STORE(prefill_attention_bf16_store_kv2_vt, 2, 256, bfloat, true)
+// The packed 4-bit format: INT8's scale geometry, two dimensions per byte.
+PAGED_PREFILL_STORE(prefill_attention_q4_store, 4, 256, SplashKvInt4, false)
+PAGED_PREFILL_STORE(prefill_attention_q4_store_kv2_g8, 2, 256, SplashKvInt4, false)
+PAGED_PREFILL_STORE(prefill_attention_q4_store_kv4_d128, 4, 128, SplashKvInt4, false)
+PAGED_PREFILL_STORE(prefill_attention_q4_store_kv2_vt, 2, 256, SplashKvInt4, true)
 #undef PAGED_PREFILL_STORE

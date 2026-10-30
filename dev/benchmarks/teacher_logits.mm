@@ -2,7 +2,7 @@
 // parity checks against another engine fed the same token ids.
 //
 //   teacher-logits METALLIB MODEL_ROOT TOKENS OUTPUT --window END:ROWS [--window END:ROWS...]
-//                  [--kv-format int8|bf16] [--state-format fp32|bf16]
+//                  [--kv-format int8|int4|bf16] [--state-format fp32|bf16]
 //                  [--expert-memory SIZE] [--ple-memory SIZE] [--captures yes]
 //
 // TOKENS holds little-endian uint32 token ids, read as they are: no BOS, no
@@ -223,7 +223,7 @@ int main(int argc, char **argv) {
     try {
       if (argc < 5) {
         std::cerr << "usage: teacher-logits METALLIB MODEL_ROOT TOKENS OUTPUT --window END:ROWS "
-                     "[--window END:ROWS...] [--kv-format int8|bf16] [--state-format fp32|bf16] "
+                     "[--window END:ROWS...] [--kv-format int8|int4|bf16] [--state-format fp32|bf16] "
                      "[--expert-memory SIZE] [--ple-memory SIZE] [--captures yes]\n";
         return 2;
       }
@@ -245,9 +245,11 @@ int main(int argc, char **argv) {
           captures = true;
         }
         else if (option == "--kv-format") {
-          if (value != "int8" && value != "bf16")
-            throw std::invalid_argument("--kv-format takes int8 or bf16");
-          format = value == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+          if (value != "int8" && value != "int4" && value != "bf16")
+            throw std::invalid_argument("--kv-format takes int8, int4 or bf16");
+          format = value == "int8"  ? kv::Format::Int8
+                   : value == "int4" ? kv::Format::Int4
+                                     : kv::Format::BFloat16;
         } else if (option == "--state-format") {
           if (value != "fp32" && value != "bf16")
             throw std::invalid_argument("--state-format takes fp32 or bf16");
@@ -296,7 +298,8 @@ int main(int argc, char **argv) {
       for (uint32_t page = 0; page < lanePages; ++page)
         pageTable[page] = page;
       std::printf("device %s, %s KV, %s state, %zu ids\n", backend.capabilities().deviceName.c_str(),
-                  format == kv::Format::Int8 ? "int8" : "bf16", std::string(ops::formatName(stateFormat)).c_str(),
+                  format == kv::Format::Int8 ? "int8" : format == kv::Format::Int4 ? "int4" : "bf16",
+                  std::string(ops::formatName(stateFormat)).c_str(),
                   tokens.size());
       for (size_t index = 0; index < windows.size(); ++index)
         runWindow(executor, tokens, windows[index], index + 1, pageTable, vocabulary, argv[4],

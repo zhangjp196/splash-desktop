@@ -94,6 +94,13 @@ PAGED_PREFILL_SPLIT(prefill_attention_bf16_split_kv2_g8, 2, 8, 256, 0, bfloat)
 PAGED_PREFILL_SPLIT(prefill_attention_bf16_split_kv2_g16, 2, 16, 256, 0, bfloat)
 PAGED_PREFILL_SPLIT(prefill_attention_bf16_split_kv4_g8_d128, 4, 8, 128, 0, bfloat)
 PAGED_PREFILL_SPLIT(prefill_attention_bf16_split_kv4_g8_d128_w512, 4, 8, 128, 512, bfloat)
+// The packed 4-bit format: the same page loop and scales as INT8, with the
+// slabs read as int4b_format operands.
+PAGED_PREFILL_SPLIT(prefill_attention_q4_split, 4, 6, 256, 0, SplashKvInt4)
+PAGED_PREFILL_SPLIT(prefill_attention_q4_split_kv2_g8, 2, 8, 256, 0, SplashKvInt4)
+PAGED_PREFILL_SPLIT(prefill_attention_q4_split_kv2_g16, 2, 16, 256, 0, SplashKvInt4)
+PAGED_PREFILL_SPLIT(prefill_attention_q4_split_kv4_g8_d128, 4, 8, 128, 0, SplashKvInt4)
+PAGED_PREFILL_SPLIT(prefill_attention_q4_split_kv4_g8_d128_w512, 4, 8, 128, 512, SplashKvInt4)
 #undef PAGED_PREFILL_SPLIT
 
 #define PAGED_PREFILL_REDUCE(Name, Heads, Group, HeadDim, Window)              \

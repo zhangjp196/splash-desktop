@@ -1,6 +1,6 @@
 // Per-kernel GPU time attribution for the production executor.
 //
-//   decode-profile METALLIB MODEL_ROOT [--prompt-tokens N] [--cycles K] [--kv-format int8|bf16]
+//   decode-profile METALLIB MODEL_ROOT [--prompt-tokens N] [--cycles K] [--kv-format int8|int4|bf16]
 //                  [--state-format fp32|bf16] [--expert-memory SIZE] [--ple-memory SIZE]
 //                  [--dispatch-list FILE]
 //   decode-profile METALLIB MODEL_ROOT --images HxW[,HxW...] [--cycles K]
@@ -317,7 +317,7 @@ int main(int argc, char **argv) {
     try {
       if (argc < 3) {
         std::cerr << "usage: decode-profile METALLIB MODEL_ROOT "
-                     "[--prompt-tokens N] [--cycles K] [--kv-format int8|bf16] "
+                     "[--prompt-tokens N] [--cycles K] [--kv-format int8|int4|bf16] "
                      "[--state-format fp32|bf16] [--expert-memory SIZE] [--ple-memory SIZE] "
                      "[--dispatch-list FILE]\n"
                      "       decode-profile METALLIB MODEL_ROOT "
@@ -344,9 +344,11 @@ int main(int argc, char **argv) {
           cycles = parseCount(argv[index + 1], "--cycles");
         else if (option == "--kv-format") {
           const std::string_view value(argv[index + 1]);
-          if (value != "int8" && value != "bf16")
-            throw std::invalid_argument("--kv-format takes int8 or bf16");
-          format = value == "int8" ? kv::Format::Int8 : kv::Format::BFloat16;
+          if (value != "int8" && value != "int4" && value != "bf16")
+            throw std::invalid_argument("--kv-format takes int8, int4 or bf16");
+          format = value == "int8"  ? kv::Format::Int8
+                   : value == "int4" ? kv::Format::Int4
+                                     : kv::Format::BFloat16;
           textOptions = true;
         } else if (option == "--state-format") {
           const std::string_view value(argv[index + 1]);

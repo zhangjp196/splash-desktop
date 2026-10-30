@@ -76,6 +76,13 @@ PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv2_g8, 2, 8, 256, 0, bfloat)
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv2_g16, 2, 16, 256, 0, bfloat)
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv4_g8_d128, 4, 8, 128, 0, bfloat)
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv4_g8_d128_w512, 4, 8, 128, 512, bfloat)
+// The packed 4-bit format: INT8's scale geometry and page loop over
+// int4b_format slabs.
+PAGED_VERIFY_SPLIT(verify_attention_q4_split, 4, 6, 256, 0, SplashKvInt4)
+PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv2_g8, 2, 8, 256, 0, SplashKvInt4)
+PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv2_g16, 2, 16, 256, 0, SplashKvInt4)
+PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv4_g8_d128, 4, 8, 128, 0, SplashKvInt4)
+PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv4_g8_d128_w512, 4, 8, 128, 512, SplashKvInt4)
 #undef PAGED_VERIFY_SPLIT
 #undef PAGED_VERIFY_TILE_AT
 #undef PAGED_VERIFY_SCRATCH

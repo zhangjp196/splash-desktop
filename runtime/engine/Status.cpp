@@ -408,8 +408,11 @@ std::string runtimeStatusJson(
       << json::quote(cacheIdentity.targetModelSha256)
       << ",\"format\":" << json::quote(kv::formatName(kvFormat))
       << ",\"quantization\":"
-      << json::quote(kvFormat == kv::Format::Int8 ? "symmetric_int8" : "none")
-      << ",\"scale_type\":" << json::quote(kvFormat == kv::Format::Int8 ? "float32" : "none")
+      << json::quote(kvFormat == kv::Format::Int8   ? "symmetric_int8"
+                     : kvFormat == kv::Format::Int4 ? "symmetric_int4"
+                                                    : "none")
+      << ",\"scale_type\":"
+      << json::quote(kv::quantizedFormat(kvFormat) ? "float32" : "none")
       << ",\"key_layout\":\"token_major\""
       << ",\"value_layout\":"
       << json::quote(cacheIdentity.kvLayout.valuesTokenMajor ? "token_major" : "dimension_major") << "}},"

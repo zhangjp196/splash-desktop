@@ -19,6 +19,7 @@
 "field.language_only" = "仅文本（跳过视觉）";
 "field.kv" = "KV 缓存";
 "kv.int8" = "8 位";
+"kv.int4" = "4 位";
 "kv.bf16" = "BF16";
 "field.neural_engine" = "使用神经引擎（ANE）";
 "help.lan_access.no_key" = "未设置 API 密钥：任何能连到这台 Mac 的人都能使用模型。";

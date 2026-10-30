@@ -119,7 +119,14 @@ std::string projectionKernel(std::string_view phase, const CompiledAttention &co
 }
 
 // A layout's KV format, as its kernels' names hold it.
-std::string kernelFormat(kv::Layout layout) { return layout.format == kv::Format::BFloat16 ? "bf16" : "q8"; }
+std::string kernelFormat(kv::Layout layout) {
+  switch (layout.format) {
+  case kv::Format::BFloat16: return "bf16";
+  case kv::Format::Int4: return "q4";
+  case kv::Format::Int8: break;
+  }
+  return "q8";
+}
 
 // One dispatch normalizes both the queries and the keys, so their norms must
 // share a stored type.

@@ -296,6 +296,17 @@ void testCleanRuntimeStatus(const char *goldenPath) {
   require(bf16Status.find("\"format\":\"bf16\"") != std::string::npos &&
               bf16Status.find("\"scale_type\":\"none\"") != std::string::npos,
           "BF16 cache identity advertised INT8 storage");
+  // The packed 4-bit format keeps INT8's scales and says so, with its own
+  // storage name so that a cache cannot mix pages of the two.
+  auto int4Identity = identity;
+  int4Identity.kvLayout = kv::Layout{16, 4, 256, kv::Format::Int4};
+  const auto int4Status = runtimeStatusJson(memoryPlan, engine, metal, warmup, audit(memoryPlan),
+                        metrics, executorTelemetry, int4Identity, governor, true,
+                        {}, {}, {}, {}, {}, {}, {});
+  require(int4Status.find("\"format\":\"int4\"") != std::string::npos &&
+              int4Status.find("\"quantization\":\"symmetric_int4\"") != std::string::npos &&
+              int4Status.find("\"scale_type\":\"float32\"") != std::string::npos,
+          "INT4 status misreported its quantization or scales");
   // YaRN's factor, to the digits that read back as it, as a context of a
   // million tokens takes it, and its original window, which every key went
   // through; the rest of the document keeps its precision.

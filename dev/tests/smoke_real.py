@@ -201,12 +201,13 @@ def validate_status(status: dict, kv_format: str | None = None) -> None:
     identity = status.get("identity", {})
     kv = kv_identity(identity)
     actual = kv.get("format")
-    require(actual in ("int8", "bf16"), "unknown KV format")
+    require(actual in ("int8", "int4", "bf16"), "unknown KV format")
     if kv_format is not None:
         require(actual == kv_format, "runtime KV format differs from requested format")
-    quantization, scale_type = (
-        ("symmetric_int8", "float32") if actual == "int8" else ("none", "none")
-    )
+    quantization, scale_type = {
+        "int8": ("symmetric_int8", "float32"),
+        "int4": ("symmetric_int4", "float32"),
+    }.get(actual, ("none", "none"))
     require(kv.get("quantization") == quantization, "wrong KV quantization")
     require(kv.get("scale_type") == scale_type, "wrong KV scale type")
 
@@ -1785,7 +1786,7 @@ def add_server_arguments(parser):
         "--verify-rows); a MoE model's greedy output repeats only with all",
     )
     parser.add_argument("--max-image-pixels", type=int)
-    parser.add_argument("--kv-format", choices=("int8", "bf16"), default="int8")
+    parser.add_argument("--kv-format", choices=("int8", "int4", "bf16"), default="int8")
     parser.add_argument("--startup-timeout", type=float, default=1800)
 
 

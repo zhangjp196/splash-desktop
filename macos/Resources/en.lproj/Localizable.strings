@@ -19,6 +19,7 @@
 "field.language_only" = "Text only (skip vision)";
 "field.kv" = "KV cache";
 "kv.int8" = "8-bit";
+"kv.int4" = "4-bit";
 "kv.bf16" = "BF16";
 "field.neural_engine" = "Use Neural Engine (ANE)";
 "help.lan_access.no_key" = "No API key is set: anyone who can reach this Mac can use the model.";

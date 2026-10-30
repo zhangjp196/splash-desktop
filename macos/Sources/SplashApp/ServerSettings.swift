@@ -29,7 +29,7 @@ struct ServerSettings: Codable, Equatable {
     /// The reasoning levels the server accepts; the empty string is the model
     /// default and is not one of them.
     static let reasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-    static let kvFormats = ["int8", "bf16"]
+    static let kvFormats = ["int8", "int4", "bf16"]
     static let verifyRowsOptions = ["auto", "all"]
 
     var modelMode = AppModel.ModelMode.upstream
