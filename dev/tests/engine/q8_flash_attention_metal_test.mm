@@ -44,12 +44,19 @@ struct Shape {
   uint32_t queryHeads() const { return kvHeads * queryHeadsPerKvHead; }
   uint32_t fusedRows() const { return kRows * queryHeadsPerKvHead; }
   bool sparse() const { return tokenMajor; }
-  uint32_t parts() const { return sparse() ? 1 : SPLASH_ATTENTION_TILE_PARTS(queryHeadsPerKvHead); }
+  uint32_t prefillParts() const {
+    return sparse() ? 1 : SPLASH_ATTENTION_TILE_PARTS(queryHeadsPerKvHead);
+  }
+  uint32_t verifyParts() const {
+    return sparse() ? 1 : SPLASH_VERIFY_ATTENTION_TILE_PARTS(queryHeadsPerKvHead, 0);
+  }
   // The partial of a fused row of the tile of KV head `head` from split
-  // `split` of `slotSplits`: [KV head][part][split][part's fused row].
-  uint64_t partialRow(uint32_t head, uint32_t slotSplits, uint32_t split, uint32_t row) const {
-    const uint32_t partRows = fusedRows() / parts();
-    return ((uint64_t{head} * parts() + row / partRows) * slotSplits + split) * partRows + row % partRows;
+  // `split` of `slotSplits`, in a tile run as `parts` parts:
+  // [KV head][part][split][part's fused row].
+  uint64_t partialRow(uint32_t head, uint32_t slotSplits, uint32_t split, uint32_t row,
+                      uint32_t parts) const {
+    const uint32_t partRows = fusedRows() / parts;
+    return ((uint64_t{head} * parts + row / partRows) * slotSplits + split) * partRows + row % partRows;
   }
   Layout layout() const {
     return {.attentionLayers = 1, .kvHeads = kvHeads, .headDimension = kHeadDimension,
@@ -493,7 +500,7 @@ Pipelines makePipelines(id<MTLDevice> device, id<MTLLibrary> library,
   std::cout << "pipeline=" << result.splitName << " threadgroup_bytes=" << scratch
             << (shaderValidationEnabled() ? " (instrumented by shader validation)" : "")
             << '\n';
-  require(scratch == result.prefillSplit.staticThreadgroupMemoryLength,
+  require(scratch <= result.prefillSplit.staticThreadgroupMemoryLength,
           "verify tile left the shared score/probability footprint");
   return result;
 }
@@ -562,7 +569,7 @@ Dispatch dispatch(id<MTLDevice> device, id<MTLCommandQueue> queue,
     [encoder useResource:extent usage:MTLResourceUsageRead];
   // The sparse split's grid is one-dimensional (ops::PagedAttention::verifyPlan).
   [encoder dispatchThreadgroups:shape.sparse() ? MTLSizeMake(shape.kvHeads * splits, 1, width)
-                                               : MTLSizeMake(shape.kvHeads * shape.parts(), splits, width)
+                                               : MTLSizeMake(shape.kvHeads * shape.verifyParts(), splits, width)
           threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   [encoder setComputePipelineState:reduce];
   [encoder setBuffer:partials offset:0 atIndex:0];
@@ -615,7 +622,7 @@ Dispatch dispatchPrefill(id<MTLDevice> device, id<MTLCommandQueue> queue,
   [encoder setBytes:&params length:sizeof(params) atIndex:paramsIndex];
   for (id<MTLBuffer> extent : data.extents)
     [encoder useResource:extent usage:MTLResourceUsageRead];
-  [encoder dispatchThreadgroups:MTLSizeMake(shape.kvHeads * shape.parts(), 1, splits)
+  [encoder dispatchThreadgroups:MTLSizeMake(shape.kvHeads * shape.prefillParts(), 1, splits)
           threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   [encoder setComputePipelineState:reduce];
   [encoder setBuffer:partials offset:0 atIndex:0];
@@ -824,38 +831,54 @@ void checkReduce(id<MTLDevice> device, id<MTLCommandQueue> queue,
                  id<MTLLibrary> library, Shape shape, uint32_t splits,
                  uint32_t activeRows) {
   const uint32_t m = shape.fusedRows(), d = kHeadDimension;
-  auto partials = makeBuffer(device, uint64_t{shape.kvHeads} * splits * m * d * 4);
-  auto stats = makeBuffer(device, uint64_t{shape.kvHeads} * splits * m * 2 * 4);
-  auto *p = static_cast<float *>(partials.contents);
-  auto *t = static_cast<float *>(stats.contents);
-  for (uint32_t head = 0; head < shape.kvHeads; ++head)
-    for (uint32_t split = 0; split < splits; ++split)
-      for (uint32_t row = 0; row < m; ++row) {
-        const uint64_t index = shape.partialRow(head, splits, split, row);
-        const bool active = row / shape.queryHeadsPerKvHead < activeRows;
-        // Alternate underflow-scale differences and fractional exp weights.
-        const float spacing = row % 2 ? 0.25f : 500.0f;
-        t[index * 2] = active ? float(int(split % 5) - 2) * spacing : -INFINITY;
-        t[index * 2 + 1] = active ? 1.0f + float(split % 7) : 0.0f;
-        for (uint32_t dim = 0; dim < d; ++dim)
-          p[index * d + dim] = float(int((split * 71 + dim * 37 + row * 13) % 257) - 128) * 0.125f;
-      }
+  // The partials of one phase's tile, laid out by its own parts.
+  struct Scratch {
+    id<MTLBuffer> partials;
+    id<MTLBuffer> statistics;
+    float *p;
+    float *t;
+  };
+  const auto scratch = [&](uint32_t parts) {
+    Scratch result{
+        makeBuffer(device, uint64_t{shape.kvHeads} * splits * m * d * 4),
+        makeBuffer(device, uint64_t{shape.kvHeads} * splits * m * 2 * 4), nullptr,
+        nullptr};
+    result.p = static_cast<float *>(result.partials.contents);
+    result.t = static_cast<float *>(result.statistics.contents);
+    for (uint32_t head = 0; head < shape.kvHeads; ++head)
+      for (uint32_t split = 0; split < splits; ++split)
+        for (uint32_t row = 0; row < m; ++row) {
+          const uint64_t index =
+              shape.partialRow(head, splits, split, row, parts);
+          const bool active = row / shape.queryHeadsPerKvHead < activeRows;
+          // Alternate underflow-scale differences and fractional exp weights.
+          const float spacing = row % 2 ? 0.25f : 500.0f;
+          result.t[index * 2] =
+              active ? float(int(split % 5) - 2) * spacing : -INFINITY;
+          result.t[index * 2 + 1] = active ? 1.0f + float(split % 7) : 0.0f;
+          for (uint32_t dim = 0; dim < d; ++dim)
+            result.p[index * d + dim] =
+                float(int((split * 71 + dim * 37 + row * 13) % 257) - 128) * 0.125f;
+        }
+    return result;
+  };
   // One phase's merge of the partials into a poisoned output; a sparse
   // reduce without lists binds another buffer of the dispatch for their
   // counts, of which it reads nothing.
-  const auto reduce = [&](const char *phase, const auto &params) {
+  const auto reduce = [&](const char *phase, const auto &params,
+                          const Scratch &data) {
     id<MTLBuffer> output = makeBuffer(device, uint64_t{shape.kvHeads} * kStride *
                                                  shape.queryHeadsPerKvHead * d * 2);
     std::memset(output.contents, 0xa5, output.length);
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:makePipeline(device, library, shape.reduce(phase))];
-    [encoder setBuffer:partials offset:0 atIndex:0];
-    [encoder setBuffer:stats offset:0 atIndex:1];
+    [encoder setBuffer:data.partials offset:0 atIndex:0];
+    [encoder setBuffer:data.statistics offset:0 atIndex:1];
     [encoder setBuffer:output offset:0 atIndex:2];
     NSUInteger paramsIndex = 3;
     if (shape.sparse())
-      [encoder setBuffer:partials offset:0 atIndex:paramsIndex++];
+      [encoder setBuffer:data.partials offset:0 atIndex:paramsIndex++];
     [encoder setBytes:&params length:sizeof(params) atIndex:paramsIndex];
     [encoder dispatchThreadgroups:MTLSizeMake(shape.kvHeads, m, 1)
            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -865,7 +888,8 @@ void checkReduce(id<MTLDevice> device, id<MTLCommandQueue> queue,
   };
   // The fp64 merge of each active row, the inactive rows' zeros and the
   // poison kept past the eight-row view.
-  const auto check = [&](id<MTLBuffer> output) {
+  const auto check = [&](id<MTLBuffer> output, const Scratch &data,
+                         uint32_t parts) {
     const auto *out = static_cast<const BFloat16Bits *>(output.contents);
     for (uint32_t head = 0; head < shape.kvHeads; ++head)
       for (uint32_t row = 0; row < m; ++row) {
@@ -878,14 +902,17 @@ void checkReduce(id<MTLDevice> device, id<MTLCommandQueue> queue,
         }
         double maximum = -INFINITY;
         for (uint32_t split = 0; split < splits; ++split)
-          maximum = std::max(maximum, double(t[shape.partialRow(head, splits, split, row) * 2]));
+          maximum = std::max(
+              maximum,
+              double(data.t[shape.partialRow(head, splits, split, row, parts) * 2]));
         for (uint32_t dim = 0; dim < d; ++dim) {
           double numerator = 0, denominator = 0;
           for (uint32_t split = 0; split < splits; ++split) {
-            const uint64_t index = shape.partialRow(head, splits, split, row);
-            const double weight = std::exp(double(t[index * 2]) - maximum);
-            numerator += weight * p[index * d + dim];
-            denominator += weight * t[index * 2 + 1];
+            const uint64_t index =
+                shape.partialRow(head, splits, split, row, parts);
+            const double weight = std::exp(double(data.t[index * 2]) - maximum);
+            numerator += weight * data.p[index * d + dim];
+            denominator += weight * data.t[index * 2 + 1];
           }
           const double expected = numerator / denominator;
           const double actual = bfloat16ToFloat(out[offset + dim]);
@@ -912,15 +939,19 @@ void checkReduce(id<MTLDevice> device, id<MTLCommandQueue> queue,
   const uint32_t pages = splits * splitTokens / 32;
   id<MTLBuffer> verify;
   if (activeRows == kRows) {
+    const uint32_t parts = shape.verifyParts();
+    const Scratch data = scratch(parts);
     const VerifyAttentionParams params{committed, pages, {1, 0}, splits, splits, 0, 0};
-    verify = reduce("verify", params);
-    check(verify);
+    verify = reduce("verify", params, data);
+    check(verify, data, parts);
   }
   if (splits <= SPLASH_PREFILL_ATTENTION_MAXIMUM_SPLITS) {
+    const uint32_t parts = shape.prefillParts();
+    const Scratch data = scratch(parts);
     const PrefillAttentionParams params{committed, activeRows, kStride, pages, {1, 0}, splits, 0, 0};
-    id<MTLBuffer> prefill = reduce("prefill", params);
-    check(prefill);
-    if (verify)
+    id<MTLBuffer> prefill = reduce("prefill", params, data);
+    check(prefill, data, parts);
+    if (verify && parts == shape.verifyParts())
       require(!std::memcmp(verify.contents, prefill.contents, verify.length),
               "verify and prefill entries merged the same partials differently");
   }

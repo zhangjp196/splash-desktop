@@ -58,6 +58,15 @@ uint32_t tileParts(uint32_t queryHeads, kv::Layout layout) {
   return layout.valuesTokenMajor ? 1 : SPLASH_ATTENTION_TILE_PARTS(queryHeads / layout.kvHeads);
 }
 
+// The parts of a layout's verify tiles: a verify tile's whole-history group
+// of six runs two (SPLASH_VERIFY_ATTENTION_TILE_PARTS), the prefill macro's
+// parts otherwise.
+uint32_t verifyTileParts(uint32_t queryHeads, kv::Layout layout) {
+  return layout.valuesTokenMajor
+             ? 1
+             : SPLASH_VERIFY_ATTENTION_TILE_PARTS(queryHeads / layout.kvHeads, 0);
+}
+
 // A layout's KV format, as its kernels' names hold it, without the separator:
 // "q8", "q4" or "bf16".
 std::string kernelFormatName(kv::Layout layout) {
@@ -180,7 +189,7 @@ void checkPlans(uint32_t queryHeads, kv::Layout layout) {
                 plan.workspace.partialsBytes == fused * 256 * 4 &&
                 plan.workspace.statisticsBytes == fused * 2 * 4 &&
                 plan.splitGroups.x ==
-                    (sparse ? layout.kvHeads * plan.splits : layout.kvHeads * tileParts(queryHeads, layout)) &&
+                    (sparse ? layout.kvHeads * plan.splits : layout.kvHeads * verifyTileParts(queryHeads, layout)) &&
                 plan.splitGroups.y == (sparse ? 1 : plan.splits) &&
                 plan.splitGroups.z == lanes &&
                 plan.reduceGroups.y == 8 * queryHeads / layout.kvHeads &&
