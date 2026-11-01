@@ -934,6 +934,30 @@ inline bool unselectable_logit(float value) {
   return (bits & 0x7fffffffu) > 0x7f800000u || bits == 0xff800000u;
 }
 
+// One thread per logit_bias entry and selected row: the entry's value is
+// added to that row's logit before the penalties rewrite it.
+kernel void decode_sample_bias(device float *logits [[buffer(0)]],
+                               device const uint *tokens [[buffer(1)]],
+                               device const float *values [[buffer(2)]],
+                               constant BiasParams &params [[buffer(3)]],
+                               uint2 position [[thread_position_in_grid]]) {
+  const uint entry = position.x;
+  const uint selected = position.y;
+  if (entry >= params.max_entries || selected >= params.selected_rows)
+    return;
+  const uint lane = selected / params.rows;
+  const uint row = params.row_offset + selected % params.rows;
+  if (lane >= SPLASH_MAXIMUM_BATCH_WIDTH || entry >= params.counts[lane])
+    return;
+  const uint token = tokens[lane * params.max_entries + entry];
+  if (token >= params.vocabulary)
+    return;
+  device float &logit =
+      logits[(lane * SPLASH_TARGET_VERIFY_ROWS + row) * params.vocabulary +
+             token];
+  logit += values[lane * params.max_entries + entry];
+}
+
 // The sampling penalties of one logit: repetition divides a positive
 // logit and multiplies a negative one when the prompt or the output holds
 // the token, and presence and frequency lower it by the output's count of

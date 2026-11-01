@@ -8,7 +8,7 @@ from dataclasses import replace
 from server import protocol as wire
 
 _HEADER = struct.Struct("<4sHHQ")
-_REQUEST = struct.Struct("<QBBQQIIIffIffffQIIIQQIII")
+_REQUEST = struct.Struct("<QBBQQIIIffIffffQIIIIIQQIII")
 _IMAGE_SPAN = struct.Struct("<IIIIQQ")
 _MASK_RESPONSE = struct.Struct("<QQI")
 _ID = struct.Struct("<Q")
@@ -83,6 +83,17 @@ def _event_payload(event: wire.EngineEvent) -> tuple[wire.FrameType, bytes]:
                 len(event.tokens),
                 *event.tokens,
             )
+        case wire.LogprobsEvent():
+            payload = bytearray(
+                struct.pack(
+                    "<QII", event.request_id, event.sequence_offset, len(event.values)
+                )
+            )
+            for token, logprob, top in event.values:
+                payload += struct.pack("<IfI", token, logprob, len(top))
+                for top_token, top_logprob in top:
+                    payload += struct.pack("<If", top_token, top_logprob)
+            return wire.FrameType.LOGPROBS, bytes(payload)
         case wire.MaskRequestEvent():
             return wire.FrameType.MASK_REQUEST, struct.pack(
                 f"<QQII{len(event.simulation_tokens)}I",
@@ -157,6 +168,8 @@ def _decode_request(payload: bytes) -> wire.RequestFrame:
         score_count,
         generation_prompt_tokens,
         flags,
+        top_logprobs,
+        bias_count,
         salt_lo,
         salt_hi,
         thinking_tokens,
@@ -177,7 +190,13 @@ def _decode_request(payload: bytes) -> wire.RequestFrame:
     pixels = bytes(payload[offset : offset + pixel_bytes])
     offset += pixel_bytes
     scores = _words(payload, offset, score_count)
-    thinking_end = _words(payload, offset + 4 * score_count, thinking_end_count)
+    offset += 4 * score_count
+    end = _words(payload, offset, thinking_end_count)
+    offset += 4 * thinking_end_count
+    bias_tokens = _words(payload, offset, bias_count)
+    offset += 4 * bias_count
+    bias_values = struct.unpack_from(f"<{bias_count}f", payload, offset)
+    offset += 4 * bias_count
     return wire.RequestFrame(
         request_id,
         wire.RequestPriority(priority),
@@ -194,8 +213,11 @@ def _decode_request(payload: bytes) -> wire.RequestFrame:
         generation_prompt_tokens,
         wire.RequestFlag(flags),
         salt_lo | salt_hi << 64,
+        top_logprobs,
+        bias_tokens,
+        bias_values,
         (
-            wire.ThinkingBudget(thinking_tokens, thinking_end, thinking_also_ends)
+            wire.ThinkingBudget(thinking_tokens, end, thinking_also_ends)
             if thinking_tokens != 0xFFFFFFFF or thinking_end_count
             else None
         ),

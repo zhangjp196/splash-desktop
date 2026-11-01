@@ -321,3 +321,21 @@ GPU workloads, and report chip/GPU cores, memory, Splash version, model
 revision, actual input/output token counts, and cache hits with results. Keep
 cold prefill, cached TTFT and sustained decode separate; a UI token rate alone
 does not measure end-to-end agent performance.
+
+For how one running server scales under concurrent chat requests, with the
+fans and hot sensors it reports, connect the benchmark to that server:
+
+```sh
+make benchmark-concurrency MODEL=mlx-community/Qwen3.8-27B-4bit \
+  BASE_URL=http://127.0.0.1:8123 \
+  CONCURRENCY_ARGS='--requests 1,2,4,8 --samples 3 --max-tokens 128'
+```
+
+It never starts a server, so run `splash serve` first. Each burst has its own
+nonce, so the requests do not share a cached prefix; the report separates
+aggregate output rate, time to first token, per-request decode rate, peak fan
+RPM and hottest sensor. On a laptop the bursts heat the machine within seconds,
+so compare bursts of the same width across cool starts, and read the fan and
+temperature peaks beside the rate. For a cold prefill, pass
+`CONCURRENCY_ARGS='--requests 1 --samples 1 --max-tokens 16 --prompt-chars 128000'`
+and read the time to first token; it is the prefill time for that prompt.

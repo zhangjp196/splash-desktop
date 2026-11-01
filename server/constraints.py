@@ -3,7 +3,7 @@
 import threading
 from concurrent.futures import Future, wait
 
-from llguidance import LLExecutor, LLMatcher, LLTokenizer
+from llguidance import LLExecutor, LLMatcher, LLTokenizer, grammar_from
 from llguidance.hf import from_tokenizer as guidance_tokenizer
 from llguidance.numpy import (
     allocate_token_bitmask,
@@ -26,6 +26,7 @@ class TokenConstraint:
     def __init__(self, matcher, executor, chat_format):
         self.matcher = matcher
         self.executor = executor
+        self.chat_format = chat_format
         # The model's vocabulary, which each mask covers, and the engine's
         # stop tokens, which end a grammar's output.
         self.vocabulary = chat_format.vocabulary
@@ -46,6 +47,14 @@ class TokenConstraint:
     def finish(self):
         """Checks the tokens generated after the last mask."""
         self._consume_committed()
+
+    def clone(self):
+        """Another constraint over the same grammar, for another choice of
+        one request: the compiled matcher is deep-copied, so the choices
+        consume it independently."""
+        return TokenConstraint(
+            self.matcher.deep_copy(), self.executor, self.chat_format
+        )
 
     def masks(self, simulation_tokens):
         self._consume_committed()
@@ -146,6 +155,17 @@ def _grammar_error(error):
     if error.startswith("panic"):
         return APIError(400, "tool or output schema is too large to compile")
     return APIError(400, f"unsupported output schema: {error.splitlines()[0]}")
+
+
+def grammar_for_source(format, source):
+    """A request's own grammar or regex as the grammar `ConstraintFactory`
+    compiles: GBNF and regex go through llguidance's own converters. A source
+    the converter refuses is the request's error, not the server's."""
+    try:
+        return grammar_from(format, source)
+    except Exception as error:
+        reason = str(error).splitlines()[0] if str(error) else type(error).__name__
+        raise APIError(400, f"unsupported {format} grammar: {reason}") from error
 
 
 class ConstraintFactory:

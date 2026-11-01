@@ -65,6 +65,9 @@ struct NativeArguments final {
   // Neural Engine when that is faster (splash serve --disable-ane turns it
   // off).
   bool neuralEngine = true;
+  // --ane-share SHARE: the prefill FFN's Neural Engine share in [0, 1), in
+  // place of the calibration; zero runs the GPU alone. Unset calibrates.
+  std::optional<double> aneShare;
   // --ple-memory BYTES|auto|off and --expert-memory BYTES|auto|off: a
   // Qwen3.8-Flash-Next GGUF's PLE table and a MoE target's routed experts,
   // through a store of BYTES that streams the rest from the SSD, as the

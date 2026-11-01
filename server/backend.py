@@ -116,6 +116,9 @@ class NativeResult:
     # The engine ended the response at a bound of its own, short of
     # max_new_tokens: what the SSD cache or memory holds of its context.
     bounded: bool = False
+    # Per generated token: its id, log probability and top (token, logprob)
+    # pairs, aligned with the streamer's token ids.
+    logprobs: tuple = ()
 
     @functools.cached_property
     def metrics(self):
@@ -170,6 +173,16 @@ class Job:
     compaction: object | None = None
     # Option token ids for score-only jobs; empty means ordinary generation.
     score_tokens: tuple = ()
+    # How many independent choices the request asks for (Chat and text
+    # completions' n); one for every other endpoint.
+    n: int = 1
+    # Tokens above each generated token in its logprobs; 0 disables them.
+    top_logprobs: int = 0
+    # Return each generated token's log probability (chosen only when
+    # top_logprobs is 0).
+    logprobs: bool = False
+    # Raw-logit adjustments, token id to value.
+    logit_bias: tuple = ()
     # Trailing prompt tokens of the chat template's generation prompt; zero
     # when unknown.
     generation_prompt_tokens: int = 0
@@ -326,6 +339,7 @@ class _JobState:
     detached: bool = False
     shutdown_requested: bool = False
     first_token_batch_tokens: int = 0
+    logprobs: list = field(default_factory=list)
 
     def detach(self):
         self.detached = True
@@ -696,7 +710,12 @@ class NativeBackend:
             image_pixels=job.image_pixels,
             score_tokens=job.score_tokens,
             generation_prompt_tokens=job.generation_prompt_tokens,
-            flags=job.flags,
+            flags=(
+                job.flags | wire.RequestFlag.LOGPROBS if job.logprobs else job.flags
+            ),
+            top_logprobs=job.top_logprobs,
+            bias_tokens=tuple(token for token, _ in job.logit_bias),
+            bias_values=tuple(value for _, value in job.logit_bias),
             cache_salt=job.cache_salt,
             thinking_budget=self._thinking_budget(job),
         )
@@ -931,6 +950,8 @@ class NativeBackend:
             if job.constraint is not None:
                 job.constraint.commit(event.tokens)
             state.streamer.put_tokens(event.tokens)
+        elif isinstance(event, wire.LogprobsEvent):
+            state.logprobs.extend(event.values)
 
     def cancel(self, job):
         call = None
@@ -995,6 +1016,7 @@ class NativeBackend:
                 accepted_draft_tokens=done.accepted_draft_tokens,
                 draft_cycles=done.draft_cycles,
                 bounded=done.bounded,
+                logprobs=tuple(state.logprobs),
             )
             if job.latency is not None:
                 latency = result.metrics["request_latency"]

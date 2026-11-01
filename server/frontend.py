@@ -31,6 +31,7 @@ from .chat_templates import (
     render_chat_template,
     template_options,
 )
+from .constraints import grammar_for_source
 from .diagnostics import print_status
 from .errors import (
     APIError,
@@ -248,6 +249,8 @@ class GenerationOptions:
     # The thinking tokens of a request that thinks, after which its thinking
     # closes; None for no cap.
     thinking_token_budget: int | None
+    # Raw-logit adjustments, token id to value.
+    logit_bias: tuple[tuple[int, float], ...] = ()
 
 
 class Frontend:
@@ -587,10 +590,13 @@ class Frontend:
                     raise APIError(400, f"{field} is not supported")
             if body.get("echo", False) is not False:
                 raise APIError(400, "echo is not supported")
-            for field in ("best_of", "n"):
+            for field in ("best_of",):
                 value = body.get(field, 1)
                 if not isinstance(value, int) or isinstance(value, bool) or value != 1:
                     raise APIError(400, f"{field} must be 1")
+            n = body.get("n", 1)
+            if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= 4:
+                raise APIError(400, "n must be an integer from 1 to 4")
             options = self._generation_options(body)
             # A text completion has no reasoning split, so no thinking is
             # tracked to close.
@@ -598,15 +604,47 @@ class Frontend:
                 raise APIError(
                     400, "thinking_token_budget is not supported for text completions"
                 )
+            grammar_source = body.get("grammar")
+            regex_source = body.get("regex")
+            if grammar_source is not None and regex_source is not None:
+                raise APIError(400, "grammar and regex cannot be combined")
+            for field_name, value in (
+                ("grammar", grammar_source),
+                ("regex", regex_source),
+            ):
+                if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                ):
+                    raise APIError(400, f"{field_name} must be a nonempty string")
+            if options.ignore_eos and (
+                grammar_source is not None or regex_source is not None
+            ):
+                raise APIError(
+                    400, "ignore_eos cannot be combined with grammar or regex"
+                )
             prompt_tokens = self._completion_prompt(body.get("prompt"))
             remaining_request_time(deadline)
+            constraint = None
+            if grammar_source is not None or regex_source is not None:
+                with self.latencies.measure("grammar"):
+                    if grammar_source is not None:
+                        grammar = grammar_for_source("gbnf", grammar_source)
+                    else:
+                        grammar = grammar_for_source("regex", regex_source)
+                    constraint = self.constraint_factory.create(
+                        grammar, timeout=remaining_request_time(deadline)
+                    )
             requested = body.get("max_tokens")
             max_new = self._output_budget(
                 COMPLETION_DEFAULT_MAX_TOKENS if requested is None else requested,
                 prompt_tokens,
                 "max_tokens",
             )
-            return self._generation_job(options, prompt_tokens, max_new, deadline)
+            job = self._generation_job(
+                options, prompt_tokens, max_new, deadline, constraint=constraint
+            )
+            job.n = n
+            return job
 
     def _completion_prompt(self, prompt):
         """A string encodes as a raw prompt, with the tokenizer's own special
@@ -658,6 +696,26 @@ class Frontend:
                 raise APIError(400, "content could not be tokenized") from error
             remaining_request_time(deadline)
             return tokens
+
+    def detokenize(self, body, *, deadline):
+        """Token ids back to text, as llama-server's /detokenize does."""
+        tokens = body.get("tokens")
+        if not isinstance(tokens, list) or any(
+            not isinstance(token, int) or isinstance(token, bool) for token in tokens
+        ):
+            raise APIError(400, "tokens must be an array of token ids")
+        if any(not 0 <= token < self.chat_format.vocabulary for token in tokens):
+            raise APIError(400, "a token id is outside the vocabulary")
+        special = body.get("special", False)
+        if not isinstance(special, bool):
+            raise APIError(400, "special must be a boolean")
+        with self._preparation(deadline):
+            try:
+                text = self.tokenizer.decode(tokens, skip_special_tokens=not special)
+            except Exception as error:
+                raise APIError(400, "tokens could not be detokenized") from error
+            remaining_request_time(deadline)
+            return text
 
     def _priority(self, body):
         priority_name = body.get("priority", "normal")
@@ -1064,15 +1122,36 @@ class Frontend:
         # Fields checked without the prompt fail before it is prepared, which
         # can render documents and build validators.
         options = self._generation_options(body)
-        n = body.get("n", 1)
-        logprobs = body.get("logprobs")
-        if (
-            not isinstance(n, int)
-            or isinstance(n, bool)
-            or n != 1
-            or (logprobs is not None and (not isinstance(logprobs, bool) or logprobs))
+        grammar_source = body.get("grammar")
+        regex_source = body.get("regex")
+        if grammar_source is not None and regex_source is not None:
+            raise APIError(400, "grammar and regex cannot be combined")
+        for field_name, value in (
+            ("grammar", grammar_source),
+            ("regex", regex_source),
         ):
-            raise APIError(400, "n and logprobs are not currently supported")
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise APIError(400, f"{field_name} must be a nonempty string")
+        n = body.get("n", 1)
+        logprobs = body.get("logprobs", False)
+        top_logprobs = body.get("top_logprobs", 0)
+        if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= 4:
+            raise APIError(400, "n must be an integer from 1 to 4")
+        if not isinstance(logprobs, bool):
+            raise APIError(400, "logprobs must be a boolean")
+        if (
+            not isinstance(top_logprobs, int)
+            or isinstance(top_logprobs, bool)
+            or not 0 <= top_logprobs <= 20
+        ):
+            raise APIError(400, "top_logprobs must be an integer from 0 to 20")
+        if top_logprobs and not logprobs:
+            raise APIError(400, "top_logprobs requires logprobs")
+        if logprobs and not options.cache_salt:
+            # A cold prompt keeps the first anchor's logits row, which a
+            # restored prefix does not carry: a salt of its own gives a
+            # logprobs request that exact row.
+            options = replace(options, cache_salt=secrets.randbits(128))
         prompt = self._prepare_prompt(
             body, tool_namespaces, deadline=deadline, without_slot=without_slot
         )
@@ -1083,15 +1162,28 @@ class Frontend:
         )
         # Constrained tool calls and structured output generate under a
         # grammar, which decides where the output ends; tools beside a
-        # response schema share one.
+        # response schema share one. A request's own GBNF or regex constrains
+        # the whole output instead, and composes with neither.
         tool_constrained = tool_policy is not None and (
             tool_policy.constrained or response_schema is not None
         )
-        constrained = tool_constrained or response_schema is not None
+        grammar_constrained = grammar_source is not None or regex_source is not None
+        if grammar_constrained and (
+            tools or tool_policy is not None or response_schema is not None
+        ):
+            raise APIError(
+                400,
+                "grammar and regex cannot be combined with tools or response_format",
+            )
+        constrained = (
+            tool_constrained or response_schema is not None or grammar_constrained
+        )
         if options.ignore_eos and constrained:
             raise APIError(
                 400,
-                "ignore_eos cannot be combined with constrained tool calls, "
+                "ignore_eos cannot be combined with grammar or regex"
+                if grammar_constrained
+                else "ignore_eos cannot be combined with constrained tool calls, "
                 "tool_choice none or structured output",
             )
         rendered = self._render_prompt(prompt, deadline)
@@ -1110,11 +1202,37 @@ class Frontend:
         )
         prompt_tokens, prepared_images = rendered.tokens, rendered.images
         image_positions, thinking = rendered.image_positions, rendered.thinking
+        if grammar_constrained and thinking:
+            raise APIError(
+                400,
+                "grammar and regex require reasoning off; set reasoning_effort to none",
+            )
+        if logprobs and thinking:
+            raise APIError(
+                400,
+                "logprobs require reasoning off; set reasoning_effort to none",
+            )
+        if logprobs and (constrained or tools):
+            raise APIError(
+                400,
+                "logprobs cannot be combined with tools, structured output, "
+                "grammar or regex",
+            )
         constraint = None
         remaining_request_time(deadline)
         if constrained:
             with self.latencies.measure("grammar"):
-                if tool_constrained:
+                if grammar_source is not None:
+                    constraint = self.constraint_factory.create(
+                        grammar_for_source("gbnf", grammar_source),
+                        timeout=remaining_request_time(deadline),
+                    )
+                elif regex_source is not None:
+                    constraint = self.constraint_factory.create(
+                        grammar_for_source("regex", regex_source),
+                        timeout=remaining_request_time(deadline),
+                    )
+                elif tool_constrained:
                     constraint = self.constraint_factory.create(
                         tool_grammar(
                             tool_policy,
@@ -1174,6 +1292,9 @@ class Frontend:
             output_clamped_to_context=requested is not None and max_new < requested,
         )
         job.compaction = compaction_report
+        job.n = n
+        job.logprobs = logprobs
+        job.top_logprobs = top_logprobs
         return job
 
     def _call_openings(self, policy, thinking):
@@ -1227,10 +1348,31 @@ class Frontend:
             stop_sequences = tuple(stop)
         else:
             raise APIError(400, "stop must be a string or up to four strings")
-        # Splash does not implement logit_bias, so only an empty one (null or
-        # {}) is accepted; a non-empty one is refused rather than ignored.
-        if body.get("logit_bias") not in (None, {}):
-            raise APIError(400, "logit_bias is not supported")
+        raw_bias = body.get("logit_bias")
+        logit_bias = []
+        if raw_bias is not None:
+            if not isinstance(raw_bias, dict):
+                raise APIError(400, "logit_bias must be an object")
+            if len(raw_bias) > 256:
+                raise APIError(400, "logit_bias takes at most 256 entries")
+            for key, value in raw_bias.items():
+                try:
+                    token = int(key)
+                except (TypeError, ValueError):
+                    raise APIError(400, "logit_bias keys must be token ids") from None
+                if str(token) != key or not 0 <= token < self.chat_format.vocabulary:
+                    raise APIError(
+                        400, f"logit_bias token {key} is outside the vocabulary"
+                    )
+                if (
+                    isinstance(value, bool)
+                    or not is_finite_number(value)
+                    or not -100.0 <= value <= 100.0
+                ):
+                    raise APIError(
+                        400, "logit_bias values must be numbers in [-100, 100]"
+                    )
+                logit_bias.append((token, float(value)))
         ignore_eos = body.get("ignore_eos", False)
         if not isinstance(ignore_eos, bool):
             raise APIError(400, "ignore_eos must be a boolean")
@@ -1263,6 +1405,7 @@ class Frontend:
             self._priority(body),
             self._cache_salt(body),
             budget,
+            tuple(logit_bias),
         )
 
     def _output_budget(self, requested, prompt_tokens, field):
@@ -1451,6 +1594,7 @@ class Frontend:
             priority=options.priority,
             cache_salt=options.cache_salt,
             stop_sequences=options.stop_sequences,
+            logit_bias=options.logit_bias,
             flags=(
                 wire.RequestFlag.IGNORE_END_OF_SEQUENCE
                 if options.ignore_eos

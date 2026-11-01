@@ -487,6 +487,21 @@ class ServeOptionsTests(unittest.TestCase):
                     [args.binary, "serve-native", args.model_root, *arguments],
                 )
 
+    def test_ane_share_environment_reaches_native(self):
+        model = "community/custom-splash"
+        package = api.ROOT / "install/models" / model
+        args = api.parse_args([str(package), "--model", model])
+        with mock.patch.dict(os.environ, {"SPLASH_ANE_SHARE": "0.6"}):
+            command = api._native_command(args, args.model_root)
+        self.assertIn("--ane-share", command)
+        self.assertEqual(command[command.index("--ane-share") + 1], "0.6")
+        for share in ("1", "1.0", "-0.1", "nan", "inf"):
+            with (
+                mock.patch.dict(os.environ, {"SPLASH_ANE_SHARE": share}),
+                self.assertRaises(ValueError),
+            ):
+                api._native_command(args, args.model_root)
+
 
 if __name__ == "__main__":
     unittest.main()

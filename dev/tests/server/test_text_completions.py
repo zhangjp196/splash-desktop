@@ -192,8 +192,8 @@ class TextCompletionTests(unittest.TestCase):
             ("logprobs", 0, "logprobs is not supported"),
             ("logprobs", 5, "logprobs is not supported"),
             ("best_of", 2, "best_of must be 1"),
-            ("n", 2, "n must be 1"),
-            ("n", True, "n must be 1"),
+            ("n", 5, "n must be an integer from 1 to 4"),
+            ("n", True, "n must be an integer from 1 to 4"),
         )
         for field, value, message in cases:
             with self.subTest(field=field, value=value):

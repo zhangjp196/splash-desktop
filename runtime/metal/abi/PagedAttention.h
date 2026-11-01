@@ -59,6 +59,13 @@ static_assert(sizeof(SplashChunkedPrefillParams) == 24,
 #define SPLASH_ATTENTION_TILE_PARTS(group) \
   ((group) <= 8u ? 1u : (group) <= 16u ? 2u : (group) <= 32u ? 4u : 8u)
 
+// A verify tile's parts: the 27B's six-wide GQA group runs as two
+// three-head parts over the whole history, which fills the GPU with enough
+// threadgroups at long histories. A windowed group keeps one part, and other
+// groups follow SPLASH_ATTENTION_TILE_PARTS.
+#define SPLASH_VERIFY_ATTENTION_TILE_PARTS(group, window) \
+  ((window) == 0u && (group) == 6u ? 2u : SPLASH_ATTENTION_TILE_PARTS(group))
+
 // Sparse attention (kernels/shared/sparse_attention.metal,
 // ops::AttentionBlocks): a query row attends only to the blocks of
 // SPLASH_ATTENTION_BLOCK_TOKENS tokens its block mask names, within its causal

@@ -63,6 +63,22 @@ struct TargetSamplingParams {
 static_assert(sizeof(TargetSamplingParams) == 120,
               "Target sampling parameters are 120 bytes on both sides");
 
+// The most logit_bias entries one request may name (Logprob.hpp's
+// kMaximumLogitBias).
+#define SPLASH_MAXIMUM_LOGIT_BIAS 256u
+
+// The logit_bias entries of a selection: each request lane's entries in
+// tokens/values at lane * max_entries, and its count. A kernel thread per
+// entry and selected row adds the value to that row's logit.
+struct BiasParams {
+  uint32_t vocabulary;
+  uint32_t rows;
+  uint32_t row_offset;
+  uint32_t selected_rows;
+  uint32_t max_entries;
+  uint32_t counts[SPLASH_MAXIMUM_BATCH_WIDTH];
+};
+
 // One shard's share of a sampled row's softmax denominator: the largest
 // logit it admits, the sum of exp((logit - maximum) / temperature) over its
 // admitted tokens, and how many it admits.

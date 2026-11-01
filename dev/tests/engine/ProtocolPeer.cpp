@@ -99,6 +99,8 @@ FrameType write(Writer &out, const RequestFrame &request) {
   out.u32(static_cast<uint32_t>(request.scoreTokens.size()));
   out.u32(request.generationPromptTokens);
   out.u32(request.flags);
+  out.u32(request.topLogprobs);
+  out.u32(static_cast<uint32_t>(request.biasTokens.size()));
   out.u64(request.cacheSalt.lo);
   out.u64(request.cacheSalt.hi);
   const ThinkingBudget thinking =
@@ -118,6 +120,9 @@ FrameType write(Writer &out, const RequestFrame &request) {
   out.raw(request.imagePixels);
   out.words(request.scoreTokens);
   out.words(thinking.end);
+  out.words(request.biasTokens);
+  for (float value : request.biasValues)
+    out.f32(value);
   return FrameType::Request;
 }
 
@@ -194,6 +199,25 @@ EngineEvent decodeEvent(FrameType type, Reader &in) {
     event.requestId = in.u64();
     event.sequenceOffset = in.u32();
     event.tokens = in.words(in.u32());
+    return event;
+  }
+  case FrameType::Logprobs: {
+    LogprobsEvent event;
+    event.requestId = in.u64();
+    event.sequenceOffset = in.u32();
+    const uint32_t count = in.u32();
+    event.values.resize(count);
+    for (TokenLogprob &value : event.values) {
+      value.token = in.u32();
+      value.logprob = in.f32();
+      value.topCount = in.u32();
+      if (value.topCount > kMaximumTopLogprobs)
+        throw std::runtime_error("logprobs event top count is too large");
+      for (uint32_t index = 0; index < value.topCount; ++index) {
+        value.top[index].token = in.u32();
+        value.top[index].logprob = in.f32();
+      }
+    }
     return event;
   }
   case FrameType::MaskRequest: {

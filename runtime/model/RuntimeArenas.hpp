@@ -368,6 +368,10 @@ enum class DecodeTensor : uint32_t {
   // Indexed by state lane, like PageTable: a penalized request's penalty
   // words (ops::Sampling::rebuildPenaltyWords).
   PenaltyState,
+  // Indexed by request lane: its logit_bias tokens and values, up to
+  // kMaximumLogitBias each (ops::Sampling::addBias).
+  BiasTokens,
+  BiasValues,
   // A GDN layer's packed input projection rows, which its mixer reads.
   GdnPacked,
   // Indexed by state lane, like PageTable: the lane's two decode tape slots

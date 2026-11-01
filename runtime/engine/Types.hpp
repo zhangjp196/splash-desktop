@@ -80,6 +80,12 @@ struct EngineRequest final {
   std::vector<uint32_t> scoreTokens{};
   // RequestFlag bits.
   uint32_t flags = 0;
+  // Up to this many tokens above each generated token in its logprobs
+  // (RequestLogprobs).
+  uint32_t topLogprobs = 0;
+  // Raw-logit adjustments (logit_bias), applied before penalties and
+  // sampling.
+  std::vector<LogitBias> logitBias;
   // Set only for a request that generates inside a thinking block.
   std::optional<ThinkingBudget> thinkingBudget;
   // `--loop-guard`: end a thinking block that repeats a short token cycle.
@@ -87,9 +93,19 @@ struct EngineRequest final {
   CacheSalt cacheSalt;
 
   [[nodiscard]] ModelRequest modelView() const noexcept {
-    return {id,           prompt,   images,     imagePixels,
-            maxNewTokens, sampling, constraint, scoreTokens,
-            flags,        thinkingBudget ? &*thinkingBudget : nullptr,
+    return {id,
+            prompt,
+            images,
+            imagePixels,
+            maxNewTokens,
+            sampling,
+            constraint,
+            scoreTokens,
+            flags,
+            (flags & RequestLogprobs) != 0,
+            topLogprobs,
+            logitBias,
+            thinkingBudget ? &*thinkingBudget : nullptr,
             loopGuard};
   }
 };
@@ -169,6 +185,13 @@ public:
                        uint32_t lane) = 0;
   virtual void promptProgress(uint64_t, uint32_t) {}
   virtual void tokens(uint64_t requestId, std::span<const uint32_t> tokens) = 0;
+  // The log probabilities of the tokens the next tokens() call reports,
+  // aligned with them. A sink that does not serve logprobs keeps the no-op.
+  virtual void logprobs(uint64_t requestId,
+                        std::span<const TokenLogprob> values) {
+    static_cast<void>(requestId);
+    static_cast<void>(values);
+  }
   virtual void maskRequested(uint64_t requestId,
                              std::span<const uint32_t> simulationTokens) = 0;
   // bounded: a Length end short of the request's maxNewTokens, at a bound

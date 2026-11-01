@@ -206,6 +206,9 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.resources.maximumImagePatches = arguments.maxImagePatches;
   config.resources.idleReleaseSeconds = arguments.idleReleaseSeconds;
   config.resources.aneFfn.enabled = arguments.neuralEngine;
+  if (arguments.aneShare)
+    config.resources.aneFfn = engine::AneFfnSetting::fromGiven(
+        arguments.aneShare, std::nullopt);
   config.resources.relaunchContext = arguments.relaunchContext;
   config.resources.pleMemory = arguments.pleMemory;
   config.resources.expertMemory = arguments.expertMemory;

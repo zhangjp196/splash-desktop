@@ -18,7 +18,7 @@
 // pins the bytes both sides agree on.
 namespace splash::protocol {
 
-inline constexpr uint16_t kProtocolVersion = 11;
+inline constexpr uint16_t kProtocolVersion = 13;
 // A frame is its header, the magic "SPLH", the u16 protocol version, the
 // u16 FrameType and the u64 payload length, then the payload.
 inline constexpr size_t kFrameHeaderBytes = 16;
@@ -46,6 +46,7 @@ enum class FrameType : uint16_t {
   Error = 0x0105,
   StatusJson = 0x0107,
   PromptProgress = 0x0108,
+  Logprobs = 0x0109,
 };
 
 // Request errors reject one request while preserving the stream.  An
@@ -132,15 +133,17 @@ validateLimits(const ProtocolLimits &limits);
 //   74 u32 score token count
 //   78 u32 generationPromptTokens
 //   82 u32 flags
-//   86 u64 cacheSalt.lo, u64 cacheSalt.hi
-//  102 u32 thinkingBudget.tokens, kNoThinkingBudget for none
-//  106 u32 thinking end token count, u32 thinkingBudget.alsoEnds, zero
+//   86 u32 topLogprobs
+//   90 u32 biasCount, then bias tokens and values after the thinking end
+//   94 u64 cacheSalt.lo, u64 cacheSalt.hi
+//  110 u32 thinkingBudget.tokens, kNoThinkingBudget for none
+//  114 u32 thinking end token count, u32 thinkingBudget.alsoEnds, zero
 //      without a budget
 // then the prompt tokens, the 32-byte image spans, the image pixels, the
-// score tokens and the thinking end tokens. The no-budget sentinel with end
+// score tokens, the thinking end tokens and the bias entries. The no-budget sentinel with end
 // tokens is a closable thinking block the engine's --loop-guard may end
 // early.
-inline constexpr uint64_t kRequestFixedBytes = 114;
+inline constexpr uint64_t kRequestFixedBytes = 122;
 inline constexpr uint32_t kNoThinkingBudget = 0xFFFFFFFFU;
 // A thinking budget's end holds 1 to this many tokens.
 inline constexpr uint32_t kMaximumThinkingEndTokens = 64;
@@ -180,6 +183,13 @@ struct RequestFrame {
   uint32_t generationPromptTokens = 0;
   // RequestFlag bits and kReturnProgressFlag.
   uint32_t flags = 0;
+  // Tokens above each generated token in its logprobs, up to
+  // kMaximumTopLogprobs; requires RequestLogprobs.
+  uint32_t topLogprobs = 0;
+  // Raw-logit adjustments (OpenAI's logit_bias), at most kMaximumLogitBias
+  // entries; biasCount precedes them on the wire.
+  std::vector<uint32_t> biasTokens;
+  std::vector<float> biasValues;
   // The request's cache_salt as the server hashed it; zero without one.
   engine::CacheSalt cacheSalt;
   // Only a request that generates inside a thinking block has one; a score
@@ -200,6 +210,9 @@ struct RequestFrame {
 //   Start          u64 requestId, u32 lane, u32 matchedPromptTokens
 //   PromptProgress u64 requestId, u32 processedTokens, u64 elapsedMicros
 //   Tokens         u64 requestId, u32 sequenceOffset, u32 count, u32 tokens
+//   Logprobs       u64 requestId, u32 sequenceOffset, u32 count, then per
+//                  token u32 token, f32 logprob, u32 topCount and topCount
+//                  (u32 token, f32 logprob) pairs
 //   MaskRequest    u64 requestId, u64 maskRequestId, u32 wordsPerMask,
 //                  u32 count, u32 simulation tokens
 //   Done           u64 requestId, u8 reason, u32 promptTokens,
@@ -286,6 +299,15 @@ struct TokensEvent {
   bool operator==(const TokensEvent &) const = default;
 };
 
+// The log probabilities of a TokensEvent's tokens, sent before that event.
+struct LogprobsEvent {
+  uint64_t requestId = 0;
+  uint32_t sequenceOffset = 0;
+  std::vector<TokenLogprob> values;
+
+  bool operator==(const LogprobsEvent &) const = default;
+};
+
 struct MaskRequestEvent {
   uint64_t requestId = 0;
   uint64_t maskRequestId = 0;
@@ -352,7 +374,8 @@ using ClientMessage =
                  PrefillDutyRequestFrame>;
 using EngineEvent =
     std::variant<ReadyEvent, StartEvent, PromptProgressEvent, TokensEvent,
-                 MaskRequestEvent, DoneEvent, ErrorEvent, StatusJsonEvent>;
+                 LogprobsEvent, MaskRequestEvent, DoneEvent, ErrorEvent,
+                 StatusJsonEvent>;
 
 struct Frame {
   FrameType type = FrameType::Request;

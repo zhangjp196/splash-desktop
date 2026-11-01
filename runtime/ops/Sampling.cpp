@@ -1,5 +1,6 @@
 #include "ops/Sampling.hpp"
 
+#include "Logprob.hpp"
 #include "metal/abi/Sampling.h"
 #include "ops/BufferExtent.hpp"
 
@@ -184,11 +185,14 @@ void Sampling::addInitial(metal::CommandGraph &graph,
                           std::span<const SamplingPolicy> policies,
                           SamplingBuffers buffers, uint32_t rowOffset,
                           const StopTokens &stopTokens,
-                          const PenaltyTable &penalties) const {
+                          const PenaltyTable &penalties,
+                          const BiasTable &biases) const {
   if (policies.empty() || policies.size() > kMaximumLanes)
     throw std::invalid_argument("invalid sampling batch width");
   if (rowOffset >= SPLASH_TARGET_VERIFY_ROWS)
     throw std::invalid_argument("invalid initial sampling row");
+  addBias(graph, buffers, biases, 1, rowOffset,
+          static_cast<uint32_t>(policies.size()));
   const TargetSamplingParams params =
       selection(policies, buffers, {1, rowOffset, 0, SPLASH_UNIFORM_INITIAL, 0}, stopTokens);
   addPenalties(graph, policies, buffers, penalties, rowOffset, false);
@@ -198,9 +202,12 @@ void Sampling::addInitial(metal::CommandGraph &graph,
 void Sampling::addVerify(metal::CommandGraph &graph,
                          std::span<const SamplingPolicy> policies,
                          SamplingBuffers buffers, const StopTokens &stopTokens,
-                         const PenaltyTable &penalties) const {
+                         const PenaltyTable &penalties,
+                         const BiasTable &biases) const {
   if (policies.empty() || policies.size() > kMaximumLanes)
     throw std::invalid_argument("invalid sampling batch width");
+  addBias(graph, buffers, biases, SPLASH_TARGET_VERIFY_ROWS, 0,
+          static_cast<uint32_t>(policies.size()));
   // Verify row r of a lane reads mask row r + 1 and, below the last row,
   // follows draft token r; every row draws with the lane's correction
   // uniform.
@@ -210,6 +217,40 @@ void Sampling::addVerify(metal::CommandGraph &graph,
                 stopTokens);
   addPenalties(graph, policies, buffers, penalties, 0, true);
   addSelection(graph, params, policies, buffers);
+}
+
+void Sampling::addBias(metal::CommandGraph &graph,
+                       const SamplingBuffers &buffers, const BiasTable &table,
+                       uint32_t rows, uint32_t rowOffset, uint32_t lanes) const {
+  static_assert(kMaximumLogitBias == SPLASH_MAXIMUM_LOGIT_BIAS);
+  if (table.counts.size() < lanes)
+    throw std::invalid_argument("a biased lane has no bias count");
+  bool any = false;
+  BiasParams params{};
+  params.vocabulary = vocabulary_;
+  params.rows = rows;
+  params.row_offset = rowOffset;
+  params.selected_rows = lanes * rows;
+  params.max_entries = kMaximumLogitBias;
+  for (uint32_t lane = 0; lane < lanes; ++lane) {
+    const uint32_t count = table.counts[lane];
+    if (count > kMaximumLogitBias)
+      throw std::invalid_argument("logit bias count exceeds its limit");
+    params.counts[lane] = count;
+    any = any || count != 0;
+  }
+  if (!any)
+    return;
+  requireBytes(buffers.biasTokens,
+               uint64_t(lanes) * kMaximumLogitBias * sizeof(uint32_t),
+               "bias token");
+  requireBytes(buffers.biasValues,
+               uint64_t(lanes) * kMaximumLogitBias * sizeof(float),
+               "bias value");
+  const metal::DispatchSize grid{kMaximumLogitBias, params.selected_rows, 1};
+  graph.add("decode_sample_bias",
+            {buffers.logits, table.tokens, table.values}, params, grid,
+            {kMaximumLogitBias, 1, 1});
 }
 
 TargetSamplingParams Sampling::selection(std::span<const SamplingPolicy> policies,

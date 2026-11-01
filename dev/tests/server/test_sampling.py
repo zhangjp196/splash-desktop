@@ -104,7 +104,6 @@ class SamplingTests(HarnessTestCase):
                 {"repetition_penalty": True},
                 "repetition_penalty must be a positive number",
             ),
-            ({"logit_bias": {"1": 2}}, "logit_bias is not supported"),
         )
         for fields, message in refused:
             with self.subTest(fields=fields):
@@ -221,13 +220,11 @@ class SamplingTests(HarnessTestCase):
         for name, value in fields.items():
             self.assertEqual(getattr(sampling, name), value)
         status, _, payload = harness.request(
-            "POST", "/v1/responses", responses_body(logit_bias={"1": 2})
+            "POST", "/v1/responses", responses_body(store=False, logit_bias={"1": 2})
         )
-        self.assertEqual(status, 400, payload)
-        self.assertEqual(
-            json.loads(payload)["error"]["message"], "logit_bias is not supported"
-        )
-        self.assertEqual(len(runtime.requests), 1)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(runtime.requests[1].frame.bias_tokens, (1,))
+        self.assertEqual(runtime.requests[1].frame.bias_values, (2.0,))
 
     def test_official_sampling_defaults_and_random_seed(self):
         tokenizer = FakeTokenizer()

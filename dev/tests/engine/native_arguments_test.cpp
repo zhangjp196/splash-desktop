@@ -226,6 +226,7 @@ void testServerCommandLines(const char *path) {
            read.cacheIdleSpillSeconds == meant.cacheIdleSpillSeconds &&
            read.preventIdleSleep == meant.preventIdleSleep &&
            read.neuralEngine == meant.neuralEngine && read.pleMemory == meant.pleMemory &&
+           read.aneShare == meant.aneShare &&
            read.expertMemory == meant.expertMemory && read.sparseKvMemory == meant.sparseKvMemory &&
            read.kvSpillAlways == meant.kvSpillAlways && read.kvWindowTrim == meant.kvWindowTrim &&
            read.verifyRows == meant.verifyRows;
@@ -252,6 +253,17 @@ void testNeuralEngine() {
               parse(model, {"auto", "auto", "--ane", "on"}).neuralEngine &&
               !parse(model, {"auto", "auto", "--ane", "off"}).neuralEngine,
           "--ane did not reach the arguments as given");
+}
+
+// --ane-share, which the server writes only from SPLASH_ANE_SHARE, replaces
+// the calibration; zero runs the GPU alone.
+void testAneShare() {
+  const ModelDirectory model;
+  const NativeArguments automatic = parse(model, {"auto", "auto"});
+  require(!automatic.aneShare &&
+              parse(model, {"auto", "auto", "--ane-share", "0.6"}).aneShare == 0.6 &&
+              parse(model, {"auto", "auto", "--ane-share", "0"}).aneShare == 0.0,
+          "--ane-share did not reach the arguments as given");
 }
 
 // --verify-rows auto, which the server never writes, is the engine's rule.
@@ -316,6 +328,11 @@ void testRefusals() {
   refuses({"auto", "auto", "--idle-sleep", "never"},
           "--idle-sleep requires prevent or allow");
   refuses({"auto", "auto", "--ane", "gpu"}, "--ane requires on or off");
+  for (const char *share : {"-0.1", "1", "1.0", "nan", "inf", "half"})
+    refuses({"auto", "auto", "--ane-share", share},
+            "--ane-share requires a share from 0 to just below 1");
+  refuses({"auto", "auto", "--ane", "off", "--ane-share", "0.6"},
+          "--ane-share requires --ane on");
   for (const char *rows : {"budget", "every", "ALL", ""})
     refuses({"auto", "auto", "--verify-rows", rows}, "--verify-rows requires auto or all");
   // The server passes bytes, auto or off.
@@ -411,6 +428,7 @@ int main(int argc, char **argv) {
   try {
     testServerCommandLines(argv[1]);
     testNeuralEngine();
+    testAneShare();
     testVerifyRows();
     testStreamedMemoryAndSpill();
     testWindowTrim();

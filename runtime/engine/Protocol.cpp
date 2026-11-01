@@ -305,6 +305,19 @@ std::optional<ProtocolIssue> validateRequest(const RequestFrame &request,
     return invalid(IssueCode::InvalidEnumValue,
                    "request flags are not defined by native protocol");
   }
+  if (request.topLogprobs > kMaximumTopLogprobs) {
+    return invalid(IssueCode::InvalidCount,
+                   "top logprobs count exceeds its limit");
+  }
+  if (request.topLogprobs && !(request.flags & RequestLogprobs)) {
+    return invalid(IssueCode::InvalidCount,
+                   "top logprobs requires the logprobs flag");
+  }
+  if ((request.flags & RequestLogprobs) &&
+      request.constraint != ConstraintMode::None) {
+    return invalid(IssueCode::InvalidConstraint,
+                   "constrained requests do not take logprobs");
+  }
   if (!request.absoluteDeadlineUnixMicros || !request.remainingDeadlineMicros) {
     return invalid(IssueCode::InvalidDeadline,
                    "absolute and remaining deadlines must be non-zero");
@@ -624,6 +637,54 @@ EncodedEvent encodeTokens(const TokensEvent &event,
   return success(writer.take());
 }
 
+std::optional<ProtocolIssue> validateLogprobs(const LogprobsEvent &event,
+                                              const ProtocolLimits &limits) {
+  if (!event.requestId) {
+    return invalidEvent(IssueCode::InvalidRequestId, 0,
+                        "logprobs event request id must be non-zero");
+  }
+  if (event.values.empty() || event.values.size() > limits.maxTokenBatch) {
+    return invalidEvent(IssueCode::LimitExceeded, event.requestId,
+                        "logprobs event batch size exceeds its limit");
+  }
+  uint64_t end = 0;
+  if (!checkedAdd(event.sequenceOffset, event.values.size(), end) ||
+      end > std::numeric_limits<uint32_t>::max()) {
+    return invalidEvent(IssueCode::IntegerOverflow, event.requestId,
+                        "logprobs event sequence range overflows uint32");
+  }
+  for (const TokenLogprob &value : event.values) {
+    if (value.topCount > kMaximumTopLogprobs) {
+      return invalidEvent(IssueCode::InvalidCount, event.requestId,
+                          "top logprobs count exceeds its limit");
+    }
+  }
+  return std::nullopt;
+}
+
+EncodedEvent encodeLogprobs(const LogprobsEvent &event,
+                            const ProtocolLimits &limits) {
+  if (auto issue = validateLogprobs(event, limits))
+    return failure<std::vector<uint8_t>>(std::move(*issue));
+  uint64_t bytes = 16;
+  for (const TokenLogprob &value : event.values)
+    bytes += 12 + uint64_t(value.topCount) * 8;
+  Writer writer = frameWriter(FrameType::Logprobs, bytes);
+  writer.u64(event.requestId);
+  writer.u32(event.sequenceOffset);
+  writer.u32(static_cast<uint32_t>(event.values.size()));
+  for (const TokenLogprob &value : event.values) {
+    writer.u32(value.token);
+    writer.f32(value.logprob);
+    writer.u32(value.topCount);
+    for (uint32_t index = 0; index < value.topCount; ++index) {
+      writer.u32(value.top[index].token);
+      writer.f32(value.top[index].logprob);
+    }
+  }
+  return success(writer.take());
+}
+
 EncodedEvent encodeMaskRequest(const MaskRequestEvent &event,
                                const ProtocolLimits &limits) {
   if (auto issue = validateMaskRequest(event, limits))
@@ -704,6 +765,7 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
   uint32_t imageSpanCount = 0;
   uint32_t scoreCount = 0;
   uint32_t thinkingEndCount = 0;
+  uint32_t biasCount = 0;
   ThinkingBudget thinking;
   if (!reader.u64(request.requestId) || !reader.u8(priority) ||
       !reader.u8(constraint) ||
@@ -720,7 +782,9 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
       !reader.f32(request.sampling.minP) ||
       !reader.u64(request.sampling.seed) || !reader.u32(scoreCount) ||
       !reader.u32(request.generationPromptTokens) ||
-      !reader.u32(request.flags) || !reader.u64(request.cacheSalt.lo) ||
+      !reader.u32(request.flags) || !reader.u32(request.topLogprobs) ||
+      !reader.u32(biasCount) ||
+      !reader.u64(request.cacheSalt.lo) ||
       !reader.u64(request.cacheSalt.hi) || !reader.u32(thinking.tokens) ||
       !reader.u32(thinkingEndCount) || !reader.u32(thinking.alsoEnds)) {
     return failure<ClientMessage>(
@@ -745,6 +809,11 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
     return failure<ClientMessage>(
         requestIssue(IssueCode::InvalidCount, request.requestId,
                      "score option count exceeds its limit"));
+  }
+  if (biasCount > kMaximumLogitBias) {
+    return failure<ClientMessage>(
+        requestIssue(IssueCode::InvalidCount, request.requestId,
+                     "logit bias count exceeds its limit"));
   }
   if (promptCount > limits.maxPromptTokens) {
     return failure<ClientMessage>(
@@ -775,15 +844,25 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
   }
   const size_t pixelsOffset = payload.size() - reader.remaining();
   const uint64_t wordBytes =
-      (uint64_t{scoreCount} + thinkingEndCount) * sizeof(uint32_t);
+      (uint64_t{scoreCount} + thinkingEndCount + 2 * uint64_t{biasCount}) *
+      sizeof(uint32_t);
   if (reader.remaining() != pixelBytes + wordBytes ||
       !reader.skip(pixelBytes) ||
       !reader.words(scoreCount, request.scoreTokens) ||
-      !reader.words(thinkingEndCount, thinking.end)) {
+      !reader.words(thinkingEndCount, thinking.end) ||
+      !reader.words(biasCount, request.biasTokens)) {
     return failure<ClientMessage>(
         requestIssue(IssueCode::InvalidPayloadLength, request.requestId,
-                     "image pixel, score or thinking end payload does not "
-                     "match its counts"));
+                     "image pixel, score, thinking end or bias payload does "
+                     "not match its counts"));
+  }
+  request.biasValues.resize(biasCount);
+  for (uint32_t index = 0; index < biasCount; ++index) {
+    if (!reader.f32(request.biasValues[index])) {
+      return failure<ClientMessage>(
+          requestIssue(IssueCode::InvalidPayloadLength, request.requestId,
+                       "bias value payload is truncated"));
+    }
   }
   if (thinking.tokens != kNoThinkingBudget || thinkingEndCount)
     request.thinkingBudget = std::move(thinking);
@@ -900,6 +979,8 @@ std::string_view frameTypeName(FrameType type) {
     return "start";
   case FrameType::Tokens:
     return "tokens";
+  case FrameType::Logprobs:
+    return "logprobs";
   case FrameType::MaskRequest:
     return "mask_request";
   case FrameType::Done:
@@ -1058,6 +1139,8 @@ serializeEvent(const EngineEvent &event, const ProtocolLimits &limits) {
             return encodePromptProgress(value, limits);
           } else if constexpr (std::is_same_v<T, TokensEvent>) {
             return encodeTokens(value, limits);
+          } else if constexpr (std::is_same_v<T, LogprobsEvent>) {
+            return encodeLogprobs(value, limits);
           } else if constexpr (std::is_same_v<T, MaskRequestEvent>) {
             return encodeMaskRequest(value, limits);
           } else if constexpr (std::is_same_v<T, DoneEvent>) {

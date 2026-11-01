@@ -126,6 +126,16 @@ struct SamplingBuffers final {
   // finished: a count every draw returns to zero, where it starts.
   metal::MetalBuffer vocabularyRanges;
   metal::MetalBuffer vocabularyArrivals;
+  // Per request lane, up to kMaximumLogitBias token ids and values.
+  metal::MetalBuffer biasTokens;
+  metal::MetalBuffer biasValues;
+};
+
+// A request lane's logit_bias entries; the counts are per lane of the batch.
+struct BiasTable final {
+  metal::MetalBuffer tokens;
+  metal::MetalBuffer values;
+  std::span<const uint32_t> counts;
 };
 
 struct AcceptanceBuffers final {
@@ -186,11 +196,13 @@ public:
                   std::span<const SamplingPolicy> policies,
                   SamplingBuffers buffers, uint32_t rowOffset,
                   const StopTokens &stopTokens,
-                  const PenaltyTable &penalties) const;
+                  const PenaltyTable &penalties,
+                  const BiasTable &biases) const;
   void addVerify(metal::CommandGraph &graph,
                  std::span<const SamplingPolicy> policies,
                  SamplingBuffers buffers, const StopTokens &stopTokens,
-                 const PenaltyTable &penalties) const;
+                 const PenaltyTable &penalties,
+                 const BiasTable &biases) const;
   void addAcceptance(
       metal::CommandGraph &graph, AcceptanceBuffers buffers,
       std::span<const uint32_t> maximumRetained,
@@ -225,6 +237,11 @@ private:
                     std::span<const SamplingPolicy> policies,
                     const SamplingBuffers &buffers, const PenaltyTable &table,
                     uint32_t rowOffset, bool verify) const;
+  // Adds each lane's raw logit_bias entries to the rows a selection reads.
+  // It runs before addPenalties, so penalties see the biased logits.
+  void addBias(metal::CommandGraph &graph,
+               const SamplingBuffers &buffers, const BiasTable &table,
+               uint32_t rows, uint32_t rowOffset, uint32_t lanes) const;
   // The parameters that select the rows `rows` names of every lane; throws
   // unless the buffers hold what the selection's kernels reach, before
   // addInitial or addVerify encodes anything.

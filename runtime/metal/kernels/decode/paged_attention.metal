@@ -21,9 +21,9 @@
       uint3 group [[threadgroup_position_in_grid]],                            \
       uint thread_index [[thread_index_in_threadgroup]])
 
-#define PAGED_VERIFY_SCRATCH(Group)                                            \
+#define PAGED_VERIFY_SCRATCH(Group, Window)                                    \
   constexpr uint M =                                                           \
-      Group * SPLASH_TARGET_VERIFY_ROWS / SPLASH_ATTENTION_TILE_PARTS(Group);  \
+      Group * SPLASH_TARGET_VERIFY_ROWS / SPLASH_VERIFY_ATTENTION_TILE_PARTS(Group, Window);  \
   constexpr uint N = SplashKvPageTokens;                                       \
   alignas(16) threadgroup float scores[M * N];                                 \
   alignas(16) threadgroup bfloat probabilities[M * N];                         \
@@ -35,8 +35,8 @@
 // group.x is the KV head and the tile's part (splash_attention_tile_part),
 // group.y the history split and group.z the lane, whose parameters select the
 // page table and the query tile.
-#define PAGED_VERIFY_TILE_AT(Heads, Group, HeadDim)                            \
-  constexpr uint Parts = SPLASH_ATTENTION_TILE_PARTS(Group);                   \
+#define PAGED_VERIFY_TILE_AT(Heads, Group, HeadDim, Window)                    \
+  constexpr uint Parts = SPLASH_VERIFY_ATTENTION_TILE_PARTS(Group, Window);    \
   const uint kv_head = group.x / Parts;                                        \
   const SplashAttentionTile tile =                                             \
       splash_attention_tile_part<Group, SPLASH_TARGET_VERIFY_ROWS, Parts,      \
@@ -49,8 +49,8 @@
 
 #define PAGED_VERIFY_SPLIT(Name, Heads, Group, HeadDim, Window, CacheElement)  \
   PAGED_VERIFY_SPLIT_SIGNATURE(Name) {                                         \
-    PAGED_VERIFY_SCRATCH(Group)                                                \
-    PAGED_VERIFY_TILE_AT(Heads, Group, HeadDim)                                \
+    PAGED_VERIFY_SCRATCH(Group, Window)                                        \
+    PAGED_VERIFY_TILE_AT(Heads, Group, HeadDim, Window)                        \
     splash_paged_attention_tile<Heads, Group,                                  \
                                 SPLASH_TARGET_VERIFY_ROWS / Parts, HeadDim,    \
                                 Window, CacheElement>(                         \
@@ -106,7 +106,7 @@ inline void splash_verify_attention_reduce_phase(
   if (!tile.active || fused_row >= M || thread_index >= D)
     return;
   splash_attention_reduce_row<QueryHeadsPerKVHead, SPLASH_TARGET_VERIFY_ROWS,
-                              SPLASH_ATTENTION_TILE_PARTS(QueryHeadsPerKVHead), HeadDim,
+                              SPLASH_VERIFY_ATTENTION_TILE_PARTS(QueryHeadsPerKVHead, Window), HeadDim,
                               Window>(
       partials, statistics, output, tile, params[group.z].slot_splits,
       fused_row, thread_index, weights, group_values,

@@ -34,6 +34,8 @@ REQUEST_FIELDS = (
     "score_count",
     "generation_prompt_tokens",
     "flags",
+    "top_logprobs",
+    "bias_count",
     "cache_salt_lo",
     "cache_salt_hi",
     "thinking_tokens",
@@ -133,6 +135,7 @@ def engine_events():
         "start": p.StartEvent(91, 2, 4096),
         "prompt_progress": p.PromptProgressEvent(91, 2048, 123456),
         "tokens": p.TokensEvent(91, 17, (10, 11, 12)),
+        "logprobs": p.LogprobsEvent(91, 17, ((10, -0.5, ((11, -1.0), (12, -2.0))),)),
         "mask_request_initial": p.MaskRequestEvent(91, 6, 4, ()),
         "mask_request_verify": p.MaskRequestEvent(91, 7, 4, (101, 102, 103)),
         "done": p.DoneEvent(
@@ -437,6 +440,8 @@ class ProtocolPythonTests(unittest.TestCase):
                 len(request.score_tokens),
                 request.generation_prompt_tokens,
                 int(request.flags),
+                request.top_logprobs,
+                len(request.bias_tokens),
                 request.cache_salt & 0xFFFFFFFFFFFFFFFF,
                 request.cache_salt >> 64,
                 request.thinking_budget.tokens,
@@ -447,6 +452,8 @@ class ProtocolPythonTests(unittest.TestCase):
             + struct.pack(p._IMAGE_SPAN.format, *astuple(span))
             + request.image_pixels
             + struct.pack("<2I", *request.thinking_budget.end)
+            + struct.pack(f"<{len(request.bias_tokens)}I", *request.bias_tokens)
+            + struct.pack(f"<{len(request.bias_values)}f", *request.bias_values)
         )
         header = struct.pack(
             p._HEADER.format,
@@ -467,7 +474,9 @@ class ProtocolPythonTests(unittest.TestCase):
 
         with mock.patch.object(p, "_words", counted):
             p.serialize_message(example_score_request())
-        self.assertEqual(sorted(labels), ["prompt tokens", "score tokens"])
+        self.assertEqual(
+            sorted(labels), ["bias tokens", "prompt tokens", "score tokens"]
+        )
 
     def test_score_request_rejects_generation_combinations(self):
         base = example_score_request()
@@ -764,7 +773,7 @@ class ProtocolPythonTests(unittest.TestCase):
         # scoring decides the output, fails the request.
         cases = [
             (replace(request, flags=flags), p.IssueCode.INVALID_ENUM_VALUE)
-            for flags in (1 << 2, 1 << 31, 0xFFFFFFFF, True, -1, 1 << 32, 1.0)
+            for flags in (1 << 3, 1 << 31, 0xFFFFFFFF, True, -1, 1 << 32, 1.0)
         ] + [
             (
                 replace(base, flags=p.RequestFlag.IGNORE_END_OF_SEQUENCE),

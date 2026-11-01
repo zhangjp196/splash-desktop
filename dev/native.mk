@@ -683,7 +683,7 @@ test-real: preflight $(TARGET) $(TEST_MODEL_RUNTIME_ORACLE) \
 	$(TEST_MODEL_RUNTIME_ORACLE) $(LIB) "$(MODEL_ROOT)" --spill-tokens 32768 --spill-window 64 $(ORACLE_ARGS)
 
 .PHONY: benchmark-backend \
-	benchmark-decode-profile benchmark-attention-sweep \
+	benchmark-concurrency benchmark-decode-profile benchmark-attention-sweep \
 	benchmark-gguf-projection benchmark-gguf-moe teacher-logits
 # decode-profile replays the installed model's prefill and decode commands as
 # separate dispatches; DECODE_PROFILE_ARGS passes --prompt-tokens/--cycles,
@@ -722,6 +722,16 @@ benchmark-gguf-moe: $(TEST_GGUF_MOE_BENCHMARK) $(LIB)
 
 benchmark-backend: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
 	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)"
+
+# A running server's scaling under B concurrent chat requests, with the fans
+# and hot sensors /status reports. BASE_URL names that server; MODEL the name
+# /v1/models serves; CONCURRENCY_ARGS passes the burst widths, samples and
+# output length (dev/benchmarks/concurrency_matrix.py).
+BASE_URL ?= http://127.0.0.1:8000
+CONCURRENCY_ARGS ?= --requests 1,2,4,8 --samples 1 --max-tokens 128
+benchmark-concurrency:
+	$(PYTHON) -m dev.benchmarks.concurrency_matrix \
+		--base-url "$(BASE_URL)" --model "$(MODEL)" $(CONCURRENCY_ARGS)
 
 # CPU tests that also run under the sanitizers: each is built three times
 # from the same sources, once as the CPU tests above are and once under each

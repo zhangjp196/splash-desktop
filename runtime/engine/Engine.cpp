@@ -2447,14 +2447,23 @@ void Engine::apply(const Pending &command, std::span<const ModelStepResult> resu
         unsent = unsent.subspan(1);
         active.sentFirstToken.reset();
       }
-      if (!unsent.empty())
+      if (!unsent.empty()) {
+        const uint32_t first = static_cast<uint32_t>(
+            result.outputTokens.size() - unsent.size());
+        if (result.outputLogprobs.size() == result.outputTokens.size())
+          events_.logprobs(
+              active.request.id,
+              std::span(result.outputLogprobs).subspan(first));
         events_.tokens(active.request.id, unsent);
+      }
     }
     if (result.firstToken) {
       if (active.sentFirstToken || !result.outputTokens.empty())
         throw std::logic_error(
             "model reported a first token twice or beside output");
       active.sentFirstToken = result.firstToken;
+      if (result.firstTokenLogprob)
+        events_.logprobs(active.request.id, {&*result.firstTokenLogprob, 1});
       events_.tokens(active.request.id, {&*result.firstToken, 1});
     }
     if (plan.kind == WorkKind::Decode) {

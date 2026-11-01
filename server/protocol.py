@@ -15,7 +15,7 @@ from dataclasses import dataclass, fields
 from enum import IntEnum, IntFlag
 from typing import TypeAlias
 
-PROTOCOL_VERSION = 11
+PROTOCOL_VERSION = 13
 # A frame is its header, the magic, the protocol version, the frame type and
 # the payload length, then the payload.
 FRAME_HEADER_BYTES = 16
@@ -39,6 +39,7 @@ MAX_PROMPT_TOKENS = 1 << 20
 MAX_LOGICAL_OUTPUT_TOKENS = 1 << 20
 MAX_TOKEN_BATCH = 4096
 MAX_SIMULATION_TOKENS = 32
+MAX_LOGIT_BIAS = 256
 MAX_IMAGE_SPANS = 64
 MAX_MASK_WORDS = 1 << 20
 
@@ -46,7 +47,7 @@ _MAGIC = b"SPLH"
 _HEADER = struct.Struct("<4sHHQ")
 # Replay can update the integer deadlines without decoding sampling floats.
 _REQUEST_HEAD = struct.Struct("<QBBQQ")
-_REQUEST = struct.Struct(_REQUEST_HEAD.format + "IIIffIffffQIIIQQIII")
+_REQUEST = struct.Struct(_REQUEST_HEAD.format + "IIIffIffffQIIIIIQQIII")
 _IMAGE_SPAN = struct.Struct("<IIIIQQ")
 _CANCEL = struct.Struct("<Q")
 _MASK_RESPONSE = struct.Struct("<QQI")
@@ -57,6 +58,7 @@ _READY = struct.Struct("<IIB")
 _START = struct.Struct("<QII")
 _PROMPT_PROGRESS = struct.Struct("<QIQ")
 _TOKENS = struct.Struct("<QII")
+_LOGPROBS = struct.Struct("<QII")
 _MASK_REQUEST = struct.Struct("<QQII")
 _DONE = struct.Struct("<QBBIIQQQIIIII")
 _ERROR = struct.Struct("<BBIQII")
@@ -68,7 +70,7 @@ assert (
     and sys.byteorder == "little"
 )
 assert _HEADER.size == FRAME_HEADER_BYTES
-assert _REQUEST.size == 114
+assert _REQUEST.size == 122
 assert _IMAGE_SPAN.size == 32
 assert _READY.size == 9
 assert _START.size == 16
@@ -97,6 +99,7 @@ class FrameType(IntEnum):
     ERROR = 0x0105
     STATUS_JSON = 0x0107
     PROMPT_PROGRESS = 0x0108
+    LOGPROBS = 0x0109
 
 
 # The frame types the engine sends; the others are the server's.
@@ -105,6 +108,7 @@ _EVENT_TYPES = frozenset(
         FrameType.READY,
         FrameType.START,
         FrameType.TOKENS,
+        FrameType.LOGPROBS,
         FrameType.MASK_REQUEST,
         FrameType.DONE,
         FrameType.ERROR,
@@ -194,11 +198,16 @@ class RequestFlag(IntFlag):
     IGNORE_END_OF_SEQUENCE = 1 << 0
     # Report the prompt's progress while it prefills (PromptProgressEvent).
     RETURN_PROGRESS = 1 << 1
+    # Return each generated token's log probability (LogprobsEvent); the
+    # request frame's top_logprobs names the tokens above it.
+    LOGPROBS = 1 << 2
 
 
 # A request with any other bit set is a request error.
 _REQUEST_FLAG_BITS = int(
-    RequestFlag.IGNORE_END_OF_SEQUENCE | RequestFlag.RETURN_PROGRESS
+    RequestFlag.IGNORE_END_OF_SEQUENCE
+    | RequestFlag.RETURN_PROGRESS
+    | RequestFlag.LOGPROBS
 )
 
 
@@ -289,6 +298,13 @@ class RequestFrame:
     # The request's cache_salt hashed to 128 bits (Frontend._cache_salt);
     # zero without one.
     cache_salt: int
+    # Tokens above each generated token in its logprobs, 0..20; requires
+    # RequestFlag.LOGPROBS.
+    top_logprobs: int = 0
+    # Raw-logit adjustments (OpenAI logit_bias), tokens then values, equal
+    # lengths, at most MAX_LOGIT_BIAS.
+    bias_tokens: tuple[int, ...] = ()
+    bias_values: tuple[float, ...] = ()
     # Only a request that generates inside a thinking block has one; a score
     # request never does.
     thinking_budget: ThinkingBudget | None = None
@@ -358,6 +374,14 @@ class TokensEvent:
     request_id: int
     sequence_offset: int
     tokens: tuple[int, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class LogprobsEvent:
+    request_id: int
+    sequence_offset: int
+    # Per token: its id, log probability and the top (token, logprob) pairs.
+    values: tuple[tuple[int, float, tuple[tuple[int, float], ...]], ...]
 
 
 @dataclass(slots=True, frozen=True)
@@ -595,6 +619,11 @@ def _payload_bounds(frame_type: FrameType) -> tuple[int, int]:
             bounds = (_START.size, _START.size)
         case FrameType.TOKENS:
             bounds = (_TOKENS.size, _TOKENS.size + MAX_TOKEN_BATCH * 4)
+        case FrameType.LOGPROBS:
+            bounds = (
+                _LOGPROBS.size,
+                _LOGPROBS.size + MAX_TOKEN_BATCH * (12 + 20 * 8),
+            )
         case FrameType.MASK_REQUEST:
             bounds = (
                 _MASK_REQUEST.size,
@@ -683,6 +712,13 @@ def _validated_request(
         )
         if flags & ~_REQUEST_FLAG_BITS:
             raise ValueError("request flags are not defined by native protocol")
+        top_logprobs = _u32(request.top_logprobs, "top logprobs")
+        if top_logprobs > 20:
+            raise ValueError("top logprobs count exceeds its limit")
+        if top_logprobs and not flags & RequestFlag.LOGPROBS:
+            raise ValueError("top logprobs requires the logprobs flag")
+        if flags & RequestFlag.LOGPROBS and constraint != ConstraintMode.NONE:
+            raise ValueError("constrained requests do not take logprobs")
     except ValueError as error:
         _fail_request(IssueCode.INVALID_ENUM_VALUE, str(error), request_id)
     try:
@@ -796,7 +832,22 @@ def _validated_request(
         _integer(request.cache_salt, 0, (1 << 128) - 1, "cache salt")
     except ValueError as error:
         _fail_request(IssueCode.INTEGER_OVERFLOW, str(error), request_id)
-    return prompt, scores, sampling, end
+    try:
+        bias_tokens = _words(request.bias_tokens, "bias tokens")
+        bias_values = array.array(
+            "f", (_float32(value, "logit bias") for value in request.bias_values)
+        )
+        if len(bias_tokens) != len(bias_values):
+            raise ValueError("logit bias tokens and values differ in length")
+        if len(bias_tokens) > MAX_LOGIT_BIAS:
+            raise ValueError("logit bias count exceeds its limit")
+        if len(set(bias_tokens)) != len(bias_tokens):
+            raise ValueError("logit bias tokens must be distinct")
+        if any(not math.isfinite(value) or abs(value) > 100.0 for value in bias_values):
+            raise ValueError("logit bias values must be finite in [-100, 100]")
+    except ValueError as error:
+        _fail_request(IssueCode.INVALID_COUNT, str(error), request_id)
+    return prompt, scores, sampling, end, bias_tokens, bias_values
 
 
 def _mask_payload(values):
@@ -819,13 +870,17 @@ def _frame(frame_type: FrameType, payload_bytes: int) -> bytearray:
 def _request_frame(request: RequestFrame) -> bytearray:
     """The whole request frame, header included, in one buffer that each part
     is copied into once: image pixels run to hundreds of MiB."""
-    prompt, scores, sampling, end = _validated_request(request)
+    prompt, scores, sampling, end, bias_tokens, bias_values = _validated_request(
+        request
+    )
     prompt_offset = FRAME_HEADER_BYTES + _REQUEST.size
     spans_offset = prompt_offset + 4 * len(prompt)
     pixels_offset = spans_offset + _IMAGE_SPAN.size * len(request.image_spans)
     scores_offset = pixels_offset + len(request.image_pixels)
     end_offset = scores_offset + 4 * len(scores)
-    payload_bytes = end_offset + 4 * len(end) - FRAME_HEADER_BYTES
+    bias_tokens_offset = end_offset + 4 * len(end)
+    bias_values_offset = bias_tokens_offset + 4 * len(bias_tokens)
+    payload_bytes = bias_values_offset + 4 * len(bias_values) - FRAME_HEADER_BYTES
     if issue := _payload_length_issue(FrameType.REQUEST, payload_bytes):
         _fail_request(issue.code, issue.message, request.request_id)
     frame = _frame(FrameType.REQUEST, payload_bytes)
@@ -845,6 +900,8 @@ def _request_frame(request: RequestFrame) -> bytearray:
         len(request.score_tokens),
         request.generation_prompt_tokens,
         request.flags,
+        request.top_logprobs,
+        len(bias_tokens),
         request.cache_salt & 0xFFFFFFFFFFFFFFFF,
         request.cache_salt >> 64,
         *(
@@ -873,7 +930,9 @@ def _request_frame(request: RequestFrame) -> bytearray:
         view[prompt_offset:spans_offset] = memoryview(prompt).cast("B")
         view[pixels_offset:scores_offset] = request.image_pixels
         view[scores_offset:end_offset] = memoryview(scores).cast("B")
-        view[end_offset:] = memoryview(end).cast("B")
+        view[end_offset:bias_tokens_offset] = memoryview(end).cast("B")
+        view[bias_tokens_offset:bias_values_offset] = memoryview(bias_tokens).cast("B")
+        view[bias_values_offset:] = memoryview(bias_values).cast("B")
     return frame
 
 
@@ -1097,6 +1156,49 @@ def _decode_event(frame: Frame) -> EngineEvent:
                 request_id,
             )
         return TokensEvent(request_id, offset, tokens)
+    if frame_type is FrameType.LOGPROBS:
+        request_id, offset, count = _LOGPROBS.unpack_from(payload)
+        if not request_id:
+            _fatal(
+                IssueCode.INVALID_REQUEST_ID,
+                "logprobs event request id must be non-zero",
+            )
+        if not 1 <= count <= MAX_TOKEN_BATCH:
+            _fatal(
+                IssueCode.LIMIT_EXCEEDED,
+                "logprobs event batch size exceeds its limit",
+                request_id,
+            )
+        values = []
+        position = _LOGPROBS.size
+        for _ in range(count):
+            token, logprob, top_count = struct.unpack_from("<IfI", payload, position)
+            position += 12
+            if top_count > 20 or position + top_count * 8 > len(payload):
+                _fatal(
+                    IssueCode.LIMIT_EXCEEDED,
+                    "logprobs event top count exceeds its limit",
+                    request_id,
+                )
+            top = []
+            for _ in range(top_count):
+                top_token, top_logprob = struct.unpack_from("<If", payload, position)
+                position += 8
+                top.append((top_token, top_logprob))
+            values.append((token, logprob, tuple(top)))
+        if position != len(payload):
+            _fatal(
+                IssueCode.INVALID_PAYLOAD_LENGTH,
+                "logprobs event payload does not match its counts",
+                request_id,
+            )
+        if offset + len(values) > 0xFFFFFFFF:
+            _fatal(
+                IssueCode.INTEGER_OVERFLOW,
+                "logprobs event sequence range overflows uint32",
+                request_id,
+            )
+        return LogprobsEvent(request_id, offset, tuple(values))
     if frame_type is FrameType.MASK_REQUEST:
         request_id, mask_request_id, words_per_mask, count = _MASK_REQUEST.unpack_from(
             payload

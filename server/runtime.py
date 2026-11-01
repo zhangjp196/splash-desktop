@@ -310,6 +310,20 @@ class RuntimeCall:
         self._emit(event)
         return None
 
+    def _record_logprobs(self, event: wire.LogprobsEvent) -> str | None:
+        with self._lock:
+            if self._event.is_set():
+                return "LogprobsEvent arrived after the request became terminal"
+            if self._start is None:
+                return "LogprobsEvent arrived before StartEvent"
+            if event.sequence_offset != self._next_token_offset:
+                return (
+                    f"LogprobsEvent offset {event.sequence_offset} does not "
+                    f"match the next token {self._next_token_offset}"
+                )
+        self._emit(event)
+        return None
+
     def _record_mask_error(self, error: MaskComputationFailed) -> None:
         with self._lock:
             if not self._event.is_set() and self._mask_error is None:
@@ -1228,6 +1242,11 @@ class MultiplexedRuntime:
         if isinstance(message, wire.TokensEvent):
             call = self._require_call(generation, message.request_id)
             if issue := call._record_tokens(message):
+                raise ProtocolFatal(issue)
+            return
+        if isinstance(message, wire.LogprobsEvent):
+            call = self._require_call(generation, message.request_id)
+            if issue := call._record_logprobs(message):
                 raise ProtocolFatal(issue)
             return
         if isinstance(message, wire.MaskRequestEvent):

@@ -13,7 +13,7 @@ import signal
 import socket
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -49,6 +49,7 @@ from .api_shapes import (
     text_completion_response,
 )
 from .backend import (
+    CacheInfo,
     NativeBackend,
     NativeResult,
     ThinkingEndError,
@@ -213,6 +214,7 @@ POST_ROUTES = {
         "_post_count_tokens", ANTHROPIC_ERRORS, prompt_only=True
     ),
     "/tokenize": PostRoute("_post_tokenize", OPENAI_ERRORS, prompt_only=True),
+    "/detokenize": PostRoute("_post_detokenize", OPENAI_ERRORS, prompt_only=True),
     "/apply-template": PostRoute(
         "_post_apply_template", OPENAI_ERRORS, prompt_only=True
     ),
@@ -667,8 +669,10 @@ class FrontendHandler(BaseHTTPRequestHandler):
             )
             return
         self._body_reservation = None
-        # The native job submitted last, which a failure cancels.
+        # The native job submitted last, which a failure cancels, and every
+        # job of this request (n choices), which a failure cancels too.
         self._submitted = None
+        self._submitted_jobs = []
         try:
             generation = self._serve(route, started_at)
             if generation is not None:
@@ -697,6 +701,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
             # still reads of an upload refused unread; the job must not, as
             # freeing it returns the input it retains.
             self._submitted = None
+            self._submitted_jobs = []
             admission.release()
             self.app.latencies.observe("http_request", time.monotonic() - started_at)
 
@@ -719,12 +724,15 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
     def _generate(self, job, respond, started_at):
         """Submit a prepared generation and answer with its output. The
-        request's input bytes stay reserved only for what the job retains."""
-        self._body_reservation.retain_for(job)
+        request's input bytes stay reserved only for what the job retains.
+        `job` is one Job, or the list of a request's n choices."""
+        jobs = job if isinstance(job, (list, tuple)) else [job]
+        self._body_reservation.retain_for(jobs[0])
         self._body_reservation = None
-        job.latency = RequestLatency(self.app.latencies, started_at)
-        self._submit(job)
-        respond(job)
+        for choice in jobs:
+            choice.latency = RequestLatency(self.app.latencies, started_at)
+            self._submit(choice)
+        respond(jobs if len(jobs) > 1 else jobs[0])
 
     def _submit(self, job):
         """Submit `job` unless its deadline has passed or its client has
@@ -734,27 +742,65 @@ class FrontendHandler(BaseHTTPRequestHandler):
             raise ConnectionResetError("client disconnected before submission")
         self.app.backend.submit(job)
         self._submitted = job
+        self._submitted_jobs.append(job)
 
     def _cancel_submitted(self):
-        if self._submitted is not None:
-            self.app.backend.cancel(self._submitted)
+        for job in self._submitted_jobs:
+            self.app.backend.cancel(job)
+        self._submitted_jobs = []
 
     def _post_chat_completions(self, body, deadline):
         progress = _progress_flag(body)
         stream, stream_options = _stream_options(body)
         job = self.app.prepare(body, deadline=deadline)
         job.flags |= progress
+        if job.logprobs and stream:
+            raise APIError(400, "streaming logprobs are not supported")
+        jobs = self._choice_jobs(job)
+        if isinstance(jobs, list):
+            if stream:
+                raise APIError(400, "n > 1 is not supported with stream")
+            return jobs, self._complete_choices
         if stream:
             return job, partial(
                 self._openai_stream, stream_options=stream_options, chat=True
             )
         return job, self._complete
 
+    def _choice_jobs(self, job):
+        """One job per choice of an n-request, or the job itself."""
+        if job.n <= 1:
+            return job
+        jobs = [job]
+        for index in range(1, job.n):
+            jobs.append(
+                replace(
+                    job,
+                    request_id=next(self.app.ids),
+                    seed=(job.seed + index) % (2**64),
+                    events=queue.Queue(),
+                    cache=CacheInfo(),
+                    latency=None,
+                    cache_salt=(
+                        secrets.randbits(128) if job.logprobs else job.cache_salt
+                    ),
+                    constraint=(
+                        job.constraint.clone() if job.constraint is not None else None
+                    ),
+                )
+            )
+        return jobs
+
     def _post_completions(self, body, deadline):
         progress = _progress_flag(body)
         stream, stream_options = _stream_options(body)
         job = self.app.prepare_completion(body, deadline=deadline)
         job.flags |= progress
+        jobs = self._choice_jobs(job)
+        if isinstance(jobs, list):
+            if stream:
+                raise APIError(400, "n > 1 is not supported with stream")
+            return jobs, self._text_completion_choices
         if stream:
             return job, partial(
                 self._openai_stream, stream_options=stream_options, chat=False
@@ -796,6 +842,9 @@ class FrontendHandler(BaseHTTPRequestHandler):
 
     def _post_tokenize(self, body, deadline):
         self._json(200, {"tokens": self.app.tokenize(body, deadline=deadline)})
+
+    def _post_detokenize(self, body, deadline):
+        self._json(200, {"content": self.app.detokenize(body, deadline=deadline)})
 
     def _post_apply_template(self, body, deadline):
         self._json(200, {"prompt": self.app.apply_template(body, deadline=deadline)})
@@ -1043,6 +1092,44 @@ class FrontendHandler(BaseHTTPRequestHandler):
             None if projector is None else projector.call_id,
         )
 
+    def _chat_logprobs(self, result, content):
+        """A generated token list as Chat's logprobs content, trimmed to the
+        text a stop sequence left."""
+        entries = []
+        for token, logprob, top in result.logprobs:
+            text = self.app.tokenizer.decode([token], skip_special_tokens=True)
+            if not text:
+                # A stop or other special token ends the output rather than
+                # being content; it has no Chat logprobs entry.
+                continue
+            entries.append(
+                {
+                    "token": text,
+                    "logprob": logprob,
+                    "bytes": list(text.encode("utf-8")),
+                    "top_logprobs": [
+                        {
+                            "token": self.app.tokenizer.decode(
+                                [top_token], skip_special_tokens=False
+                            ),
+                            "logprob": top_logprob,
+                            "bytes": list(
+                                self.app.tokenizer.decode(
+                                    [top_token], skip_special_tokens=False
+                                ).encode("utf-8")
+                            ),
+                        }
+                        for top_token, top_logprob in top
+                    ],
+                }
+            )
+        while entries:
+            joined = "".join(entry["token"] for entry in entries)
+            if joined == content or content.startswith(joined):
+                break
+            entries.pop()
+        return {"content": entries, "refusal": None}
+
     def _complete(self, job):
         collected = self._collect(job)
         message = {"role": "assistant", "content": collected.content or None}
@@ -1050,16 +1137,54 @@ class FrontendHandler(BaseHTTPRequestHandler):
             message["reasoning_content"] = collected.reasoning
         if collected.tool_calls:
             message["tool_calls"] = collected.tool_calls
-        self._json(
-            200,
-            completion_response(
+        response = completion_response(
+            self.app.response_model,
+            job,
+            collected.result,
+            message,
+            collected.called,
+        )
+        if job.logprobs:
+            response["choices"][0]["logprobs"] = self._chat_logprobs(
+                collected.result, collected.content
+            )
+        self._json(200, response)
+
+    def _complete_choices(self, jobs):
+        choices = []
+        first = None
+        prompt_tokens = 0
+        completion_tokens = 0
+        for index, job in enumerate(jobs):
+            collected = self._collect(job)
+            message = {"role": "assistant", "content": collected.content or None}
+            if collected.reasoning:
+                message["reasoning_content"] = collected.reasoning
+            if collected.tool_calls:
+                message["tool_calls"] = collected.tool_calls
+            response = completion_response(
                 self.app.response_model,
                 job,
                 collected.result,
                 message,
                 collected.called,
-            ),
-        )
+            )
+            if job.logprobs:
+                response["choices"][0]["logprobs"] = self._chat_logprobs(
+                    collected.result, collected.content
+                )
+            if first is None:
+                first = response
+            choice = response["choices"][0]
+            choice["index"] = index
+            choices.append(choice)
+            prompt_tokens = max(prompt_tokens, response["usage"]["prompt_tokens"])
+            completion_tokens += response["usage"]["completion_tokens"]
+        first["choices"] = choices
+        first["usage"]["prompt_tokens"] = prompt_tokens
+        first["usage"]["completion_tokens"] = completion_tokens
+        first["usage"]["total_tokens"] = prompt_tokens + completion_tokens
+        self._json(200, first)
 
     def _text_completion(self, job):
         collected = self._collect(job)
@@ -1069,6 +1194,29 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 self.app.response_model, job, collected.result, collected.content
             ),
         )
+
+    def _text_completion_choices(self, jobs):
+        choices = []
+        first = None
+        prompt_tokens = 0
+        completion_tokens = 0
+        for index, job in enumerate(jobs):
+            collected = self._collect(job)
+            response = text_completion_response(
+                self.app.response_model, job, collected.result, collected.content
+            )
+            if first is None:
+                first = response
+            choice = response["choices"][0]
+            choice["index"] = index
+            choices.append(choice)
+            prompt_tokens = max(prompt_tokens, response["usage"]["prompt_tokens"])
+            completion_tokens += response["usage"]["completion_tokens"]
+        first["choices"] = choices
+        first["usage"]["prompt_tokens"] = prompt_tokens
+        first["usage"]["completion_tokens"] = completion_tokens
+        first["usage"]["total_tokens"] = prompt_tokens + completion_tokens
+        self._json(200, first)
 
     def _anthropic_complete(self, job):
         sequencer = BlockSequencer()
@@ -1774,6 +1922,16 @@ def _native_command(args, model_root, relaunch_context=None):
         )
     if args.disable_ane:
         command.extend(("--ane", "off"))
+    if share := os.environ.get("SPLASH_ANE_SHARE"):
+        try:
+            value = float(share)
+        except ValueError:
+            value = -1.0
+        if not 0.0 <= value < 1.0:
+            raise ValueError("SPLASH_ANE_SHARE must be a share from 0 to just below 1")
+        if args.disable_ane:
+            raise ValueError("SPLASH_ANE_SHARE cannot be combined with --disable-ane")
+        command.extend(("--ane-share", share))
     policy = serve_options.thermal_policy(args)
     if args.verify_rows != "auto":
         command.extend(("--verify-rows", args.verify_rows))

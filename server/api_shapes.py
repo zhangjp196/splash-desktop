@@ -546,6 +546,12 @@ def responses_to_chat_body(body, items):
         raise APIError(400, "background responses are not supported")
     if body.get("truncation") not in (None, "disabled"):
         raise APIError(400, "only disabled truncation is supported")
+    for field_name in ("grammar", "regex"):
+        if body.get(field_name) is not None:
+            raise APIError(
+                400,
+                f"{field_name} is supported on Chat Completions and text completions alone",
+            )
     if body.get("stream") is not None and not isinstance(body["stream"], bool):
         raise APIError(400, "stream must be a boolean")
     chat = {
@@ -768,6 +774,12 @@ def _anthropic_chat(body, thinking_resolver):
     shows reasoning."""
     if not isinstance(body.get("model"), str) or not body["model"]:
         raise APIError(400, "model must be a non-empty string")
+    for field_name in ("grammar", "regex"):
+        if body.get(field_name) is not None:
+            raise APIError(
+                400,
+                f"{field_name} is supported on Chat Completions and text completions alone",
+            )
     preserve_thinking = _anthropic_preserve_thinking(body.get("context_management"))
     output_config = body.get("output_config", {})
     if not isinstance(output_config, dict):

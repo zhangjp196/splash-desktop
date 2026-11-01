@@ -312,6 +312,15 @@ struct Runtime::Impl {
     // RequestFlag bits.
     uint32_t flags = 0;
     std::optional<uint32_t> pendingToken;
+    // --logprobs: return each generated token's log probability, and up to
+    // `topLogprobs` tokens above it.
+    bool logprobs = false;
+    uint32_t topLogprobs = 0;
+    // Raw-logit adjustments applied before penalties and sampling.
+    std::vector<LogitBias> logitBias;
+    // The log probability of pendingToken, kept from the selection that
+    // chose it until the token is emitted.
+    std::optional<TokenLogprob> pendingLogprob;
     // While the request thinks under a budget (ModelRequest::thinkingBudget),
     // that budget with the thinking tokens it may still select and, once
     // they ran out, the tokens of its end it selected; none once thinking
@@ -510,15 +519,19 @@ struct Runtime::Impl {
         .thinkingCutoff = ops::ThinkingCutoff{.end = end}};
     const std::array<ops::SamplingPolicy, 2> policies{sampled, {}};
     const std::array<uint32_t, 2> stateLanes{0, 1};
+    const std::array<uint32_t, 2> biasCounts{0, 0};
     const ops::PenaltyTable penalties{penaltyTable, stateLanes};
+    const ops::SamplingBuffers buffers = samplingBuffers(2);
+    const ops::BiasTable biases{buffers.biasTokens, buffers.biasValues,
+                                biasCounts};
     CommandGraph graph;
-    sampling.addInitial(graph, policies, samplingBuffers(2), 0,
-                        geometry.target.stopTokens, penalties);
+    sampling.addInitial(graph, policies, buffers, 0,
+                        geometry.target.stopTokens, penalties, biases);
     sampling.addThinkingDrafts(
         graph, policies,
         decodeArena->batchSlice(DecodeTensor::ProposedTokens, 2));
-    sampling.addVerify(graph, policies, samplingBuffers(2),
-                       geometry.target.stopTokens, penalties);
+    sampling.addVerify(graph, policies, buffers,
+                       geometry.target.stopTokens, penalties, biases);
     backend.preparePipelines(graph.dispatches());
   }
 
@@ -1145,7 +1158,9 @@ struct Runtime::Impl {
             d(DecodeTensor::Candidates),
             d(DecodeTensor::ProposalProbs),
             d(DecodeTensor::TargetVocabularyRanges),
-            d(DecodeTensor::TargetVocabularyArrivals)};
+            d(DecodeTensor::TargetVocabularyArrivals),
+            d(DecodeTensor::BiasTokens),
+            d(DecodeTensor::BiasValues)};
   }
 
   std::span<uint32_t> penaltyWords(uint32_t stateLane) const {
@@ -1167,6 +1182,25 @@ struct Runtime::Impl {
                                        entry.generatedTokens,
                                        entry.pendingToken,
                                        penalties.repetition != 1.0F);
+  }
+
+  // Uploads a request's logit_bias entries into its lane's buffers, at
+  // activation and at resume; no command reads them yet.
+  void bindBias(const Request &entry) const {
+    if (entry.logitBias.empty())
+      return;
+    if (entry.logitBias.size() > kMaximumLogitBias)
+      throw std::logic_error("logit bias count exceeds its limit");
+    auto tokens = contents<uint32_t>(
+        decodeArena->get(entry.stateLane, DecodeTensor::BiasTokens),
+        "bias tokens");
+    auto values = contents<float>(
+        decodeArena->get(entry.stateLane, DecodeTensor::BiasValues),
+        "bias values");
+    for (size_t index = 0; index < entry.logitBias.size(); ++index) {
+      tokens[index] = entry.logitBias[index].token;
+      values[index] = entry.logitBias[index].value;
+    }
   }
 
   // The one place a token the target selected becomes the pending anchor:
@@ -1216,6 +1250,95 @@ struct Runtime::Impl {
     if (entry.pendingToken) entry.tokens.push_back(*entry.pendingToken);
     entry.tokens.insert(entry.tokens.end(), tokens.begin(), tokens.end() - 1);
     entry.pendingToken = tokens.back();
+  }
+
+  // One selected token's log probability from the logits row that selected
+  // it, after the penalties the sampling kernels applied in place and at the
+  // request's temperature (greedy reads at temperature 1), and the tokens
+  // above it the request asked for. Ties order by the lower token id.
+  [[nodiscard]] TokenLogprob logprobAt(const float *row, uint32_t token,
+                                      uint32_t topK,
+                                      float temperature) const {
+    TokenLogprob result;
+    result.token = token;
+    const uint32_t vocabulary = geometry.target.vocabularySize;
+    const float scale =
+        temperature > 0.0F ? 1.0F / temperature : 1.0F;
+    float maximum = -std::numeric_limits<float>::infinity();
+    for (uint32_t id = 0; id < vocabulary; ++id) {
+      if (std::isfinite(row[id]))
+        maximum = std::max(maximum, row[id]);
+    }
+    if (!std::isfinite(maximum)) {
+      result.logprob = -std::numeric_limits<float>::infinity();
+      return result;
+    }
+    double sum = 0.0;
+    for (uint32_t id = 0; id < vocabulary; ++id) {
+      if (std::isfinite(row[id]))
+        sum += std::exp(double(row[id] - maximum) * scale);
+    }
+    if (!(sum > 0.0) || !std::isfinite(sum)) {
+      result.logprob = -std::numeric_limits<float>::infinity();
+    } else {
+      result.logprob =
+          (row[token] - maximum) * scale - std::log(sum);
+    }
+    if (!topK)
+      return result;
+
+    struct Candidate final {
+      float value;
+      uint32_t token;
+    };
+    const auto better = [](const Candidate &a, const Candidate &b) {
+      return a.value > b.value || (a.value == b.value && a.token < b.token);
+    };
+    const auto worse = [&](const Candidate &a, const Candidate &b) {
+      return better(b, a);
+    };
+    const auto siftDown = [&](std::array<Candidate, kMaximumTopLogprobs> &heap,
+                              uint32_t count, uint32_t index) {
+      for (;;) {
+        const uint32_t left = index * 2 + 1;
+        if (left >= count)
+          return;
+        uint32_t child = left;
+        const uint32_t right = left + 1;
+        if (right < count && worse(heap[right], heap[left]))
+          child = right;
+        if (!worse(heap[child], heap[index]))
+          return;
+        std::swap(heap[index], heap[child]);
+        index = child;
+      }
+    };
+    std::array<Candidate, kMaximumTopLogprobs> heap{};
+    uint32_t count = 0;
+    for (uint32_t id = 0; id < vocabulary; ++id) {
+      if (!std::isfinite(row[id]))
+        continue;
+      const Candidate candidate{row[id], id};
+      if (count < topK) {
+        heap[count++] = candidate;
+        if (count == topK) {
+          for (uint32_t index = count / 2; index > 0; --index)
+            siftDown(heap, count, index - 1);
+        }
+      } else if (better(candidate, heap[0])) {
+        heap[0] = candidate;
+        siftDown(heap, count, 0);
+      }
+    }
+    std::sort(heap.begin(), heap.begin() + count, better);
+    result.topCount = count;
+    for (uint32_t index = 0; index < count; ++index) {
+      result.top[index] = {
+          heap[index].token,
+          static_cast<float>((heap[index].value - maximum) * scale -
+                             std::log(sum))};
+    }
+    return result;
   }
 
   // A selection outside the vocabulary is the sampling kernels' sentinel for a
@@ -1308,19 +1431,25 @@ struct Runtime::Impl {
       return;
     std::array<ops::SamplingPolicy, kLaneCount> policies{};
     std::array<uint32_t, kLaneCount> stateLanes{};
+    std::array<uint32_t, kLaneCount> biasCounts{};
     for (const InitialSelection &lane : lanes) {
       if (!lane.select)
         continue;
       policies[lane.lane] = samplingPolicy(*lane.entry);
       stateLanes[lane.lane] = lane.entry->stateLane;
+      biasCounts[lane.lane] =
+          static_cast<uint32_t>(lane.entry->logitBias.size());
     }
 #ifdef SPLASH_RUNTIME_INSTRUMENTATION
     encodeTargetLogitsCapture(graph, width, 1);
 #endif
-    sampling.addInitial(graph, std::span(policies).first(width),
-                        samplingBuffers(width), 0,
-                        geometry.target.stopTokens,
-                        {penaltyTable, std::span(stateLanes).first(width)});
+    const ops::SamplingBuffers buffers = samplingBuffers(width);
+    sampling.addInitial(
+        graph, std::span(policies).first(width), buffers, 0,
+        geometry.target.stopTokens,
+        {penaltyTable, std::span(stateLanes).first(width)},
+        {buffers.biasTokens, buffers.biasValues,
+         std::span(biasCounts).first(width)});
   }
 
   // The first token encodeInitialSelections() selected for a batch lane: a
@@ -1377,6 +1506,13 @@ struct Runtime::Impl {
           continue;
         }
         commitSelected(entry, {&token, 1});
+        if (entry.logprobs) {
+          const float *row = contents<float>(
+              decodeArena->get(selection.lane, DecodeTensor::Logits),
+              "initial logits");
+          entry.pendingLogprob = logprobAt(row, token, entry.topLogprobs,
+                                           entry.sampling.temperature);
+        }
         entry.maskWords.clear();
         entry.finalTargetHidden.clear();
         entry.decodeStage = DecodeStage::Regular;
@@ -2106,18 +2242,25 @@ struct Runtime::Impl {
     const uint32_t lanes = static_cast<uint32_t>(entries.size());
     std::array<ops::SamplingPolicy, kLaneCount> policies{};
     std::array<uint32_t, kLaneCount> stateLanes{};
+    std::array<uint32_t, kLaneCount> biasCounts{};
     for (uint32_t lane = 0; lane < lanes; ++lane) {
       if (!entries[lane])
         throw std::invalid_argument("empty target policy lane");
       policies[lane] = samplingPolicy(*entries[lane]);
       stateLanes[lane] = entries[lane]->stateLane;
+      biasCounts[lane] =
+          static_cast<uint32_t>(entries[lane]->logitBias.size());
     }
 #ifdef SPLASH_RUNTIME_INSTRUMENTATION
     encodeTargetLogitsCapture(graph, lanes, kDecodeRows);
 #endif
-    sampling.addVerify(graph, std::span(policies).first(lanes),
-                       samplingBuffers(lanes), geometry.target.stopTokens,
-                       {penaltyTable, std::span(stateLanes).first(lanes)});
+    const ops::SamplingBuffers buffers = samplingBuffers(lanes);
+    sampling.addVerify(
+        graph, std::span(policies).first(lanes), buffers,
+        geometry.target.stopTokens,
+        {penaltyTable, std::span(stateLanes).first(lanes)},
+        {buffers.biasTokens, buffers.biasValues,
+         std::span(biasCounts).first(lanes)});
   }
 
   void encodeDraftStateCommitBatch(CommandGraph &graph,
@@ -2237,6 +2380,8 @@ struct Runtime::Impl {
     if (!stop && entry.maxNewTokens - entry.generatedTokens != 1)
       return false;
     result.outputTokens.push_back(*entry.pendingToken);
+    if (entry.logprobs && entry.pendingLogprob)
+      result.outputLogprobs.push_back(*entry.pendingLogprob);
     result.outputTokensWithoutKv = 1;
     result.finished = stop;
     ++entry.generatedTokens;
@@ -2328,6 +2473,31 @@ struct Runtime::Impl {
       output.push_back(laneResult.currentAnchor);
       output.insert(output.end(), targetTokens,
                     targetTokens + (laneResult.retained - 1));
+      std::vector<TokenLogprob> outputLogprobs;
+      if (entry.logprobs) {
+        const float *rows = contents<float>(
+            decodeArena->get(lane, DecodeTensor::Logits), "logits");
+        const uint32_t vocabulary = geometry.target.vocabularySize;
+        const float temperature = entry.sampling.temperature;
+        outputLogprobs.reserve(output.size() + 1);
+        if (entry.pendingLogprob) {
+          outputLogprobs.push_back(*entry.pendingLogprob);
+        } else {
+          // A restored state can reach the cycle without the selection that
+          // chose its anchor; the row that would have chosen it is gone.
+          outputLogprobs.push_back(
+              logprobAt(rows, output.front(), entry.topLogprobs, temperature));
+        }
+        for (uint32_t index = 1; index < output.size(); ++index) {
+          outputLogprobs.push_back(
+              logprobAt(rows + uint64_t(index - 1) * vocabulary, output[index],
+                        entry.topLogprobs, temperature));
+        }
+        entry.pendingLogprob = logprobAt(
+            rows + uint64_t(laneResult.retained - 1) * vocabulary,
+            targetTokens[laneResult.retained - 1], entry.topLogprobs,
+            temperature);
+      }
 
       states.swapDecodeParity(entry.stateLane, laneResult.retained);
       const uint64_t nextLength =
@@ -2347,16 +2517,19 @@ struct Runtime::Impl {
       const uint32_t accepted =
           std::min(laneResult.accepted, laneResult.retained - 1);
       const uint32_t verified = laneResult.verifyRows - 1;
-      results.push_back({entry.id,
-                         0,
-                         std::move(output),
-                         false,
-                         DecodeStage::Regular,
-                         verified - std::min(verified, laneResult.endDrafts),
-                         accepted - std::min(accepted, laneResult.endDrafts)});
-      ModelStepResult &result = results.back();
+      ModelStepResult result{
+          entry.id,
+          0,
+          std::move(output),
+          false,
+          DecodeStage::Regular,
+          verified - std::min(verified, laneResult.endDrafts),
+          accepted - std::min(accepted, laneResult.endDrafts)};
+      result.outputLogprobs = std::move(outputLogprobs);
+      results.push_back(std::move(result));
+      ModelStepResult &stored = results.back();
       if (entry.generatedTokens < entry.maxNewTokens)
-        emitTerminalAnchor(entry, result);
+        emitTerminalAnchor(entry, stored);
     }
 
     counters.lastDecodeGpuSeconds = timing.gpuSeconds;
@@ -2638,6 +2811,7 @@ StateAdmission Runtime::resume(const ModelRequest &request) {
     entry.images = std::move(images);
     entry.restoredTokens = request.restoredTokens;
     impl_->bindPenalties(entry, request.prompt);
+    impl_->bindBias(entry);
   }
   rollback.committed = admission.granted();
   return admission;
@@ -2658,6 +2832,9 @@ StateAdmission Runtime::beginAt(const ModelRequest &request, uint32_t stateLane)
   entry.sampling = request.sampling;
   entry.constraint = request.constraint;
   entry.flags = request.flags;
+  entry.logprobs = request.logprobs;
+  entry.topLogprobs = request.topLogprobs;
+  entry.logitBias.assign(request.logitBias.begin(), request.logitBias.end());
   entry.loopGuard = request.loopGuard;
   if (request.thinkingBudget) {
     Impl::Request::Thinking thinking;
@@ -2675,6 +2852,7 @@ StateAdmission Runtime::beginAt(const ModelRequest &request, uint32_t stateLane)
   entry.images = std::move(images);
   entry.restoredTokens = request.restoredTokens;
   impl_->bindPenalties(entry, request.prompt);
+  impl_->bindBias(entry);
   auto [_, inserted] = impl_->requests.emplace(request.id, std::move(entry));
   if (!inserted) {
     throw std::logic_error("request insertion lost uniqueness");
@@ -2936,10 +3114,20 @@ Runtime::prefillAsync(const BatchPlan &plan,
           result.finished = true;
         } else if (selected) {
           impl->commitSelected(entry, {&*selected, 1});
+          if (entry.logprobs) {
+            const float *row = contents<float>(
+                impl->decodeArena->get(lane, DecodeTensor::Logits),
+                "initial logits");
+            entry.pendingLogprob = impl->logprobAt(
+                row, *selected, entry.topLogprobs, entry.sampling.temperature);
+          }
           // Unless it ends the request, the first token waits for the first
           // decode cycle; the engine sends it to the client now.
-          if (!impl->emitTerminalAnchor(entry, result))
+          if (!impl->emitTerminalAnchor(entry, result)) {
             result.firstToken = entry.pendingToken;
+            if (entry.logprobs)
+              result.firstTokenLogprob = entry.pendingLogprob;
+          }
         } else {
           // The first token waits for the request's first mask. A replay
           // never gets here: it keeps its stage, and a request that holds

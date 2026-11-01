@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Logprob.hpp"
 #include "ops/PagedKv.hpp"
 #include "ops/Vision.hpp"
 #include "model/StateTransfer.hpp"
@@ -50,9 +51,14 @@ enum RequestFlag : uint32_t {
   // Never select the model's stop tokens, so generation runs to its output
   // limit. Only unconstrained generation can carry it.
   RequestIgnoreEndOfSequence = 1U << 0,
+  // Return each generated token's log probability, and the request frame's
+  // topLogprobs tokens above it. Bit 1 is the protocol's return-progress flag,
+  // which the engine does not read.
+  RequestLogprobs = 1U << 2,
 };
 
-inline constexpr uint32_t kRequestFlagBits = RequestIgnoreEndOfSequence;
+inline constexpr uint32_t kRequestFlagBits =
+    RequestIgnoreEndOfSequence | RequestLogprobs;
 
 // A request's token selection, its fields in the native request frame's
 // order. The defaults are greedy selection with nothing changing the logits.
@@ -148,6 +154,12 @@ struct ModelRequest final {
   std::span<const uint32_t> scoreTokens{};
   // RequestFlag bits.
   uint32_t flags = 0;
+  // Return each generated token's log probability, and up to `topLogprobs`
+  // tokens above it. A constrained request may not ask for logprobs.
+  bool logprobs = false;
+  uint32_t topLogprobs = 0;
+  // Raw-logit adjustments applied before the penalties and sampling.
+  std::span<const LogitBias> logitBias{};
   // The engine request's thinking budget; null for a request without one.
   const ThinkingBudget *thinkingBudget = nullptr;
   // `--loop-guard`: end this request's thinking where it repeats a short
@@ -422,6 +434,11 @@ struct ModelStepResult final {
   // and emits it first. Reported so that the engine can send it to the client
   // now rather than with that cycle.
   std::optional<uint32_t> firstToken{};
+  // Per-token log probabilities aligned with outputTokens, and the first
+  // token's beside firstToken, for a request that asked for them; empty
+  // otherwise.
+  std::vector<TokenLogprob> outputLogprobs{};
+  std::optional<TokenLogprob> firstTokenLogprob{};
 
   bool operator==(const ModelStepResult &) const = default;
 };

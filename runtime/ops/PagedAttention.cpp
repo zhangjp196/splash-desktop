@@ -20,6 +20,15 @@ uint64_t tileParts(uint32_t queryHeads, kv::Layout layout) {
   return layout.valuesTokenMajor ? 1 : SPLASH_ATTENTION_TILE_PARTS(queryHeads / layout.kvHeads);
 }
 
+// The parts a verify tile runs in (SPLASH_VERIFY_ATTENTION_TILE_PARTS).
+uint64_t verifyTileParts(uint32_t queryHeads, kv::Layout layout,
+                         uint32_t windowTokens) {
+  return layout.valuesTokenMajor
+             ? 1
+             : SPLASH_VERIFY_ATTENTION_TILE_PARTS(queryHeads / layout.kvHeads,
+                                                  windowTokens);
+}
+
 // One thread per gate element, across rows x query heads x head dimension.
 uint64_t gateGroups(uint64_t rows, uint32_t queryHeads, uint32_t headDimension) {
   const uint64_t elements = rows * queryHeads * headDimension;
@@ -297,7 +306,7 @@ VerifyAttentionPlan PagedAttention::verifyPlan(
           // (x the KV head, y the split) worse, running it up to 1.7x slower
           // on most grids of more than 32 splits.
           layout.valuesTokenMajor ? metal::DispatchSize{layout.kvHeads * splits, 1, lanes}
-                                  : metal::DispatchSize{layout.kvHeads * tileParts(queryHeads, layout), splits, lanes},
+                                  : metal::DispatchSize{layout.kvHeads * verifyTileParts(queryHeads, layout, variant.windowTokens), splits, lanes},
           {layout.kvHeads,
            kv::kVerifyRows * (queryHeads / layout.kvHeads), lanes},
           layout.valuesTokenMajor, kernel.sinks,

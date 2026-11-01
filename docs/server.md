@@ -119,6 +119,14 @@ paths for `--model-dir`, `--draft-model` and `--mmproj`.
 | `--verify-rows` | `auto` | The rows of each draft block decode cycles verify: `auto` lets the verify budget choose a MoE target's rows, which is faster but makes its greedy and seeded outputs vary from run to run, and verifies every row of a dense target; `all` verifies every row the output limit leaves on every target, so those outputs repeat when a request runs alone with the same cached prefixes. See [drafts](models.md#drafts) and [sampling](api.md#sampling). |
 | `--allow-idle-sleep` | Off | Let the Mac sleep automatically while requests run; by default it stays awake until they finish (the display may still sleep). |
 
+For an advanced prefill tuning, `SPLASH_ANE_SHARE` sets the dense prefill
+FFN's Neural Engine share in `[0, 1)` in place of the calibration, as the
+development benchmarks' `--ane-ffn-share` does; `0` runs the GPU alone. The
+M3 Max measurements found `0.60` up to 10% faster end to end than the
+calibrated share, at some cost in KV context (the split's buffers come from
+the attention cache). It cannot be combined with `--disable-ane`. This is a
+server environment setting, not a `splash serve` option.
+
 Sizes (`--max-memory`, `--max-cache-disk`, `--max-cache-disk-writes`,
 `--max-request-size`, `--ple-memory`, `--expert-memory`, `--sparse-kv-memory`) are a whole number of bytes, or one with a `K`, `M` or
 `G` suffix in binary units: `28G` is 28 GiB, and `28GB`, `28GiB` and `28g` say

@@ -23,6 +23,7 @@ Messages requires it.
 | `POST /v1/messages/count_tokens` | A Messages request's prompt tokens, images included, as `{"input_tokens": N}`, without inference |
 | `GET /v1/models`, `/v1/models/{id}` | The served model and its aliases, with the context limit and what reasoning efforts do ([default reasoning effort](server.md#default-reasoning-effort)) |
 | `POST /tokenize`, `/apply-template` | A text's tokens, or a conversation's rendered prompt, without inference |
+| `POST /detokenize` | Token ids back to text, `{"tokens": [...]}` to `{"content": "..."}`; `special` keeps special tokens' text |
 | `POST /v1/judgments`, `/v1/systemone` | Scores over fixed answers ([judgment contracts](#judgment-contracts)) |
 | `POST /v1/memory/release` | Gives the weights back now, as the idle release does, when no request is in service; the next request restores them ([explicit release](internals.md#explicit-weights-release)). It takes no body (or `{}`); `200` with `{"released": true, "weights": …}`, `409 engine_busy` while the engine serves a request or restores its weights, `503 engine_busy` when the engine does not answer within 5 s, and `503 engine_recovering` or `server_shutdown` while the engine restarts or the server stops |
 | `POST /v1/thermal` | Sets the [heat-and-noise rung](#heat-and-noise) of the running engine, without restarting it. The body is `{"prefill_duty_percent": N}`, a percentage from 10 to 100; `200` with `{"prefill_duty_percent": N}`, the duty the engine took, which its next `throttle` status reports too; `400 invalid_request_error` for a missing, out-of-range or unknown field, and `503 engine_busy` when the engine does not answer within 5 s |
@@ -67,7 +68,8 @@ Completions, text completions, Responses and Messages share these fields:
 
 Chat Completions also takes `messages`, `tools`, `tool_choice` and
 `parallel_tool_calls` ([tool calls](#tool-calls)), `response_format`
-([structured output](#structured-output)), `reasoning_effort` and
+([structured output](#structured-output)), `grammar` or `regex`
+([grammar and regex](#grammar-and-regex)), `reasoning_effort` and
 `chat_template_kwargs` ([default reasoning effort](server.md#default-reasoning-effort)),
 `thinking_token_budget` ([thinking token budget](server.md#thinking-token-budget)),
 `preserve_thinking`, which reaches the template (the Qwen templates keep earlier
@@ -79,7 +81,12 @@ delta, and an assistant message sent back may carry its `reasoning_content`
 `output_text` and `input_image` parts too, and a `refusal` part, an assistant's
 refusal, is text. A history tool call whose `arguments` are not a JSON object,
 such as one the output limit cut, is kept as text, so the conversation
-continues. `n` other than 1 and `logprobs: true` return 400.
+continues. `n` is 1 to 4, one choice per value; a larger value returns 400,
+and `stream` with `n` above 1 returns 400 because one stream carries one
+choice. `logprobs` and `top_logprobs` return each content token's log
+probability and the tokens above it ([log probabilities](#log-probabilities));
+they require reasoning off and cannot be combined with tools, structured
+output, grammar or regex.
 
 `POST /v1/completions` serves OpenAI's legacy text completions. `prompt` is one
 string, which the loaded tokenizer encodes as a raw prompt, adding its own
@@ -90,8 +97,10 @@ images apply: `text` is the generated text, decoded without special tokens.
 larger value is lowered to what the context leaves, as in Chat
 ([output limits](#output-limits-and-streaming)). The sampling fields
 below, `seed`, `stop`, `priority`, `timeout` and `stream` with
-`stream_options.include_usage` work as in Chat. Batched prompts, `suffix`,
-`echo`, `logprobs`, `best_of` and `n` other than 1 are rejected.
+`stream_options.include_usage` work as in Chat. `grammar` and `regex` work as
+in Chat (no reasoning split applies). `n` is 1 to 4 and follows Chat's rules,
+including the refusal of `stream` with more than one choice. Batched prompts,
+`suffix`, `echo`, `logprobs` and `best_of` are rejected.
 
 Responses takes `input` and `instructions`, function `tools` and `namespace`
 groups of them, custom (freeform) `tools`, `tool_choice`,
@@ -143,9 +152,12 @@ Splash makes no other edit, so the model reads the conversation as sent.
 `parse_special:false` and `with_pieces:true` are unsupported.
 `POST /apply-template` accepts Chat-style `messages`, `tools` and reasoning options,
 and returns `{"prompt":"..."}` using the same template as generation.
+`POST /detokenize` takes `{"tokens":[...], "special":false}` and returns
+`{"content":"..."}` with the same tokenizer; `special` true keeps special
+tokens' text, and an id outside the vocabulary is a 400.
 `add_generation_prompt` defaults to true. Image prompts retain textual placeholders;
 raw tokenization does not account for image embeddings (use `count_tokens` for that).
-Both endpoints run without inference and share bounded preparation capacity with
+These endpoints run without inference and share bounded preparation capacity with
 `count_tokens`; they can inspect prompts larger than the serving context limit.
 
 ## Request limits and timeouts
@@ -213,8 +225,11 @@ one for every token of the prompt or of the output so far, and presence and
 frequency lower the logit of every output token by `presence_penalty` plus
 `frequency_penalty` times its count. Speculative decoding stays exact: each
 verified draft position counts the draft tokens before it, so a penalized
-request samples as it would without a draft. Splash does not implement
-`logit_bias`: a non-empty one returns 400; `null` and `{}` are accepted. Like
+request samples as it would without a draft. `logit_bias` maps token id
+strings to numbers in [-100, 100], at most 256 distinct entries; each value is
+added to that token's raw logit before the penalties and sampling, on every
+verify row, so speculative decoding stays exact. An unknown token id, a
+non-finite value or one out of range returns 400. Like
 vLLM and HF, repetition counts every prompt token: with the Qwen templates
 that includes the tool-call syntax every tool-enabled system prompt carries,
 earlier tool calls and reasoning, and the `<think>` markers of the generation
@@ -281,6 +296,36 @@ fresh one splits. And where other requests' cache leaves its states no free
 memory, a state's prefill command can end at the state's boundary instead of
 capturing it inside a longer command, which changes the chunks. Either way the
 logits differ slightly.
+
+## Multiple choices
+
+Chat Completions and text completions take `n` from 1 to 4. Each choice is an
+engine request of its own, with its own lane, seed and constraint state, so
+the choices can sample independently; the request occupies up to `n` of the
+server's `--queue-size` slots. Usage reports the prompt once and the completion
+tokens over every choice. Streaming carries one choice only, so `stream` with
+`n` above 1 returns 400.
+
+## Log probabilities
+
+Chat Completions takes `logprobs: true` and `top_logprobs` from 0 to 20. Each
+generated content token then carries its log probability and, when
+`top_logprobs` is above 0, that many tokens with more probability. The
+distribution is the target's after the request's temperature and penalties,
+over the whole vocabulary; greedy requests read it at temperature 1. The
+chosen token is among its `top_logprobs` when it ranks there, and stop or
+other special tokens end the output without a content entry; a `stop` string
+trims the tokens it matched from the content entries too.
+
+A request must not think (`reasoning_effort: "none"`), and cannot combine
+logprobs with `tools`, `response_format`, `grammar` or `regex`, whose
+constrained distribution this server does not report. `stream` with logprobs
+returns 400: one stream carries no logprobs yet. Text completions' legacy
+integer `logprobs` is still unsupported. A logprobs request without a
+`cache_salt` runs cold: a cached prefix would restore an anchor whose logits
+row is gone, so the server gives it a salt of its own; an explicit salt keeps
+the request on the cached path, where that first entry reads the following
+row.
 
 ## Output limits and streaming
 
@@ -494,6 +539,24 @@ reference a remote document, and cannot combine `unevaluatedProperties` with
 `patternProperties`. `response_format` constrains generation and validates
 final output; it does not inject formatting instructions into the prompt.
 Clients should describe their output requirements in their own messages.
+
+## Grammar and regex
+
+Chat Completions and text completions also accept a raw GBNF grammar in
+`grammar`, or a regular expression in `regex`, as `llama-server` does:
+
+```json
+{"messages": [{"role": "user", "content": "Answer yes or no."}],
+ "grammar": "root ::= \"yes\" | \"no\"", "reasoning_effort": "none"}
+```
+
+The grammar or regex constrains the whole generated output, including the
+first token, so the request must not think (`reasoning_effort: "none"` or the
+template's thinking off) and cannot also use `tools` or `response_format`; a
+request that does returns 400. `grammar` and `regex`
+cannot be combined, and neither is supported on Responses or Messages. A
+source the grammar compiler refuses returns 400 with its first line. The
+compiled form is cached like a schema, so repeats do not recompile.
 
 ## Images and PDFs
 

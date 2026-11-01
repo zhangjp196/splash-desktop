@@ -194,6 +194,11 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       if (value != "on" && value != "off")
         throw UsageError("--ane requires on or off");
       result.neuralEngine = value == "on";
+    } else if (option == "--ane-share") {
+      double share = 0.0;
+      if (!parseFinite(value, share) || share < 0.0 || share >= 1.0)
+        throw UsageError("--ane-share requires a share from 0 to just below 1");
+      result.aneShare = share;
     } else if (option == "--verify-rows") {
       if (value != "auto" && value != "all")
         throw UsageError("--verify-rows requires auto or all");
@@ -225,6 +230,8 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       throw UsageError("--relaunch-context requires an integer in [1, " +
                        std::to_string(result.model.capabilities.maximumContextTokens) + "]");
   }
+  if (result.aneShare && !result.neuralEngine)
+    throw UsageError("--ane-share requires --ane on");
   result.maxMemoryBytes = parseMaxMemory(argv[4]);
   return result;
 }

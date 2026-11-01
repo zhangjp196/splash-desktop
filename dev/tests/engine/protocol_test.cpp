@@ -69,7 +69,9 @@ constexpr size_t seed = minP + 4;
 constexpr size_t scoreCount = seed + 8;
 constexpr size_t generationPrompt = scoreCount + 4;
 constexpr size_t flags = generationPrompt + 4;
-constexpr size_t cacheSalt = flags + 4;
+constexpr size_t topLogprobs = flags + 4;
+constexpr size_t biasCount = topLogprobs + 4;
+constexpr size_t cacheSalt = biasCount + 4;
 constexpr size_t thinkingBudget = cacheSalt + 16;
 static_assert(thinkingBudget + 12 == kRequestFixedBytes);
 } // namespace request_offset
@@ -240,6 +242,14 @@ const std::vector<std::pair<std::string, EngineEvent>> &engineEvents() {
       {"start", StartEvent{91, 2, 4096}},
       {"prompt_progress", PromptProgressEvent{91, 2048, 123456}},
       {"tokens", TokensEvent{91, 17, {10, 11, 12}}},
+      {"logprobs",
+       LogprobsEvent{91,
+                     17,
+                     {splash::TokenLogprob{10,
+                                   -0.5F,
+                                   2,
+                                   {splash::LogprobCandidate{11, -1.0F},
+                                    splash::LogprobCandidate{12, -2.0F}}}}}},
       {"mask_request_initial", MaskRequestEvent{91, 6, 4, {}}},
       {"mask_request_verify", MaskRequestEvent{91, 7, 4, {101, 102, 103}}},
       {"done", DoneEvent{91, EngineFinishReason::Stop, 4096, 512, 1000, 2000,
@@ -885,7 +895,7 @@ void testRequestFlags() {
   RequestFrame progress = request;
   progress.flags |= kReturnProgressFlag;
   CHECK(test, roundTrip(progress) == progress);
-  for (const uint32_t flags : {1U << 2, 1U << 31, 0xffffffffU}) {
+  for (const uint32_t flags : {1U << 3, 1U << 31, 0xffffffffU}) {
     RequestFrame undefined = request;
     undefined.flags = flags;
     expectRequestIssue(test, undefined, IssueCode::InvalidEnumValue);

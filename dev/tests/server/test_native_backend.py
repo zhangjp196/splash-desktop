@@ -86,6 +86,13 @@ class FakeConstraint:
         if self.finish_error is not None:
             raise self.finish_error
 
+    def clone(self):
+        return FakeConstraint(
+            self.words_per_mask,
+            commit_error=self.commit_error,
+            finish_error=self.finish_error,
+        )
+
 
 class FakeMatcher:
     """Records the batches a TokenConstraint consumes; accepts every one."""

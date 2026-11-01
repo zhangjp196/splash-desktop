@@ -330,6 +330,11 @@ bool NativeRuntime::handleRequest(protocol::RequestFrame &request) {
     engineRequest.sampling = request.sampling;
     engineRequest.constraint = request.constraint;
     engineRequest.flags = request.flags & kRequestFlagBits;
+    engineRequest.topLogprobs = request.topLogprobs;
+    engineRequest.logitBias.resize(request.biasTokens.size());
+    for (size_t index = 0; index < request.biasTokens.size(); ++index)
+      engineRequest.logitBias[index] = {
+          request.biasTokens[index], request.biasValues[index]};
     engineRequest.thinkingBudget = request.thinkingBudget;
     engineRequest.cacheSalt = request.cacheSalt;
     engineRequest.returnProgress =
@@ -549,6 +554,14 @@ void NativeRuntime::tokens(uint64_t requestId,
   telemetry.lastTokenMilliseconds = now;
   send(protocol::TokensEvent{
       requestId, offset, std::vector<uint32_t>(values.begin(), values.end())});
+}
+
+void NativeRuntime::logprobs(uint64_t requestId,
+                             std::span<const TokenLogprob> values) {
+  RequestTelemetry &telemetry = telemetry_.at(requestId);
+  send(protocol::LogprobsEvent{
+      requestId, telemetry.emittedTokens,
+      std::vector<TokenLogprob>(values.begin(), values.end())});
 }
 
 void NativeRuntime::maskRequested(uint64_t requestId,

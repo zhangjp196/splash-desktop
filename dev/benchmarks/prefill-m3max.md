@@ -111,7 +111,7 @@ a unit or two above the layer-time optimum can win end to end. Until the engine
 probes shares on the real model, the flag is the lever:
 
 ```sh
-splash serve --model ... --ane-ffn-share 0.60
+SPLASH_ANE_SHARE=0.60 splash serve --model ...
 ```
 
 The cost is KV context: the split's buffers come out of the attention cache,

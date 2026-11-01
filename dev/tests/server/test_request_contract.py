@@ -159,7 +159,7 @@ class RequestContractTests(HarnessTestCase):
             ({"temperature": 5}, "temperature must be"),
             ({"seed": -(2**63) - 1}, "seed must be"),
             ({"priority": "urgent"}, "priority must be"),
-            ({"n": 2}, "n and logprobs"),
+            ({"n": 5}, "n must be"),
         )
         # The valid request shows that the PDF otherwise reaches the renderer.
         for fields, message in (*invalid, ({}, rendering)):

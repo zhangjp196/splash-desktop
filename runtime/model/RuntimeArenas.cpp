@@ -302,6 +302,8 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
     put(DecodeTensor::Locations, bytesFor<uint32_t>(uint64_t{shape->verifyRows} * (shape->selectedBlocks + 1)));
   put(DecodeTensor::PenaltyState,
       bytesFor<uint32_t>(geometry.target.vocabularySize));
+  put(DecodeTensor::BiasTokens, bytesFor<uint32_t>(kMaximumLogitBias));
+  put(DecodeTensor::BiasValues, bytesFor<float>(kMaximumLogitBias));
   put(DecodeTensor::GdnPacked, gdnPackedStride(geometry));
   put(DecodeTensor::GdnTape, 2 * gdnTapeSlotBytes(geometry));
   put(DecodeTensor::ChunkKeysBase,
