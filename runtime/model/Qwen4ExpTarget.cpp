@@ -417,8 +417,9 @@ void Qwen4ExpTarget::addPleGather(metal::CommandGraph &graph, const Qwen4Scratch
   // At most `count` distinct rows, each slot below it: the gather of the
   // table's rows with the staging as a table of `count` rows, so a row's
   // values are computed exactly as from the table.
-  const ops::EmbeddingWeights staged{count, geometry_.pleHeadDimension,
-                                     ops::NativeRows(scratch.pleStaging, weights_.pleFormat)};
+  ops::EmbeddingWeights staged{count, geometry_.pleHeadDimension,
+                               ops::NativeRows(scratch.pleStaging, weights_.pleFormat)};
+  staged.rowSize = weights_.pleRowSize;
   ops::Embedding::add(graph, scratch.pleSlots, staged, scratch.pleRows, count);
 }
 

@@ -208,12 +208,15 @@ class EmbeddingWeights final {
 public:
   EmbeddingWeights() = default;
   EmbeddingWeights(uint32_t output, uint32_t input, NativeRows rows)
-      : outputSize(output), inputSize(input), rows_(std::move(rows)) {}
+      : outputSize(output), inputSize(input), rowSize(input), rows_(std::move(rows)) {}
 
   [[nodiscard]] const NativeRows &blocks() const noexcept { return rows_; }
 
   uint32_t outputSize = 0;
   uint32_t inputSize = 0;
+  // Values a stored row holds, past inputSize padding it: Qwen3.8-Flash-Next's PLE table stores 256-value rows of
+  // which a gather reads the first 160. 0 in a default value; every reader sets it.
+  uint32_t rowSize = 0;
   // Native rows stored rotated, gathered as D (H r) (InputRotation).
   InputRotation rotation;
 

@@ -529,6 +529,25 @@ template <uint F> struct FmtTwoBit {
 };
 typedef FmtTwoBit<GGUF_FMT_PQ20> FmtPQ20;
 typedef FmtTwoBit<GGUF_FMT_Q20> FmtQ20;
+// Q1_0 (GGUF tensor type 41): plane0 the group's 32 sign bits as a little-endian string of the slots; meta the half
+// d of the native block, four groups (128 weights). value = d * (2 bit - 1), the dequantize_row_q1_0 result.
+struct FmtQ10 {
+  QUANT_FORMAT(GGUF_FMT_Q10, QuantLinear, 1, 32 * MetaGroups, false);
+  struct Payload { uint a; }; typedef uint4 Chunk; typedef ushort Meta;
+  static Payload load(device uchar *p0, device uchar *) { return {*((device uint *)p0)}; }
+  static Meta loadMeta(device uchar *m) { return *((device ushort *)m); }
+  // A pair p's e0 at bit 0 and e1 at bit 16, each 2 for a set bit: staged_linear's code minus Zero (1) is ±1.
+  static Chunk chunk(Payload w, ushort c) {
+    const uint bits = (w.a >> (8 * c)) & 0xFFu;
+    return uint4(((bits >> 0) & 1u) << 1 | ((bits >> 1) & 1u) << 17,
+                 ((bits >> 2) & 1u) << 1 | ((bits >> 3) & 1u) << 17,
+                 ((bits >> 4) & 1u) << 1 | ((bits >> 5) & 1u) << 17,
+                 ((bits >> 6) & 1u) << 1 | ((bits >> 7) & 1u) << 17);
+  }
+  static Chunk loadChunk(device uchar *p0, device uchar *p1, ushort c) { return chunk(load(p0, p1), c); }
+  static uint4 codes(Chunk q) { return q; }
+  static QuantCoef coef(Meta d, ushort) { return {float2(float(as_type<half>(d)))}; }
+};
 // Gyro's trellis formats (TQ2_T, TQK6, TQK7; GGUF types 144, 145, 146): 128
 // weights per block, one fp16 d and 32 steps of a 15-bit state, K bits each.
 // Step t covers weights 4t..4t+3: x = state * 0x9e3779b1 (uint32), whose bits
@@ -620,7 +639,7 @@ QUANT_AFFINE_GROUPS(8)
   X(FmtAF8G32, af8g32) X(FmtAF8G64, af8g64) X(FmtAF8G128, af8g128) X(FmtNVFP4, nvfp4) X(FmtFP8, fp8)            \
   X(FmtQ50, q50) X(FmtQ51, q51) X(FmtBF16, bf16) X(FmtQ20, q20)
 #define QUANT_FORMATS(X)                                                                                           \
-  QUANT_REGISTER_FORMATS(X) X(FmtF16, f16) X(FmtTQ2T, tq2t) X(FmtTQK6, tqk6) X(FmtTQK7, tqk7)
+  QUANT_REGISTER_FORMATS(X) X(FmtF16, f16) X(FmtTQ2T, tq2t) X(FmtTQK6, tqk6) X(FmtTQK7, tqk7) X(FmtQ10, q10)
 
 // Runs body(F()) with the format type of run-time format id `format` (GGUF_FMT_*), for kernels whose tiles pick
 // their tensor, and so its format, at run time: any format (quant_format_switch), or one of the register tile's

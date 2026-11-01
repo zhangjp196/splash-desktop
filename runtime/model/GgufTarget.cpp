@@ -72,7 +72,7 @@ std::optional<GgufTargetLoader::StreamedTable> GgufTargetLoader::streamTable() c
       std::make_shared<SparseRowStore>(SparseRowTable{rows.tensor, rows.rows, rows.rowBytes, rows.offset},
                                        openRowReader(std::shared_ptr<const WeightSource>(planned_, &source)),
                                        planned_->table),
-      rows.format,
+      rows.format, rows.columns,
       // As WeightImages::load records the image (WeightFile).
       {"target/" + plan->name, plan->magic, plan->layer, plan->type, plan->bytes, images_.contentIdentity()}};
 }

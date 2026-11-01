@@ -32,7 +32,7 @@ public:
 // rest are looked up in kGgmlTypes. llama.cpp's NVFP4 (kNVFP4) loads into
 // the NVFP4 format's native rows (model/GgufImage.cpp, imageFormat).
 namespace ggml {
-inline constexpr uint32_t kF32 = 0, kF16 = 1, kQ8_0 = 8, kBF16 = 30, kNVFP4 = 40, kPQ2_0 = 142;
+inline constexpr uint32_t kF32 = 0, kF16 = 1, kQ8_0 = 8, kBF16 = 30, kNVFP4 = 40, kQ1_0 = 41, kPQ2_0 = 142;
 }
 
 struct GgmlTypeTraits {
@@ -45,7 +45,7 @@ struct GgmlTypeTraits {
 // size, as ggml-common.h defines them and, for 142, PrismML-Eng/llama.cpp's
 // block_pq2_0, and for 144..146 Agention's llama.cpp block_tq2_t, block_tqk6
 // and block_tqk7 (ggml-common-tq.h); a tensor of another type is rejected.
-inline constexpr std::array<std::pair<uint32_t, GgmlTypeTraits>, 36> kGgmlTypes{{
+inline constexpr std::array<std::pair<uint32_t, GgmlTypeTraits>, 37> kGgmlTypes{{
     {0, {"F32", 1, 4}},         {1, {"F16", 1, 2}},         {2, {"Q4_0", 32, 18}},
     {3, {"Q4_1", 32, 20}},      {6, {"Q5_0", 32, 22}},      {7, {"Q5_1", 32, 24}},
     {8, {"Q8_0", 32, 34}},      {9, {"Q8_1", 32, 36}},      {10, {"Q2_K", 256, 84}},
@@ -56,8 +56,9 @@ inline constexpr std::array<std::pair<uint32_t, GgmlTypeTraits>, 36> kGgmlTypes{
     {23, {"IQ4_XS", 256, 136}}, {24, {"I8", 1, 1}},         {25, {"I16", 1, 2}},
     {26, {"I32", 1, 4}},        {27, {"I64", 1, 8}},        {28, {"F64", 1, 8}},
     {29, {"IQ1_M", 256, 56}},   {30, {"BF16", 1, 2}},       {39, {"MXFP4", 32, 17}},
-    {40, {"NVFP4", 64, 36}},    {42, {"Q2_0", 64, 18}},     {142, {"PQ2_0", 128, 34}},
-    {144, {"TQ2_T", 128, 34}},  {145, {"TQK6", 128, 26}},   {146, {"TQK7", 128, 30}},
+    {40, {"NVFP4", 64, 36}},    {41, {"Q1_0", 128, 18}},    {42, {"Q2_0", 64, 18}},
+    {142, {"PQ2_0", 128, 34}},  {144, {"TQ2_T", 128, 34}},  {145, {"TQK6", 128, 26}},
+    {146, {"TQK7", 128, 30}},
 }};
 
 // nullptr for type ids this parser does not know.

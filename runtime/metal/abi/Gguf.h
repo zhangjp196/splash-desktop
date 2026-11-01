@@ -108,9 +108,10 @@ static_assert(sizeof(GgufDecodeFusedParams) == 52, "GGUF fused decode parameters
 struct GgufEmbedParams {
   uint32_t rows;
   uint32_t vocabulary;
-  uint32_t hidden;
+  uint32_t hidden;     // values a gathered row writes
+  uint32_t row_hidden; // values a source row holds, past `hidden` padding it (Qwen3.8-Flash-Next's PLE table)
 };
-static_assert(sizeof(GgufEmbedParams) == 12, "GGUF embedding parameters are 12 bytes on both sides");
+static_assert(sizeof(GgufEmbedParams) == 16, "GGUF embedding parameters are 16 bytes on both sides");
 // The formats whose native rows the embedding kernels gather, in bf16 as token
 // tables and in fp32 as the F32 values load-time widening writes
 // (kernels/shared/embedding.metal, gguf_embed_<kQuantFormats name> and
@@ -138,7 +139,7 @@ struct GgufEmbedRotationParams {
   GgufEmbedParams embed;
   GgufRotationParams rotation;
 };
-static_assert(sizeof(GgufEmbedRotationParams) == 28, "rotated embedding parameters are 28 bytes on both sides");
+static_assert(sizeof(GgufEmbedRotationParams) == 32, "rotated embedding parameters are 32 bytes on both sides");
 
 // fp32 projections of GGUF float tensors (kernels/shared/gguf_float.metal),
 // up to GGUF_FLOAT_PROJECTIONS of one input in one dispatch, their column

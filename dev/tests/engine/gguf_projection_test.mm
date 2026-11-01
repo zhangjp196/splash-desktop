@@ -963,15 +963,19 @@ void stagedGather(MetalBackend &backend) {
   private:
     const std::vector<uint8_t> &bytes_;
   };
-  const auto check = [&](const Fmt f, const uint32_t hidden) {
-    const std::string name = std::string(fmtName(f)) + " at " + std::to_string(hidden) + " values";
-    const uint32_t bytesPerRow = uint32_t(rowBytes(f, hidden));
-    const std::vector<uint8_t> native = makeNative(f, kRows, hidden, rng);
+  // `stored` is the values a source row holds when it pads the gathered `hidden` (the PLE table's 160 of 256).
+  const auto check = [&](const Fmt f, const uint32_t hidden, const uint32_t stored = 0) {
+    const uint32_t rowSize = stored ? stored : hidden;
+    const std::string name = std::string(fmtName(f)) + " at " + std::to_string(hidden) + " of " +
+                             std::to_string(rowSize) + " values";
+    const uint32_t bytesPerRow = uint32_t(rowBytes(f, rowSize));
+    const std::vector<uint8_t> native = makeNative(f, kRows, rowSize, rng);
     model::SparseRowStore store({"table", kRows, bytesPerRow, 0}, std::make_unique<MemoryRows>(native),
                                 {model::SparseRowStore::cacheBytesFor(kRows / 2, bytesPerRow) +
                                      model::SparseRowStore::workingBytes(bytesPerRow, 1024, 0),
                                  std::make_shared<model::SsdReaders>(2), 1024});
-    const EmbeddingWeights table(kRows, hidden, NativeRows(upload(backend, native), f));
+    EmbeddingWeights table(kRows, hidden, NativeRows(upload(backend, native), f));
+    table.rowSize = rowSize;
     for (int step = 0; step < 2; ++step) {
       std::vector<uint32_t> ids(kCount);
       for (uint32_t &id : ids) id = uint32_t(rng() % (step ? kRows : 64)); // the second step repeats rows
@@ -986,8 +990,9 @@ void stagedGather(MetalBackend &backend) {
                   {static_cast<uint32_t *>(slots.view.contents()), kCount}, model::SparseRowUse::Prefill);
       CommandGraph graph;
       Embedding::add(graph, indices.view, table, resident.view, kCount);
-      Embedding::add(graph, slots.view, EmbeddingWeights(kCount, hidden, NativeRows(staging.view, f)), staged.view,
-                     kCount);
+      EmbeddingWeights stagedTable(kCount, hidden, NativeRows(staging.view, f));
+      stagedTable.rowSize = rowSize;
+      Embedding::add(graph, slots.view, stagedTable, staged.view, kCount);
       static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
       if (!staged.intact() || !resident.intact()) fail(name + " staged gather writes past its output");
       if (resident.halves() != staged.halves()) fail(name + " staged gather differs from the table's");
@@ -1003,9 +1008,11 @@ void stagedGather(MetalBackend &backend) {
     if (rowBytes(f, 160) != (f == Q80 ? 170u : 90u)) fail(std::string(fmtName(f)) + " PLE rows have another width");
     check(f, 160);
   }
+  // Q1_0's padded PLE table: 256-value rows of which a gather reads 160.
+  check(Q10, 160, 256);
   section("staged gather: " + std::to_string(formats) +
-          " embedding formats, and IQ4_NL and Q8_0 PLE rows of 160 values, byte-equal to the table's gather of the "
-          "same rows");
+          " embedding formats, IQ4_NL and Q8_0 PLE rows of 160 values, and a Q1_0 PLE table of 256-value rows read "
+          "as 160, byte-equal to the table's gather of the same rows");
 }
 
 // Each buffer the token gathers reach, at its extent and one element short:

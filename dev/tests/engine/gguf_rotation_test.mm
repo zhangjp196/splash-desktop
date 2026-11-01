@@ -215,7 +215,7 @@ int checkBlock(MetalBackend &backend, std::mt19937 &rng, uint32_t block) {
     const MetalBuffer tokenBuffer = upload(backend, tokens), rows = upload(backend, table);
     const MetalBuffer out = sharedBuffer(backend, fp32.size() * 2);
     CommandGraph graph;
-    const GgufEmbedParams embed{uint32_t(tokens.size()), vocabulary, hidden};
+    const GgufEmbedParams embed{uint32_t(tokens.size()), vocabulary, hidden, hidden};
     graph.add("gguf_embed_rotated_pq20", {tokenBuffer, rows, signBuffer, out},
               GgufEmbedRotationParams{embed, {hidden, block, scale, 0}},
               {hidden / block, uint32_t(tokens.size()), 1}, {threads, 1, 1});

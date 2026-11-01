@@ -129,7 +129,8 @@
 #define GGUF_FMT_TQ2T 44u
 #define GGUF_FMT_TQK6 45u
 #define GGUF_FMT_TQK7 46u
-#define GGUF_FMT_COUNT 47u
+#define GGUF_FMT_Q10 47u
+#define GGUF_FMT_COUNT 48u
 
 // The tensor type an image descriptor names for an MLX affine format: no GGUF
 // type is of this form.
@@ -209,6 +210,9 @@ QUANT_CONSTANT QuantFormat kQuantFormats[GGUF_FMT_COUNT] = {
     {144, 128, 34, 8, 1, 2, 4, "tq2t"},
     {145, 128, 26, 8, 0, 2, 4, "tqk6"},
     {146, 128, 30, 8, 0, 2, 4, "tqk7"},
+    // Q1_0 (GGUF tensor type 41): block_q1_0, one half d per 128 weights and one sign bit each, worth d or -d
+    // (llama.cpp's dequantize_row_q1_0). plane0: the group's bits as a little-endian string of 32 slots; meta: d.
+    {41, 128, 18, 4, 0, 2, 4, "q10"},
 };
 
 // The format that stores a GGUF tensor type (or a loader's);
@@ -233,11 +237,12 @@ inline constexpr bool quant_loader_format(uint32_t format) {
 inline constexpr bool quant_trellis_type(uint32_t ggml_type) { return ggml_type >= 144 && ggml_type <= 146; }
 // Whether a format's values enter a bf16 matrix multiply exactly, as the
 // Apple9 register tile takes them (kernels/decode/linear_gguf_sgmatrix.metal):
-// every format's but F16's, whose 11-bit significands bf16 does not hold, and
-// the trellis formats', whose codebook values are fp16.
+// every format's but F16's and Q1_0's, whose fp16 d (a value of F16's
+// significand) bf16 does not hold, and the trellis formats', whose codebook
+// values are fp16.
 inline constexpr bool quant_register_format(uint32_t format) {
-  return format != GGUF_FMT_F16 && format != GGUF_FMT_TQ2T && format != GGUF_FMT_TQK6 &&
-         format != GGUF_FMT_TQK7;
+  return format != GGUF_FMT_F16 && format != GGUF_FMT_Q10 && format != GGUF_FMT_TQ2T &&
+         format != GGUF_FMT_TQK6 && format != GGUF_FMT_TQK7;
 }
 // The MLX affine format of b bits in groups of g; GGUF_FMT_COUNT when none
 // (QUANT_AFFINE_TYPE holds b and g in a byte each).

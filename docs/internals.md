@@ -375,7 +375,7 @@ A chain over a whole 64-input group instead leaves a lane two dependent chains p
 it has four, and took 1-6% more time at one to three lanes. A zero point is such a term too,
 entered where it costs no epilogue: codes with one enter as 160 + code - zero, and the term's last
 chain starts from -160 times the sum of its inputs, from the table's sums of 32 once per group and
-span where a scale covers 32 inputs or more (Q4_0, Q5_0, IQ1_S, PQ2_0, Q2_0), and from the table's
+span where a scale covers 32 inputs or more (Q4_0, Q5_0, IQ1_S, Q1_0, PQ2_0, Q2_0), and from the table's
 seed of 16 inputs per chain where scales cover 16 (Q6_K, Q3_K, IQ1_M). On the 10-core M4, against a
 decode and a seeded chain per 16 inputs, those five formats at projection shapes of 2048 to 17408
 columns take 1.4-7.1% less time at one lane and 3.5-8.0% at two to four. The zero point as an
@@ -389,9 +389,9 @@ Table16 table (`kernels/common/gguf_sgmatrix.h`) that the input's producer write
 `decode_linear_gguf_prepare` when none did. The formats whose operands those kernels build from
 grid lookups, IQ3_XXS, the IQ2 formats and IQ1 (`apple9StagesFormat`), and Q2_K from two lanes
 decode faster on the staged tile there, which a projection all of whose segments are in them
-takes wherever the tile holds its lanes' rows unpadded. F16, whose 11-bit significands bf16 does
-not hold, has no register kernels (`quant_register_format`), and they read a tensor in rows of
-whole coefficient units (`quant_register_tensor`: 256 inputs for a format of several groups per
+takes wherever the tile holds its lanes' rows unpadded. F16 and Q1_0, whose fp16 values
+(Q1_0's d) bf16 does not hold exactly, have no register kernels (`quant_register_format`), and
+they read a tensor in rows of whole coefficient units (`quant_register_tensor`: 256 inputs for a format of several groups per
 meta unit, else 64), each K partition whole units (`quant_register_unit`): a projection with a
 segment they do not take, or a gate/up pair with one, stages at every lane count, and its decode
 storage holds the staged tile's rows. On Apple10

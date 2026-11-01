@@ -151,7 +151,7 @@ and lists every unsupported tensor in one error:
 
 - linears and experts: Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0, Q4_0, Q4_1,
   Q5_0, Q5_1, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS,
-  IQ4_NL, MXFP4, NVFP4, PQ2_0, Q2_0, TQ2_T, TQK6, TQK7, BF16 or F16;
+  IQ4_NL, MXFP4, NVFP4, Q1_0, PQ2_0, Q2_0, TQ2_T, TQK6, TQK7, BF16 or F16;
 - token embeddings: any of the linears' formats;
 - norms: F32, BF16 or F16, loaded as the F32 values they hold;
 - the MoE router: F32, BF16 or any of the linears' quantized formats (not
@@ -263,6 +263,24 @@ Model Optimizer's NVFP4 does
 Q2_0 is GGUF tensor type 42, `block_q2_0`, as in the GSQ-RCO GGUFs:
 2-bit codes q worth d (q - 1) with one half d per 64 weights. Its planes are
 PQ2_0's ([PQ2_0](#pq2_0)), with a meta unit per 64 weights.
+
+Q1_0 is GGUF tensor type 41, `block_q1_0`: one sign bit per weight with one
+half d per 128 weights, worth d or -d. Its plane0 holds the group's bits as
+a little-endian string of the 32 slots, and its meta unit is the block's d,
+at 1.125 bits per weight for the file's 1.
+`0xKitkat/Qwen3.8-Flash-Next-125B-UltraLite-37GiB-GGUF` uses it for the gate
+and up routed experts of layers 3-43 and for `per_layer_token_embd.weight`,
+whose rows that release stores padded to 256 values so that they hold whole
+Q1_0 blocks; the gather reads the first 160, the header's
+`embedding_length_per_layer_input`, as a strided view does in the runtime the
+release names.
+
+That UltraLite release loads, but its 1.125-bit experts and PLE table leave
+its output degenerate: it repeats phrases, stops before `</think>`, or
+answers briefly before an end-of-turn token. The same engine serves
+`ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:Q2_0` correctly; use that
+release for a usable Flash-Next model, and treat the UltraLite as an
+experiment in the Q1_0 format rather than a chat model.
 
 ## PQ2_0
 

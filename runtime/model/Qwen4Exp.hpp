@@ -176,6 +176,8 @@ struct Qwen4ExpWeights final : QwenTargetWeightsBase {
   // the rows of pleFormat a step gathers.
   ops::EmbeddingWeights pleTable;
   uint32_t pleFormat = 0;
+  // Values a stored PLE row holds: pleHeadDimension, or the padded physical width a release stores (256 for 160).
+  uint32_t pleRowSize = 0;
   Qwen4PleHash pleHash;
 };
 

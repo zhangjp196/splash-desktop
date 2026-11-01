@@ -305,11 +305,15 @@ public:
 
   // A table's native rows [rows, columns] in an embedding format, after their
   // descriptor (a family's table, which no projection reads), as stored but
-  // for GGUF's NVFP4 (tableRows).
+  // for GGUF's NVFP4 (tableRows). Its rows may be wider than the table's
+  // values: Qwen3.8-Flash-Next's PLE table stores 256-value rows of which a
+  // gather reads the first 160 (the layout's pleHeadDimension).
   void nativeTable(const std::string &name, uint64_t columns) {
     const GgufTensor *tensor = find(name, embeddingType);
     if (!tensor) return;
-    if (tensor->columns() != columns) throw GgufError("unexpected shape for " + name);
+    if (tensor->columns() < columns ||
+        tensor->columns() % kQuantFormats[imageFormat(tensor->type)].block_elements)
+      throw GgufError("unexpected shape for " + name);
     copiedRows(*tensor, nativeRowBytes(*tensor));
   }
 
@@ -899,7 +903,9 @@ StreamedRows tableRows(const GgufFile &file, const std::string &name, uint64_t c
   // copiedRows), but for NVFP4's, which the writer rebuilds.
   if (!embeddingType(tensor.type) || tensor.type == ggml::kNVFP4)
     throw GgufError("a table of type " + ggmlTypeName(tensor.type) + " does not stream: " + name);
-  if (tensor.columns() != columns || !tensor.rows()) throw GgufError("unexpected shape for " + name);
+  if (tensor.columns() < columns || tensor.columns() % kQuantFormats[imageFormat(tensor.type)].block_elements ||
+      !tensor.rows())
+    throw GgufError("unexpected shape for " + name);
   const uint32_t format = imageFormat(tensor.type);
   const uint64_t rowBytes = ggufRowBytes(kQuantFormats[format], tensor.columns());
   if (!rowBytes || rowBytes > UINT32_MAX || tensor.rows() * rowBytes != tensor.bytes)
@@ -914,6 +920,7 @@ StreamedRows tableRows(const GgufFile &file, const std::string &name, uint64_t c
   rows.offset = source.dataOffset() + tensor.offset;
   rows.rows = tensor.rows();
   rows.rowBytes = static_cast<uint32_t>(rowBytes);
+  rows.columns = static_cast<uint32_t>(tensor.columns());
   rows.format = format;
   return rows;
 }

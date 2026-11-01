@@ -55,7 +55,7 @@ kernel void gguf_embed_rotated_pq20(device const uint *tokens [[buffer(0)]], dev
   // The runtime validates every token; the guard keeps a direct call inside the table.
   const uint token = tokens[group.y] < p.vocabulary ? tokens[group.y] : 0;
   const uint threads = r.block / 4, column = group.x * r.block;
-  device const uchar *row = table + ulong(token) * (p.hidden / F::Weights) * F::Bytes;
+  device const uchar *row = table + ulong(token) * (p.row_hidden / F::Weights) * F::Bytes;
   float4 v;
   for (uint i = 0; i < 4; ++i) {
     const uint dim = column + tid + i * threads;

@@ -12,7 +12,8 @@ __attribute__((always_inline)) inline void gguf_embedding(device const uint *tok
   const uint elements = p.rows * p.hidden; if (index >= elements) return;
   const uint row = index / p.hidden, dim = index % p.hidden;
   uint token = tokens[row]; token = token < p.vocabulary ? token : 0;
-  device const uchar *block = table + (ulong(token) * (p.hidden / F::Weights) + dim / F::Weights) * F::Bytes;
+  // A table's source row may hold padding past `hidden`, which a field's values still index past their block.
+  device const uchar *block = table + (ulong(token) * (p.row_hidden / F::Weights) + dim / F::Weights) * F::Bytes;
   output[index] = T(F::decode(block, dim));
 }
 

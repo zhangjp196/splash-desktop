@@ -178,14 +178,17 @@ ops::Projection readBlockProjection(WeightFile &file, uint32_t outputSize, uint3
 ops::EmbeddingWeights readBlockEmbedding(WeightFile &file, uint32_t outputSize, uint32_t inputSize,
                                          std::string_view label) {
     const GgufTensorDescriptor d = readGgufDescriptor(file, label);
-    if (d.outputSize != outputSize || d.inputSize != inputSize)
+    if (d.outputSize != outputSize || d.inputSize < inputSize)
         throw WeightStoreError("GGUF embedding does not match the layout: " + std::string(label));
-    // Rows as stored, of whole native blocks.
+    // Rows as stored, of whole native blocks; a row may hold padding past inputSize (the PLE table's 256-value rows).
     const uint32_t format = gguf_format_of(d.type);
     if (format == GGUF_FMT_COUNT || d.inputSize % kQuantFormats[format].block_elements)
         throw WeightStoreError("GGUF embedding rows are not native GGUF blocks: " + std::string(label));
-    return {outputSize, inputSize,
-            ops::NativeRows(readRows(file, d, ggufRowBytes(kQuantFormats[format], d.inputSize), label), format)};
+    ops::EmbeddingWeights weights{
+        outputSize, inputSize,
+        ops::NativeRows(readRows(file, d, ggufRowBytes(kQuantFormats[format], d.inputSize), label), format)};
+    weights.rowSize = d.inputSize;
+    return weights;
 }
 
 std::string weightManifestFingerprint(

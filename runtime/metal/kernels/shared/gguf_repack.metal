@@ -129,6 +129,12 @@ static inline void gguf_repack_group(device const uchar *row, uint fmt, uint G, 
       if (j == 0) { meta[0] = blk[0]; meta[1] = blk[1]; }
       break;
     }
+    case GGUF_FMT_Q10: {   // block_q1_0 {half d, uchar qs[16]}: element e of group j is bit (e % 8) of qs[4 j + e / 8]
+      for (uint e = 0; e < 32; ++e) lo[quant_slot(e)] = (blk[2 + 4 * j + e / 8] >> (e % 8)) & 1;
+      gguf_store_bits(lo, 1, out0);
+      if (j == 0) { meta[0] = blk[0]; meta[1] = blk[1]; }
+      break;
+    }
     case GGUF_FMT_IQ4NL: case GGUF_FMT_Q40: case GGUF_FMT_Q41: case GGUF_FMT_MXFP4: {   // the meta unit, then qs[16]
       for (uint l = 0; l < 16; ++l) { const uchar q = blk[f.meta_bytes + l]; lo[quant_slot(l)] = q & 15; lo[quant_slot(16 + l)] = q >> 4; }
       if (fmt == GGUF_FMT_Q40 || fmt == GGUF_FMT_Q41) gguf_store_pairs(lo, out0); else gguf_store_bits(lo, 4, out0);

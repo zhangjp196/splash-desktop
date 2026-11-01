@@ -19,7 +19,7 @@ const QuantFormat &NativeRows::format() const noexcept { return kQuantFormats[fo
 void Embedding::add(metal::CommandGraph &graph, metal::MetalBuffer tokens,
                     const EmbeddingWeights &table, metal::MetalBuffer output,
                     uint32_t rows) {
-  if (!rows || !table.outputSize || !table.inputSize)
+  if (!rows || !table.outputSize || !table.inputSize || table.rowSize < table.inputSize)
     throw std::invalid_argument("invalid embedding shape");
   // Every gather reads `rows` token ids and writes `rows` bf16 rows of the table's width.
   requireBytes(tokens, uint64_t{rows} * sizeof(uint32_t), "embedding token");
@@ -27,10 +27,10 @@ void Embedding::add(metal::CommandGraph &graph, metal::MetalBuffer tokens,
   const NativeRows &native = table.blocks();
   const QuantFormat &format = native.format();
   // Every token's row of native blocks (kernels/shared/embedding.metal).
-  if (table.inputSize % format.block_elements) throw std::invalid_argument("native token rows take whole blocks");
-  requireBytes(native.rows, uint64_t{table.outputSize} * (table.inputSize / format.block_elements) * format.block_bytes,
+  if (table.rowSize % format.block_elements) throw std::invalid_argument("native token rows take whole blocks");
+  requireBytes(native.rows, uint64_t{table.outputSize} * (table.rowSize / format.block_elements) * format.block_bytes,
                "token table");
-  const GgufEmbedParams params{rows, table.outputSize, table.inputSize};
+  const GgufEmbedParams params{rows, table.outputSize, table.inputSize, table.rowSize};
   if (table.rotation) {
     // One threadgroup per rotation block of a row, which gathers the block
     // and inverts its rotation in fp32 (kernels/shared/gguf_rotation.metal).

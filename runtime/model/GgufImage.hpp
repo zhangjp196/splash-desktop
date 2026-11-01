@@ -167,7 +167,8 @@ struct StreamedRows final {
   uint64_t offset = 0; // of row 0, from the start of that file
   uint64_t rows = 0;
   uint32_t rowBytes = 0;
-  uint32_t format = 0; // its gguf_embedding_format (GGUF_FMT_*)
+  uint32_t columns = 0; // values a row holds, past a gather's width where the table pads it
+  uint32_t format = 0;  // its gguf_embedding_format (GGUF_FMT_*)
 };
 struct Image {
   std::string name; // layer-N.bin, head.bin, embedding.bin, a family's table's (ple.bin)

@@ -129,6 +129,16 @@ template <uint W> struct GgufEmbedTwoBit {
 };
 using GgufEmbedPQ20 = GgufEmbedTwoBit<128>;
 using GgufEmbedQ20 = GgufEmbedTwoBit<64>;
+// block_q1_0: half d | uchar qs[16], element 128 b + l's sign bit l % 8 of qs[l / 8]; value = the bit's d or -d, as
+// llama.cpp's dequantize_row_q1_0.
+struct GgufEmbedQ10 {
+  enum : uint { Weights = 128, Bytes = 18, D = 0, Codes = 2 };
+  __attribute__((always_inline)) static float decode(device const uchar *block, uint dim) {
+    const uint l = dim % Weights;
+    const half d = gguf_half(block, D);
+    return (block[Codes + l / 8] >> (l % 8)) & 1 ? float(d) : -float(d);
+  }
+};
 // block_iq4_nl: block_q4_0's layout, whose codes index the IQ4_NL values.
 struct GgufEmbedIQ4NL {
   enum : uint { Weights = 32, Bytes = 18, D = 0, Codes = 2 };
@@ -402,7 +412,7 @@ GGUF_EMBED_AFFINE(8)
 #define GGUF_QUANTIZED_EMBEDDING_FORMATS(X)                                                                        \
   X(q4k, GgufEmbedQ4K) X(q6k, GgufEmbedQ6K) X(q80, GgufEmbedQ80) X(q5k, GgufEmbedQ5K) X(q3k, GgufEmbedQ3K)        \
   X(q2k, GgufEmbedQ2K) X(q40, GgufEmbedQ40) X(q41, GgufEmbedQ41) X(q50, GgufEmbedQ50) X(q51, GgufEmbedQ51)        \
-  X(pq20, GgufEmbedPQ20) X(q20, GgufEmbedQ20) X(iq4nl, GgufEmbedIQ4NL) X(iq4xs, GgufEmbedIQ4XS)                    \
+  X(pq20, GgufEmbedPQ20) X(q20, GgufEmbedQ20) X(q10, GgufEmbedQ10) X(iq4nl, GgufEmbedIQ4NL) X(iq4xs, GgufEmbedIQ4XS)  \
   X(iq3s, GgufEmbedIQ3S) X(iq3xxs, GgufEmbedIQ3XXS) X(iq2xxs, GgufEmbedIQ2XXS) X(iq2xs, GgufEmbedIQ2XS)            \
   X(iq2s, GgufEmbedIQ2S) X(iq1s, GgufEmbedIQ1S) X(iq1m, GgufEmbedIQ1M) X(mxfp4, GgufEmbedMXFP4)                    \
   X(nvfp4, GgufEmbedNVFP4) X(fp8, GgufEmbedFP8)                                                                   \

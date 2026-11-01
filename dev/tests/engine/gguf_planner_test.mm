@@ -541,6 +541,10 @@ void checkPleTableRows(const std::filesystem::path &directory) {
             rows->format == GGUF_FMT_Q80,
         "a Q8_0 PLE table streams as 170-byte rows");
   rows.reset();
+  check(planned(kQ1_0, 256, 100, 36, rows, table).empty() && rows && rows->rowBytes == 36 && rows->columns == 256 &&
+            rows->format == GGUF_FMT_Q10,
+        "a Q1_0 PLE table streams its padded 256-value rows");
+  rows.reset();
   check(planned(0, columns, 10, uint64_t{columns} * 4, rows, table).find("does not stream") != std::string::npos,
         "an F32 PLE table does not stream");
   check(planned(kIQ4_NL, 128, 10, 72, rows, table).find("unexpected shape") != std::string::npos,

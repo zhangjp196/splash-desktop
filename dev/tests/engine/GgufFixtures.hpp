@@ -45,9 +45,9 @@ consteval uint32_t ggmlType(std::string_view name) {
     if (traits.name == name) return id;
   throw std::invalid_argument("unknown ggml type");
 }
-inline constexpr uint32_t kQ8_0 = ggmlType("Q8_0"), kQ3_K = ggmlType("Q3_K"), kQ4_K = ggmlType("Q4_K"),
-                          kQ5_K = ggmlType("Q5_K"), kQ6_K = ggmlType("Q6_K"), kIQ4_NL = ggmlType("IQ4_NL"),
-                          kIQ3_S = ggmlType("IQ3_S"), kIQ4_XS = ggmlType("IQ4_XS");
+inline constexpr uint32_t kQ1_0 = ggmlType("Q1_0"), kQ8_0 = ggmlType("Q8_0"), kQ3_K = ggmlType("Q3_K"),
+                          kQ4_K = ggmlType("Q4_K"), kQ5_K = ggmlType("Q5_K"), kQ6_K = ggmlType("Q6_K"),
+                          kIQ4_NL = ggmlType("IQ4_NL"), kIQ3_S = ggmlType("IQ3_S"), kIQ4_XS = ggmlType("IQ4_XS");
 
 inline int failures = 0;
 

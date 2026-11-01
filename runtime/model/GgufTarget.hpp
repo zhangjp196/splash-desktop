@@ -32,6 +32,7 @@ public:
   struct StreamedTable final {
     std::shared_ptr<SparseRowStore> store;
     uint32_t format = 0;
+    uint32_t columns = 0; // values a stored row holds (the PLE table's padded physical width)
     WeightFileRecord record;
   };
 
