@@ -1591,7 +1591,7 @@ counters include:
   past what the cache changed.
 
 The cache spills to the tier when the engine goes idle, on its own timer
-(`--cache-idle-spill`, 30 s without a request): every idle KV leaf and state is
+(`--cache-idle-spill`, 5 min without a request): every idle KV leaf and state is
 written to the tier and its Metal backing released, so an idle server hands
 memory back to the host without losing the cached prefixes, and the next
 request restores what it needs through the ordinary tier restore path. Its own

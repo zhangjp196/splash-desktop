@@ -15,8 +15,9 @@ struct ServerSettings: Codable, Equatable {
         // the residency below; the residency releases the weights alone.
         static let residencySeconds = "10"
         // The SSD cache: on by default, within a 16 GiB quota, and a 32 GiB a
-        // day write budget that paces it against the drive's life. It lives
-        // for the session: a restart starts from an empty cache.
+        // day write budget that paces it against the drive's life. A coding
+        // conversation's prefix survives a restart through the persistent
+        // cache.
         static let diskCache = true
         static let maxCacheDisk = "16G"
         static let maxCacheDiskWrites = "32G"
@@ -67,8 +68,8 @@ struct ServerSettings: Codable, Equatable {
     var residencySeconds = First.residencySeconds
     /// Whether the engine may use the SSD for cached KV pages and states at
     /// all. Off keeps every cached prefix in memory and passes
-    /// `--max-cache-disk 0`, which turns the disk tier off. On, the tier lives
-    /// for the session; no cache survives a restart.
+    /// `--max-cache-disk 0`, which turns the disk tier off. On, the tier is
+    /// persistent: a restart keeps the conversation prefixes.
     var diskCache = First.diskCache
     /// The SSD cache's quota. The default is a size; empty follows the
     /// volume's free space up to 64 GiB, and `0` turns the cache off.

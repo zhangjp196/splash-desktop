@@ -606,15 +606,16 @@ final class AppModel: ObservableObject {
         }
         // The SSD cache: on by default, its quota the server's own automatic
         // one unless the panel set a size, and a daily write budget that paces
-        // it against the drive's life. The tier lives for the session: the
-        // panel never asks for a persistent cache, so a restart starts from an
-        // empty one. The switch turns the disk tier off outright
-        // (`--max-cache-disk 0`), keeping cached prefixes in memory only; the
-        // engine's idle spill is its own timer and needs no argument. A quota
-        // of `0` still means off.
+        // it against the drive's life. A coding conversation keeps its prefix
+        // across an app restart through the persistent cache, so the next
+        // launch does not prefill the system prompt and history again. The
+        // switch turns the disk tier off outright (`--max-cache-disk 0`),
+        // keeping cached prefixes in memory only; the engine's idle spill is
+        // its own timer and needs no argument. A quota of `0` still means off.
         let cacheQuota = maxCacheDisk.trimmingCharacters(in: .whitespaces)
         let cacheOn = diskCache && cacheQuota != "0"
         if cacheOn {
+            arguments.append("--persistent-cache")
             if !cacheQuota.isEmpty { arguments += ["--max-cache-disk", cacheQuota] }
             let cacheWrites = maxCacheDiskWrites.trimmingCharacters(in: .whitespaces)
             if !cacheWrites.isEmpty {

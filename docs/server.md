@@ -98,10 +98,10 @@ paths for `--model-dir`, `--draft-model` and `--mmproj`.
 | `--expert-memory` | Auto | MoE targets: hold routed experts in this much memory, e.g. `16G`, and read the others from the SSD when a step routes them; `off` loads every expert. Auto loads them all where memory holds them, else gives them what the context leaves. See [streamed experts](#streamed-experts). |
 | `--sparse-kv-memory` | Auto | Qwen3.8-Flash-Next: memory for the KV blocks read back from the SSD for requests whose KV is there, e.g. `1200M`; never below its floor, which auto keeps. See [KV on the SSD](#kv-on-the-ssd). |
 | `--idle-release` | `10m` | Time without a request before the engine unwires its memory and frees the weights; the next request restores them. `off` keeps both, though `POST /v1/memory/release` still frees the weights. See [weight loading](internals.md#weight-loading). |
-| `--cache-idle-spill` | `30` | Time without a request before the engine writes the cached prefixes to disk and releases their memory; the next request restores what it needs from there. Its own timer, so `--idle-release off` may keep the weights while the cache still spills; `off` keeps the cache in memory. See [SSD cache](#ssd-cache). |
+| `--cache-idle-spill` | `5m` | Time without a request before the engine writes the cached prefixes to disk and releases their memory; the next request restores what it needs from there. Its own timer, so `--idle-release off` may keep the weights while the cache still spills; `off` keeps the cache in memory. See [SSD cache](#ssd-cache). |
 | `--max-cache-disk` | `auto` | SSD quota for cached KV pages and states: `auto` follows the volume, a quarter of its free space beyond a floor of 10 GiB (5% of a volume under 200 GiB), at most 64 GiB; a size such as `16G` is held as given while the volume keeps that floor; `0` turns the cache off. Kept for the session, or across restarts with `--persistent-cache`. See [SSD cache](#ssd-cache). |
 | `--max-cache-disk-writes` | `0` (no limit) | The most the SSD cache writes a day, e.g. `200G`. See [SSD cache](#ssd-cache). |
-| `--persistent-cache` | Off | Keep the SSD cache across restarts. See [persistent cache](#persistent-cache). |
+| `--persistent-cache` | Off in `splash serve`; on in the desktop app | Keep the SSD cache across restarts. See [persistent cache](#persistent-cache). |
 | `--cache-dir` | `~/Library/Caches/Splash/prefix-cache` | Where `--persistent-cache` keeps its files; needs `--persistent-cache`. |
 | `--served-model-name` | None | Additional model name the API accepts; repeatable. See [API model aliases](#api-model-aliases). |
 | `--announce-served-name` | Off | Report the first `--served-model-name` in responses; needs `--served-model-name`. |
@@ -558,7 +558,9 @@ when the engine exits.
 ### Persistent cache
 
 `--persistent-cache` keeps the SSD cache across restarts of the same model, so a
-restart, an upgrade or a crash keeps conversations' prefixes; an upgrade that
+restart, an upgrade or a crash keeps conversations' prefixes. The desktop app
+sets it for its coding server unless the SSD cache is switched off; `splash
+serve` leaves it off until asked. An upgrade that
 changes what the namespace digests (below), such as a weight image's size,
 starts its cache cold once, and one that only lays out images of the same sizes
 and headers anew keeps it. It follows

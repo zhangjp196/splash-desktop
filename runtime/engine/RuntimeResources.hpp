@@ -142,7 +142,7 @@ struct RuntimeResourcesConfig {
   // from the weights': a user away from the keyboard need not keep the whole
   // cache wired for the sake of a weight load. Infinite never spills, and
   // nothing spills without a writable disk tier.
-  double cacheIdleSpillSeconds = 30.0;
+  double cacheIdleSpillSeconds = 300.0;
   // Reclaimable host memory, sampled at every Metal operation during startup
   // and by the governor afterwards.
   MemoryGovernor::HostMemoryProvider hostMemory = queryHostMemory;

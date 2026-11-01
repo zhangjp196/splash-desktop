@@ -165,9 +165,13 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         }
         reloaded.restoreDefaultSettings()
         let restored = AppModel()
+        let defaultLaunch = restored.launchArguments(launcherPath: "/tmp/launcher.py")
         passed = passed
             && restored.settings == ServerSettings.default
             && store.load() == ServerSettings.default
+            // The default disk cache keeps coding conversations across a
+            // restart; turning the cache off above removes the flag.
+            && defaultLaunch.contains("--persistent-cache")
     }
 
     discard()
