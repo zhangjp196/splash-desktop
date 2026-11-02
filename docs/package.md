@@ -70,10 +70,11 @@ job, with its output appended to a log in `~/Library/Logs/Splash`:
 `splash serve --model ID --port PORT --offline` serves an installed one, with
 the launch options picked in the app that differ from the server's defaults,
 ready once the port's lock names that process and `/health` answers; stopping
-is Ctrl+C's SIGINT to the group. The model is fixed for the desktop app, so
-there is no model selection to change; the settings serve the same model on the
-next start. The app starts nothing by itself: its window opens
-on the Models pane, where the settings are, beside the Chat. Models, locks and
+is Ctrl+C's SIGINT to the group. The models pane holds the configurations the
+app serves — one per target and its whole set of server settings — and
+switching one stops the running server and starts the next. The app starts
+nothing by itself: its window opens
+on the Models pane, where the model is chosen, beside the Chat. Models, locks and
 downloads are the ones a packaged `splash` uses, in `~/Library/Application
 Support/Splash` and the Hugging Face cache. The app offers
 `install/suggested-models.tsv`, per model the variant meant for the Mac's
@@ -359,16 +360,16 @@ reads. Its settings live in SQLite at
 per setting, `SPLASH_SETTINGS_DB` points it elsewhere): the panel saves each
 edit after a short pause, the next launch opens on what the last one saved, and
 Restore Defaults returns the form to the values the first launch opened with
-(the built-in model, port 8000, 8-bit KV, a 28 GiB memory ceiling, a 204800 token
+(upstream model, port 8000, 8-bit KV, a 28 GiB memory ceiling, a 204800 token
 context, an 8-request admission limit, a 10 second residency, and the SSD cache
 off — turning it on gives it a 16 GiB quota and a 32 GiB a day write budget). A
 stored value the launcher would reject falls
 back to its first-launch default rather than starting a server that refuses to
 run. `swift run --selfcheck-settings` exercises the store and that round trip
-headlessly against a temporary database. The **Models** pane shows the model
-that is running, or that nothing is, above the settings the next start uses:
-one Mac serves one model at a time, so there is no library of configurations to
-choose among. The
+headlessly against a temporary database. The **Models** pane lists the saved
+configurations, each holding the whole set of server settings, and shows the
+one that is running above them: add, edit and switch between them, or aim one
+at a model folder on your disk. The
 conversation is the server's own web page, embedded in the **Chat** tab: the
 app loads `chat.html?embed=1`, where the page keeps only the conversation and
 posts its history and state to the view, so the native band can list chats,
@@ -376,10 +377,10 @@ start a new one, and clear them with one undo. The same page without `embed`
 still opens in a browser, sidebar and all, for anyone using the server
 directly. Its labels and
 the chat page follow the system interface language (English and Simplified
-Chinese are bundled). The panel has no
-model selection: the desktop app always serves its built-in model, and the
-Models pane shows the one that is running, or that nothing is, with no way to
-switch it. The
+Chinese are bundled). The model
+section offers two modes — an upstream MLX or GGUF model (the installer pairs
+its draft), or a local directory per
+[local model directories](models.md#local-model-directories) — and the
 remaining sections group the rest by what it decides: the server's port and
 whether it serves the LAN, with the extra Host names it accepts; KV
 format, text-only mode, API key and model aliases; the admission limit of

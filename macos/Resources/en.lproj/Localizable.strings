@@ -1,8 +1,18 @@
+"mode.upstream" = "Upstream model (MLX/GGUF)";
+"mode.local" = "Local folder";
+"model.picker" = "Model mode";
+"section.model" = "Model";
 "section.server" = "Server";
 "section.memory" = "Memory";
 "section.cache" = "Idle and cache";
 "section.request" = "Requests and access";
 "section.schedule" = "Scheduling";
+"field.target" = "Target folder";
+"field.target.prompt" = "an MLX 4-bit or GGUF directory";
+"field.draft" = "Draft folder";
+"field.draft.prompt" = "the matching DFlash2 checkpoint (empty downloads the family's)";
+"field.mmproj" = "Vision projector (GGUF)";
+"field.mmproj.prompt" = "the GGUF target's mmproj (empty uses the one beside it)";
 "field.port" = "Port";
 "field.lan_access" = "Allow access from other devices (LAN)";
 "field.allowed_hosts" = "Extra host names (comma-separated)";
@@ -13,6 +23,7 @@
 "kv.bf16" = "BF16";
 "field.neural_engine" = "Use Neural Engine (ANE)";
 "help.lan_access.no_key" = "No API key is set: anyone who can reach this Mac can use the model.";
+"help.mmproj.text_only" = "Text only ignores this path: it is kept for when vision is turned back on.";
 "field.max_memory" = "Max memory (default 28G)";
 "field.max_context" = "Max context (default 204800; up to 1M)";
 "field.expert_memory" = "Routed experts in memory (e.g. 16G, off loads every expert)";
@@ -33,6 +44,9 @@
 "field.max_request_size" = "Max request size (e.g. 128M)";
 "field.reasoning_effort" = "Default reasoning effort";
 "reasoning.default" = "Model default";
+"examples" = "Examples";
+"field.clear" = "Clear";
+"field.browse" = "Browse…";
 "view.live" = "Live";
 "view.thermal" = "Thermal";
 "view.control" = "Control";
@@ -113,10 +127,31 @@
 "sidebar.monitor" = "Monitor";
 "sidebar.about" = "About";
 
-// The models pane: what is served now, and the settings the next start uses.
+// The models pane: configurations and managed directories.
 "view.models" = "Models";
-"models.settings" = "Settings";
-"models.settings.next_start" = "Applies on the next start";
+"models.configs" = "Configurations";
+"models.add_config" = "Add configuration";
+"models.edit" = "Edit";
+"models.active" = "In use";
+"models.use" = "Use";
+"models.use_start" = "Use & Start";
+"models.start" = "Start";
+"models.remove" = "Remove";
+"models.remove.title" = "Remove configuration?";
+"models.remove.message" = "“%@” will be removed from the app. Model files on disk are not deleted.";
+"models.empty.configs" = "No configurations yet. Add one to choose a model.";
+"models.text_only" = "text only";
+"models.ane_off" = "ANE off";
+"models.disk_cache_off" = "disk cache off";
+"models.concurrency" = "%d concurrent";
+
+// The configuration editor.
+"config.name" = "Name";
+"config.untitled" = "Untitled";
+"config.add.title" = "New configuration";
+"config.edit.title" = "Edit configuration";
+"config.save" = "Save";
+"config.cancel" = "Cancel";
 
 // The about page: what this app is and where its projects live.
 "about.version" = "Version %@";
@@ -195,11 +230,15 @@
 "split.divider" = "Resize the pane and conversation";
 
 // Pane headers.
-"models.none" = "Nothing running";
-"models.subtitle" = "The model this Mac serves, and how it runs";
+"models.none" = "No model";
+"models.count" = "%d configurations";
+"models.empty.subtitle" = "Choose the model this Mac serves and how it runs";
 "live.subtitle" = "Throughput and memory, refreshed every second";
 "thermal.subtitle" = "The heat this Mac reports, and how hard it may work";
 "log.live" = "Live output";
+
+"mode.upstream.short" = "Upstream";
+"mode.local.short" = "Local";
 
 "view.chat" = "Chat";
 "chat.clear" = "Clear history";

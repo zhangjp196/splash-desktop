@@ -83,6 +83,23 @@ struct PaneEmpty: View {
     }
 }
 
+/// A small rounded label for one characteristic of a value.
+struct Pill: View {
+    let text: String
+    var tint: Color?
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(tint ?? .secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background((tint ?? .secondary).opacity(tint == nil ? 0.10 : 0.14), in: Capsule())
+    }
+}
+
 /// Lets a pane send the window to the conversation without knowing how the
 /// sidebar keeps its selection.
 private struct OpenChatKey: EnvironmentKey {

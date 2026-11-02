@@ -9,6 +9,7 @@ if CommandLine.arguments.contains("--print-runtime") {
     if let runtime {
         print("python: \(Runtime.python?.path ?? "missing")")
         print("launcher: \(Runtime.launcher?.path ?? "missing")")
+        print("catalog: \(Runtime.catalog.count) model(s)")
         _ = runtime
         exit(0)
     }
@@ -37,6 +38,11 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     // Every setting must survive a round trip, and a second save replaces the
     // first instead of leaving it behind.
     var edited = ServerSettings.default
+    edited.modelMode = .local
+    edited.modelID = "selfcheck/model"
+    edited.modelDirectory = "/tmp/selfcheck"
+    edited.draftDirectory = "/tmp/selfcheck-draft"
+    edited.mmproj = "/tmp/selfcheck-mmproj.gguf"
     edited.port = 9123
     edited.lanAccess = true
     edited.allowedHosts = "mymac.local, tunnel.example"
@@ -59,9 +65,12 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.reasoningEffort = "high"
     edited.maxConcurrency = 24
     passed = store.save(edited) && store.load() == edited
-    // The model selection is gone: no stored row names a model or a local
-    // target, so a build that reads the database cannot offer one again.
-    passed = passed && !edited.rows.contains { $0.key.hasPrefix("model") }
+    // The model selection is stored again: the rows name the mode, the target
+    // and the local folders, so the next launch opens on the same target.
+    passed = passed
+        && edited.rows.contains { $0.key == "modelMode" && $0.value == AppModel.ModelMode.local.rawValue }
+        && edited.rows.contains { $0.key == "modelDirectory" && $0.value == "/tmp/selfcheck" }
+        && edited.rows.contains { $0.key == "mmproj" && $0.value == "/tmp/selfcheck-mmproj.gguf" }
 
     var replaced = edited
     replaced.port = 8000
@@ -92,11 +101,12 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
 
     // A configuration stored before a setting existed still decodes: a missing
     // key keeps its first-launch value instead of dropping the user's saved
-    // settings. Keys an earlier build wrote for the removed model selection
-    // are ignored as well.
+    // settings. A target an earlier build stored decodes with it.
     let legacy = Data(#"{"modelMode":"upstream","modelID":"legacy/model","maxContext":"64K"}"#.utf8)
     let decoded = try? JSONDecoder().decode(ServerSettings.self, from: legacy)
     passed = passed
+        && decoded?.modelID == "legacy/model"
+        && decoded?.modelMode == .upstream
         && decoded?.maxContext == "64K"
         && decoded?.maxConcurrency == ServerSettings.First.maxConcurrency
         && decoded?.diskCache == ServerSettings.First.diskCache
@@ -120,6 +130,24 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && migrated.diskCache == false
         && migrated.settingsVersion == ServerSettings.currentVersion
 
+    // The configuration library the models pane lists: a saved configuration
+    // and the active one come back the next launch, so the pane opens on what
+    // it showed. The library follows SPLASH_SETTINGS_DB into a suite of its
+    // own, so this never touches the user's real configurations.
+    let library = LibraryStore()
+    var named = ModelConfig(settings: edited)
+    named.name = "Selfcheck"
+    let spare = ModelConfig(settings: ServerSettings.default)
+    library.saveConfigs([named, spare])
+    library.saveActive(spare.id)
+    let loadedConfigs = library.loadConfigs()
+    passed = passed
+        && loadedConfigs.map(\.id) == [named.id, spare.id]
+        && loadedConfigs.first?.displayName == "Selfcheck"
+        && library.loadActive() == spare.id
+    library.saveConfigs([])
+    library.saveActive(nil)
+
     // The model: what one launch saves is what the next one opens on, and the
     // defaults button returns it to the state the app first opened with. The
     // per-field debounce the form drives is a view path and is left to the UI.
@@ -140,12 +168,17 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             carries(launch, flag, value)
         }
         passed = passed
-            && carries("--model", AppModel.modelID)
+            && carries("--model-dir", "/tmp/selfcheck")
+            && carries("--draft-model", "/tmp/selfcheck-draft")
             && carries("--expert-memory", "16G")
             && carries("--ple-memory", "2G")
             && carries("--sparse-kv-memory", "1200M")
             && carries("--verify-rows", "all")
             && carries("--max-context", "100K")
+            // Text only loads no tower, so this configuration names no
+            // projector even though the form still holds one; turning vision
+            // back on puts the same path back on the command.
+            && !launch.contains("--mmproj")
             && launch.contains("--language-only")
             // The switch is off in this configuration, so the command turns
             // the disk tier off instead of passing the quota or write budget;
@@ -153,6 +186,20 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries("--max-cache-disk", "0")
             && !launch.contains("--persistent-cache")
             && !launch.contains("--max-cache-disk-writes")
+        reloaded.languageOnly = false
+        let vision = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed
+            && vision.contains("--mmproj")
+            && vision.contains("/tmp/selfcheck-mmproj.gguf")
+            && !vision.contains("--language-only")
+        // An upstream target is the model ID the panel holds, and its draft is
+        // the installer's choice.
+        reloaded.modelMode = .upstream
+        reloaded.modelID = "mlx-community/selfcheck-model"
+        let upstream = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed
+            && carries(upstream, "--model", "mlx-community/selfcheck-model")
+            && !upstream.contains("--model-dir")
         // Every KV format the panel offers reaches the launcher, and the
         // server's own default stays off the command.
         for format in ServerSettings.kvFormats {

@@ -17,7 +17,7 @@ It reuses cached prefixes and batches concurrent requests automatically.
 
 The easiest way to run Splash is the macOS app: one self-contained
 installation that carries the engine, the server, and the runtime, so neither
-installing it nor its first run needs anything but the model it serves.
+installing it nor its first run needs anything but the model you choose.
 
 1. Download the newest `Splash-Desktop-<version>.dmg` from the
    [Releases](https://github.com/zhangjp196/splash-desktop/releases) page and
@@ -26,14 +26,14 @@ installing it nor its first run needs anything but the model it serves.
    the two do not sit side by side.
 2. Open it. The build is ad-hoc signed but not notarized, so the first time
    you may need to right-click and choose Open.
-3. In the **Models** pane, the model and its settings are already there:
-   press **Start**. The first run downloads the model and its DFlash2 draft and
-   serves on `127.0.0.1:8000`; later starts reuse the downloads.
+3. In the **Models** pane, pick a configuration and press **Start**. The
+   first run downloads the model and its DFlash2 draft and serves on
+   `127.0.0.1:8000`; later starts reuse the downloads.
 4. Open the **Chat** tab, open <http://127.0.0.1:8000> in your browser, or
    point a coding agent at the server.
 
 To reach the server from another device on the same network, turn on **Allow
-access from other devices** in the **Server** section: it
+access from other devices** in the configuration's **Server** section: it
 starts the server with `--host 0.0.0.0`, so this Mac's IP address works from
 the other device. Set an **API key** in the **Requests and access** section at
 the same time — without one, anyone on the network can use the model. Reaching
@@ -48,9 +48,9 @@ it:
 - **Chat** — the conversation, in the window: history, a new chat, and one
   click to clear it. The same page still opens in a browser for anyone using
   the server directly.
-- **Models** — the model this Mac serves and the whole set of server settings,
-  edited in place: what is running, or that nothing is (there is no model
-  selection), above the settings the next start uses.
+- **Models** — the configurations you have saved, each holding the whole set
+  of server settings: add, edit, and switch between them, or aim one at a
+  model folder on your disk.
 - **Live** — a live panel of decode and prefill rates, request counts, Metal
   memory, and the caches.
 - **Thermal** — how hard the Mac may work and how loud it gets: **Smart**

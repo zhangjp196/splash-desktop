@@ -170,10 +170,13 @@ final class AppModel: ObservableObject {
         case failed(String)
     }
 
-    /// The one model this app serves. There is no model selection in the
-    /// panel: the launcher is always given this target, and `/v1/models` says
-    /// which model is running.
-    static let modelID = "mlx-community/Qwen3.8-27B-4bit"
+    /// How the launcher is asked for a target: an upstream MLX or GGUF model
+    /// whose draft the installer selects, or a local directory that names its
+    /// target and draft (or the family's).
+    enum ModelMode: String, CaseIterable, Identifiable, Codable {
+        case upstream, local
+        var id: String { rawValue }
+    }
 
     @Published var phase: Phase = .idle
     @Published var log = ""
@@ -182,6 +185,11 @@ final class AppModel: ObservableObject {
 
     // The first-launch values live in ServerSettings; the store replaces them
     // below before the window is shown.
+    @Published var modelMode: ModelMode = .upstream
+    @Published var modelID = ServerSettings.First.modelID
+    @Published var modelDirectory = ""
+    @Published var draftDirectory = ""
+    @Published var mmproj = ""
     @Published var port = ServerSettings.First.port
     @Published var lanAccess = false
     @Published var allowedHosts = ""
@@ -203,6 +211,11 @@ final class AppModel: ObservableObject {
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
     @Published var maxConcurrency = ServerSettings.First.maxConcurrency
+
+    // The model library: the configurations the app has served, persisted as
+    // JSON beside the settings.
+    @Published var configs: [ModelConfig] = []
+    @Published var activeConfigID: UUID?
 
     /// The interface language follows the system unless the user fixes it.
     enum InterfaceLanguage: String, CaseIterable, Identifiable {
@@ -242,11 +255,14 @@ final class AppModel: ObservableObject {
     private var restoring = false
     private var pendingSave: Task<Void, Never>?
     private let store = SettingsStore()
+    private let libraryStore = LibraryStore()
     // A server the app found already running on the configured port (its PID
     // from the launcher's serve-<port>.lock), shown and stoppable like its own.
     var foreignPID: pid_t?
     private var offlineCount = 0
     private let statusFetcher = LiveStatusFetcher()
+
+    let catalogIDs = Runtime.catalog
 
     init() {
         if let raw = UserDefaults.standard.string(forKey: Self.languageKey),
@@ -262,20 +278,20 @@ final class AppModel: ObservableObject {
             smartLevel = stored
         }
         applyLanguage()
-        // The configuration library the pane used to keep is gone: one Mac
-        // serves one model, so its two keys are cleared rather than left for a
-        // build that no longer reads them. The headless selfcheck stays out of
-        // the user's defaults, as it does for the settings.
-        if ProcessInfo.processInfo.environment["SPLASH_SETTINGS_DB"] == nil {
-            for key in ["splash.configs", "splash.active-config"] {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-        }
         let stored = store.hasStoredSettings
         applySettings(store.load())
         // The first launch records what the app opened with, so the settings
         // are on disk before the first edit rather than appearing from nowhere.
         if !stored { _ = saveSettings() }
+        configs = libraryStore.loadConfigs()
+        activeConfigID = libraryStore.loadActive()
+        if configs.isEmpty {
+            let seed = ModelConfig(settings: settings)
+            configs = [seed]
+            activeConfigID = seed.id
+            libraryStore.saveConfigs(configs)
+            libraryStore.saveActive(seed.id)
+        }
         // A server left over from a previous session is detected and taken
         // over asynchronously.
         Task { @MainActor in
@@ -298,6 +314,11 @@ final class AppModel: ObservableObject {
     /// The settings the form currently shows, the value SQLite keeps.
     var settings: ServerSettings {
         var settings = ServerSettings()
+        settings.modelMode = modelMode
+        settings.modelID = modelID
+        settings.modelDirectory = modelDirectory
+        settings.draftDirectory = draftDirectory
+        settings.mmproj = mmproj
         settings.port = port
         settings.lanAccess = lanAccess
         settings.allowedHosts = allowedHosts
@@ -350,11 +371,18 @@ final class AppModel: ObservableObject {
     func restoreDefaultSettings() {
         applySettings(.default)
         saveSettings()
+        activeConfigID = nil
+        libraryStore.saveActive(nil)
     }
 
     private func applySettings(_ settings: ServerSettings) {
         restoring = true
         defer { restoring = false }
+        modelMode = settings.modelMode
+        modelID = settings.modelID
+        modelDirectory = settings.modelDirectory
+        draftDirectory = settings.draftDirectory
+        mmproj = settings.mmproj
         port = settings.port
         lanAccess = settings.lanAccess
         allowedHosts = settings.allowedHosts
@@ -505,12 +533,45 @@ final class AppModel: ObservableObject {
         return message
     }
 
-    /// Take a whole edited settings value: the form edits the app's settings in
-    /// place, and every field of it goes through the same debounced save.
-    func update(_ settings: ServerSettings) {
-        guard settings != self.settings else { return }
-        applySettings(settings)
-        settingsEdited()
+    // MARK: Model configurations
+
+    /// Store a configuration and make it the one the server starts with.
+    func save(_ config: ModelConfig) {
+        if let index = configs.firstIndex(where: { $0.id == config.id }) {
+            configs[index] = config
+        } else {
+            configs.append(config)
+        }
+        libraryStore.saveConfigs(configs)
+        apply(config)
+    }
+
+    /// Make a configuration current: the form and the next start follow it.
+    func apply(_ config: ModelConfig) {
+        activeConfigID = config.id
+        libraryStore.saveActive(config.id)
+        applySettings(config.settings)
+        saveSettings()
+    }
+
+    func removeConfig(_ config: ModelConfig) {
+        configs.removeAll { $0.id == config.id }
+        libraryStore.saveConfigs(configs)
+        if activeConfigID == config.id {
+            activeConfigID = nil
+            libraryStore.saveActive(nil)
+        }
+    }
+
+    /// A new, empty configuration to edit: the defaults, with no model chosen
+    /// yet, so adding one starts from scratch instead of copying the current.
+    func newConfig() -> ModelConfig {
+        var defaults = ServerSettings.default
+        defaults.modelID = ""
+        defaults.modelDirectory = ""
+        defaults.draftDirectory = ""
+        defaults.mmproj = ""
+        return ModelConfig(settings: defaults)
     }
 
     // MARK: Derived state
@@ -527,14 +588,8 @@ final class AppModel: ObservableObject {
     var chatEmbedURL: URL? { URL(string: "http://127.0.0.1:\(port)/?embed=1") }
     var apiBaseURL: String { "http://127.0.0.1:\(port)/v1" }
 
-    /// The model being served right now, as `/v1/models` reports it: nil while
-    /// nothing runs, which is what the models pane says instead of a name. A
-    /// server the app has not read a `/status` from yet — a start in progress,
-    /// or one it just attached to — reports the model the app starts.
-    var runningModelName: String? {
-        guard isRunning else { return nil }
-        if let name = live.modelID, !name.isEmpty { return name }
-        return Self.modelID
+    var activeConfig: ModelConfig? {
+        configs.first { $0.id == activeConfigID }
     }
 
     func copyToClipboard(_ text: String) {
@@ -544,7 +599,17 @@ final class AppModel: ObservableObject {
     }
 
     var canStart: Bool {
-        !isBusy && !isRunning && Runtime.python != nil && Runtime.launcher != nil
+        guard !isBusy, !isRunning, Runtime.python != nil, Runtime.launcher != nil else {
+            return false
+        }
+        switch modelMode {
+        case .upstream:
+            return !modelID.trimmingCharacters(in: .whitespaces).isEmpty
+        case .local:
+            // An MLX or GGUF target without a named draft has its family's
+            // DFlash2 draft downloaded by the installer.
+            return !modelDirectory.isEmpty
+        }
     }
 
     var statusText: String {
@@ -572,7 +637,22 @@ final class AppModel: ObservableObject {
     /// headless selfcheck reads it too, so a setting the panel added is also
     /// one the command carries.
     func launchArguments(launcherPath: String) -> [String] {
-        var arguments = [launcherPath, "serve", "--model", Self.modelID]
+        var arguments = [launcherPath, "serve"]
+        switch modelMode {
+        case .upstream:
+            arguments += ["--model", modelID.trimmingCharacters(in: .whitespaces)]
+        case .local:
+            arguments += ["--model-dir", modelDirectory]
+            let draft = draftDirectory.trimmingCharacters(in: .whitespaces)
+            if !draft.isEmpty { arguments += ["--draft-model", draft] }
+            // Text only loads no tower, so it names no projector: the launcher
+            // refuses the two together, and the form keeps the path for the
+            // configuration that turns vision back on.
+            let projector = mmproj.trimmingCharacters(in: .whitespaces)
+            if !projector.isEmpty && !languageOnly {
+                arguments += ["--mmproj", projector]
+            }
+        }
         arguments += ["--port", String(port)]
         // Loopback unless the configuration asks for the LAN; the extra Host
         // names are passed either way, since a tunnel or proxy reaches the

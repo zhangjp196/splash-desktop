@@ -1,8 +1,18 @@
+"mode.upstream" = "上游模型（MLX/GGUF）";
+"mode.local" = "本地文件夹";
+"model.picker" = "模型模式";
+"section.model" = "模型";
 "section.server" = "服务";
 "section.memory" = "内存";
 "section.cache" = "空闲与缓存";
 "section.request" = "请求与访问";
 "section.schedule" = "调度";
+"field.target" = "目标文件夹";
+"field.target.prompt" = "MLX 4-bit 或 GGUF 目录";
+"field.draft" = "Draft 文件夹";
+"field.draft.prompt" = "匹配的 DFlash2 检查点（留空则自动下载）";
+"field.mmproj" = "视觉投影器（GGUF）";
+"field.mmproj.prompt" = "GGUF 目标的 mmproj（留空则用目标旁的）";
 "field.port" = "端口";
 "field.lan_access" = "允许其他设备访问（局域网）";
 "field.allowed_hosts" = "额外主机名（逗号分隔）";
@@ -13,6 +23,7 @@
 "kv.bf16" = "BF16";
 "field.neural_engine" = "使用神经引擎（ANE）";
 "help.lan_access.no_key" = "未设置 API 密钥：任何能连到这台 Mac 的人都能使用模型。";
+"help.mmproj.text_only" = "仅文本会忽略此路径：它保留下来，等重新开启视觉时使用。";
 "field.max_memory" = "最大内存（默认 28G）";
 "field.max_context" = "最大上下文（默认 204800，最高 1M）";
 "field.expert_memory" = "专家驻留内存（如 16G，off 全部载入）";
@@ -33,6 +44,9 @@
 "field.max_request_size" = "最大请求大小（如 128M）";
 "field.reasoning_effort" = "默认思考级别";
 "reasoning.default" = "模型默认";
+"examples" = "示例";
+"field.clear" = "清除";
+"field.browse" = "浏览…";
 "view.live" = "实时";
 "view.thermal" = "散热";
 "view.control" = "控制";
@@ -113,10 +127,31 @@
 "sidebar.monitor" = "监控";
 "sidebar.about" = "关于";
 
-// 模型面板：正在服务什么，以及下次启动使用的设置。
+// 模型面板：配置与目录管理。
 "view.models" = "模型";
-"models.settings" = "设置";
-"models.settings.next_start" = "下次启动生效";
+"models.configs" = "配置";
+"models.add_config" = "添加配置";
+"models.edit" = "编辑";
+"models.active" = "使用中";
+"models.use" = "使用";
+"models.use_start" = "使用并启动";
+"models.start" = "启动";
+"models.remove" = "移除";
+"models.remove.title" = "移除配置？";
+"models.remove.message" = "「%@」会从 App 中移除；磁盘上的模型文件不会被删除。";
+"models.empty.configs" = "还没有配置。添加一个来选模型。";
+"models.text_only" = "仅文本";
+"models.ane_off" = "ANE 关";
+"models.disk_cache_off" = "无磁盘缓存";
+"models.concurrency" = "并发 %d";
+
+// 配置编辑器。
+"config.name" = "名称";
+"config.untitled" = "未命名";
+"config.add.title" = "新建配置";
+"config.edit.title" = "编辑配置";
+"config.save" = "保存";
+"config.cancel" = "取消";
 
 // 关于页：应用说明与项目地址。
 "about.version" = "版本 %@";
@@ -195,11 +230,15 @@
 "split.divider" = "调整面板与对话的宽度";
 
 // 面板标题。
-"models.none" = "无运行";
-"models.subtitle" = "这台 Mac 正在服务的模型，以及它的运行方式";
+"models.none" = "未选择模型";
+"models.count" = "%d 个配置";
+"models.empty.subtitle" = "选择这台 Mac 要服务的模型，以及它如何运行";
 "live.subtitle" = "吞吐与显存，每秒刷新";
 "thermal.subtitle" = "这台 Mac 的热量，以及它允许工作得多用力";
 "log.live" = "实时输出";
+
+"mode.upstream.short" = "上游模型";
+"mode.local.short" = "本地目录";
 
 "view.chat" = "对话";
 "chat.clear" = "清空历史";

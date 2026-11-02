@@ -8,6 +8,7 @@ struct ServerSettings: Codable, Equatable {
     /// The first-launch values, named so the store, the form and the headless
     /// selfcheck all read them instead of repeating the literals.
     enum First {
+        static let modelID = "mlx-community/Qwen3.8-27B-4bit"
         static let port = 8000
         static let kvFormat = "int8"
         // The idle spill is the engine's own timer now and no longer follows
@@ -33,6 +34,13 @@ struct ServerSettings: Codable, Equatable {
     static let kvFormats = ["int8", "int4", "bf16"]
     static let verifyRowsOptions = ["auto", "all"]
 
+    var modelMode = AppModel.ModelMode.upstream
+    var modelID = First.modelID
+    var modelDirectory = ""
+    var draftDirectory = ""
+    /// A local GGUF target's vision projector (`--mmproj`): a GGUF file
+    /// wherever it lies, or empty for the one beside the target.
+    var mmproj = ""
     var port = First.port
     /// Listen on every IPv4 interface (`--host 0.0.0.0`) so other devices on
     /// the network can reach the server. Off keeps it on loopback.
@@ -90,7 +98,7 @@ struct ServerSettings: Codable, Equatable {
     // or one a hand edit corrupted, keeps its first-launch default instead of
     // failing the whole decode and dropping the user's configurations.
     private enum CodingKeys: String, CodingKey {
-        case port
+        case modelMode, modelID, modelDirectory, draftDirectory, mmproj, port
         case lanAccess, allowedHosts
         case languageOnly, kvFormat, neuralEngine, maxMemory, maxContext
         case residencySeconds, maxRequestSize, apiKey, servedNames
@@ -101,11 +109,12 @@ struct ServerSettings: Codable, Equatable {
     }
 
     /// The row set this build writes, so a stored one can be told from those
-    /// an earlier build wrote. `2` is the row set that turned the SSD cache off
-    /// by default: a row set without it carries the switch's old default (`on`),
-    /// which was not a choice the user made, so it reads as the new default —
-    /// off. A row set that carries it keeps what the switch was set to.
-    static let currentVersion = "2"
+    /// an earlier build wrote. `3` is the row set that carries the model
+    /// selection again, after `2` dropped it: `2` turned the SSD cache off by
+    /// default, and a row set without a version carries the switch's old
+    /// default (`on`), which was not a choice the user made, so it reads as the
+    /// new default — off. A row set that carries a version keeps the switch.
+    static let currentVersion = "3"
 
     init(from decoder: Decoder) throws {
         self.init()
@@ -113,6 +122,11 @@ struct ServerSettings: Codable, Equatable {
         func value<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
             try? container.decodeIfPresent(T.self, forKey: key)
         }
+        modelMode = value(AppModel.ModelMode.self, .modelMode) ?? modelMode
+        modelID = value(String.self, .modelID) ?? modelID
+        modelDirectory = value(String.self, .modelDirectory) ?? modelDirectory
+        draftDirectory = value(String.self, .draftDirectory) ?? draftDirectory
+        mmproj = value(String.self, .mmproj) ?? mmproj
         port = value(Int.self, .port) ?? port
         lanAccess = value(Bool.self, .lanAccess) ?? lanAccess
         allowedHosts = value(String.self, .allowedHosts) ?? allowedHosts
@@ -154,10 +168,19 @@ struct ServerSettings: Codable, Equatable {
         return data.base64EncodedString()
     }
 
+    /// Row sets this build can read a choice from: the one it writes, and the
+    /// one before it, which already turned the SSD cache off by default.
+    static let knownVersions: Set<String> = ["2", currentVersion]
+
     /// The settings as the store's key/value rows, in a fixed order.
     var rows: [(key: String, value: String)] {
         [
             ("settingsVersion", Self.currentVersion),
+            ("modelMode", modelMode.rawValue),
+            ("modelID", modelID),
+            ("modelDirectory", modelDirectory),
+            ("draftDirectory", draftDirectory),
+            ("mmproj", mmproj),
             ("port", String(port)),
             ("lanAccess", lanAccess ? "1" : "0"),
             ("allowedHosts", allowedHosts),
@@ -189,6 +212,13 @@ struct ServerSettings: Codable, Equatable {
     init(rows: [String: String]) {
         self.init()
         if let value = rows["settingsVersion"] { settingsVersion = value }
+        if let raw = rows["modelMode"], let mode = AppModel.ModelMode(rawValue: raw) {
+            modelMode = mode
+        }
+        if let value = rows["modelID"] { modelID = value }
+        if let value = rows["modelDirectory"] { modelDirectory = value }
+        if let value = rows["draftDirectory"] { draftDirectory = value }
+        if let value = rows["mmproj"] { mmproj = value }
         if let value = Self.number(rows["port"], in: 0...65_535) { port = value }
         if let value = rows["lanAccess"] { lanAccess = value == "1" }
         if let value = rows["allowedHosts"] { allowedHosts = value }
@@ -208,12 +238,13 @@ struct ServerSettings: Codable, Equatable {
             residencySeconds = value
         }
         if let value = rows["maxCacheDisk"] { maxCacheDisk = value }
-        // The switch's own row is a choice only once this build has written the
-        // rows with its version. A row set from before that carries the old
+        // The switch's own row is a choice only once a build that knew it wrote
+        // the rows with a version. A row set from before that carries the old
         // default (on) for every install, which is not a choice anyone made, so
         // it reads as the new default instead of turning the cache back on; the
         // next save writes the version, and from then on the row is the user's.
-        if rows["settingsVersion"] == Self.currentVersion, let value = rows["diskCache"] {
+        if let version = rows["settingsVersion"], Self.knownVersions.contains(version),
+           let value = rows["diskCache"] {
             diskCache = value == "1"
         }
         if let value = rows["maxCacheDiskWrites"] { maxCacheDiskWrites = value }

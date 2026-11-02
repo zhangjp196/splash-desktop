@@ -42,4 +42,22 @@ enum Runtime {
     static var launcher: URL? {
         root?.appendingPathComponent("install/launcher.py")
     }
+
+    /// The model IDs the suggested list bundles, for the picker: the first
+    /// column of `install/suggested-models.tsv`, comments and layout aside.
+    static var catalog: [String] {
+        guard let root else { return [] }
+        let file = root.appendingPathComponent("install/suggested-models.tsv")
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return [] }
+        var seen = Set<String>()
+        var identifiers: [String] = []
+        for line in text.split(separator: "\n") {
+            guard let field = line.split(separator: "\t", maxSplits: 1).first else { continue }
+            let candidate = field.trimmingCharacters(in: .whitespaces)
+            if !candidate.isEmpty, !candidate.hasPrefix("#"), seen.insert(candidate).inserted {
+                identifiers.append(candidate)
+            }
+        }
+        return identifiers
+    }
 }
