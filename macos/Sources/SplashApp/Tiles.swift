@@ -10,7 +10,7 @@ import SwiftUI
 /// have (a value, a bar and one line of caption), and captions are kept to one
 /// line so nothing grows past them.
 enum TileMetrics {
-    static let heroHeight: CGFloat = 104
+    static let heroHeight: CGFloat = 122
     static let cardHeight: CGFloat = 84
     static let corner: CGFloat = 12
 }
@@ -102,7 +102,8 @@ struct Meter: View {
 }
 
 /// The headline tile: the number is the point, so it is set large and the
-/// icon and label stay quiet around it.
+/// icon and label stay quiet around it. `note` is one quiet line under it, for
+/// the figure the headline hides — the peak behind an average.
 struct HeroCard: View {
     let title: String
     let value: String
@@ -110,9 +111,10 @@ struct HeroCard: View {
     let systemImage: String
     let tint: Color
     var progress: Double?
+    var note = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 7) {
                 Image(systemName: systemImage)
                     .font(.system(size: 13, weight: .semibold))
@@ -137,6 +139,12 @@ struct HeroCard: View {
             if let progress {
                 Meter(fraction: progress, tint: tint)
             }
+            // One line, and the same line whether or not there is a peak yet,
+            // so a row of heroes never has one taller than its neighbours.
+            Text(note.isEmpty ? " " : note)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: TileMetrics.heroHeight,

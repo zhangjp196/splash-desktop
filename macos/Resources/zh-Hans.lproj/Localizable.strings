@@ -1,18 +1,8 @@
-"mode.upstream" = "上游模型（MLX/GGUF）";
-"mode.local" = "本地文件夹";
-"model.picker" = "模型模式";
-"section.model" = "模型";
 "section.server" = "服务";
 "section.memory" = "内存";
 "section.cache" = "空闲与缓存";
 "section.request" = "请求与访问";
 "section.schedule" = "调度";
-"field.target" = "目标文件夹";
-"field.target.prompt" = "MLX 4-bit 或 GGUF 目录";
-"field.draft" = "Draft 文件夹";
-"field.draft.prompt" = "匹配的 DFlash2 检查点（留空则自动下载）";
-"field.mmproj" = "视觉投影器（GGUF）";
-"field.mmproj.prompt" = "GGUF 目标的 mmproj（留空则用目标旁的）";
 "field.port" = "端口";
 "field.lan_access" = "允许其他设备访问（局域网）";
 "field.allowed_hosts" = "额外主机名（逗号分隔）";
@@ -23,9 +13,8 @@
 "kv.bf16" = "BF16";
 "field.neural_engine" = "使用神经引擎（ANE）";
 "help.lan_access.no_key" = "未设置 API 密钥：任何能连到这台 Mac 的人都能使用模型。";
-"help.mmproj.text_only" = "仅文本会忽略此路径：它保留下来，等重新开启视觉时使用。";
-"field.max_memory" = "最大内存（如 28G）";
-"field.max_context" = "最大上下文（如 100K，最高 1M）";
+"field.max_memory" = "最大内存（默认 28G）";
+"field.max_context" = "最大上下文（默认 204800，最高 1M）";
 "field.expert_memory" = "专家驻留内存（如 16G，off 全部载入）";
 "field.ple_memory" = "PLE 表内存（如 2G，off 全部载入）";
 "field.sparse_kv_memory" = "KV 回读内存（如 1200M）";
@@ -34,7 +23,7 @@
 "verify.all" = "逐行";
 "field.max_concurrency" = "最大并发";
 "field.residency" = "空闲释放权重秒数（LM Studio 风格）";
-"field.disk_cache" = "使用磁盘缓存";
+"field.disk_cache" = "使用磁盘缓存（默认关闭）";
 "field.cache_quota" = "SSD 缓存配额（如 16G）";
 "field.cache_writes" = "SSD 每日写入预算（如 32G）";
 "control.saved" = "已自动保存";
@@ -44,9 +33,6 @@
 "field.max_request_size" = "最大请求大小（如 128M）";
 "field.reasoning_effort" = "默认思考级别";
 "reasoning.default" = "模型默认";
-"examples" = "示例";
-"field.clear" = "清除";
-"field.browse" = "浏览…";
 "view.live" = "实时";
 "view.thermal" = "散热";
 "view.control" = "控制";
@@ -86,31 +72,36 @@
 "live.not_ready" = "未就绪";
 "live.restarts" = "重启 %d 次";
 "live.context" = "上下文";
-"live.decode" = "解码";
-"live.prefill" = "预填充";
+"live.decode" = "解码速度";
+"live.prefill" = "输入速度";
 "live.draft_acceptance" = "Draft 接受率";
 "live.caption.tokens_per_second" = "token/秒";
 "live.caption.draft_acceptance" = "draft token 接受率";
 "live.caption.queue" = "排队数 / 准入上限";
+"live.caption.context_setting" = "面板设置 %@";
+"live.caption.peak_of" = "峰值 %@";
 "live.caption.share" = "%@ / %@";
+"live.caption.outcomes" = "完成 %d · 取消 %d · 失败 %d";
+"live.caption.failure_kinds" = "容量 %d · Metal %d";
+"live.caption.wait_kinds" = "内存 %d · 并发 %d · 挂起 %d";
+"live.caption.peak_output" = "最大 %@ token/秒";
+"live.caption.peak_input" = "最大 %@ token/秒";
+"live.caption.peak_acceptance" = "最大 %@";
+"live.caption.limit_configured" = "面板设置的上限（--max-memory）";
+"live.caption.limit_automatic" = "引擎按机型自动规划";
 "live.submitted" = "已提交";
-"live.completed" = "已完成";
 "live.failed" = "失败";
-"live.cancelled" = "已取消";
 "live.pending" = "排队中";
 "live.waiting" = "等待中";
-"live.waiting_memory" = "等待内存";
-"live.waiting_concurrency" = "并发等待";
-"live.suspended" = "已挂起";
-"live.capacity_failures" = "容量失败";
-"live.metal_failures" = "Metal 失败";
 "live.current_memory" = "Metal 地址空间";
 "live.current_memory_caption" = "虚拟占位非实际占用，权重页可被系统回收";
 "live.physical_memory" = "物理内存占用";
-"live.physical_memory_caption" = "引擎当前占用";
-"live.peak_memory" = "地址空间峰值";
+"live.physical_memory_caption" = "引擎实际占用 / 可用预算";
+"live.memory_limit" = "内存预算";
 "live.disk_cache" = "磁盘缓存";
 "live.caption.idle_offload" = "%d 次空闲落盘 · %@";
+"live.caption.disk_cache_off" = "已关闭：前缀只留在内存";
+"live.caption.disk_cache_on" = "已开启：前缀可跨重启保留";
 "live.hit_rate" = "请求级缓存命中率";
 "live.kv_disk_hit" = "KV 复用来自磁盘";
 "live.state_hit" = "状态命中";
@@ -122,31 +113,10 @@
 "sidebar.monitor" = "监控";
 "sidebar.about" = "关于";
 
-// 模型面板：配置与目录管理。
+// 模型面板：正在服务什么，以及下次启动使用的设置。
 "view.models" = "模型";
-"models.configs" = "配置";
-"models.add_config" = "添加配置";
-"models.edit" = "编辑";
-"models.active" = "使用中";
-"models.use" = "使用";
-"models.use_start" = "使用并启动";
-"models.start" = "启动";
-"models.remove" = "移除";
-"models.remove.title" = "移除配置？";
-"models.remove.message" = "「%@」会从 App 中移除；磁盘上的模型文件不会被删除。";
-"models.empty.configs" = "还没有配置。添加一个来选模型。";
-"models.text_only" = "仅文本";
-"models.ane_off" = "ANE 关";
-"models.disk_cache_off" = "无磁盘缓存";
-"models.concurrency" = "并发 %d";
-
-// 配置编辑器。
-"config.name" = "名称";
-"config.untitled" = "未命名";
-"config.add.title" = "新建配置";
-"config.edit.title" = "编辑配置";
-"config.save" = "保存";
-"config.cancel" = "取消";
+"models.settings" = "设置";
+"models.settings.next_start" = "下次启动生效";
 
 // 关于页：应用说明与项目地址。
 "about.version" = "版本 %@";
@@ -165,23 +135,31 @@
 // that trades prompt preprocessing speed for quiet.
 "thermal.ladder.title" = "散热与噪音";
 "thermal.auto" = "系统默认";
-"thermal.performance" = "性能";
+"thermal.smart" = "智能";
 "thermal.balanced" = "平衡";
 "thermal.moderate" = "适中";
 "thermal.quiet" = "安静";
 "thermal.rung.help" = "预填充最多占用 %d%% 的时间。";
+"thermal.rung.help.smart" = "按风扇与温度每秒自动调整预填充占时。";
 "thermal.cost.full" = "提示词全速预处理，风扇由 macOS 自行决定。";
 "thermal.cost.paced" = "提示词预处理约慢 %.1f 倍。";
+"thermal.cost.smart" = "按风扇与温度自动调整占时：凉快时全速，变热时逐步让路。";
+"thermal.smart.duty" = "自适应";
+"thermal.smart.high" = "高";
+"thermal.smart.medium" = "中";
+"thermal.smart.low" = "低";
+"thermal.smart.level" = "智能档位";
+"thermal.smart.band" = "风扇最多到 %.0f%%";
 "thermal.duty.held" = "引擎当前 %d%%";
 "thermal.applies" = "立即生效，无需重启引擎。";
 "thermal.next_start" = "服务器未运行，将在下次启动生效。";
+"thermal.heat" = "热量与风扇";
 "thermal.fans" = "风扇";
-"thermal.fan" = "风扇 %d";
-"thermal.fan.caption" = "%d–%d RPM";
+"thermal.fan.range" = "%d 个风扇 · %d–%d RPM";
+"thermal.fan.count" = "%d 个风扇";
 "thermal.caption.rpm" = "RPM";
 "thermal.no_fans" = "本机没有风扇";
 "thermal.unavailable" = "无读数";
-"thermal.sensors" = "温度";
 "thermal.sensor.cpu" = "CPU";
 "thermal.sensor.gpu" = "GPU";
 "thermal.sensor.io" = "IO";
@@ -190,8 +168,7 @@
 "thermal.pacing" = "预填充节流";
 "thermal.duty" = "预填充占时";
 "thermal.duty.caption" = "占墙钟时间的比例";
-"thermal.scale" = "热压让步";
-"thermal.scale.caption" = "1.00 表示不让步";
+"thermal.scale.caption" = "已按热压让步 ×%.2f";
 "thermal.waits" = "节流等待";
 "thermal.waits.caption" = "累计等待 %@";
 "thermal.waits.none" = "尚未发生等待";
@@ -205,7 +182,6 @@
 "live.fans" = "最高风扇转速";
 "live.hottest" = "最高温度";
 "live.duty" = "预填充占时";
-"live.caption.rpm" = "RPM";
 
 // 内嵌对话：页面持有会话，应用只显示顶部历史菜单。
 "chat.new" = "新对话";
@@ -219,15 +195,11 @@
 "split.divider" = "调整面板与对话的宽度";
 
 // 面板标题。
-"models.none" = "未选择模型";
-"models.count" = "%d 个配置";
-"models.empty.subtitle" = "选择这台 Mac 要服务的模型，以及它如何运行";
+"models.none" = "无运行";
+"models.subtitle" = "这台 Mac 正在服务的模型，以及它的运行方式";
 "live.subtitle" = "吞吐与显存，每秒刷新";
 "thermal.subtitle" = "这台 Mac 的热量，以及它允许工作得多用力";
 "log.live" = "实时输出";
-
-"mode.upstream.short" = "上游模型";
-"mode.local.short" = "本地目录";
 
 "view.chat" = "对话";
 "chat.clear" = "清空历史";

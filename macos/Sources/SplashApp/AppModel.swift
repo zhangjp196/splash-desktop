@@ -11,6 +11,12 @@ struct LiveStatus: Equatable {
     var decodeTokensPerSecond: Double?
     var prefillTokensPerSecond: Double?
     var draftAcceptanceRate: Double?
+    /// The fastest the engine has been seen to run since it started: the peak
+    /// behind each rate above, kept by the panel because /status reports the
+    /// engine's lifetime average, not its best batch.
+    var peakDecodeTokensPerSecond: Double?
+    var peakPrefillTokensPerSecond: Double?
+    var peakDraftAcceptanceRate: Double?
     var submitted = 0
     var completed = 0
     var failed = 0
@@ -23,6 +29,10 @@ struct LiveStatus: Equatable {
     /// are address space whose weight pages the host reclaims when idle.
     var physicalBytes: UInt64?
     var peakPhysicalBytes: UInt64?
+    /// The budget the memory governor holds the engine to, and the ceiling the
+    /// panel named for it (`--max-memory`): nil while the budget is automatic.
+    var governorLimitBytes: UInt64?
+    var configuredMemoryLimitBytes: UInt64?
     var cacheHitRate: Double?
     var kvDiskHitTokens: Int?
     /// The share of the tokens requests reused that came back from the disk
@@ -160,13 +170,10 @@ final class AppModel: ObservableObject {
         case failed(String)
     }
 
-    /// How the launcher is asked for a target: an upstream MLX or GGUF model
-    /// whose draft the installer selects, or a local directory that names its
-    /// target and draft (or the family's).
-    enum ModelMode: String, CaseIterable, Identifiable, Codable {
-        case upstream, local
-        var id: String { rawValue }
-    }
+    /// The one model this app serves. There is no model selection in the
+    /// panel: the launcher is always given this target, and `/v1/models` says
+    /// which model is running.
+    static let modelID = "mlx-community/Qwen3.8-27B-4bit"
 
     @Published var phase: Phase = .idle
     @Published var log = ""
@@ -175,17 +182,12 @@ final class AppModel: ObservableObject {
 
     // The first-launch values live in ServerSettings; the store replaces them
     // below before the window is shown.
-    @Published var modelMode: ModelMode = .upstream
-    @Published var modelID = ServerSettings.First.modelID
-    @Published var modelDirectory = ""
-    @Published var draftDirectory = ""
-    @Published var mmproj = ""
     @Published var port = ServerSettings.First.port
     @Published var lanAccess = false
     @Published var allowedHosts = ""
     @Published var languageOnly = false
-    @Published var maxMemory = ""
-    @Published var maxContext = ""
+    @Published var maxMemory = ServerSettings.First.maxMemory
+    @Published var maxContext = ServerSettings.First.maxContext
     @Published var expertMemory = ""
     @Published var pleMemory = ""
     @Published var sparseKvMemory = ""
@@ -201,11 +203,6 @@ final class AppModel: ObservableObject {
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
     @Published var maxConcurrency = ServerSettings.First.maxConcurrency
-
-    // The model library: the configurations the app has served, persisted as
-    // JSON beside the settings.
-    @Published var configs: [ModelConfig] = []
-    @Published var activeConfigID: UUID?
 
     /// The interface language follows the system unless the user fixes it.
     enum InterfaceLanguage: String, CaseIterable, Identifiable {
@@ -224,28 +221,32 @@ final class AppModel: ObservableObject {
     /// given the rung, and a running engine's duty is changed through
     /// /v1/thermal, so a change applies without a restart.
     @Published var thermalRung: ThermalRung = .auto
+    /// How hard the smart mode works: the most prefill may keep the GPU busy
+    /// when the Mac is cool, before the fans and temperatures pull it down.
+    @Published var smartLevel: SmartLevel = .medium
     /// What the engine answered a change with that it would not take, shown on
     /// the thermal page until the next change goes through.
     @Published var thermalError: String?
 
     private static let thermalKey = "splash.thermal-rung"
+    private static let smartLevelKey = "splash.smart-level"
 
     private var process: Process?
     private var poll: Task<Void, Never>?
     private var stopping = false
+    /// The last duty the smart mode pushed, so the poll pushes only when the
+    /// fans and temperatures have moved it, not once a second forever.
+    private var lastSmartDuty: Double?
     /// True while stored settings are being applied, so the assignments do not
     /// read as edits and schedule a save of what was just loaded.
     private var restoring = false
     private var pendingSave: Task<Void, Never>?
     private let store = SettingsStore()
-    private let libraryStore = LibraryStore()
     // A server the app found already running on the configured port (its PID
     // from the launcher's serve-<port>.lock), shown and stoppable like its own.
     var foreignPID: pid_t?
     private var offlineCount = 0
     private let statusFetcher = LiveStatusFetcher()
-
-    let catalogIDs = Runtime.catalog
 
     init() {
         if let raw = UserDefaults.standard.string(forKey: Self.languageKey),
@@ -256,21 +257,25 @@ final class AppModel: ObservableObject {
            let stored = ThermalRung(rawValue: raw) {
             thermalRung = stored
         }
+        if let raw = UserDefaults.standard.string(forKey: Self.smartLevelKey),
+           let stored = SmartLevel(rawValue: raw) {
+            smartLevel = stored
+        }
         applyLanguage()
+        // The configuration library the pane used to keep is gone: one Mac
+        // serves one model, so its two keys are cleared rather than left for a
+        // build that no longer reads them. The headless selfcheck stays out of
+        // the user's defaults, as it does for the settings.
+        if ProcessInfo.processInfo.environment["SPLASH_SETTINGS_DB"] == nil {
+            for key in ["splash.configs", "splash.active-config"] {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
         let stored = store.hasStoredSettings
         applySettings(store.load())
         // The first launch records what the app opened with, so the settings
         // are on disk before the first edit rather than appearing from nowhere.
         if !stored { _ = saveSettings() }
-        configs = libraryStore.loadConfigs()
-        activeConfigID = libraryStore.loadActive()
-        if configs.isEmpty {
-            let seed = ModelConfig(settings: settings)
-            configs = [seed]
-            activeConfigID = seed.id
-            libraryStore.saveConfigs(configs)
-            libraryStore.saveActive(seed.id)
-        }
         // A server left over from a previous session is detected and taken
         // over asynchronously.
         Task { @MainActor in
@@ -293,11 +298,6 @@ final class AppModel: ObservableObject {
     /// The settings the form currently shows, the value SQLite keeps.
     var settings: ServerSettings {
         var settings = ServerSettings()
-        settings.modelMode = modelMode
-        settings.modelID = modelID
-        settings.modelDirectory = modelDirectory
-        settings.draftDirectory = draftDirectory
-        settings.mmproj = mmproj
         settings.port = port
         settings.lanAccess = lanAccess
         settings.allowedHosts = allowedHosts
@@ -350,18 +350,11 @@ final class AppModel: ObservableObject {
     func restoreDefaultSettings() {
         applySettings(.default)
         saveSettings()
-        activeConfigID = nil
-        libraryStore.saveActive(nil)
     }
 
     private func applySettings(_ settings: ServerSettings) {
         restoring = true
         defer { restoring = false }
-        modelMode = settings.modelMode
-        modelID = settings.modelID
-        modelDirectory = settings.modelDirectory
-        draftDirectory = settings.draftDirectory
-        mmproj = settings.mmproj
         port = settings.port
         lanAccess = settings.lanAccess
         allowedHosts = settings.allowedHosts
@@ -402,14 +395,74 @@ final class AppModel: ObservableObject {
     var engineRung: ThermalRung? { engineDutyPercent.flatMap(ThermalRung.init(duty:)) }
 
     /// Choose a rung: remember it for the next start, and take a running
-    /// engine's duty to it now.
+    /// engine's duty to it now. `smart` has no fixed duty: it is pushed each
+    /// second from the fans and temperatures, so a change to its level is
+    /// remembered and applied on the next poll.
     func setThermalRung(_ rung: ThermalRung) {
         thermalRung = rung
         UserDefaults.standard.set(rung.rawValue, forKey: Self.thermalKey)
         thermalError = nil
         Task { @MainActor [weak self] in
-            await self?.pushThermalDuty(rung.duty)
+            if let duty = rung.duty {
+                await self?.pushThermalDuty(duty)
+            } else {
+                await self?.pushSmartDuty()
+            }
         }
+    }
+
+    /// Remember the smart level and, while a server runs, take the engine's
+    /// duty to it now.
+    func setSmartLevel(_ level: SmartLevel) {
+        smartLevel = level
+        UserDefaults.standard.set(level.rawValue, forKey: Self.smartLevelKey)
+        thermalError = nil
+        Task { @MainActor [weak self] in
+            await self?.pushSmartDuty()
+        }
+    }
+
+    /// The duty the smart mode asks for now: its level's ceiling while the fans
+    /// are still inside the band that level allows and the sensors are cool,
+    /// falling toward its floor as the fans leave that band or the hottest
+    /// sensor climbs. The fans are the Mac's own answer to the heat, so a Mac
+    /// already spinning them is asked to feed less work; a Mac without fans
+    /// (a fanless Air) is judged by its sensors alone. The result is clamped to
+    /// the engine's range, so it is always one the engine will take.
+    func smartDuty() -> Double {
+        let live = self.live
+        let level = smartLevel
+        // How far the fans are past what this level allows, 0 inside the band
+        // and 1 at their top speed.
+        let fanShare: Double
+        if live.fansAvailable, let maxRpm = live.fanMaximums.max(), maxRpm > 0 {
+            let fastest = live.fanSpeeds.max() ?? 0
+            fanShare = min(1.0, Double(fastest) / Double(maxRpm))
+        } else {
+            fanShare = 0.0
+        }
+        let band = level.fanShare
+        let fanHead = min(1.0, max(0.0, (fanShare - band) / max(0.01, 1.0 - band)))
+        // The sensors: cool below 65 °C, at their hottest the runtime reads to
+        // at 90 °C.
+        let heatHead: Double
+        if let hottest = TemperatureGroup.hottest(live.temperatures)?.celsius {
+            heatHead = min(1.0, max(0.0, (hottest - 65.0) / 25.0))
+        } else {
+            heatHead = 0.0
+        }
+        // Whichever of the two is further along holds the duty down, so a hot
+        // Mac with lazy fans is paced as hard as a cool one with loud fans.
+        let backoff = max(fanHead, heatHead)
+        let duty = level.ceiling - (level.ceiling - level.floor) * backoff
+        return min(100.0, max(10.0, duty))
+    }
+
+    /// Changes the running engine's duty to what the smart mode asks for now.
+    /// Nothing to do while no server runs: the level is the next start's too.
+    private func pushSmartDuty() async {
+        guard thermalRung == .smart else { return }
+        await pushThermalDuty(smartDuty())
     }
 
     /// Changes the duty of the running engine in place, through /v1/thermal.
@@ -433,9 +486,13 @@ final class AppModel: ObservableObject {
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 thermalError = refusalMessage(data)
                     ?? L10n.format("thermal.error.status", http.statusCode)
+                lastSmartDuty = nil
+            } else {
+                lastSmartDuty = duty
             }
         } catch {
             thermalError = error.localizedDescription
+            lastSmartDuty = nil
         }
     }
 
@@ -448,45 +505,12 @@ final class AppModel: ObservableObject {
         return message
     }
 
-    // MARK: Model configurations
-
-    /// Store a configuration and make it the one the server starts with.
-    func save(_ config: ModelConfig) {
-        if let index = configs.firstIndex(where: { $0.id == config.id }) {
-            configs[index] = config
-        } else {
-            configs.append(config)
-        }
-        libraryStore.saveConfigs(configs)
-        apply(config)
-    }
-
-    /// Make a configuration current: the form and the next start follow it.
-    func apply(_ config: ModelConfig) {
-        activeConfigID = config.id
-        libraryStore.saveActive(config.id)
-        applySettings(config.settings)
-        saveSettings()
-    }
-
-    func removeConfig(_ config: ModelConfig) {
-        configs.removeAll { $0.id == config.id }
-        libraryStore.saveConfigs(configs)
-        if activeConfigID == config.id {
-            activeConfigID = nil
-            libraryStore.saveActive(nil)
-        }
-    }
-
-    /// A new, empty configuration to edit: the defaults, with no model chosen
-    /// yet, so adding one starts from scratch instead of copying the current.
-    func newConfig() -> ModelConfig {
-        var defaults = ServerSettings.default
-        defaults.modelID = ""
-        defaults.modelDirectory = ""
-        defaults.draftDirectory = ""
-        defaults.mmproj = ""
-        return ModelConfig(settings: defaults)
+    /// Take a whole edited settings value: the form edits the app's settings in
+    /// place, and every field of it goes through the same debounced save.
+    func update(_ settings: ServerSettings) {
+        guard settings != self.settings else { return }
+        applySettings(settings)
+        settingsEdited()
     }
 
     // MARK: Derived state
@@ -503,8 +527,14 @@ final class AppModel: ObservableObject {
     var chatEmbedURL: URL? { URL(string: "http://127.0.0.1:\(port)/?embed=1") }
     var apiBaseURL: String { "http://127.0.0.1:\(port)/v1" }
 
-    var activeConfig: ModelConfig? {
-        configs.first { $0.id == activeConfigID }
+    /// The model being served right now, as `/v1/models` reports it: nil while
+    /// nothing runs, which is what the models pane says instead of a name. A
+    /// server the app has not read a `/status` from yet — a start in progress,
+    /// or one it just attached to — reports the model the app starts.
+    var runningModelName: String? {
+        guard isRunning else { return nil }
+        if let name = live.modelID, !name.isEmpty { return name }
+        return Self.modelID
     }
 
     func copyToClipboard(_ text: String) {
@@ -514,17 +544,7 @@ final class AppModel: ObservableObject {
     }
 
     var canStart: Bool {
-        guard !isBusy, !isRunning, Runtime.python != nil, Runtime.launcher != nil else {
-            return false
-        }
-        switch modelMode {
-        case .upstream:
-            return !modelID.trimmingCharacters(in: .whitespaces).isEmpty
-        case .local:
-            // An MLX or GGUF target without a named draft has its family's
-            // DFlash2 draft downloaded by the installer.
-            return !modelDirectory.isEmpty
-        }
+        !isBusy && !isRunning && Runtime.python != nil && Runtime.launcher != nil
     }
 
     var statusText: String {
@@ -552,22 +572,7 @@ final class AppModel: ObservableObject {
     /// headless selfcheck reads it too, so a setting the panel added is also
     /// one the command carries.
     func launchArguments(launcherPath: String) -> [String] {
-        var arguments = [launcherPath, "serve"]
-        switch modelMode {
-        case .upstream:
-            arguments += ["--model", modelID.trimmingCharacters(in: .whitespaces)]
-        case .local:
-            arguments += ["--model-dir", modelDirectory]
-            let draft = draftDirectory.trimmingCharacters(in: .whitespaces)
-            if !draft.isEmpty { arguments += ["--draft-model", draft] }
-            // Text only loads no tower, so it names no projector: the launcher
-            // refuses the two together, and the form keeps the path for the
-            // configuration that turns vision back on.
-            let projector = mmproj.trimmingCharacters(in: .whitespaces)
-            if !projector.isEmpty && !languageOnly {
-                arguments += ["--mmproj", projector]
-            }
-        }
+        var arguments = [launcherPath, "serve", "--model", Self.modelID]
         arguments += ["--port", String(port)]
         // Loopback unless the configuration asks for the LAN; the extra Host
         // names are passed either way, since a tunnel or proxy reaches the
@@ -633,9 +638,13 @@ final class AppModel: ObservableObject {
         }
         // How loud the Mac may get: the top rung passes nothing, leaving the
         // Mac's own thermal management in charge, which is the server's
-        // default too. A change made while the server runs goes to the engine
-        // through /v1/thermal instead.
-        if thermalRung != .auto {
+        // default too. `smart` starts at its level's ceiling, and the poll
+        // takes it to what the fans and temperatures ask for each second. A
+        // change made while the server runs goes to the engine through
+        // /v1/thermal instead.
+        if thermalRung == .smart {
+            arguments += ["--prefill-duty", String(Int(smartLevel.ceiling))]
+        } else if thermalRung != .auto {
             arguments += ["--thermal-policy", thermalRung.rawValue]
         }
         return arguments
@@ -868,6 +877,39 @@ final class AppModel: ObservableObject {
         applyStatus(snapshot)
     }
 
+    /// The rate of the engine's most recent completed batch of one kind, when
+    /// it has one: `/status` reports it as `current_*_batch`.
+    private func batchRate(_ value: Any?) -> Double? {
+        guard let batch = value as? [String: Any],
+              (batch["valid"] as? Bool) ?? false,
+              let rate = batch["tokens_per_second"] as? Double,
+              rate > 0
+        else { return nil }
+        return rate
+    }
+
+    /// The share of the draft tokens a completed decode batch had accepted:
+    /// `current_decode_batch` reports both counts, so a single good batch is a
+    /// peak the lifetime ratio averages away.
+    private func batchAcceptance(_ value: Any?) -> Double? {
+        guard let batch = value as? [String: Any],
+              (batch["valid"] as? Bool) ?? false,
+              let drafted = batch["drafted_tokens"] as? Int, drafted > 0,
+              let accepted = batch["accepted_draft_tokens"] as? Int
+        else { return nil }
+        return Double(accepted) / Double(drafted)
+    }
+
+    /// The larger of a fresh reading and what has been seen before.
+    private func peak(_ value: Double?, _ previous: Double?) -> Double? {
+        switch (value, previous) {
+        case (nil, nil): return nil
+        case (let value?, nil): return value
+        case (nil, let previous?): return previous
+        case (let value?, let previous?): return max(value, previous)
+        }
+    }
+
     private func applyStatus(_ snapshot: LiveSnapshot) {
         let object = snapshot.status
         var status = LiveStatus()
@@ -884,6 +926,19 @@ final class AppModel: ObservableObject {
             status.draftAcceptanceRate = metrics["draft_acceptance_rate"] as? Double
             status.capacityFailures = metrics["capacity_failures"] as? Int ?? 0
             status.metalFailures = metrics["metal_failures"] as? Int ?? 0
+            // The peaks: the fastest completed batch the engine has reported
+            // since the panel started watching it, falling back to the lifetime
+            // averages while no batch has completed. They are what the Mac can
+            // reach, which the averages beside them hide.
+            let decode = batchRate(metrics["current_decode_batch"])
+                ?? status.decodeTokensPerSecond
+            let prefill = batchRate(metrics["current_prefill_batch"])
+                ?? status.prefillTokensPerSecond
+            let acceptance = batchAcceptance(metrics["current_decode_batch"])
+                ?? status.draftAcceptanceRate
+            status.peakDecodeTokensPerSecond = peak(decode, live.peakDecodeTokensPerSecond)
+            status.peakPrefillTokensPerSecond = peak(prefill, live.peakPrefillTokensPerSecond)
+            status.peakDraftAcceptanceRate = peak(acceptance, live.peakDraftAcceptanceRate)
         }
         if let requests = object["requests"] as? [String: Any] {
             status.submitted = requests["submitted"] as? Int ?? 0
@@ -902,6 +957,14 @@ final class AppModel: ObservableObject {
             status.physicalBytes = memory["physical_bytes"] as? UInt64
             status.peakPhysicalBytes = memory["peak_physical_bytes"] as? UInt64
         }
+        if let governor = object["memory_governor"] as? [String: Any] {
+            status.governorLimitBytes = governor["limit_bytes"] as? UInt64
+        }
+        if let plan = object["memory_plan"] as? [String: Any],
+           let budget = plan["budget"] as? [String: Any] {
+            let configured = budget["configured_memory_limit_bytes"] as? UInt64
+            status.configuredMemoryLimitBytes = (configured ?? 0) > 0 ? configured : nil
+        }
         if let cache = object["cache"] as? [String: Any] {
             status.cacheHitRate = cache["hit_rate"] as? Double
             status.kvDiskHitTokens = cache["kv_disk_hit_tokens"] as? Int
@@ -919,7 +982,11 @@ final class AppModel: ObservableObject {
         }
         if let disk = object["disk"] as? [String: Any] {
             status.diskUsedBytes = disk["used_bytes"] as? UInt64
-            status.diskCapacityBytes = disk["capacity_bytes"] as? UInt64
+            // The tier's own quota is what a used figure is a share of; the
+            // volume's capacity is the size of the whole disk, not of the
+            // cache, so a cache that names no quota shows no bar.
+            let quota = disk["limit_bytes"] as? UInt64
+            status.diskCapacityBytes = (quota ?? 0) > 0 ? quota : nil
         }
         if let offload = object["idle_offload"] as? [String: Any] {
             status.idleOffloadPasses = offload["passes"] as? Int ?? 0
@@ -948,5 +1015,22 @@ final class AppModel: ObservableObject {
         }
         status.updated = true
         live = status
+        // The smart mode is the app's own pacer: each poll it reads the fans
+        // and temperatures the engine just reported and takes the engine's
+        // duty to them, so the Mac stays as loud as it needs to be and no
+        // louder. A push only when the reading has moved the duty, so the
+        // engine is not asked to change a duty it already holds.
+        if thermalRung == .smart, phase == .ready {
+            let duty = smartDuty()
+            if let last = lastSmartDuty, abs(last - duty) < 1.0 {
+                return
+            }
+            lastSmartDuty = duty
+            Task { @MainActor [weak self] in
+                await self?.pushThermalDuty(duty)
+            }
+        } else {
+            lastSmartDuty = nil
+        }
     }
 }

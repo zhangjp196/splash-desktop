@@ -247,6 +247,21 @@ DiskTier openDiskTier(const RuntimeResourcesConfig &config, const std::string &c
   const std::vector<CacheDirectory::Idle> rootCaches =
       config.cacheRoot.empty() ? std::vector<CacheDirectory::Idle>{} : CacheDirectory::idle(config.cacheRoot);
   const uint64_t stateSlotBytes = model::SlotFile::slotBytesFor(stateBytes);
+  // `--max-cache-disk 0` turns the tier off outright: the model's persistent
+  // cache from an earlier start is not used, so it is removed rather than left
+  // to occupy the disk until it goes stale. A tier that only failed to open
+  // (a plan without staging, a volume that refuses) keeps its files for the
+  // start that can use them.
+  if (!config.cacheDisk.automatic && config.cacheDisk.bytes == 0 &&
+      !config.cacheRoot.empty()) {
+    for (const CacheDirectory::Idle &cache : rootCaches) {
+      if (cache.path.filename() != cacheNamespace)
+        continue;
+      if (CacheDirectory::remove(cache))
+        logLine("Persistent cache: removed ", cache.path.string(), " (the SSD cache is off).");
+      break;
+    }
+  }
   if (quotaBytes) {
     // A write budget, when one is set, refills on the awake clock the
     // engine schedules its wake-ups on (awakeMilliseconds), so a write it

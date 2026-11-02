@@ -2036,6 +2036,33 @@ void testIdleSpillKeepsItsOwnTimer() {
   }
 }
 
+// Without a disk tier there is nothing to spill to, so the idle spill evicts
+// the cached prefixes instead: an idle server must not keep memory at its
+// ceiling for the sake of a cache that has no disk copy to restore it from.
+void testIdleSpillWithoutATierEvictsTheIdleCache() {
+  constexpr double kSpillSeconds = 2.0;
+  constexpr double spill = 1000.0 * kSpillSeconds;
+  engine::NativeLoopConfig config;
+  config.engine.maxContext = 1024;
+  LoopFixture fixture(config, {}, {}, std::numeric_limits<double>::infinity(),
+                      kSpillSeconds);
+  engine::NativeRuntime &loop = fixture.loop;
+  loop.announceReady();
+  require(loop.receive(protocol::peer::serialize(request(1))) && loop.snapshot().completed == 0,
+          "a request failed");
+  runUntilIdle(loop);
+  require(loop.snapshot().completed == 1, "the request did not complete");
+  require(fixture.cache.snapshot().pool.pagesPrefix > 0,
+          "the request left no cached prefix for the idle pass");
+
+  fixture.monotonic += spill;
+  loop.spillIdleCache();
+  require(loop.snapshot().idleOffloadPasses > 0,
+          "the idle spill without a tier did not evict the cache");
+  require(fixture.cache.snapshot().pool.pagesPrefix == 0,
+          "the idle spill without a tier kept the cached prefix");
+}
+
 // A release request gives the weights back now, as the idle release does, when
 // the engine holds no request and no restore is under way, and otherwise leaves
 // them as they are. Either way its answer reports what the engine did: released
@@ -2223,6 +2250,7 @@ int main() {
     testRefusedRestoreWaitsForMemory();
     testIdleReleaseOffReleasesOnlyOnRequest();
     testIdleSpillKeepsItsOwnTimer();
+    testIdleSpillWithoutATierEvictsTheIdleCache();
     testReleaseRequestGivesTheWeightsBackWhenIdle();
     testPrefillDutyRequestChangesTheRunningEngine();
     testHoldingRequestsSpansFirstToLastRequest();

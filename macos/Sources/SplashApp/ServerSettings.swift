@@ -8,19 +8,19 @@ struct ServerSettings: Codable, Equatable {
     /// The first-launch values, named so the store, the form and the headless
     /// selfcheck all read them instead of repeating the literals.
     enum First {
-        static let modelID = "mlx-community/Qwen3.8-27B-4bit"
         static let port = 8000
         static let kvFormat = "int8"
         // The idle spill is the engine's own timer now and no longer follows
         // the residency below; the residency releases the weights alone.
         static let residencySeconds = "10"
-        // The SSD cache: on by default, within a 16 GiB quota, and a 32 GiB a
-        // day write budget that paces it against the drive's life. A coding
-        // conversation's prefix survives a restart through the persistent
-        // cache.
-        static let diskCache = true
+        // The SSD cache: off by default; the user turns it on in the panel.
+        // When on, within a 16 GiB quota and a 32 GiB a day write budget.
+        static let diskCache = false
         static let maxCacheDisk = "16G"
         static let maxCacheDiskWrites = "32G"
+        // The engine's memory and context defaults, shown in the panel.
+        static let maxMemory = "28G"
+        static let maxContext = "204800"
         // The admission limit: requests running and waiting at once. The
         // server's own default, so the panel and the engine open on the same
         // number.
@@ -33,13 +33,6 @@ struct ServerSettings: Codable, Equatable {
     static let kvFormats = ["int8", "int4", "bf16"]
     static let verifyRowsOptions = ["auto", "all"]
 
-    var modelMode = AppModel.ModelMode.upstream
-    var modelID = First.modelID
-    var modelDirectory = ""
-    var draftDirectory = ""
-    /// A local GGUF target's vision projector (`--mmproj`): a GGUF file
-    /// wherever it lies, or empty for the one beside the target.
-    var mmproj = ""
     var port = First.port
     /// Listen on every IPv4 interface (`--host 0.0.0.0`) so other devices on
     /// the network can reach the server. Off keeps it on loopback.
@@ -50,8 +43,8 @@ struct ServerSettings: Codable, Equatable {
     var languageOnly = false
     var kvFormat = First.kvFormat
     var neuralEngine = true
-    var maxMemory = ""
-    var maxContext = ""
+    var maxMemory = First.maxMemory
+    var maxContext = First.maxContext
     /// Memory of the stores the engine streams from the SSD: a MoE target's
     /// routed experts (`--expert-memory`), Qwen3.8-Flash-Next's PLE table
     /// (`--ple-memory`), and the KV blocks read back for requests whose KV
@@ -83,6 +76,9 @@ struct ServerSettings: Codable, Equatable {
     var reasoningEffort = ""
     /// Requests admitted at once, running or waiting.
     var maxConcurrency = First.maxConcurrency
+    /// The row set this value was stored by, so a value an earlier build wrote
+    /// can be told from one this build wrote. See `currentVersion`.
+    var settingsVersion = ServerSettings.currentVersion
 
     /// The first-launch state, before anything is edited or stored.
     init() {}
@@ -94,14 +90,22 @@ struct ServerSettings: Codable, Equatable {
     // or one a hand edit corrupted, keeps its first-launch default instead of
     // failing the whole decode and dropping the user's configurations.
     private enum CodingKeys: String, CodingKey {
-        case modelMode, modelID, modelDirectory, draftDirectory, mmproj, port
+        case port
         case lanAccess, allowedHosts
         case languageOnly, kvFormat, neuralEngine, maxMemory, maxContext
         case residencySeconds, maxRequestSize, apiKey, servedNames
         case reasoningEffort, maxConcurrency
         case diskCache, maxCacheDisk, maxCacheDiskWrites
         case expertMemory, pleMemory, sparseKvMemory, verifyRows
+        case settingsVersion
     }
+
+    /// The row set this build writes, so a stored one can be told from those
+    /// an earlier build wrote. `2` is the row set that turned the SSD cache off
+    /// by default: a row set without it carries the switch's old default (`on`),
+    /// which was not a choice the user made, so it reads as the new default —
+    /// off. A row set that carries it keeps what the switch was set to.
+    static let currentVersion = "2"
 
     init(from decoder: Decoder) throws {
         self.init()
@@ -109,11 +113,6 @@ struct ServerSettings: Codable, Equatable {
         func value<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
             try? container.decodeIfPresent(T.self, forKey: key)
         }
-        modelMode = value(AppModel.ModelMode.self, .modelMode) ?? modelMode
-        modelID = value(String.self, .modelID) ?? modelID
-        modelDirectory = value(String.self, .modelDirectory) ?? modelDirectory
-        draftDirectory = value(String.self, .draftDirectory) ?? draftDirectory
-        mmproj = value(String.self, .mmproj) ?? mmproj
         port = value(Int.self, .port) ?? port
         lanAccess = value(Bool.self, .lanAccess) ?? lanAccess
         allowedHosts = value(String.self, .allowedHosts) ?? allowedHosts
@@ -128,16 +127,22 @@ struct ServerSettings: Codable, Equatable {
         verifyRows = value(String.self, .verifyRows) ?? verifyRows
         residencySeconds = value(String.self, .residencySeconds) ?? residencySeconds
         // A configuration stored before the switch existed follows its quota:
-        // a quota of `0` already meant "no disk cache".
+        // a quota of `0` already meant "no disk cache", and one that named a
+        // size meant the cache was on. One that named neither gets the
+        // first-launch value, which is off.
         let storedDiskCache = value(Bool.self, .diskCache)
-        maxCacheDisk = value(String.self, .maxCacheDisk) ?? maxCacheDisk
-        diskCache = storedDiskCache ?? (maxCacheDisk.trimmingCharacters(in: .whitespaces) != "0")
+        let storedQuota = value(String.self, .maxCacheDisk)
+        maxCacheDisk = storedQuota ?? maxCacheDisk
+        diskCache = storedDiskCache
+            ?? (storedQuota.map { $0.trimmingCharacters(in: .whitespaces) != "0" }
+                ?? First.diskCache)
         maxCacheDiskWrites = value(String.self, .maxCacheDiskWrites) ?? maxCacheDiskWrites
         maxRequestSize = value(String.self, .maxRequestSize) ?? maxRequestSize
         apiKey = value(String.self, .apiKey) ?? apiKey
         servedNames = value(String.self, .servedNames) ?? servedNames
         reasoningEffort = value(String.self, .reasoningEffort) ?? reasoningEffort
         maxConcurrency = value(Int.self, .maxConcurrency) ?? maxConcurrency
+        settingsVersion = value(String.self, .settingsVersion) ?? settingsVersion
     }
 
     /// A digest that changes exactly when the settings do, so the autosave
@@ -152,11 +157,7 @@ struct ServerSettings: Codable, Equatable {
     /// The settings as the store's key/value rows, in a fixed order.
     var rows: [(key: String, value: String)] {
         [
-            ("modelMode", modelMode.rawValue),
-            ("modelID", modelID),
-            ("modelDirectory", modelDirectory),
-            ("draftDirectory", draftDirectory),
-            ("mmproj", mmproj),
+            ("settingsVersion", Self.currentVersion),
             ("port", String(port)),
             ("lanAccess", lanAccess ? "1" : "0"),
             ("allowedHosts", allowedHosts),
@@ -187,13 +188,7 @@ struct ServerSettings: Codable, Equatable {
     /// next launch start a server that refuses to run.
     init(rows: [String: String]) {
         self.init()
-        if let raw = rows["modelMode"], let mode = AppModel.ModelMode(rawValue: raw) {
-            modelMode = mode
-        }
-        if let value = rows["modelID"] { modelID = value }
-        if let value = rows["modelDirectory"] { modelDirectory = value }
-        if let value = rows["draftDirectory"] { draftDirectory = value }
-        if let value = rows["mmproj"] { mmproj = value }
+        if let value = rows["settingsVersion"] { settingsVersion = value }
         if let value = Self.number(rows["port"], in: 0...65_535) { port = value }
         if let value = rows["lanAccess"] { lanAccess = value == "1" }
         if let value = rows["allowedHosts"] { allowedHosts = value }
@@ -213,11 +208,13 @@ struct ServerSettings: Codable, Equatable {
             residencySeconds = value
         }
         if let value = rows["maxCacheDisk"] { maxCacheDisk = value }
-        if let value = rows["diskCache"] {
+        // The switch's own row is a choice only once this build has written the
+        // rows with its version. A row set from before that carries the old
+        // default (on) for every install, which is not a choice anyone made, so
+        // it reads as the new default instead of turning the cache back on; the
+        // next save writes the version, and from then on the row is the user's.
+        if rows["settingsVersion"] == Self.currentVersion, let value = rows["diskCache"] {
             diskCache = value == "1"
-        } else {
-            // A row set written before the switch existed follows its quota.
-            diskCache = maxCacheDisk.trimmingCharacters(in: .whitespaces) != "0"
         }
         if let value = rows["maxCacheDiskWrites"] { maxCacheDiskWrites = value }
         if let value = rows["maxRequestSize"] { maxRequestSize = value }

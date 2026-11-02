@@ -1,18 +1,8 @@
-"mode.upstream" = "Upstream model (MLX/GGUF)";
-"mode.local" = "Local folder";
-"model.picker" = "Model mode";
-"section.model" = "Model";
 "section.server" = "Server";
 "section.memory" = "Memory";
 "section.cache" = "Idle and cache";
 "section.request" = "Requests and access";
 "section.schedule" = "Scheduling";
-"field.target" = "Target folder";
-"field.target.prompt" = "an MLX 4-bit or GGUF directory";
-"field.draft" = "Draft folder";
-"field.draft.prompt" = "the matching DFlash2 checkpoint (empty downloads the family's)";
-"field.mmproj" = "Vision projector (GGUF)";
-"field.mmproj.prompt" = "the GGUF target's mmproj (empty uses the one beside it)";
 "field.port" = "Port";
 "field.lan_access" = "Allow access from other devices (LAN)";
 "field.allowed_hosts" = "Extra host names (comma-separated)";
@@ -23,9 +13,8 @@
 "kv.bf16" = "BF16";
 "field.neural_engine" = "Use Neural Engine (ANE)";
 "help.lan_access.no_key" = "No API key is set: anyone who can reach this Mac can use the model.";
-"help.mmproj.text_only" = "Text only ignores this path: it is kept for when vision is turned back on.";
-"field.max_memory" = "Max memory (e.g. 28G)";
-"field.max_context" = "Max context (e.g. 100K, up to 1M)";
+"field.max_memory" = "Max memory (default 28G)";
+"field.max_context" = "Max context (default 204800; up to 1M)";
 "field.expert_memory" = "Routed experts in memory (e.g. 16G, off loads every expert)";
 "field.ple_memory" = "PLE table in memory (e.g. 2G, off loads it whole)";
 "field.sparse_kv_memory" = "KV read-back memory (e.g. 1200M)";
@@ -34,7 +23,7 @@
 "verify.all" = "Every row";
 "field.max_concurrency" = "Max concurrency";
 "field.residency" = "Release weights after idle seconds (LM Studio style)";
-"field.disk_cache" = "Use the SSD cache";
+"field.disk_cache" = "Use the SSD cache (off by default)";
 "field.cache_quota" = "SSD cache quota (e.g. 16G)";
 "field.cache_writes" = "Daily SSD write budget (e.g. 32G)";
 "control.saved" = "Saved automatically";
@@ -44,9 +33,6 @@
 "field.max_request_size" = "Max request size (e.g. 128M)";
 "field.reasoning_effort" = "Default reasoning effort";
 "reasoning.default" = "Model default";
-"examples" = "Examples";
-"field.clear" = "Clear";
-"field.browse" = "Browse…";
 "view.live" = "Live";
 "view.thermal" = "Thermal";
 "view.control" = "Control";
@@ -86,31 +72,36 @@
 "live.not_ready" = "Not ready";
 "live.restarts" = "%d restarts";
 "live.context" = "Context";
-"live.decode" = "Decode";
-"live.prefill" = "Prefill";
+"live.decode" = "Output rate";
+"live.prefill" = "Input rate";
 "live.draft_acceptance" = "Draft acceptance";
 "live.caption.tokens_per_second" = "tokens/s";
 "live.caption.draft_acceptance" = "draft tokens accepted";
 "live.caption.queue" = "queued against the admission limit";
+"live.caption.context_setting" = "panel setting %@";
+"live.caption.peak_of" = "peak %@";
 "live.caption.share" = "%@ of %@";
+"live.caption.outcomes" = "%d done · %d cancelled · %d failed";
+"live.caption.failure_kinds" = "%d capacity · %d Metal";
+"live.caption.wait_kinds" = "%d memory · %d concurrency · %d suspended";
+"live.caption.peak_output" = "max %@ tokens/s";
+"live.caption.peak_input" = "max %@ tokens/s";
+"live.caption.peak_acceptance" = "max %@";
+"live.caption.limit_configured" = "the panel's limit (--max-memory)";
+"live.caption.limit_automatic" = "planned by the engine for this Mac";
 "live.submitted" = "Submitted";
-"live.completed" = "Completed";
 "live.failed" = "Failed";
-"live.cancelled" = "Cancelled";
 "live.pending" = "Pending";
 "live.waiting" = "Waiting";
-"live.waiting_memory" = "Waiting for memory";
-"live.waiting_concurrency" = "Concurrency wait";
-"live.suspended" = "Suspended";
-"live.capacity_failures" = "Capacity failures";
-"live.metal_failures" = "Metal failures";
 "live.current_memory" = "Metal address space";
 "live.current_memory_caption" = "Virtual, not physical; weight pages are reclaimable";
 "live.physical_memory" = "Physical memory";
-"live.physical_memory_caption" = "Held by the engine now";
-"live.peak_memory" = "Peak address space";
+"live.physical_memory_caption" = "Held now / the budget";
+"live.memory_limit" = "Memory budget";
 "live.disk_cache" = "Disk cache";
 "live.caption.idle_offload" = "%d idle offloads · %@";
+"live.caption.disk_cache_off" = "off: prefixes stay in memory";
+"live.caption.disk_cache_on" = "on: prefixes survive a restart";
 "live.hit_rate" = "Request cache hit rate";
 "live.kv_disk_hit" = "KV reuse from disk";
 "live.state_hit" = "State hits";
@@ -122,31 +113,10 @@
 "sidebar.monitor" = "Monitor";
 "sidebar.about" = "About";
 
-// The models pane: configurations and managed directories.
+// The models pane: what is served now, and the settings the next start uses.
 "view.models" = "Models";
-"models.configs" = "Configurations";
-"models.add_config" = "Add configuration";
-"models.edit" = "Edit";
-"models.active" = "In use";
-"models.use" = "Use";
-"models.use_start" = "Use & Start";
-"models.start" = "Start";
-"models.remove" = "Remove";
-"models.remove.title" = "Remove configuration?";
-"models.remove.message" = "“%@” will be removed from the app. Model files on disk are not deleted.";
-"models.empty.configs" = "No configurations yet. Add one to choose a model.";
-"models.text_only" = "text only";
-"models.ane_off" = "ANE off";
-"models.disk_cache_off" = "disk cache off";
-"models.concurrency" = "%d concurrent";
-
-// The configuration editor.
-"config.name" = "Name";
-"config.untitled" = "Untitled";
-"config.add.title" = "New configuration";
-"config.edit.title" = "Edit configuration";
-"config.save" = "Save";
-"config.cancel" = "Cancel";
+"models.settings" = "Settings";
+"models.settings.next_start" = "Applies on the next start";
 
 // The about page: what this app is and where its projects live.
 "about.version" = "Version %@";
@@ -165,23 +135,31 @@
 // that trades prompt preprocessing speed for quiet.
 "thermal.ladder.title" = "Heat and noise";
 "thermal.auto" = "System default";
-"thermal.performance" = "Performance";
+"thermal.smart" = "Smart";
 "thermal.balanced" = "Balanced";
 "thermal.moderate" = "Moderate";
 "thermal.quiet" = "Quiet";
 "thermal.rung.help" = "Prefill may keep the GPU busy %d%% of the time.";
+"thermal.rung.help.smart" = "Prefill's share follows the fans and temperatures each second.";
 "thermal.cost.full" = "Prompts are preprocessed at full speed; macOS decides the fans.";
 "thermal.cost.paced" = "A prompt takes about %.1f× as long to preprocess.";
+"thermal.cost.smart" = "The share follows the fans and temperatures: full speed while cool, giving way as the Mac warms.";
+"thermal.smart.duty" = "Adaptive";
+"thermal.smart.high" = "High";
+"thermal.smart.medium" = "Medium";
+"thermal.smart.low" = "Low";
+"thermal.smart.level" = "Smart level";
+"thermal.smart.band" = "fans up to %.0f%%";
 "thermal.duty.held" = "the engine holds %d%%";
 "thermal.applies" = "Applies at once; the engine is not restarted.";
 "thermal.next_start" = "The server is not running; the next start will use this.";
+"thermal.heat" = "Heat and fans";
 "thermal.fans" = "Fans";
-"thermal.fan" = "Fan %d";
-"thermal.fan.caption" = "%d–%d RPM";
+"thermal.fan.range" = "%d fans · %d–%d RPM";
+"thermal.fan.count" = "%d fans";
 "thermal.caption.rpm" = "RPM";
 "thermal.no_fans" = "this Mac reports none";
 "thermal.unavailable" = "No reading";
-"thermal.sensors" = "Temperature";
 "thermal.sensor.cpu" = "CPU";
 "thermal.sensor.gpu" = "GPU";
 "thermal.sensor.io" = "IO";
@@ -190,8 +168,7 @@
 "thermal.pacing" = "Prefill pacing";
 "thermal.duty" = "Prefill share";
 "thermal.duty.caption" = "of the wall time";
-"thermal.scale" = "Thermal backoff";
-"thermal.scale.caption" = "1.00 holds nothing back";
+"thermal.scale.caption" = "backed off ×%.2f";
 "thermal.waits" = "Paced waits";
 "thermal.waits.caption" = "%@ waited in total";
 "thermal.waits.none" = "nothing has waited";
@@ -205,7 +182,6 @@
 "live.fans" = "Fastest fan";
 "live.hottest" = "Hottest sensor";
 "live.duty" = "Prefill share";
-"live.caption.rpm" = "RPM";
 
 // The embedded conversation: the page owns it, the app shows its history band.
 "chat.new" = "New chat";
@@ -219,15 +195,11 @@
 "split.divider" = "Resize the pane and conversation";
 
 // Pane headers.
-"models.none" = "No model";
-"models.count" = "%d configurations";
-"models.empty.subtitle" = "Choose the model this Mac serves and how it runs";
+"models.none" = "Nothing running";
+"models.subtitle" = "The model this Mac serves, and how it runs";
 "live.subtitle" = "Throughput and memory, refreshed every second";
 "thermal.subtitle" = "The heat this Mac reports, and how hard it may work";
 "log.live" = "Live output";
-
-"mode.upstream.short" = "Upstream";
-"mode.local.short" = "Local";
 
 "view.chat" = "Chat";
 "chat.clear" = "Clear history";

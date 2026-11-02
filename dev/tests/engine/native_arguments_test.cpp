@@ -155,14 +155,12 @@ void testServerCommandLines(const char *path) {
       // engine is a duty, and only when it differs from the rung without
       // pacing, which is also the engine's own default.
       {"prefill_auto", [](NativeArguments &) {}},
-      {"prefill_performance",
-       [](NativeArguments &read) { read.prefillDutyPercent = 90.0; }},
       {"prefill_balanced",
-       [](NativeArguments &read) { read.prefillDutyPercent = 75.0; }},
+       [](NativeArguments &read) { read.prefillDutyPercent = 68.0; }},
       {"prefill_moderate",
-       [](NativeArguments &read) { read.prefillDutyPercent = 50.0; }},
+       [](NativeArguments &read) { read.prefillDutyPercent = 48.0; }},
       {"prefill_quiet",
-       [](NativeArguments &read) { read.prefillDutyPercent = 30.0; }},
+       [](NativeArguments &read) { read.prefillDutyPercent = 33.0; }},
       {"prefill_policy_duty",
        [](NativeArguments &read) { read.prefillDutyPercent = 80.0; }},
       {"prefill_duty_alone",

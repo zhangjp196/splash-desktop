@@ -1594,11 +1594,14 @@ The cache spills to the tier when the engine goes idle, on its own timer
 (`--cache-idle-spill`, 5 min without a request): every idle KV leaf and state is
 written to the tier and its Metal backing released, so an idle server hands
 memory back to the host without losing the cached prefixes, and the next
-request restores what it needs through the ordinary tier restore path. Its own
+request restores what it needs through the ordinary tier restore path. Without
+a writable tier, such as when the SSD cache is off, the same pass evicts the
+idle prefixes instead: there is no copy to restore them from, and keeping them
+would hold memory at the engine's ceiling while it serves nothing. Its own
 timer and not the weights' (`--idle-release`): a user away from the keyboard
 should not keep the whole cache wired for the sake of a weight load, and a
 server that keeps its weights (`--idle-release off`) still gives the cache
-back. It runs only while the tier is writable and no command is in flight, at
+back. It runs only while no command is in flight, at
 most once a second, and does not change the context limit. `/status` reports
 `idle_offload.passes` and `idle_offload.bytes`.
 

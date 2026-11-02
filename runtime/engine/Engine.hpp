@@ -311,10 +311,12 @@ public:
   }
   // Offloads the idle cache: with a writable disk tier and no request held,
   // demotes cached KV pages and states to disk and releases their Metal
-  // backing, so the next request restores what it needs from the tier. Runs
-  // on the idle spill's own timer (NativeRuntime::spillIdleCache), apart from
-  // the weights' idle release; true when a pass ran. Never runs while a
-  // command is in flight.
+  // backing, so the next request restores what it needs from the tier. Without
+  // a writable tier it evicts what no request holds instead, so memory does
+  // not stay at its ceiling while the server is idle. Runs on the idle
+  // spill's own timer (NativeRuntime::spillIdleCache), apart from the weights'
+  // idle release; true when a pass ran. Never runs while a command is in
+  // flight, and at most once a second.
   [[nodiscard]] bool offloadIdleCache(double nowMilliseconds);
   [[nodiscard]] std::optional<double> nextWakeupMilliseconds() const;
   [[nodiscard]] EngineSnapshot snapshot() const;

@@ -103,7 +103,7 @@ private struct Sidebar: View {
                     Text(verbatim: "Splash Desktop")
                         .font(.system(size: 13.5, weight: .semibold))
                         .lineLimit(1)
-                    Text(verbatim: model.activeConfig?.displayName ?? model.live.modelID ?? L10n.string("models.none"))
+                    Text(verbatim: model.runningModelName ?? L10n.string("models.none"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

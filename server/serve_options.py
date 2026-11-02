@@ -57,13 +57,14 @@ class ThermalPolicy:
 # speak of the same rungs. `auto` is not a choice of its own: it passes no
 # duty at all, so the engine paces nothing and the Mac's own thermal
 # management decides the fans, which is what a server started without
-# --prefill-duty does.
+# --prefill-duty does. The app's `smart` mode is not a rung here: it holds no
+# fixed duty, so the app computes one from the fans and temperatures and
+# pushes it to a running engine through /v1/thermal.
 THERMAL_POLICIES = {
     "auto": ThermalPolicy(prefill_duty=100.0),
-    "performance": ThermalPolicy(prefill_duty=90.0),
-    "balanced": ThermalPolicy(prefill_duty=75.0),
-    "moderate": ThermalPolicy(prefill_duty=50.0),
-    "quiet": ThermalPolicy(prefill_duty=30.0),
+    "balanced": ThermalPolicy(prefill_duty=68.0),
+    "moderate": ThermalPolicy(prefill_duty=48.0),
+    "quiet": ThermalPolicy(prefill_duty=33.0),
 }
 # What the engine does without --prefill-duty: the default policy's duty, which
 # the engine's own command line therefore leaves off.
@@ -648,8 +649,9 @@ SERVE_OPTIONS = (
             default=None,
             metavar="DURATION",
             help="time without a request before the engine writes the cached "
-            "prefixes to disk and releases their memory: seconds, or with an s, "
-            "m or h suffix, e.g. 2m (default: 30); off keeps them. Its own "
+            "prefixes to disk and releases their memory, or evicts them when "
+            "the SSD cache is off: seconds, or with an s, m or h suffix, e.g. "
+            "2m (default: 30); off keeps them. Its own "
             "timer, apart from --idle-release's, which moves only the weights",
         ),
         text=idle_release_text,

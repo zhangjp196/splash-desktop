@@ -2047,7 +2047,15 @@ auto Engine::allocate(Attempt &&attempt, bool inService, ReclaimClass upTo,
   Allocation<Admission> result{tryOnce(), {}};
   Admission &admission = result.admission;
   Denial &denial = result.denial;
+  // A reclaim step that keeps reporting progress while the same admission
+  // stays refused would spin the native loop with nothing ever served. No
+  // request may hold it: once the bound is reached it waits or fails by its
+  // own resource limit, and the next call starts the reclaim afresh.
+  constexpr size_t kReclaimAttemptLimit = 4096;
+  size_t attempts = 0;
   while (memoryDenied(admission)) {
+    if (++attempts > kReclaimAttemptLimit)
+      break;
     const bool paused =
         admission.allocationFailure == metal::AllocationFailure::HostPressure;
     CacheReclaimResult reclaimed;
@@ -2148,17 +2156,32 @@ bool Engine::reclaimIdleState(bool keepLane, model::IdleMemory scope) noexcept {
 // ordinary tier restore path, so offloading never loses cache that fits the
 // quota.
 bool Engine::offloadIdleCache(double now) {
-  if (!cache_.diskTierWritable() || !idle())
+  if (!idle())
     return false;
   // The pass takes only what no request holds, and only between commands,
   // like the memory reclaims it runs: while one is in flight it would race
   // the pages and buffers it touches.
   if (pending_)
     return false;
-  // A full quota would otherwise make the pass write nothing while still
-  // running on every control tick; at most one pass a second.
+  // A pass that finds nothing must not run on every control tick: the idle
+  // spill's timer calls this twice a second once it has passed, and a full
+  // quota or an already empty cache would otherwise scan the cache forever.
   if (now - lastIdleOffloadMilliseconds_ < 1000.0)
     return false;
+  lastIdleOffloadMilliseconds_ = now;
+  // Without a writable tier there is nothing to offload to, and keeping the
+  // idle cache would hold memory at its ceiling for as long as the server
+  // runs. Drop what no request holds instead: the next request computes its
+  // prompt again, which is what serving without a disk cache costs.
+  if (!cache_.diskTierWritable()) {
+    const CacheReclaimResult evicted = cache_.evictAll();
+    if (!evicted.madeProgress)
+      return false;
+    ++counters_.idleOffloadPasses;
+    counters_.idleOffloadBytes += evicted.reclaimedBytes;
+    signalResourceProgress();
+    return true;
+  }
   uint64_t released = 0;
   while (const uint64_t bytes =
              model_.reclaimIdleState(false, model::IdleMemory::BuffersThenCaches))
@@ -2171,7 +2194,6 @@ bool Engine::offloadIdleCache(double now) {
     released += bytes;
   if (!released && !demoted)
     return false;
-  lastIdleOffloadMilliseconds_ = now;
   ++counters_.idleOffloadPasses;
   counters_.idleOffloadBytes += released;
   signalResourceProgress();

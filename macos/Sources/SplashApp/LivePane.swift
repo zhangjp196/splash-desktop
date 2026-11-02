@@ -57,7 +57,10 @@ struct LivePane: View {
     }
 
     /// The three numbers that decide whether a request feels fast, given the
-    /// full width so they are readable at a glance from across the desk.
+    /// full width so they are readable at a glance from across the desk. Each
+    /// hero carries the fastest the engine has been seen to run in its note:
+    /// the figure above is the lifetime average, which a long conversation
+    /// pulls down, so the peak is what says how fast this Mac really is.
     private func throughput(_ live: LiveStatus) -> some View {
         HStack(spacing: 12) {
             HeroCard(
@@ -65,14 +68,16 @@ struct LivePane: View {
                 value: rate(live.decodeTokensPerSecond),
                 unit: L10n.string("live.caption.tokens_per_second"),
                 systemImage: "speedometer",
-                tint: .green
+                tint: .green,
+                note: peakNote("live.caption.peak_output", live.peakDecodeTokensPerSecond)
             )
             HeroCard(
                 title: L10n.string("live.prefill"),
                 value: rate(live.prefillTokensPerSecond),
                 unit: L10n.string("live.caption.tokens_per_second"),
                 systemImage: "arrow.down.to.line",
-                tint: .teal
+                tint: .teal,
+                note: peakNote("live.caption.peak_input", live.peakPrefillTokensPerSecond)
             )
             HeroCard(
                 title: L10n.string("live.draft_acceptance"),
@@ -80,9 +85,19 @@ struct LivePane: View {
                 unit: L10n.string("live.caption.draft_acceptance"),
                 systemImage: "checkmark.seal",
                 tint: .mint,
-                progress: live.draftAcceptanceRate
+                progress: live.draftAcceptanceRate,
+                note: peakNote(
+                    "live.caption.peak_acceptance", live.peakDraftAcceptanceRate,
+                    percent: true
+                )
             )
         }
+    }
+
+    /// "max 123 tokens/s", or nothing while the panel has not seen a reading.
+    private func peakNote(_ key: String, _ value: Double?, percent: Bool = false) -> String {
+        guard let value, value > 0 else { return "" }
+        return L10n.format(key, percent ? self.percent(value) : rate(value))
     }
 
     private func serving(_ live: LiveStatus) -> [MetricCard] {
@@ -102,62 +117,98 @@ struct LivePane: View {
             ),
             MetricCard(
                 title: L10n.string("live.context"), value: tokens(live.contextTokens),
+                caption: contextCaption,
                 systemImage: "text.alignleft", tint: .indigo
             ),
         ]
     }
 
+    /// The context the engine serves, with the panel's own setting beside it:
+    /// the card's figure is what the engine opened with, which is the smaller
+    /// of that setting and what the model's memory allows.
+    private var contextCaption: String {
+        let configured = model.maxContext.trimmingCharacters(in: .whitespaces)
+        guard !configured.isEmpty else { return "" }
+        return L10n.format("live.caption.context_setting", configured)
+    }
+
+    /// The request counters as a few blocks rather than a dozen: what was asked
+    /// and what came of it, what is queued, what is held back. Each of the two
+    /// failure and waiting kinds is folded into the block it belongs to, with
+    /// its own share as the caption, so the board stays readable while no count
+    /// is lost.
     private func requests(_ live: LiveStatus) -> [MetricCard] {
+        let outcomes = L10n.format(
+            "live.caption.outcomes", live.completed, live.cancelled, live.failed
+        )
+        let failures = L10n.format(
+            "live.caption.failure_kinds", live.capacityFailures, live.metalFailures
+        )
+        let waits = L10n.format(
+            "live.caption.wait_kinds", live.waitingMemory, live.waitingConcurrency, live.suspended
+        )
         return [
             MetricCard(title: L10n.string("live.submitted"), value: "\(live.submitted)",
+                       caption: outcomes,
                        systemImage: "arrow.up.circle", tint: .blue),
-            MetricCard(title: L10n.string("live.completed"), value: "\(live.completed)",
-                       systemImage: "checkmark.circle", tint: .green),
-            MetricCard(title: L10n.string("live.failed"), value: "\(live.failed)",
+            MetricCard(title: L10n.string("live.failed"),
+                       value: "\(live.failed)",
+                       caption: failures,
                        systemImage: "xmark.octagon", tint: .red),
-            MetricCard(title: L10n.string("live.cancelled"), value: "\(live.cancelled)",
-                       systemImage: "slash.circle", tint: .orange),
             MetricCard(title: L10n.string("live.pending"), value: "\(live.pending) / \(live.pendingLimit)",
                        caption: L10n.string("live.caption.queue"),
                        systemImage: "hourglass", tint: .purple,
                        progress: live.pendingLimit > 0
                            ? Double(live.pending) / Double(live.pendingLimit) : nil),
             MetricCard(title: L10n.string("live.waiting"), value: "\(live.waiting)",
+                       caption: waits,
                        systemImage: "clock", tint: .orange),
-            MetricCard(title: L10n.string("live.waiting_memory"), value: "\(live.waitingMemory)",
-                       systemImage: "memorychip", tint: .pink),
-            MetricCard(title: L10n.string("live.waiting_concurrency"), value: "\(live.waitingConcurrency)",
-                       systemImage: "person.2", tint: .brown),
-            MetricCard(title: L10n.string("live.suspended"), value: "\(live.suspended)",
-                       systemImage: "pause.circle", tint: .gray),
-            MetricCard(title: L10n.string("live.capacity_failures"), value: "\(live.capacityFailures)",
-                       systemImage: "exclamationmark.triangle", tint: .red),
-            MetricCard(title: L10n.string("live.metal_failures"), value: "\(live.metalFailures)",
-                       systemImage: "exclamationmark.octagon", tint: .red),
         ]
     }
 
+    /// Memory in four blocks: what the engine holds against the budget it is
+    /// held to, that budget, the Metal address space whose weight pages the
+    /// host may reclaim, and the SSD cache. The budget names the panel's own
+    /// `--max-memory` when it sets one, and says so, so a card never hides
+    /// whether the limit shown is the configured one or the automatic plan's;
+    /// the held card keeps the peak in its bar's note, which the figure and
+    /// the budget alone cannot show.
     private func memory(_ live: LiveStatus) -> [MetricCard] {
-        // Physical against the peak is the share the host is actually holding.
-        let held = share(live.physicalBytes, of: live.peakPhysicalBytes ?? live.peakBytes)
+        let limit = live.configuredMemoryLimitBytes ?? live.governorLimitBytes
+        let held = share(live.physicalBytes, of: limit)
+        let peak = live.peakPhysicalBytes ?? live.peakBytes
+        let limitCaption = live.configuredMemoryLimitBytes != nil
+            ? L10n.string("live.caption.limit_configured")
+            : L10n.string("live.caption.limit_automatic")
         return [
             MetricCard(title: L10n.string("live.physical_memory"),
                        value: bytes(live.physicalBytes),
                        caption: L10n.string("live.physical_memory_caption"),
                        systemImage: "cpu", tint: .green,
                        progress: held.value,
-                       progressCaption: held.caption),
+                       progressCaption: heldNote(held.caption, peak)),
+            MetricCard(title: L10n.string("live.memory_limit"),
+                       value: bytes(limit),
+                       caption: limitCaption,
+                       systemImage: "memorychip", tint: .blue),
             MetricCard(title: L10n.string("live.current_memory"), value: bytes(live.currentBytes),
                        caption: L10n.string("live.current_memory_caption"),
-                       systemImage: "memorychip", tint: .blue),
-            MetricCard(title: L10n.string("live.peak_memory"), value: bytes(live.peakBytes),
-                       systemImage: "chart.bar", tint: .indigo),
+                       systemImage: "square.stack.3d.up", tint: .indigo),
             MetricCard(title: L10n.string("live.disk_cache"),
                        value: disk(live.diskUsedBytes, live.diskCapacityBytes),
-                       caption: idleOffloadCaption(live),
+                       caption: diskCacheCaption(live),
                        systemImage: "internaldrive", tint: .teal,
                        progress: share(live.diskUsedBytes, of: live.diskCapacityBytes).value),
         ]
+    }
+
+    /// The disk cache's own line: what the panel's switch does to it, since a
+    /// tier that is off reports no capacity and the figures alone would read
+    /// as a cache that is empty rather than one that is not used.
+    private func diskCacheCaption(_ live: LiveStatus) -> String {
+        if !model.diskCache { return L10n.string("live.caption.disk_cache_off") }
+        let offload = idleOffloadCaption(live)
+        return offload.isEmpty ? L10n.string("live.caption.disk_cache_on") : offload
     }
 
     private func caches(_ live: LiveStatus) -> [MetricCard] {
@@ -182,25 +233,39 @@ struct LivePane: View {
     }
 
     /// What the Mac is doing about the heat, as the thermal page reads it in
-    /// full: the fastest fan, the hottest of the four temperatures, and the
-    /// share of the wall time prefill may keep the GPU busy.
+    /// full: the fans as one number, the hottest of the four temperature
+    /// groups, and the share of the wall time prefill may keep the GPU busy.
     private func thermal(_ live: LiveStatus) -> [MetricCard] {
-        let fastest = live.fanSpeeds.max()
+        let fans = live.fanSpeeds
         let hottest = TemperatureGroup.hottest(live.temperatures)
         return [
             MetricCard(title: L10n.string("live.fans"),
-                       value: fastest.map { "\($0)" } ?? "—",
-                       caption: L10n.string("live.caption.rpm"),
+                       value: fans.isEmpty ? "—" : "\(fans.max() ?? 0)",
+                       caption: fans.isEmpty
+                           ? L10n.string("thermal.no_fans")
+                           : L10n.format("thermal.fan.count", fans.count),
                        systemImage: "fan.fill", tint: .cyan),
             MetricCard(title: L10n.string("live.hottest"),
                        value: hottest.map { String(format: "%.1f °C", $0.celsius) } ?? "—",
-                       caption: hottest?.group.title ?? "",
-                       systemImage: "thermometer", tint: .orange),
+                       caption: hottest?.group.title ?? L10n.string("thermal.unavailable"),
+                       systemImage: "thermometer", tint: hottest.map { heatTint($0.celsius) } ?? .gray),
             MetricCard(title: L10n.string("live.duty"),
                        value: live.dutyPercent.map { String(format: "%.0f%%", $0) } ?? "—",
+                       caption: live.thermalScale.map {
+                           L10n.format("thermal.scale.caption", $0)
+                       } ?? "",
                        systemImage: "metronome.fill", tint: .teal,
                        progress: live.dutyPercent.map { $0 / 100 }),
         ]
+    }
+
+    /// The bar's note under the physical memory card: the share of the budget
+    /// and the peak it has reached, either of which can be missing without
+    /// taking the other with it.
+    private func heldNote(_ share: String?, _ peak: UInt64?) -> String? {
+        let notes = [share, peak.map { L10n.format("live.caption.peak_of", bytes($0)) }]
+            .compactMap { $0 }
+        return notes.isEmpty ? nil : notes.joined(separator: " · ")
     }
 
     /// A used-of-total pair as a fraction and a caption, either of which is nil

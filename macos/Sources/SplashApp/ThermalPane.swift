@@ -1,27 +1,31 @@
 import SwiftUI
 
 /// The heat-and-noise ladder, in the server's own names
-/// (server/serve_options.py THERMAL_POLICIES): the five rungs the app offers,
+/// (server/serve_options.py THERMAL_POLICIES): the rungs the app offers,
 /// loudest first, each the share of wall time prefill may keep the GPU busy.
 /// `auto` sets nothing at all — the engine paces nothing and macOS's own
-/// thermal management decides the fans. Prefill is the one command that pins
-/// the GPU for seconds at a time, so it is what heats a Mac and what its fans
+/// thermal management decides the fans. `smart` is not a fixed rung: the app
+/// reads the fans and temperatures from /status each second and pushes a
+/// computed duty to the engine through /v1/thermal, so the Mac stays as loud
+/// as it needs to be and no louder. Prefill is the one command that pins the
+/// GPU for seconds at a time, so it is what heats a Mac and what its fans
 /// answer; decoding keeps its speed at every rung, and a lower one also backs
 /// off further as the Mac's thermal state rises.
 enum ThermalRung: String, CaseIterable, Identifiable {
-    case auto, performance, balanced, moderate, quiet
+    case auto, smart, balanced, moderate, quiet
 
     var id: String { rawValue }
 
-    /// The rung's duty, which is what the server passes as --prefill-duty and
-    /// what /v1/thermal changes on a running engine.
-    var duty: Double {
+    /// The rung's fixed duty, which is what the server passes as --prefill-duty
+    /// and what /v1/thermal changes on a running engine. `smart` holds no
+    /// fixed duty: the app computes one from the fans and temperatures.
+    var duty: Double? {
         switch self {
         case .auto: return 100
-        case .performance: return 90
-        case .balanced: return 75
-        case .moderate: return 50
-        case .quiet: return 30
+        case .smart: return nil
+        case .balanced: return 68
+        case .moderate: return 48
+        case .quiet: return 33
         }
     }
 
@@ -29,15 +33,54 @@ enum ThermalRung: String, CaseIterable, Identifiable {
 
     /// How much longer a prompt takes at this rung, as the multiple a person
     /// reads: prefill runs the given share of the wall time.
-    var cost: Double { 100 / duty }
+    var cost: Double? { duty.map { 100 / $0 } }
 
     /// The rung a duty the engine holds is on, or nil for a duty between the
     /// rungs, as a server started outside the app with --prefill-duty leaves.
     init?(duty: Double) {
-        guard let match = Self.allCases.first(where: { abs($0.duty - duty) < 0.5 })
+        guard let match = Self.allCases.first(where: { $0.duty.map { abs($0 - duty) < 0.5 } ?? false })
         else { return nil }
         self = match
     }
+}
+
+/// How hard the smart mode works. Unlike the fixed rungs, none of the three is
+/// a duty: each is the fan the Mac may hear before prefill gives way, and the
+/// duty follows the fans and the sensors from second to second (AppModel
+/// smartDuty). High lets the fans run up and keeps the GPU busy; low holds them
+/// near where they idle and trades prompt speed for quiet.
+enum SmartLevel: String, CaseIterable, Identifiable {
+    case high, medium, low
+
+    var id: String { rawValue }
+
+    var title: String { L10n.string("thermal.smart." + rawValue) }
+
+    /// The share of a fan's own range this level lets the Mac reach before
+    /// prefill starts to give way: below it the fans are the Mac's quiet answer
+    /// and prefill runs at the ceiling, above it the duty falls off toward the
+    /// floor as the fans approach their top.
+    var fanShare: Double {
+        switch self {
+        case .high: return 0.85
+        case .medium: return 0.60
+        case .low: return 0.40
+        }
+    }
+
+    /// The most prefill may keep the GPU busy while the fans are still below
+    /// their level's share.
+    var ceiling: Double {
+        switch self {
+        case .high: return 100
+        case .medium: return 75
+        case .low: return 55
+        }
+    }
+
+    /// The least the smart mode backs off to, so a hot Mac still makes
+    /// progress instead of stopping.
+    var floor: Double { 12 }
 }
 
 /// The thermal page: the heat the Mac reports, read-only, and the one control
@@ -54,14 +97,9 @@ struct ThermalPane: View {
                 ladder
                 if model.live.updated {
                     MetricSection(
-                        title: L10n.string("thermal.fans"),
-                        systemImage: "fan.fill",
-                        cards: fanCards
-                    )
-                    MetricSection(
-                        title: L10n.string("thermal.sensors"),
+                        title: L10n.string("thermal.heat"),
                         systemImage: "thermometer.medium",
-                        cards: temperatureCards
+                        cards: heatCards
                     )
                     MetricSection(
                         title: L10n.string("thermal.pacing"),
@@ -85,12 +123,19 @@ struct ThermalPane: View {
         .background(.background)
     }
 
-    /// The five rungs, with the one in effect marked. While a server runs, what
+    /// The rungs, with the one in effect marked. While a server runs, what
     /// is marked is what the engine holds, which is the truth a change is read
     /// back from; while none does, it is the rung the next start will use.
+    /// `smart` shows its level picker, since its duty is computed, not fixed.
     private var ladder: some View {
         let running = model.live.updated
-        let marked = running ? model.engineRung : model.thermalRung
+        // `smart` holds no rung of the server's ladder: the duty the engine
+        // carries is one the app computed, so it can land between the rungs
+        // and match none of them. What is marked is therefore the app's own
+        // choice while it is the one pacing the engine.
+        let marked = running
+            ? (model.thermalRung == .smart ? ThermalRung.smart : model.engineRung)
+            : model.thermalRung
         return VStack(alignment: .leading, spacing: 13) {
             HStack(spacing: 8) {
                 Label(L10n.string("thermal.ladder.title"), systemImage: "dial.medium.fill")
@@ -108,6 +153,31 @@ struct ThermalPane: View {
                     RungButton(rung: rung, selected: marked == rung) {
                         model.setThermalRung(rung)
                     }
+                }
+            }
+            if model.thermalRung == .smart {
+                HStack(spacing: 10) {
+                    Text(L10n.string("thermal.smart.level"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { model.smartLevel },
+                        set: { model.setSmartLevel($0) }
+                    )) {
+                        ForEach(SmartLevel.allCases) { level in
+                            Text(level.title).tag(level)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 240)
+                    Spacer(minLength: 0)
+                    // What the level decides, in the same words the rungs use
+                    // for their duty: the fan band this level allows before
+                    // prefill gives way.
+                    Text(L10n.format("thermal.smart.band", model.smartLevel.fanShare * 100))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
             }
             Text(costLine())
@@ -137,17 +207,61 @@ struct ThermalPane: View {
 
     /// The price of the rung in effect, which while a server runs is the one
     /// the engine holds: a server started elsewhere, or a change made through
-    /// the CLI, need not be the rung the app would start.
+    /// the CLI, need not be the rung the app would start. `smart` has no fixed
+    /// price: it is whatever the fans and temperatures ask for.
     private func costLine() -> String {
+        if model.thermalRung == .smart {
+            return L10n.string("thermal.cost.smart")
+        }
         let duty = model.live.updated ? model.engineDutyPercent : model.thermalRung.duty
         guard let duty, duty < 100 else { return L10n.string("thermal.cost.full") }
         return L10n.format("thermal.cost.paced", 100 / duty)
     }
 
-    /// One block per part: CPU, GPU, IO and the disk, each the hottest of the
-    /// SMC keys that belong to it. A Mac that reports none of a group's keys
-    /// keeps the block with no reading rather than hiding it, so the four are
-    /// always read the same way.
+    /// The Mac's heat in one row: the fans as a single block — the fastest
+    /// against what it can do, the rest of the pack in its caption — then one
+    /// block per part (CPU, GPU, IO and the disk), each the hottest of the SMC
+    /// keys that belong to it. A Mac that reports none of a group's keys keeps
+    /// the block with no reading rather than hiding it, so the row is always
+    /// read the same way.
+    private var heatCards: [MetricCard] {
+        [fanCard] + temperatureCards
+    }
+
+    /// Every fan folded into one block: a MacBook's two and a Mac Studio's two
+    /// answer the same question, and the row is read by comparing the parts of
+    /// the Mac, not one fan against another.
+    private var fanCard: MetricCard {
+        let live = model.live
+        guard live.fansAvailable, !live.fanSpeeds.isEmpty else {
+            return MetricCard(title: L10n.string("thermal.fans"),
+                              value: L10n.string("thermal.unavailable"),
+                              caption: L10n.string("thermal.no_fans"),
+                              systemImage: "fan", tint: .gray)
+        }
+        let fastest = live.fanSpeeds.max() ?? 0
+        let maximum = live.fanMaximums.max()
+        return MetricCard(
+            title: L10n.string("thermal.fans"),
+            value: "\(fastest)",
+            caption: fanCaption(),
+            systemImage: "fan.fill",
+            tint: fastest == 0 ? .secondary : .cyan,
+            progress: maximum.flatMap { $0 > 0 ? Double(fastest) / Double($0) : nil }
+        )
+    }
+
+    /// "2 fans, 1342–3197 RPM", or the count alone when the SMC gave no range.
+    private func fanCaption() -> String {
+        let speeds = model.live.fanSpeeds
+        guard let low = speeds.min(), let high = speeds.max(), speeds.count > 1 else {
+            return speeds.count > 1
+                ? L10n.format("thermal.fan.count", speeds.count)
+                : L10n.string("thermal.caption.rpm")
+        }
+        return L10n.format("thermal.fan.range", speeds.count, low, high)
+    }
+
     private var temperatureCards: [MetricCard] {
         let readings = model.live.temperatures
         let hottest = TemperatureGroup.hottest(readings)?.group
@@ -173,57 +287,19 @@ struct ThermalPane: View {
         }
     }
 
-    /// One card per fan, read-only: the speed against what the fan can do, so
-    /// the bar says how hard it is already working.
-    private var fanCards: [MetricCard] {
-        let live = model.live
-        guard live.fansAvailable, !live.fanSpeeds.isEmpty else {
-            return [
-                MetricCard(title: L10n.string("thermal.fans"),
-                           value: L10n.string("thermal.unavailable"),
-                           caption: L10n.string("thermal.no_fans"),
-                           systemImage: "fan", tint: .gray)
-            ]
-        }
-        return live.fanSpeeds.enumerated().map { index, rpm in
-            let maximum = live.fanMaximums.indices.contains(index)
-                ? live.fanMaximums[index] : nil
-            let minimum = live.fanMinimums.indices.contains(index)
-                ? live.fanMinimums[index] : nil
-            return MetricCard(
-                title: L10n.format("thermal.fan", index + 1),
-                value: "\(rpm)",
-                caption: fanCaption(minimum: minimum, maximum: maximum),
-                systemImage: "fan.fill",
-                tint: rpm == 0 ? .secondary : .cyan,
-                progress: maximum.flatMap { $0 > 0 ? Double(rpm) / Double($0) : nil }
-            )
-        }
-    }
-
-    private func fanCaption(minimum: Int?, maximum: Int?) -> String {
-        guard let minimum, let maximum else { return L10n.string("thermal.caption.rpm") }
-        return L10n.format("thermal.fan.caption", minimum, maximum)
-    }
-
-    /// What the race against the heat costs while it serves: the duty the
-    /// engine holds, what the Mac's thermal state leaves of it, and the waits
-    /// the pacing has cost so far.
+    /// What the race against the heat costs while it serves, in two blocks:
+    /// the duty the engine holds with the backoff the Mac's thermal state
+    /// leaves of it, and the waits that pacing has cost so far.
     private var pacingCards: [MetricCard] {
         let live = model.live
         let scale = live.thermalScale
+        let backoff = scale.map { L10n.format("thermal.scale.caption", $0) }
         return [
             MetricCard(title: L10n.string("thermal.duty"),
                        value: live.dutyPercent.map { String(format: "%.0f%%", $0) } ?? "—",
-                       caption: L10n.string("thermal.duty.caption"),
+                       caption: backoff ?? L10n.string("thermal.duty.caption"),
                        systemImage: "metronome.fill", tint: .teal,
                        progress: live.dutyPercent.map { $0 / 100 }),
-            MetricCard(title: L10n.string("thermal.scale"),
-                       value: scale.map { String(format: "×%.2f", $0) } ?? "—",
-                       caption: L10n.string("thermal.scale.caption"),
-                       systemImage: "thermometer.snowflake",
-                       tint: (scale ?? 1) >= 1 ? .green : .orange,
-                       progress: scale),
             MetricCard(title: L10n.string("thermal.waits"),
                        value: "\(live.pacedWaits ?? 0)",
                        caption: waitsCaption,
@@ -251,7 +327,8 @@ func heatTint(_ celsius: Double) -> Color {
 }
 
 /// One rung of the ladder: its name and the share of the wall time prefill may
-/// run at it, marked when it is the rung in effect.
+/// run at it, marked when it is the rung in effect. `smart` shows no fixed
+/// share: its duty is computed from the fans and temperatures.
 private struct RungButton: View {
     let rung: ThermalRung
     let selected: Bool
@@ -264,7 +341,7 @@ private struct RungButton: View {
                     .font(.callout.weight(selected ? .semibold : .regular))
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
-                Text("\(Int(rung.duty))%")
+                Text(dutyLabel)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(selected ? .primary : .secondary)
             }
@@ -280,6 +357,16 @@ private struct RungButton: View {
             )
         }
         .buttonStyle(.plain)
-        .help(L10n.format("thermal.rung.help", Int(rung.duty)))
+        .help(helpText)
+    }
+
+    private var dutyLabel: String {
+        guard let duty = rung.duty else { return L10n.string("thermal.smart.duty") }
+        return "\(Int(duty))%"
+    }
+
+    private var helpText: String {
+        guard let duty = rung.duty else { return L10n.string("thermal.rung.help.smart") }
+        return L10n.format("thermal.rung.help", Int(duty))
     }
 }

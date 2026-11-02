@@ -98,8 +98,8 @@ paths for `--model-dir`, `--draft-model` and `--mmproj`.
 | `--expert-memory` | Auto | MoE targets: hold routed experts in this much memory, e.g. `16G`, and read the others from the SSD when a step routes them; `off` loads every expert. Auto loads them all where memory holds them, else gives them what the context leaves. See [streamed experts](#streamed-experts). |
 | `--sparse-kv-memory` | Auto | Qwen3.8-Flash-Next: memory for the KV blocks read back from the SSD for requests whose KV is there, e.g. `1200M`; never below its floor, which auto keeps. See [KV on the SSD](#kv-on-the-ssd). |
 | `--idle-release` | `10m` | Time without a request before the engine unwires its memory and frees the weights; the next request restores them. `off` keeps both, though `POST /v1/memory/release` still frees the weights. See [weight loading](internals.md#weight-loading). |
-| `--cache-idle-spill` | `5m` | Time without a request before the engine writes the cached prefixes to disk and releases their memory; the next request restores what it needs from there. Its own timer, so `--idle-release off` may keep the weights while the cache still spills; `off` keeps the cache in memory. See [SSD cache](#ssd-cache). |
-| `--max-cache-disk` | `auto` | SSD quota for cached KV pages and states: `auto` follows the volume, a quarter of its free space beyond a floor of 10 GiB (5% of a volume under 200 GiB), at most 64 GiB; a size such as `16G` is held as given while the volume keeps that floor; `0` turns the cache off. Kept for the session, or across restarts with `--persistent-cache`. See [SSD cache](#ssd-cache). |
+| `--cache-idle-spill` | `5m` | Time without a request before the engine writes the cached prefixes to disk and releases their memory; the next request restores what it needs from there. Without an SSD cache (including `--max-cache-disk 0`) the same pass evicts the idle prefixes instead, so memory does not stay at its ceiling. Its own timer, so `--idle-release off` may keep the weights while the cache still spills; `off` keeps the cache in memory. See [SSD cache](#ssd-cache). |
+| `--max-cache-disk` | `auto` | SSD quota for cached KV pages and states: `auto` follows the volume, a quarter of its free space beyond a floor of 10 GiB (5% of a volume under 200 GiB), at most 64 GiB; a size such as `16G` is held as given while the volume keeps that floor; `0` turns the cache off, and a start with it removes the model's persistent cache left by an earlier start. Kept for the session, or across restarts with `--persistent-cache`. See [SSD cache](#ssd-cache). |
 | `--max-cache-disk-writes` | `0` (no limit) | The most the SSD cache writes a day, e.g. `200G`. See [SSD cache](#ssd-cache). |
 | `--persistent-cache` | Off in `splash serve`; on in the desktop app | Keep the SSD cache across restarts. See [persistent cache](#persistent-cache). |
 | `--cache-dir` | `~/Library/Caches/Splash/prefix-cache` | Where `--persistent-cache` keeps its files; needs `--persistent-cache`. |
@@ -112,7 +112,7 @@ paths for `--model-dir`, `--draft-model` and `--mmproj`.
 | `--max-image-pixels` | `4194304` | Maximum resized pixels per image. An image's vision scratch grows with its patches (pixels / 256), to about 600 MiB at the default. |
 | `--request-timeout` | None | Time a request may take from its arrival; a request's own `timeout` can only shorten it. |
 | `--queue-size` | `8` | Requests admitted at once, running or waiting; more get 503 with `Retry-After`. |
-| `--thermal-policy` | `auto` | How hard prefill may drive the Mac: `performance` 90, `balanced` 75, `moderate` 50 or `quiet` 30 percent of the wall time; `auto`, the default, paces nothing and leaves the fans to macOS. Prefill is what heats a Mac; decoding keeps its speed at every rung. See [heat and noise](api.md#heat-and-noise). |
+| `--thermal-policy` | `auto` | How hard prefill may drive the Mac: `balanced` 68, `moderate` 48 or `quiet` 33 percent of the wall time; `auto`, the default, paces nothing and leaves the fans to macOS. Prefill is what heats a Mac; decoding keeps its speed at every rung. The desktop app's `smart` rung is not a policy here: the app computes its duty from the fans and pushes it through `POST /v1/thermal`. See [heat and noise](api.md#heat-and-noise). |
 | `--prefill-duty` | The rung's | The same share in percent, 10 to 100, whatever the rung says; a running engine's duty changes through `POST /v1/thermal`. |
 | `--decode-share` | `0.5` | Decode time owed per unit of prefill time while other requests generate. Higher keeps their output faster during a long prompt and slows that prompt; `0` alternates one command each. |
 | `--disable-ane` | Off | Prefill on the GPU alone. By default a dense model's long prompts also use the Neural Engine when that is faster. See [Neural Engine prefill](internals.md#neural-engine-prefill). |
@@ -498,7 +498,7 @@ the floor: while a local snapshot, such as Time Machine's on the startup disk,
 keeps the blocks the cache frees, the copies it rewrites can take free space
 below the floor, as far as a full volume, before the snapshot goes. Off a local
 volume, such as a network share, the quota alone is the limit. `0` turns the
-cache off.
+cache off and removes the model's persistent cache from an earlier start.
 
 State writes stage through a buffer of one state (64 MiB for 35B, 153 MiB for
 27B) that the memory plan sets aside within `--max-memory`; on a 24 GB Mac

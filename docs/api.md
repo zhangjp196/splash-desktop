@@ -703,13 +703,19 @@ of a prompt taking about 100/duty as long:
 | Rung | `--prefill-duty` |
 | --- | --- |
 | `auto` (default) | 100, and nothing is passed |
-| `performance` | 90 |
-| `balanced` | 75 |
-| `moderate` | 50 |
-| `quiet` | 30 |
+| `balanced` | 68 |
+| `moderate` | 48 |
+| `quiet` | 33 |
 
 `auto` is not a choice of its own: it sends no duty at all, so the engine paces
 nothing and the Mac's own thermal management decides the fans.
+
+The desktop app adds a `smart` rung that the server has no policy for: the app
+reads the fans and temperatures from `/status` each second, computes a duty
+from them — its high, medium or low level sets the band the fans may reach
+before prefill gives way — and pushes it through `POST /v1/thermal`, so the Mac
+stays as loud as it needs to be and no louder. A server started by the app in
+that mode begins at its level's ceiling and follows the sensors from there.
 
 `--prefill-duty` sets any percentage from 10 to 100 whatever the rung says. A
 sustained stream runs at the duty; a Mac that has been quiet, by decoding or by

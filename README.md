@@ -17,7 +17,7 @@ It reuses cached prefixes and batches concurrent requests automatically.
 
 The easiest way to run Splash is the macOS app: one self-contained
 installation that carries the engine, the server, and the runtime, so neither
-installing it nor its first run needs anything but the model you choose.
+installing it nor its first run needs anything but the model it serves.
 
 1. Download the newest `Splash-Desktop-<version>.dmg` from the
    [Releases](https://github.com/zhangjp196/splash-desktop/releases) page and
@@ -26,14 +26,14 @@ installing it nor its first run needs anything but the model you choose.
    the two do not sit side by side.
 2. Open it. The build is ad-hoc signed but not notarized, so the first time
    you may need to right-click and choose Open.
-3. In the **Models** pane, pick a configuration and press **Start**. The
-   first run downloads the model and its DFlash2 draft and serves on
-   `127.0.0.1:8000`; later starts reuse the downloads.
+3. In the **Models** pane, the model and its settings are already there:
+   press **Start**. The first run downloads the model and its DFlash2 draft and
+   serves on `127.0.0.1:8000`; later starts reuse the downloads.
 4. Open the **Chat** tab, open <http://127.0.0.1:8000> in your browser, or
    point a coding agent at the server.
 
 To reach the server from another device on the same network, turn on **Allow
-access from other devices** in the configuration's **Server** section: it
+access from other devices** in the **Server** section: it
 starts the server with `--host 0.0.0.0`, so this Mac's IP address works from
 the other device. Set an **API key** in the **Requests and access** section at
 the same time — without one, anyone on the network can use the model. Reaching
@@ -48,18 +48,18 @@ it:
 - **Chat** — the conversation, in the window: history, a new chat, and one
   click to clear it. The same page still opens in a browser for anyone using
   the server directly.
-- **Models** — the configurations you have saved, each holding the whole set
-  of server settings: add, edit, and switch between them, or aim one at a
-  model folder on your disk.
+- **Models** — the model this Mac serves and the whole set of server settings,
+  edited in place: what is running, or that nothing is (there is no model
+  selection), above the settings the next start uses.
 - **Live** — a live panel of decode and prefill rates, request counts, Metal
   memory, and the caches.
-- **Thermal** — how hard the Mac may work and how loud it gets: five rungs,
-  from **System default** (which sets nothing and leaves the fans to macOS)
-  through Performance 90, Balanced 75 and Moderate 50 to Quiet 30 percent of
-  the wall time, applied to a running server at once, above the fans and the
-  CPU, GPU, IO and disk temperatures the engine reads from the SMC. The rung is
-  the app's own
-  preference rather than part of a model configuration.
+- **Thermal** — how hard the Mac may work and how loud it gets: **Smart**
+  (which paces prefill from the fans and the temperatures every second, at a
+  high, medium or low level), **Balanced 68**, **Moderate 48** and **Quiet 33**
+  percent of the wall time, plus **System default** (which sets nothing and
+  leaves the fans to macOS), applied to a running server at once, above the
+  fans and the CPU, GPU, IO and disk temperatures the engine reads from the
+  SMC. The rung is the app's own preference, not part of the model settings.
 - **Log** — the server's log.
 
 Closing the window leaves the app and a running server in the menu bar;
@@ -183,15 +183,15 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | Option | Purpose |
 | --- | --- |
 | `--max-memory 28G` | Cap Metal memory use. |
-| `--idle-release off` | Keep the model in memory while idle (default: release after 10m). The cache still spills to disk after 5m; `--cache-idle-spill off` keeps it too. |
+| `--idle-release off` | Keep the model in memory while idle (default: release after 10m). The cache still spills to disk after 5m, or is evicted if the SSD cache is off; `--cache-idle-spill off` keeps it too. |
 | `--max-context 100K` | Set the context limit. Up to `1M` tokens. |
 | `--language-only` | Skip vision; serve text only. |
 | `--kv-format bf16` | Use BF16 KV cache. Default: 8-bit (INT8), or `int4` for a page half its size. |
 | `--state-format bf16` | Use BF16 recurrent states, half the size. Default: FP32. |
 | `--disable-ane` | Prefill on the GPU alone. Default: the 27B also uses the Neural Engine. |
 | `--max-cache-disk 16G` | Cap the SSD cache (default: auto, up to 64 GiB; `0` turns it off). |
-| `--persistent-cache` | Keep the SSD cache across restarts. Off in `splash serve`; the desktop app keeps it on for coding conversations. |
-| `--thermal-policy quiet` | Make prefill quieter: it keeps the GPU busy 30 percent of the wall time (`moderate` 50, `balanced` 75, `performance` 90), so prompts take longer and the fans answer less. The default, `auto`, paces nothing and leaves the Mac's own thermal management in charge. A running server's rung changes through `POST /v1/thermal`. |
+| `--persistent-cache` | Keep the SSD cache across restarts. Off in `splash serve`; the desktop app turns it on when the SSD cache is switched on for coding conversations (off by default). |
+| `--thermal-policy quiet` | Make prefill quieter: it keeps the GPU busy 33 percent of the wall time (`moderate` 48, `balanced` 68), so prompts take longer and the fans answer less. The default, `auto`, paces nothing and leaves the Mac's own thermal management in charge. A running server's rung changes through `POST /v1/thermal`. |
 
 Use `--max-memory` to leave room for other applications.
 The server listens on localhost without authentication by default. For LAN

@@ -9,7 +9,6 @@ if CommandLine.arguments.contains("--print-runtime") {
     if let runtime {
         print("python: \(Runtime.python?.path ?? "missing")")
         print("launcher: \(Runtime.launcher?.path ?? "missing")")
-        print("catalog: \(Runtime.catalog.count) model(s)")
         _ = runtime
         exit(0)
     }
@@ -38,11 +37,6 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     // Every setting must survive a round trip, and a second save replaces the
     // first instead of leaving it behind.
     var edited = ServerSettings.default
-    edited.modelMode = .local
-    edited.modelID = "selfcheck/model"
-    edited.modelDirectory = "/tmp/selfcheck"
-    edited.draftDirectory = "/tmp/selfcheck-draft"
-    edited.mmproj = "/tmp/selfcheck-mmproj.gguf"
     edited.port = 9123
     edited.lanAccess = true
     edited.allowedHosts = "mymac.local, tunnel.example"
@@ -65,6 +59,9 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.reasoningEffort = "high"
     edited.maxConcurrency = 24
     passed = store.save(edited) && store.load() == edited
+    // The model selection is gone: no stored row names a model or a local
+    // target, so a build that reads the database cannot offer one again.
+    passed = passed && !edited.rows.contains { $0.key.hasPrefix("model") }
 
     var replaced = edited
     replaced.port = 8000
@@ -95,11 +92,12 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
 
     // A configuration stored before a setting existed still decodes: a missing
     // key keeps its first-launch value instead of dropping the user's saved
-    // configurations.
-    let legacy = Data(#"{"modelMode":"upstream","modelID":"legacy/model"}"#.utf8)
+    // settings. Keys an earlier build wrote for the removed model selection
+    // are ignored as well.
+    let legacy = Data(#"{"modelMode":"upstream","modelID":"legacy/model","maxContext":"64K"}"#.utf8)
     let decoded = try? JSONDecoder().decode(ServerSettings.self, from: legacy)
     passed = passed
-        && decoded?.modelID == "legacy/model"
+        && decoded?.maxContext == "64K"
         && decoded?.maxConcurrency == ServerSettings.First.maxConcurrency
         && decoded?.diskCache == ServerSettings.First.diskCache
         && decoded?.maxCacheDiskWrites == ServerSettings.First.maxCacheDiskWrites
@@ -107,9 +105,20 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && decoded?.allowedHosts == ServerSettings.default.allowedHosts
     // A configuration that turned the SSD cache off through its quota keeps
     // that meaning after the switch arrives.
-    let quotaOff = Data(#"{"modelID":"legacy/model","maxCacheDisk":"0"}"#.utf8)
+    let quotaOff = Data(#"{"maxMemory":"20G","maxCacheDisk":"0"}"#.utf8)
     let quotaDecoded = try? JSONDecoder().decode(ServerSettings.self, from: quotaOff)
     passed = passed && quotaDecoded?.diskCache == false
+
+    // A row set an earlier build wrote carries the switch's old default, which
+    // nobody chose: it reads as the new default, off. The rows this build writes
+    // carry their version, so a choice made from then on is kept.
+    var legacyRows = ServerSettings.default.rows.filter { $0.key != "settingsVersion" }
+    legacyRows.removeAll { $0.key == "diskCache" }
+    legacyRows.append((key: "diskCache", value: "1"))
+    let migrated = ServerSettings(rows: Dictionary(uniqueKeysWithValues: legacyRows))
+    passed = passed
+        && migrated.diskCache == false
+        && migrated.settingsVersion == ServerSettings.currentVersion
 
     // The model: what one launch saves is what the next one opens on, and the
     // defaults button returns it to the state the app first opened with. The
@@ -131,15 +140,12 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             carries(launch, flag, value)
         }
         passed = passed
+            && carries("--model", AppModel.modelID)
             && carries("--expert-memory", "16G")
             && carries("--ple-memory", "2G")
             && carries("--sparse-kv-memory", "1200M")
             && carries("--verify-rows", "all")
             && carries("--max-context", "100K")
-            // Text only loads no tower, so this configuration names no
-            // projector even though the form still holds one; turning vision
-            // back on puts the same path back on the command.
-            && !launch.contains("--mmproj")
             && launch.contains("--language-only")
             // The switch is off in this configuration, so the command turns
             // the disk tier off instead of passing the quota or write budget;
@@ -147,12 +153,6 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries("--max-cache-disk", "0")
             && !launch.contains("--persistent-cache")
             && !launch.contains("--max-cache-disk-writes")
-        reloaded.languageOnly = false
-        let vision = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
-        passed = passed
-            && vision.contains("--mmproj")
-            && vision.contains("/tmp/selfcheck-mmproj.gguf")
-            && !vision.contains("--language-only")
         // Every KV format the panel offers reaches the launcher, and the
         // server's own default stays off the command.
         for format in ServerSettings.kvFormats {
@@ -163,15 +163,29 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
                     ? !arguments.contains("--kv-format")
                     : carries(arguments, "--kv-format", format))
         }
+        // Turning the SSD cache on is what keeps a coding conversation's prefix
+        // across a restart: the command asks for the persistent cache and
+        // passes the quota and the day's write budget beside it.
+        reloaded.diskCache = true
+        let cached = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed
+            && cached.contains("--persistent-cache")
+            && carries(cached, "--max-cache-disk", edited.maxCacheDisk)
+            && carries(cached, "--max-cache-disk-writes", edited.maxCacheDiskWrites)
         reloaded.restoreDefaultSettings()
         let restored = AppModel()
         let defaultLaunch = restored.launchArguments(launcherPath: "/tmp/launcher.py")
         passed = passed
             && restored.settings == ServerSettings.default
             && store.load() == ServerSettings.default
-            // The default disk cache keeps coding conversations across a
-            // restart; turning the cache off above removes the flag.
-            && defaultLaunch.contains("--persistent-cache")
+            // The SSD cache is off on a first launch: the command turns the
+            // disk tier off and keeps every cached prefix in memory, and the
+            // panel's memory and context defaults are on the command so the
+            // limit it shows is the one the engine runs with.
+            && carries(defaultLaunch, "--max-cache-disk", "0")
+            && !defaultLaunch.contains("--persistent-cache")
+            && carries(defaultLaunch, "--max-memory", ServerSettings.First.maxMemory)
+            && carries(defaultLaunch, "--max-context", ServerSettings.First.maxContext)
     }
 
     discard()

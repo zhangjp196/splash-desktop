@@ -42,23 +42,4 @@ enum Runtime {
     static var launcher: URL? {
         root?.appendingPathComponent("install/launcher.py")
     }
-
-    /// The model IDs the completion catalog bundles, for the picker.
-    static var catalog: [String] {
-        guard let root else { return [] }
-        let directory = root.appendingPathComponent("install/completions")
-        var seen = Set<String>()
-        var identifiers: [String] = []
-        for name in ["suggested-models.txt", "official-models.txt"] {
-            let file = directory.appendingPathComponent(name)
-            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
-            for line in text.split(separator: "\n") {
-                let candidate = line.trimmingCharacters(in: .whitespaces)
-                if !candidate.isEmpty, !candidate.hasPrefix("#"), seen.insert(candidate).inserted {
-                    identifiers.append(candidate)
-                }
-            }
-        }
-        return identifiers
-    }
 }
