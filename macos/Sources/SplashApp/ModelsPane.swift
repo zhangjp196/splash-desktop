@@ -170,8 +170,10 @@ struct ModelsPane: View {
     }
 }
 
-/// A saved configuration, as a card: what it serves, how the server runs it,
-/// and the ways to use, edit and remove it.
+/// A saved configuration, as a card: what it serves and how the server runs
+/// it. Start is the only way to make one the configuration the server runs —
+/// it applies the configuration and starts the server — and the menu holds
+/// edit and remove.
 private struct ConfigRow: View {
     @EnvironmentObject private var model: AppModel
     let config: ModelConfig
@@ -216,17 +218,6 @@ private struct ConfigRow: View {
 
             Spacer(minLength: 10)
 
-            if !isActive {
-                Button {
-                    model.apply(config)
-                } label: {
-                    Image(systemName: "checkmark.circle")
-                        .font(.system(size: 13))
-                }
-                .buttonStyle(.borderless)
-                .help(L10n.string("models.use"))
-            }
-
             Button {
                 model.apply(config)
                 model.start()
@@ -238,8 +229,6 @@ private struct ConfigRow: View {
             .disabled(model.isRunning || model.isBusy)
 
             Menu {
-                Button(L10n.string("models.use")) { model.apply(config) }
-                    .disabled(isActive)
                 Button(L10n.string("models.edit")) { onEdit() }
                 Divider()
                 Button(L10n.string("models.remove"), role: .destructive) { onRemove() }
@@ -266,7 +255,6 @@ private struct ConfigRow: View {
                 )
         }
         .contentShape(Rectangle())
-        .onTapGesture { model.apply(config) }
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
         .contextMenu {

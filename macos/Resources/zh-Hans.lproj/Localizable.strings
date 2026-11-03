@@ -133,8 +133,6 @@
 "models.add_config" = "添加配置";
 "models.edit" = "编辑";
 "models.active" = "使用中";
-"models.use" = "使用";
-"models.use_start" = "使用并启动";
 "models.start" = "启动";
 "models.remove" = "移除";
 "models.remove.title" = "移除配置？";
@@ -171,6 +169,7 @@
 "thermal.ladder.title" = "散热与噪音";
 "thermal.auto" = "系统默认";
 "thermal.smart" = "智能";
+"thermal.fixed" = "固定";
 "thermal.balanced" = "平衡";
 "thermal.moderate" = "适中";
 "thermal.quiet" = "安静";
@@ -185,6 +184,8 @@
 "thermal.smart.low" = "低";
 "thermal.smart.level" = "智能档位";
 "thermal.smart.band" = "风扇最多到 %.0f%%";
+"thermal.fixed.level" = "固定档位";
+"thermal.fixed.duty" = "占时 %.0f%%";
 "thermal.duty.held" = "引擎当前 %d%%";
 "thermal.applies" = "立即生效，无需重启引擎。";
 "thermal.next_start" = "服务器未运行，将在下次启动生效。";

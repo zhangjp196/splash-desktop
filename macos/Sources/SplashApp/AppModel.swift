@@ -237,12 +237,17 @@ final class AppModel: ObservableObject {
     /// How hard the smart mode works: the most prefill may keep the GPU busy
     /// when the Mac is cool, before the fans and temperatures pull it down.
     @Published var smartLevel: SmartLevel = .medium
+    /// The level the fixed mode runs at: one of the ladder's rungs, the share
+    /// of wall time prefill may keep the GPU busy, held steady while the fixed
+    /// mode is chosen.
+    @Published var fixedLevel: FixedLevel = .balanced
     /// What the engine answered a change with that it would not take, shown on
     /// the thermal page until the next change goes through.
     @Published var thermalError: String?
 
     private static let thermalKey = "splash.thermal-rung"
     private static let smartLevelKey = "splash.smart-level"
+    private static let fixedLevelKey = "splash.fixed-level"
 
     private var process: Process?
     private var poll: Task<Void, Never>?
@@ -276,6 +281,10 @@ final class AppModel: ObservableObject {
         if let raw = UserDefaults.standard.string(forKey: Self.smartLevelKey),
            let stored = SmartLevel(rawValue: raw) {
             smartLevel = stored
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.fixedLevelKey),
+           let stored = FixedLevel(rawValue: raw) {
+            fixedLevel = stored
         }
         applyLanguage()
         let stored = store.hasStoredSettings
@@ -417,36 +426,58 @@ final class AppModel: ObservableObject {
     /// The duty the running engine holds, once /status has reported one.
     var engineDutyPercent: Double? { live.updated ? live.dutyPercent : nil }
 
-    /// The rung the engine holds, when it holds one of the ladder's: nil while
-    /// no server runs, and for a duty between rungs, as a server started
-    /// outside the app with --prefill-duty leaves.
-    var engineRung: ThermalRung? { engineDutyPercent.flatMap(ThermalRung.init(duty:)) }
+    /// The mode the engine holds, when it holds one of the ladder's: nil while
+    /// no server runs, and for a duty between the fixed levels, as a server
+    /// started outside the app with --prefill-duty leaves. A duty one of the
+    /// fixed levels holds marks the fixed mode; a top duty marks the system
+    /// default.
+    var engineRung: ThermalRung? {
+        guard let duty = engineDutyPercent else { return nil }
+        if FixedLevel(duty: duty) != nil { return .fixed }
+        if abs(duty - 100) < 0.5 { return .auto }
+        return nil
+    }
 
-    /// Choose a rung: remember it for the next start, and take a running
+    /// Choose a mode: remember it for the next start, and take a running
     /// engine's duty to it now. `smart` has no fixed duty: it is pushed each
     /// second from the fans and temperatures, so a change to its level is
-    /// remembered and applied on the next poll.
+    /// remembered and applied on the next poll. `fixed` takes its level's
+    /// duty.
     func setThermalRung(_ rung: ThermalRung) {
         thermalRung = rung
         UserDefaults.standard.set(rung.rawValue, forKey: Self.thermalKey)
         thermalError = nil
         Task { @MainActor [weak self] in
-            if let duty = rung.duty {
-                await self?.pushThermalDuty(duty)
-            } else {
-                await self?.pushSmartDuty()
+            guard let self else { return }
+            switch rung {
+            case .auto: await pushThermalDuty(rung.duty ?? 100)
+            case .smart: await pushSmartDuty()
+            case .fixed: await pushThermalDuty(fixedLevel.duty)
             }
         }
     }
 
-    /// Remember the smart level and, while a server runs, take the engine's
-    /// duty to it now.
+    /// Remember the smart level and, while the smart mode is chosen and a
+    /// server runs, take the engine's duty to it now.
     func setSmartLevel(_ level: SmartLevel) {
         smartLevel = level
         UserDefaults.standard.set(level.rawValue, forKey: Self.smartLevelKey)
         thermalError = nil
         Task { @MainActor [weak self] in
-            await self?.pushSmartDuty()
+            guard let self, thermalRung == .smart else { return }
+            await pushSmartDuty()
+        }
+    }
+
+    /// Remember the fixed level and, while the fixed mode is chosen and a
+    /// server runs, take the engine's duty to it now.
+    func setFixedLevel(_ level: FixedLevel) {
+        fixedLevel = level
+        UserDefaults.standard.set(level.rawValue, forKey: Self.fixedLevelKey)
+        thermalError = nil
+        Task { @MainActor [weak self] in
+            guard let self, thermalRung == .fixed else { return }
+            await pushThermalDuty(level.duty)
         }
     }
 
@@ -716,16 +747,17 @@ final class AppModel: ObservableObject {
         if !reasoningEffort.isEmpty {
             arguments += ["--default-reasoning-effort", reasoningEffort]
         }
-        // How loud the Mac may get: the top rung passes nothing, leaving the
-        // Mac's own thermal management in charge, which is the server's
+        // How loud the Mac may get: the system default passes nothing, leaving
+        // the Mac's own thermal management in charge, which is the server's
         // default too. `smart` starts at its level's ceiling, and the poll
-        // takes it to what the fans and temperatures ask for each second. A
-        // change made while the server runs goes to the engine through
-        // /v1/thermal instead.
+        // takes it to what the fans and temperatures ask for each second.
+        // `fixed` starts at its level, one of the ladder's rungs, which the
+        // server names as a policy. A change made while the server runs goes
+        // to the engine through /v1/thermal instead.
         if thermalRung == .smart {
             arguments += ["--prefill-duty", String(Int(smartLevel.ceiling))]
-        } else if thermalRung != .auto {
-            arguments += ["--thermal-policy", thermalRung.rawValue]
+        } else if thermalRung == .fixed {
+            arguments += ["--thermal-policy", fixedLevel.rawValue]
         }
         return arguments
     }

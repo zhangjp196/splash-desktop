@@ -710,12 +710,16 @@ of a prompt taking about 100/duty as long:
 `auto` is not a choice of its own: it sends no duty at all, so the engine paces
 nothing and the Mac's own thermal management decides the fans.
 
-The desktop app adds a `smart` rung that the server has no policy for: the app
-reads the fans and temperatures from `/status` each second, computes a duty
-from them — its high, medium or low level sets the band the fans may reach
-before prefill gives way — and pushes it through `POST /v1/thermal`, so the Mac
-stays as loud as it needs to be and no louder. A server started by the app in
-that mode begins at its level's ceiling and follows the sensors from there.
+The desktop app groups this ladder into three modes: **System default** sends
+nothing, as `auto` does; **Fixed** runs steady at one of the rungs, its
+balanced, moderate or quiet level being the server's policy of that name; and
+**Smart**, which the server has no policy for — the app reads the fans and
+temperatures from `/status` each second, computes a duty from them — its high,
+medium or low level sets the band the fans may reach before prefill gives way —
+and pushes it through `POST /v1/thermal`, so the Mac stays as loud as it needs
+to be and no louder. A server started by the app in smart mode begins at its
+level's ceiling and follows the sensors from there; in fixed mode it begins at
+the level's policy.
 
 `--prefill-duty` sets any percentage from 10 to 100 whatever the rung says. A
 sustained stream runs at the duty; a Mac that has been quiet, by decoding or by

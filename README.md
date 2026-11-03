@@ -53,13 +53,14 @@ it:
   model folder on your disk.
 - **Live** — a live panel of decode and prefill rates, request counts, Metal
   memory, and the caches.
-- **Thermal** — how hard the Mac may work and how loud it gets: **Smart**
+- **Thermal** — how hard the Mac may work and how loud it gets: **System
+  default** (which sets nothing and leaves the fans to macOS), **Smart**
   (which paces prefill from the fans and the temperatures every second, at a
-  high, medium or low level), **Balanced 68**, **Moderate 48** and **Quiet 33**
-  percent of the wall time, plus **System default** (which sets nothing and
-  leaves the fans to macOS), applied to a running server at once, above the
-  fans and the CPU, GPU, IO and disk temperatures the engine reads from the
-  SMC. The rung is the app's own preference, not part of the model settings.
+  high, medium or low level), and **Fixed**, which runs steady at a level —
+  **Balanced 68**, **Moderate 48** or **Quiet 33** percent of the wall time —
+  applied to a running server at once, above the fans and the CPU, GPU, IO and
+  disk temperatures the engine reads from the SMC. The choice is the app's own
+  preference, not part of the model settings.
 - **Log** — the server's log.
 
 Closing the window leaves the app and a running server in the menu bar;
