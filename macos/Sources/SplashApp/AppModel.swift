@@ -274,17 +274,27 @@ final class AppModel: ObservableObject {
            let stored = InterfaceLanguage(rawValue: raw) {
             language = stored
         }
-        if let raw = UserDefaults.standard.string(forKey: Self.thermalKey),
-           let stored = ThermalRung(rawValue: raw) {
-            thermalRung = stored
+        // The fixed level first: a thermal preference stored before the modes
+        // replaced the ladder named one of its rungs, and that rung becomes
+        // the same level of the fixed mode rather than losing the choice to
+        // the default. The migrated pair is written back, so it runs once.
+        if let raw = UserDefaults.standard.string(forKey: Self.fixedLevelKey),
+           let stored = FixedLevel(rawValue: raw) {
+            fixedLevel = stored
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.thermalKey) {
+            if let stored = ThermalRung(rawValue: raw) {
+                thermalRung = stored
+            } else if let rung = FixedLevel(rawValue: raw) {
+                thermalRung = .fixed
+                fixedLevel = rung
+                UserDefaults.standard.set(rung.rawValue, forKey: Self.fixedLevelKey)
+                UserDefaults.standard.set(ThermalRung.fixed.rawValue, forKey: Self.thermalKey)
+            }
         }
         if let raw = UserDefaults.standard.string(forKey: Self.smartLevelKey),
            let stored = SmartLevel(rawValue: raw) {
             smartLevel = stored
-        }
-        if let raw = UserDefaults.standard.string(forKey: Self.fixedLevelKey),
-           let stored = FixedLevel(rawValue: raw) {
-            fixedLevel = stored
         }
         applyLanguage()
         let stored = store.hasStoredSettings
