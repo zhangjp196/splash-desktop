@@ -52,8 +52,8 @@ class ThermalPolicy:
     prefill_duty: float
 
 
-# The ladder a person picks from, loudest first: what the desktop app's
-# heat-and-noise control offers, and what --thermal-policy names, so both
+# The ladder a person picks from, loudest first: the levels of the desktop
+# app's fixed heat-and-noise mode, and what --thermal-policy names, so both
 # speak of the same rungs. `auto` is not a choice of its own: it passes no
 # duty at all, so the engine paces nothing and the Mac's own thermal
 # management decides the fans, which is what a server started without
