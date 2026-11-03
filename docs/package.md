@@ -347,15 +347,13 @@ launches `install/launcher.py serve`, shows its log and a live panel of
 and admission waits), and keeps a menu bar item to start and stop it. The
 window opens on the live panel, with control and the log behind it in the tab
 band under the header; the header itself carries only the state and the
-actions. Its thermal page holds the [heat-and-noise control](api.md#heat-and-noise) of
-the Mac itself rather than of a model, in three modes — the system default,
-which passes nothing; `fixed`, whose balanced, moderate or quiet levels are
-the ladder's rungs and pass `--thermal-policy` to a server it starts; and
-`smart`, the app's own pacer, computing a duty from the fans and temperatures
-it reads each second, with a high, medium or low level that sets how hard the
-fans may work before prefill gives way. The choice is remembered in
-`UserDefaults` (as the interface language is) and reaches a running engine at
-once through `POST /v1/thermal`. Beside it
+actions. Its thermal page holds the [heat-and-noise rung](api.md#heat-and-noise) of
+the Mac itself rather than of a model: the choice is remembered in
+`UserDefaults` (as the interface language is), passes `--thermal-policy` to a
+server it starts, and reaches a running engine at once through
+`POST /v1/thermal`; its `smart` rung is the app's own pacer, computing a duty
+from the fans and temperatures it reads each second, with a high, medium or low
+level that sets how hard the fans may work before prefill gives way. Beside it
 the page shows the fans and the CPU, GPU, IO and disk temperatures the engine
 reads. Its settings live in SQLite at
 `~/Library/Application Support/ai.inco.splash/settings.db` (one key/value row

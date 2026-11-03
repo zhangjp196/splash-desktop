@@ -133,6 +133,8 @@
 "models.add_config" = "Add configuration";
 "models.edit" = "Edit";
 "models.active" = "In use";
+"models.use" = "Use";
+"models.use_start" = "Use & Start";
 "models.start" = "Start";
 "models.remove" = "Remove";
 "models.remove.title" = "Remove configuration?";
@@ -169,7 +171,6 @@
 "thermal.ladder.title" = "Heat and noise";
 "thermal.auto" = "System default";
 "thermal.smart" = "Smart";
-"thermal.fixed" = "Fixed";
 "thermal.balanced" = "Balanced";
 "thermal.moderate" = "Moderate";
 "thermal.quiet" = "Quiet";
@@ -184,8 +185,6 @@
 "thermal.smart.low" = "Low";
 "thermal.smart.level" = "Smart level";
 "thermal.smart.band" = "fans up to %.0f%%";
-"thermal.fixed.level" = "Fixed level";
-"thermal.fixed.duty" = "duty %.0f%%";
 "thermal.duty.held" = "the engine holds %d%%";
 "thermal.applies" = "Applies at once; the engine is not restarted.";
 "thermal.next_start" = "The server is not running; the next start will use this.";
