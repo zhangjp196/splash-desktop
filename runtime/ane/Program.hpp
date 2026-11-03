@@ -121,10 +121,6 @@ public:
   // Throws if their count is not the procedure's.
   [[nodiscard]] Binding bind(uint32_t procedure, std::span<const Surface> inputs, const Surface &output) const;
 
-  // The reason the service gave for the last evaluation it reported failed;
-  // empty until one fails, or after one that it reported without a reason.
-  [[nodiscard]] std::string evaluationError() const;
-
   // Queues one evaluation of `binding` that starts once `event` reaches
   // `wait` and raises it to `signal` when done. Throws if this program did
   // not bind `binding`, is not loaded or cannot queue the evaluation; `done`

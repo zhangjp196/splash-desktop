@@ -373,10 +373,6 @@ std::filesystem::path rememberedFile(std::string_view key) {
 } // namespace
 
 std::filesystem::path cacheDirectory() {
-  // SPLASH_ANE_CACHE keeps the programs elsewhere, a directory a test or a
-  // benchmark can write where its sandbox allows.
-  if (const char *given = std::getenv("SPLASH_ANE_CACHE"); given && *given)
-    return std::filesystem::path(given);
   char path[PATH_MAX];
   const size_t size = confstr(_CS_DARWIN_USER_CACHE_DIR, path, sizeof path);
   if (!size || size > sizeof path) throw std::runtime_error("macOS names no per-user cache directory");
@@ -493,10 +489,6 @@ struct Program::Impl {
   std::vector<Procedure> procedures;
   // Changed only on the service's queue.
   std::atomic<bool> loaded = false;
-  // The reason the service gave for the last evaluation it reported failed,
-  // which a caller reading it races with the next one.
-  std::mutex errorMutex;
-  std::string error;
 #ifdef SPLASH_ANE_INSTRUMENTATION
   ProgramInstrumentation::Faults faults;
   std::atomic<uint64_t> enqueues = 0;
@@ -712,11 +704,6 @@ Program::Binding Program::bind(uint32_t procedure, std::span<const Surface> inpu
   return Binding(std::move(state));
 }
 
-std::string Program::evaluationError() const {
-  std::lock_guard guard(impl_->errorMutex);
-  return impl_->error;
-}
-
 void Program::enqueue(const Binding &binding, const metal::SharedEvent &event, uint64_t wait, uint64_t signal,
                       std::function<void(bool)> done) {
 #ifdef SPLASH_ANE_INSTRUMENTATION
@@ -759,12 +746,7 @@ void Program::enqueue(const Binding &binding, const metal::SharedEvent &event, u
     // completion handler, which only reports the evaluation's result.
     const auto completion = std::make_shared<Completion>();
     completion->done = std::move(done);
-    std::shared_ptr<Impl> reportImpl = impl_;
-    void (^report)(BOOL, NSError *) = ^(BOOL success, NSError *error) {
-      if (!success) {
-        std::lock_guard guard(reportImpl->errorMutex);
-        reportImpl->error = error && error.localizedDescription ? error.localizedDescription.UTF8String : "";
-      }
+    void (^report)(BOOL, NSError *) = ^(BOOL success, NSError *) {
       std::unique_lock lock(completion->mutex);
       if (!completion->result) completion->result = success;
       completion->settle(std::move(lock));
