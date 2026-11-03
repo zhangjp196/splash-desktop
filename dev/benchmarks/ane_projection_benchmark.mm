@@ -45,9 +45,9 @@ std::string dimensions(uint32_t height, uint32_t width) {
 
 // The MIL of the projection: one matmul per input segment, their sum scaled by
 // the weights' row scales and the tokens' scales.
-std::string mil(uint32_t rows, uint32_t columns, uint32_t segments, const std::vector<Surface> &activations,
-                const std::vector<Surface> &weights, const Surface &weightScale, const Surface &tokenScale,
-                const Surface &output) {
+std::string mil(uint32_t rows, uint32_t columns, uint32_t segments, uint32_t stage,
+                const std::vector<Surface> &activations, const std::vector<Surface> &weights,
+                const Surface &weightScale, const Surface &tokenScale, const Surface &output) {
   const std::string unit = fp16(1.0 / ANE_FFN_INT8_UNIT);
   std::string parameters, body;
   const auto line = [&](const std::string &text) { body += "        " + text + ";\n"; };
@@ -75,15 +75,19 @@ std::string mil(uint32_t rows, uint32_t columns, uint32_t segments, const std::v
          "_d)");
   }
   std::string total = "m0";
-  for (uint32_t segment = 1; segment < segments; ++segment) {
+  for (uint32_t segment = 1; segment < segments && stage > 1; ++segment) {
     const std::string next = "sum" + std::to_string(segment);
     f16(next, columns, rows, "add(x = " + total + ", y = m" + std::to_string(segment) + ")");
     total = next;
   }
-  f16("rows", columns, rows, "mul(x = " + total + ", y = sw_t)");
-  f16("tokens", columns, rows, "mul(x = rows, y = sx_t)");
+  std::string last = total;
+  if (stage > 2) {
+    f16("rows", columns, rows, "mul(x = " + total + ", y = sw_t)");
+    f16("tokens", columns, rows, "mul(x = rows, y = sx_t)");
+    last = "tokens";
+  }
   line(output.bufferType(columns, rows) +
-       " y = tensor_to_tensor_buffer<ios17>(input = tokens, interleave_factors = tensor<uint8, [4]>([1, 1, 1, 1]), "
+       " y = tensor_to_tensor_buffer<ios17>(input = " + last + ", interleave_factors = tensor<uint8, [4]>([1, 1, 1, 1]), "
        "strides = tensor<int64, [4]>(" +
        output.strides(columns) + "))");
   return "program(1.3)\n{\n    func f" + std::to_string(rows) + "<ios18>(" + parameters + ") {\n" + body +
@@ -105,6 +109,7 @@ int main(int argc, char **argv) {
   const uint32_t hidden = static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 10));
   const uint32_t rows = argc > 4 ? static_cast<uint32_t>(std::strtoul(argv[4], nullptr, 10)) : kDefaultRows;
   const uint32_t rounds = argc > 5 ? static_cast<uint32_t>(std::strtoul(argv[5], nullptr, 10)) : kDefaultRounds;
+  const uint32_t stage = argc > 6 ? static_cast<uint32_t>(std::strtoul(argv[6], nullptr, 10)) : 3;
   if (!columns || !hidden || hidden % kSegment || !rows || !rounds) {
     std::fprintf(stderr, "N and rows must be positive and K a multiple of %u\n", kSegment);
     return 2;
@@ -134,9 +139,14 @@ int main(int argc, char **argv) {
     for (uint32_t column = 0; column < columns; ++column) contents<_Float16>(weightScale)[column] = weightStep;
     for (uint32_t token = 0; token < rows; ++token) contents<_Float16>(tokenScale)[token] = tokenStep;
 
-    const std::string source = mil(rows, columns, segments, activations, weights, weightScale, tokenScale, output);
+    const std::string source =
+        mil(rows, columns, segments, stage, activations, weights, weightScale, tokenScale, output);
+    // The MIL names no BLOBFILE, but the service loads a program with its
+    // blob beside it: a zero blob keeps that path the one AneFfn takes.
+    const std::vector<uint8_t> blob(64 * 1024, 0);
     splash::ane::Program program(
-        source, {}, splash::ane::Program::Limits{std::chrono::seconds(180), [] { return false; }}, "build/ane-cache");
+        source, blob, splash::ane::Program::Limits{std::chrono::seconds(180), [] { return false; }},
+        "build/ane-cache");
     const uint32_t procedure = program.procedure("f" + std::to_string(rows));
     // The program's inputs in the order its function declares them: each
     // segment's activations, then its weights, then the scales.
@@ -151,7 +161,6 @@ int main(int argc, char **argv) {
 
     splash::metal::SharedEvent event = backend.newSharedEvent();
     uint64_t value = 1;
-    event.signal(value);
     std::mutex mutex;
     std::condition_variable changed;
     double milliseconds = 0.0;
@@ -165,6 +174,9 @@ int main(int argc, char **argv) {
         succeeded = success;
         changed.notify_one();
       });
+      // The GPU signals a job's `ready` after the request is queued: raising it
+      // first could be what the service rejects.
+      event.signal(wait);
       std::unique_lock lock(mutex);
       if (!changed.wait_for(lock, std::chrono::seconds(120), [&] { return done; }))
         throw std::runtime_error("the Neural Engine did not report the evaluation");
