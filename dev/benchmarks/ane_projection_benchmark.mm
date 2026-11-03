@@ -180,7 +180,8 @@ int main(int argc, char **argv) {
       std::unique_lock lock(mutex);
       if (!changed.wait_for(lock, std::chrono::seconds(120), [&] { return done; }))
         throw std::runtime_error("the Neural Engine did not report the evaluation");
-      if (!succeeded) throw std::runtime_error("the evaluation failed");
+      if (!succeeded)
+        throw std::runtime_error("the evaluation failed: " + program.evaluationError());
       milliseconds = splash::millisecondsSince(start);
       std::printf("  round %u: %.3f ms\n", round + 1, milliseconds);
     }
