@@ -373,6 +373,10 @@ std::filesystem::path rememberedFile(std::string_view key) {
 } // namespace
 
 std::filesystem::path cacheDirectory() {
+  // SPLASH_ANE_CACHE keeps the programs elsewhere, a directory a test or a
+  // benchmark can write where its sandbox allows.
+  if (const char *given = std::getenv("SPLASH_ANE_CACHE"); given && *given)
+    return std::filesystem::path(given);
   char path[PATH_MAX];
   const size_t size = confstr(_CS_DARWIN_USER_CACHE_DIR, path, sizeof path);
   if (!size || size > sizeof path) throw std::runtime_error("macOS names no per-user cache directory");
