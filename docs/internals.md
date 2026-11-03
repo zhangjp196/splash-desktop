@@ -777,6 +777,16 @@ the one prefill command (`metal::EventStep`); each signal ends a Metal command
 buffer, so the queue holds 512. MoE targets, the mixers and decode stay on the
 GPU.
 
+A start warms a real 2048-row prefill and, after it, prefill of 128, 512 and
+1024 rows (`Runtime::warmupPrefill`): a request's opening chunk of a row count
+the warmup did not cover pays for that shape once, and on an M3 Max the first
+request after a start took 4.5 s against 1.6 s for the same request later,
+which reads as a slow first prompt. `SPLASH_PROFILE_NO_DRAFT_CONTEXT` leaves
+a prefill's draft context unwritten, so that a timed request shows what that
+context costs (80 ms of a 2075-row chunk on an M3 Max): the target's rows and
+KV stay right, the draft's rings and windows do not, so only a timed request
+uses it.
+
 Startup decides the split on the loaded model before it allocates the KV cache
 (`runtime/engine/AneFfnStartup.cpp`), once it has built the memory governor,
 which is the same with the split or without, every step arithmetic until the

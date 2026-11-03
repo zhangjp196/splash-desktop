@@ -29,6 +29,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <list>
@@ -1793,6 +1794,12 @@ struct Runtime::Impl {
   void addDraftContext(CommandGraph &graph, std::span<const PrefillChunk> chunks, uint32_t index) {
     const PrefillChunk &chunk = chunks[index];
     if (!chunk.capturedRows) return;
+    // SPLASH_PROFILE_NO_DRAFT_CONTEXT leaves the draft's context unwritten so
+    // that a profiling run can time a chunk without it: the target's rows and
+    // KV are still right, the draft's rings and windows are not, so only a
+    // timed request uses it.
+    static const bool profileWithoutDraftContext = std::getenv("SPLASH_PROFILE_NO_DRAFT_CONTEXT") != nullptr;
+    if (profileWithoutDraftContext) return;
     std::array<DFlashPrefillSpan, kLaneCount * 2> spans{};
     uint32_t spanCount = 0;
     std::vector<DFlashWindowCapture> windowCaptures;
@@ -3489,7 +3496,28 @@ void Runtime::prepareWarmupDecode(uint64_t requestId, uint32_t anchor) {
 WarmupStepResult Runtime::warmupPrefill(uint32_t rows) {
   if (!rows || rows > kPrefillRows)
     throw std::invalid_argument("invalid prefill warmup row count");
-  constexpr uint64_t id = std::numeric_limits<uint64_t>::max() - 100;
+  WarmupStepResult result = warmupPrefillOnce(
+      rows, std::numeric_limits<uint64_t>::max() - 100);
+  // A request's opening chunk of a row count the maximum prefill above does
+  // not cover pays for that shape once, on the Neural Engine's function of
+  // those rows and the GPU's kernels beside it: on an M3 Max the first
+  // request after a start timed 4.5 s against 1.6 s for the same request
+  // later, which reads as a slow first prompt. Warming the shapes a short
+  // prompt opens with takes that off the first request; a shape this plan
+  // cannot hold is left to serving rather than failing the start.
+  if (rows == kPrefillRows) {
+    uint64_t id = std::numeric_limits<uint64_t>::max() - 120;
+    for (const uint32_t shape : {128u, 512u, 1024u}) {
+      try {
+        static_cast<void>(warmupPrefillOnce(shape, id--));
+      } catch (const std::exception &) {
+      }
+    }
+  }
+  return result;
+}
+
+WarmupStepResult Runtime::warmupPrefillOnce(uint32_t rows, uint64_t id) {
   double wallSeconds = 0.0, hostSeconds = 0.0;
   std::vector<WarmupLaneResult> lanes;
   std::vector<uint32_t> warmupPrompt(rows, 0);

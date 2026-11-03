@@ -71,6 +71,10 @@ public:
   telemetry() const noexcept override;
 
 private:
+  // One prefill of `rows` rows as request `id`, on the path a request's
+  // opening chunk takes: target and draft, the KV it stages through.
+  [[nodiscard]] WarmupStepResult warmupPrefillOnce(uint32_t rows,
+                                                   uint64_t id);
   // The state lane of a resident request; the storage checks that its
   // committed state can be cached.
   [[nodiscard]] uint32_t residentLane(uint64_t requestId);
