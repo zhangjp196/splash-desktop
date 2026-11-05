@@ -60,7 +60,6 @@ struct ModelsPane: View {
                 },
                 onCancel: { editing = nil }
             )
-            .frame(minWidth: 560, minHeight: 640)
         }
         .alert(
             L10n.string("models.remove.title"),
@@ -308,51 +307,192 @@ private struct ConfigRow: View {
     }
 }
 
-/// The configuration editor: a name and the whole settings form, in a sheet.
-/// Each instance owns an independent draft, so editing one configuration
-/// never bleeds into another.
+/// The configuration editor: a name, the whole settings form, and a summary of
+/// what saving will start, in one sheet. Each instance owns an independent
+/// draft, so editing one configuration never bleeds into another.
 private struct ConfigEditor: View {
     let isNew: Bool
     var onSave: (ModelConfig) -> Void
     var onCancel: () -> Void
 
+    /// The configuration the sheet opened on, kept to tell an edited section
+    /// from an untouched one.
+    private let original: ModelConfig
     @State private var draft: ModelConfig
+    @FocusState private var nameFocused: Bool
 
     init(config: ModelConfig, isNew: Bool, onSave: @escaping (ModelConfig) -> Void, onCancel: @escaping () -> Void) {
         self.isNew = isNew
         self.onSave = onSave
         self.onCancel = onCancel
+        self.original = config
         _draft = State(initialValue: config)
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                BrandMark()
-                Text(L10n.string(isNew ? "config.add.title" : "config.edit.title"))
-                    .font(.headline)
-                Spacer()
-                Button(L10n.string("config.cancel"), action: onCancel)
-                Button(L10n.string("config.save")) { onSave(draft) }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(.bar)
-            Divider()
-            HStack(spacing: 8) {
-                Text(L10n.string("config.name")).foregroundStyle(.secondary)
-                TextField("", text: $draft.name, prompt: Text(verbatim: draft.displayName))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 340)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            Divider()
-            SettingsTabs(settings: $draft.settings)
+    /// A configuration with nothing to serve would save and then fail to
+    /// start, so the editor asks for the model before it lets go.
+    private var canSave: Bool {
+        switch draft.settings.modelMode {
+        case .upstream:
+            return !draft.settings.modelID.trimmingCharacters(in: .whitespaces).isEmpty
+        case .local:
+            return !draft.settings.modelDirectory.trimmingCharacters(in: .whitespaces).isEmpty
         }
-        .frame(minWidth: 660, minHeight: 600)
+    }
+
+    private var hasChanges: Bool { draft != original }
+
+    private var summary: String {
+        let mode = draft.settings.modelMode == .local
+            ? L10n.string("mode.local.short")
+            : L10n.string("mode.upstream.short")
+        return "\(mode) · \(draft.settings.kvFormat.uppercased())"
+    }
+
+    var body: some View {
+        ZStack {
+            AuroraBackground(tint: SplashPalette.blue)
+
+            VStack(spacing: 0) {
+                header
+                Rectangle()
+                    .fill(SplashPalette.border.opacity(0.4))
+                    .frame(height: 0.7)
+                SettingsEditor(settings: $draft.settings, baseline: original.settings)
+                footer
+            }
+        }
+        .frame(width: 900, height: 680)
+        .onExitCommand(perform: onCancel)
+        .onAppear {
+            guard isNew else { return }
+            DispatchQueue.main.async { nameFocused = true }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 14) {
+            BrandMark(size: 32)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L10n.string(isNew ? "config.eyebrow.new" : "config.eyebrow.edit"))
+                    .font(.system(size: 9.5, weight: .bold))
+                    .tracking(1.5)
+                    .foregroundStyle(SplashPalette.cyan)
+                TextField(
+                    "",
+                    text: $draft.name,
+                    prompt: Text(L10n.string("config.name.placeholder"))
+                )
+                .textFieldStyle(.plain)
+                .font(.system(size: 21, weight: .bold, design: .rounded))
+                .tracking(-0.3)
+                .focused($nameFocused)
+                .onSubmit(save)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(nameFocused
+                            ? SplashPalette.blue.opacity(0.7)
+                            : SplashPalette.border.opacity(0.45))
+                        .frame(height: 0.8)
+                        .offset(y: 3)
+                }
+                .frame(maxWidth: 420)
+            }
+
+            Spacer(minLength: 12)
+
+            if hasChanges {
+                Pill(text: L10n.string("config.changed"), tint: SplashPalette.amber)
+                    .transition(.opacity)
+            }
+
+            Button(action: onCancel) {
+                Text(L10n.string("config.cancel"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(
+                        SplashPalette.surface.opacity(0.55),
+                        in: Capsule()
+                    )
+                    .overlay(
+                        Capsule().strokeBorder(
+                            SplashPalette.border.opacity(0.6),
+                            lineWidth: 0.8
+                        )
+                    )
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+
+            Button(action: save) {
+                Text(L10n.string("config.save"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 7)
+                    .background(SplashPalette.accentFill, in: Capsule())
+                    .shadow(color: SplashPalette.blue.opacity(0.35), radius: 8, y: 3)
+                    .opacity(canSave ? 1 : 0.4)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.defaultAction)
+            .disabled(!canSave)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Image(systemName: draft.settings.modelMode == .local ? "folder.fill" : "shippingbox.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(SplashPalette.cyan)
+                .frame(width: 26, height: 26)
+                .background(
+                    SplashPalette.cyan.opacity(0.12),
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                )
+            VStack(alignment: .leading, spacing: 1) {
+                Text(verbatim: draft.displayName)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .lineLimit(1)
+                Text(verbatim: summary)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(SplashPalette.muted)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 12)
+
+            if !canSave {
+                Label(L10n.string("config.needs_model"), systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(SplashPalette.amber)
+            } else if draft.settings.lanAccess && draft.settings.apiKey.isEmpty {
+                Label(L10n.string("help.lan_access.no_key"), systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(SplashPalette.amber)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(SplashPalette.surface.opacity(0.32))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(SplashPalette.border.opacity(0.4))
+                .frame(height: 0.7)
+        }
+    }
+
+    private func save() {
+        guard canSave else { return }
+        var saved = draft
+        saved.name = saved.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        onSave(saved)
     }
 }
 

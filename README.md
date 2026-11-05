@@ -53,7 +53,9 @@ toolbar. Closing the window keeps a miniature live dashboard in the menu bar.
   the server directly, in the same aurora palette.
 - **Models** — the configurations you have saved, each holding the whole set
   of server settings: add, edit, and switch between them, or aim one at a
-  model folder on your disk.
+  model folder on your disk. The editor keeps its sections in a rail beside
+  card-style rows, with the explanation under each field and a strip at the
+  foot showing what Start would use.
 - **Live** — the engine's request lifecycle in real time (**Queued**,
   **Prefill**, **Decode**, **Idle**), decode and prefill sparklines over the
   last minute with hover scrubbing, DFlash 2 acceptance, a unified-memory ring

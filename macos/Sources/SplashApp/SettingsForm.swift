@@ -2,313 +2,1064 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The configuration's settings, grouped in a rail the editor switches
-/// between: what model, how the server serves it, admission, memory, idle
-/// behaviour and what a request may carry. Bound to a configuration the
-/// models pane edits.
-struct SettingsTabs: View {
-    @Binding var settings: ServerSettings
-    var disabled = false
-    @State private var section: Pane? = .model
+/// The groups the configuration editor's rail switches between. Each one owns
+/// a short description, so the rail explains the form instead of only naming
+/// it.
+enum SettingsSection: String, CaseIterable, Identifiable {
+    case model, server, schedule, memory, cache, request
 
-    /// The form's groups. The admission limit sits under Scheduling with the
-    /// rest of how requests are taken, rather than hidden among the server's
-    /// transport options.
-    private enum Pane: String, CaseIterable, Identifiable {
-        case model, server, schedule, memory, cache, request
+    var id: String { rawValue }
 
-        var id: String { rawValue }
+    var title: String { L10n.string("section.\(rawValue)") }
+    var summary: String { L10n.string("section.\(rawValue).help") }
 
-        var title: String { L10n.string("section.\(rawValue)") }
-
-        var systemImage: String {
-            switch self {
-            case .model: return "cube.box"
-            case .server: return "network"
-            case .schedule: return "speedometer"
-            case .memory: return "memorychip"
-            case .cache: return "internaldrive"
-            case .request: return "text.bubble"
-            }
+    var systemImage: String {
+        switch self {
+        case .model: return "cube.box"
+        case .server: return "network"
+        case .schedule: return "speedometer"
+        case .memory: return "memorychip"
+        case .cache: return "internaldrive"
+        case .request: return "text.bubble"
         }
     }
+
+    var tint: Color {
+        switch self {
+        case .model: return SplashPalette.blue
+        case .server: return SplashPalette.cyan
+        case .schedule: return SplashPalette.amber
+        case .memory: return SplashPalette.mint
+        case .cache: return SplashPalette.violet
+        case .request: return SplashPalette.rose
+        }
+    }
+}
+
+/// The configuration form: a rail of sections beside the selected section's
+/// cards. It edits a draft the caller owns, so nothing is applied until the
+/// caller saves it. `baseline` is the configuration the draft started from;
+/// the rail marks the sections that differ from it.
+struct SettingsEditor: View {
+    @Binding var settings: ServerSettings
+    let baseline: ServerSettings
+    @State private var section: SettingsSection = .model
 
     var body: some View {
         HStack(spacing: 0) {
-            List(selection: $section) {
-                ForEach(Pane.allCases) { item in
-                    Label(item.title, systemImage: item.systemImage).tag(item)
+            rail
+            Rectangle()
+                .fill(SplashPalette.border.opacity(0.35))
+                .frame(width: 1)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    sectionHeader
+                    page
+                    Spacer(minLength: 14)
+                    reviewCard
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 20)
+                .frame(maxWidth: .infinity, minHeight: 540, alignment: .topLeading)
+            }
+        }
+    }
+
+    // MARK: Rail
+
+    private var rail: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(L10n.string("config.sections").uppercased())
+                .font(.system(size: 9.5, weight: .bold))
+                .tracking(1.4)
+                .foregroundStyle(SplashPalette.faint)
+                .padding(.horizontal, 9)
+                .padding(.bottom, 7)
+
+            ForEach(SettingsSection.allCases) { item in
+                RailItem(
+                    section: item,
+                    selected: section == item,
+                    changed: changed(item)
+                ) {
+                    withAnimation(.easeOut(duration: 0.14)) { section = item }
                 }
             }
-            .listStyle(.sidebar)
-            .frame(width: 176)
 
-            Divider()
+            Spacer(minLength: 10)
 
-            Form { current }
-                .formStyle(.grouped)
-                .scrollContentBackground(.hidden)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            Text(L10n.string("config.hint"))
+                .font(.system(size: 10))
+                .foregroundStyle(SplashPalette.faint)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 9)
+        }
+        .padding(12)
+        .frame(width: 226, alignment: .top)
+    }
+
+    /// Whether this section holds a value that differs from the configuration
+    /// the editor opened on. A dot in the rail, rather than a page-wide
+    /// "unsaved" flag, tells the user where the edit actually is.
+    private func changed(_ item: SettingsSection) -> Bool {
+        let s = settings
+        let b = baseline
+        switch item {
+        case .model:
+            return s.modelMode != b.modelMode || s.modelID != b.modelID
+                || s.modelDirectory != b.modelDirectory
+                || s.draftDirectory != b.draftDirectory || s.mmproj != b.mmproj
+        case .server:
+            return s.port != b.port || s.lanAccess != b.lanAccess
+                || s.allowedHosts != b.allowedHosts || s.kvFormat != b.kvFormat
+                || s.neuralEngine != b.neuralEngine || s.languageOnly != b.languageOnly
+        case .schedule:
+            return s.maxConcurrency != b.maxConcurrency || s.verifyRows != b.verifyRows
+        case .memory:
+            return s.maxMemory != b.maxMemory || s.maxContext != b.maxContext
+                || s.expertMemory != b.expertMemory || s.pleMemory != b.pleMemory
+                || s.sparseKvMemory != b.sparseKvMemory
+        case .cache:
+            return s.residencySeconds != b.residencySeconds || s.diskCache != b.diskCache
+                || s.maxCacheDisk != b.maxCacheDisk
+                || s.maxCacheDiskWrites != b.maxCacheDiskWrites
+                || s.cacheEvictionPreset != b.cacheEvictionPreset
+                || s.cacheEvictionPolicy != b.cacheEvictionPolicy
+                || s.cacheEvictionProtect != b.cacheEvictionProtect
+        case .request:
+            return s.apiKey != b.apiKey || s.servedNames != b.servedNames
+                || s.maxRequestSize != b.maxRequestSize
+                || s.reasoningEffort != b.reasoningEffort
         }
     }
 
-    @ViewBuilder private var current: some View {
-        switch section ?? .model {
-        case .model: modelSection
-        case .server: serverSection
-        case .schedule: scheduleSection
-        case .memory: memorySection
-        case .cache: cacheSection
-        case .request: requestsSection
+    // MARK: Page
+
+    private var sectionHeader: some View {
+        HStack(spacing: 12) {
+            Image(systemName: section.systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background(
+                    LinearGradient(
+                        colors: [section.tint, section.tint.opacity(0.68)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                )
+                .shadow(color: section.tint.opacity(0.35), radius: 7, y: 3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(section.title)
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .tracking(-0.2)
+                Text(section.summary)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(SplashPalette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
         }
     }
 
-    // MARK: Sections
+    @ViewBuilder private var page: some View {
+        switch section {
+        case .model: modelPage
+        case .server: serverPage
+        case .schedule: schedulePage
+        case .memory: memoryPage
+        case .cache: cachePage
+        case .request: requestPage
+        }
+    }
 
-    @ViewBuilder private var modelSection: some View {
-        Section {
-            Picker(L10n.string("model.picker"), selection: $settings.modelMode) {
+    // MARK: Model
+
+    @ViewBuilder private var modelPage: some View {
+        EditorCard(
+            title: L10n.string("config.group.mode"),
+            systemImage: "switch.2",
+            tint: SplashPalette.blue
+        ) {
+            HStack(spacing: 10) {
                 ForEach(AppModel.ModelMode.allCases) { mode in
-                    Text(verbatim: label(mode)).tag(mode)
-                }
-            }
-            .pickerStyle(.menu)
-            .disabled(disabled)
-
-            switch settings.modelMode {
-            case .upstream:
-                ModelField(modelID: $settings.modelID, catalog: Runtime.catalog, disabled: disabled)
-            case .local:
-                DirectoryField(
-                    label: L10n.string("field.target"),
-                    prompt: L10n.string("field.target.prompt"),
-                    path: $settings.modelDirectory,
-                    disabled: disabled
-                )
-                DirectoryField(
-                    label: L10n.string("field.draft"),
-                    prompt: L10n.string("field.draft.prompt"),
-                    path: $settings.draftDirectory,
-                    disabled: disabled
-                )
-                // An MLX target's tower is in its checkpoint; a GGUF target's
-                // is a file beside it unless this names another.
-                DirectoryField(
-                    label: L10n.string("field.mmproj"),
-                    prompt: L10n.string("field.mmproj.prompt"),
-                    path: $settings.mmproj,
-                    disabled: disabled || settings.languageOnly,
-                    files: true
-                )
-                if settings.languageOnly {
-                    // The path is kept for the configuration that turns vision
-                    // back on, but text only loads no tower, so the launcher is
-                    // not given one.
-                    Text(L10n.string("help.mmproj.text_only"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var serverSection: some View {
-        Section {
-            TextField(L10n.string("field.port"), value: $settings.port, format: .number)
-                .disabled(disabled)
-            Toggle(L10n.string("field.lan_access"), isOn: $settings.lanAccess)
-                .disabled(disabled)
-            TextField(L10n.string("field.allowed_hosts"), text: $settings.allowedHosts)
-                .disabled(disabled)
-            Picker(L10n.string("field.kv"), selection: $settings.kvFormat) {
-                Text(verbatim: L10n.string("kv.int8")).tag("int8")
-                Text(verbatim: L10n.string("kv.int4")).tag("int4")
-                Text(verbatim: L10n.string("kv.k8v4")).tag("k8v4")
-                Text(verbatim: L10n.string("kv.bf16")).tag("bf16")
-            }
-            .pickerStyle(.segmented)
-            .disabled(disabled)
-            Toggle(L10n.string("field.language_only"), isOn: $settings.languageOnly)
-                .disabled(disabled)
-            Toggle(L10n.string("field.neural_engine"), isOn: $settings.neuralEngine)
-                .disabled(disabled)
-        } footer: {
-            if settings.lanAccess && settings.apiKey.isEmpty {
-                Label(
-                    L10n.string("help.lan_access.no_key"),
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .foregroundStyle(.orange)
-            }
-        }
-    }
-
-    @ViewBuilder private var scheduleSection: some View {
-        Section {
-            TextField(L10n.string("field.max_concurrency"), value: $settings.maxConcurrency, format: .number)
-                .disabled(disabled)
-            Picker(L10n.string("field.verify_rows"), selection: $settings.verifyRows) {
-                Text(verbatim: L10n.string("verify.auto")).tag("auto")
-                Text(verbatim: L10n.string("verify.all")).tag("all")
-            }
-            .pickerStyle(.segmented)
-            .disabled(disabled)
-        }
-    }
-
-    @ViewBuilder private var memorySection: some View {
-        Section {
-            TextField(L10n.string("field.max_memory"), text: $settings.maxMemory)
-                .disabled(disabled)
-            TextField(L10n.string("field.max_context"), text: $settings.maxContext)
-                .disabled(disabled)
-            TextField(L10n.string("field.expert_memory"), text: $settings.expertMemory)
-                .disabled(disabled)
-            TextField(L10n.string("field.ple_memory"), text: $settings.pleMemory)
-                .disabled(disabled)
-            TextField(L10n.string("field.sparse_kv_memory"), text: $settings.sparseKvMemory)
-                .disabled(disabled)
-        }
-    }
-
-    @ViewBuilder private var cacheSection: some View {
-        Section {
-            TextField(L10n.string("field.residency"), text: $settings.residencySeconds)
-                .disabled(disabled)
-            Toggle(L10n.string("field.disk_cache"), isOn: $settings.diskCache)
-                .disabled(disabled)
-            TextField(L10n.string("field.cache_quota"), text: $settings.maxCacheDisk)
-                .disabled(disabled || !settings.diskCache)
-            TextField(L10n.string("field.cache_writes"), text: $settings.maxCacheDiskWrites)
-                .disabled(disabled || !settings.diskCache)
-            Picker(L10n.string("field.cache_eviction"), selection: $settings.cacheEvictionPreset) {
-                Text(verbatim: L10n.string("eviction.light")).tag("light")
-                Text(verbatim: L10n.string("eviction.balanced")).tag("balanced")
-                Text(verbatim: L10n.string("eviction.strong")).tag("strong")
-                Text(verbatim: L10n.string("eviction.custom")).tag("custom")
-            }
-            .pickerStyle(.menu)
-            .disabled(disabled)
-            if settings.cacheEvictionPreset == "custom" {
-                Picker(L10n.string("field.cache_policy"), selection: $settings.cacheEvictionPolicy) {
-                    Text(verbatim: L10n.string("eviction.policy.lru")).tag("lru")
-                    Text(verbatim: L10n.string("eviction.policy.fifo")).tag("fifo")
-                    Text(verbatim: L10n.string("eviction.policy.lfu")).tag("lfu")
-                    Text(verbatim: L10n.string("eviction.policy.largest")).tag("largest")
-                }
-                .pickerStyle(.menu)
-                .disabled(disabled)
-                Picker(L10n.string("field.cache_protect"), selection: $settings.cacheEvictionProtect) {
-                    ForEach(0...8, id: \.self) { count in
-                        Text(verbatim: count == 0
-                            ? L10n.string("eviction.protect.off")
-                            : String(count))
-                            .tag(count)
+                    ModeChoice(mode: mode, selected: settings.modelMode == mode) {
+                        settings.modelMode = mode
                     }
                 }
-                .pickerStyle(.menu)
-                .disabled(disabled)
             }
-            Text(L10n.string("help.cache_eviction"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .padding(.top, 10)
         }
-    }
 
-    @ViewBuilder private var requestsSection: some View {
-        Section {
-            SecureField(L10n.string("field.api_key"), text: $settings.apiKey)
-                .disabled(disabled)
-            TextField(L10n.string("field.served_names"), text: $settings.servedNames)
-                .disabled(disabled)
-            TextField(L10n.string("field.max_request_size"), text: $settings.maxRequestSize)
-                .disabled(disabled)
-            Picker(L10n.string("field.reasoning_effort"), selection: $settings.reasoningEffort) {
-                Text(verbatim: L10n.string("reasoning.default")).tag("")
-                ForEach(ServerSettings.reasoningEfforts, id: \.self) { effort in
-                    Text(verbatim: effort).tag(effort)
-                }
-            }
-            .pickerStyle(.menu)
-            .disabled(disabled)
-        }
-    }
-
-    private func label(_ mode: AppModel.ModelMode) -> String {
-        switch mode {
-        case .upstream: return L10n.string("mode.upstream")
-        case .local: return L10n.string("mode.local")
-        }
-    }
-}
-
-/// A model ID field with a menu of matching catalog examples, kept in sync:
-/// choosing an example replaces the current text.
-private struct ModelField: View {
-    @Binding var modelID: String
-    let catalog: [String]
-    let disabled: Bool
-
-    var body: some View {
-        LabeledContent("Model") {
-            HStack {
-                TextField("owner/repo[:variant]", text: $modelID)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(disabled)
-                if !modelID.isEmpty {
-                    Button {
-                        modelID = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .help(L10n.string("field.clear"))
-                    .disabled(disabled)
-                }
-                if !catalog.isEmpty {
-                    Menu(L10n.string("examples")) {
-                        ForEach(catalog, id: \.self) { identifier in
-                            Button(identifier) { modelID = identifier }
+        if settings.modelMode == .upstream {
+            EditorCard(
+                title: L10n.string("config.group.source"),
+                systemImage: "shippingbox",
+                tint: SplashPalette.cyan
+            ) {
+                SettingRow(
+                    title: L10n.string("field.model_id"),
+                    help: L10n.string("help.model_id"),
+                    controlWidth: 300
+                ) {
+                    HStack(spacing: 6) {
+                        EditorField(
+                            text: $settings.modelID,
+                            prompt: "owner/repo[:variant]",
+                            monospaced: true
+                        )
+                        if !Runtime.catalog.isEmpty {
+                            Menu {
+                                ForEach(Runtime.catalog, id: \.self) { identifier in
+                                    Button(identifier) { settings.modelID = identifier }
+                                }
+                            } label: {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(SplashPalette.cyan)
+                                    .frame(width: 28, height: 28)
+                                    .background(
+                                        SplashPalette.cyan.opacity(0.13),
+                                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .strokeBorder(SplashPalette.cyan.opacity(0.25), lineWidth: 0.7)
+                                    )
+                            }
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
+                            .fixedSize()
+                            .help(L10n.string("examples"))
                         }
                     }
-                    .fixedSize()
-                    .disabled(disabled)
+                }
+            }
+        } else {
+            EditorCard(
+                title: L10n.string("config.group.files"),
+                systemImage: "folder",
+                tint: SplashPalette.cyan
+            ) {
+                SettingRow(
+                    title: L10n.string("field.target"),
+                    help: L10n.string("field.target.prompt"),
+                    controlWidth: 300
+                ) {
+                    DirectoryPicker(
+                        path: $settings.modelDirectory,
+                        prompt: L10n.string("field.target.prompt")
+                    )
+                }
+                rowDivider
+                SettingRow(
+                    title: L10n.string("field.draft"),
+                    help: L10n.string("field.draft.prompt"),
+                    controlWidth: 300
+                ) {
+                    DirectoryPicker(
+                        path: $settings.draftDirectory,
+                        prompt: L10n.string("field.draft.prompt")
+                    )
+                }
+                rowDivider
+                SettingRow(
+                    title: L10n.string("field.mmproj"),
+                    help: L10n.string("field.mmproj.prompt"),
+                    controlWidth: 300
+                ) {
+                    DirectoryPicker(
+                        path: $settings.mmproj,
+                        prompt: L10n.string("field.mmproj.prompt"),
+                        files: true
+                    )
+                }
+                .disabled(settings.languageOnly)
+                .opacity(settings.languageOnly ? 0.55 : 1)
+            }
+            if settings.languageOnly {
+                EditorNote(
+                    text: L10n.string("help.mmproj.text_only"),
+                    tone: SplashPalette.muted,
+                    systemImage: "info.circle"
+                )
+            }
+        }
+    }
+
+    // MARK: Server
+
+    @ViewBuilder private var serverPage: some View {
+        EditorCard(
+            title: L10n.string("config.group.endpoint"),
+            systemImage: "network",
+            tint: SplashPalette.cyan
+        ) {
+            SettingRow(
+                title: L10n.string("field.port"),
+                help: L10n.string("help.port")
+            ) {
+                EditorNumberField(value: $settings.port, range: 1...65535, width: 92)
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.lan_access"),
+                help: L10n.string("help.lan_access")
+            ) {
+                Toggle("", isOn: $settings.lanAccess)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(SplashPalette.cyan)
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.allowed_hosts"),
+                help: L10n.string("help.allowed_hosts"),
+                controlWidth: 300
+            ) {
+                EditorField(text: $settings.allowedHosts, prompt: "studio.local, proxy.example")
+            }
+        }
+
+        if settings.lanAccess && settings.apiKey.isEmpty {
+            EditorNote(text: L10n.string("help.lan_access.no_key"))
+        }
+
+        EditorCard(
+            title: L10n.string("config.group.runtime"),
+            systemImage: "cpu",
+            tint: SplashPalette.mint
+        ) {
+            SettingRow(
+                title: L10n.string("field.kv"),
+                help: L10n.string("help.kv"),
+                controlWidth: 286
+            ) {
+                Picker("", selection: $settings.kvFormat) {
+                    Text(verbatim: L10n.string("kv.int8")).tag("int8")
+                    Text(verbatim: L10n.string("kv.int4")).tag("int4")
+                    Text(verbatim: L10n.string("kv.k8v4")).tag("k8v4")
+                    Text(verbatim: L10n.string("kv.bf16")).tag("bf16")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.neural_engine"),
+                help: L10n.string("help.neural_engine")
+            ) {
+                Toggle("", isOn: $settings.neuralEngine)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(SplashPalette.mint)
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.language_only"),
+                help: L10n.string("help.language_only")
+            ) {
+                Toggle("", isOn: $settings.languageOnly)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(SplashPalette.mint)
+            }
+        }
+    }
+
+    // MARK: Schedule
+
+    private var schedulePage: some View {
+        EditorCard(
+            title: L10n.string("config.group.pacing"),
+            systemImage: "speedometer",
+            tint: SplashPalette.amber
+        ) {
+            SettingRow(
+                title: L10n.string("field.max_concurrency"),
+                help: L10n.string("help.max_concurrency")
+            ) {
+                HStack(spacing: 7) {
+                    EditorNumberField(value: $settings.maxConcurrency, range: 1...4096, width: 82)
+                    Stepper("", value: $settings.maxConcurrency, in: 1...4096)
+                        .labelsHidden()
+                }
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.verify_rows"),
+                help: L10n.string("help.verify_rows"),
+                controlWidth: 270
+            ) {
+                Picker("", selection: $settings.verifyRows) {
+                    Text(verbatim: L10n.string("verify.auto")).tag("auto")
+                    Text(verbatim: L10n.string("verify.all")).tag("all")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+        }
+    }
+
+    // MARK: Memory
+
+    @ViewBuilder private var memoryPage: some View {
+        EditorCard(
+            title: L10n.string("config.group.budget"),
+            systemImage: "memorychip",
+            tint: SplashPalette.mint
+        ) {
+            SettingRow(
+                title: L10n.string("field.max_memory"),
+                help: L10n.string("help.max_memory")
+            ) {
+                SizeField(text: $settings.maxMemory, prompt: "28G")
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.max_context"),
+                help: L10n.string("help.max_context")
+            ) {
+                EditorField(text: $settings.maxContext, prompt: "204800", monospaced: true)
+            }
+        }
+
+        EditorCard(
+            title: L10n.string("config.group.streamed"),
+            systemImage: "square.stack.3d.down.right",
+            tint: SplashPalette.violet
+        ) {
+            SettingRow(
+                title: L10n.string("field.expert_memory"),
+                help: L10n.string("help.expert_memory")
+            ) {
+                SizeField(text: $settings.expertMemory, prompt: L10n.string("size.auto"))
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.ple_memory"),
+                help: L10n.string("help.ple_memory")
+            ) {
+                SizeField(text: $settings.pleMemory, prompt: L10n.string("size.auto"))
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.sparse_kv_memory"),
+                help: L10n.string("help.sparse_kv_memory")
+            ) {
+                SizeField(text: $settings.sparseKvMemory, prompt: L10n.string("size.auto"))
+            }
+        }
+    }
+
+    // MARK: Cache
+
+    @ViewBuilder private var cachePage: some View {
+        EditorCard(
+            title: L10n.string("config.group.idle"),
+            systemImage: "moon.zzz",
+            tint: SplashPalette.violet
+        ) {
+            SettingRow(
+                title: L10n.string("field.residency"),
+                help: L10n.string("help.residency")
+            ) {
+                EditorField(
+                    text: $settings.residencySeconds,
+                    prompt: "10",
+                    monospaced: true,
+                    suffix: L10n.string("unit.seconds")
+                )
+            }
+        }
+
+        EditorCard(
+            title: L10n.string("config.group.disk"),
+            systemImage: "internaldrive",
+            tint: SplashPalette.violet
+        ) {
+            SettingRow(
+                title: L10n.string("field.disk_cache"),
+                help: L10n.string("help.disk_cache")
+            ) {
+                Toggle("", isOn: $settings.diskCache)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(SplashPalette.violet)
+            }
+            if settings.diskCache {
+                rowDivider
+                SettingRow(
+                    title: L10n.string("field.cache_quota"),
+                    help: L10n.string("help.cache_quota")
+                ) {
+                    SizeField(text: $settings.maxCacheDisk, prompt: "16G")
+                }
+                rowDivider
+                SettingRow(
+                    title: L10n.string("field.cache_writes"),
+                    help: L10n.string("help.cache_writes")
+                ) {
+                    SizeField(text: $settings.maxCacheDiskWrites, prompt: "32G")
+                }
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.cache_eviction"),
+                help: L10n.string("help.cache_eviction")
+            ) {
+                Picker("", selection: $settings.cacheEvictionPreset) {
+                    Text(verbatim: L10n.string("eviction.light")).tag("light")
+                    Text(verbatim: L10n.string("eviction.balanced")).tag("balanced")
+                    Text(verbatim: L10n.string("eviction.strong")).tag("strong")
+                    Text(verbatim: L10n.string("eviction.custom")).tag("custom")
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            if settings.cacheEvictionPreset == "custom" {
+                rowDivider
+                SettingRow(title: L10n.string("field.cache_policy")) {
+                    Picker("", selection: $settings.cacheEvictionPolicy) {
+                        Text(verbatim: L10n.string("eviction.policy.lru")).tag("lru")
+                        Text(verbatim: L10n.string("eviction.policy.fifo")).tag("fifo")
+                        Text(verbatim: L10n.string("eviction.policy.lfu")).tag("lfu")
+                        Text(verbatim: L10n.string("eviction.policy.largest")).tag("largest")
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                rowDivider
+                SettingRow(title: L10n.string("field.cache_protect")) {
+                    Picker("", selection: $settings.cacheEvictionProtect) {
+                        ForEach(0...8, id: \.self) { count in
+                            Text(verbatim: count == 0
+                                ? L10n.string("eviction.protect.off")
+                                : String(count))
+                                .tag(count)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
         }
     }
+
+    // MARK: Requests
+
+    private var requestPage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            EditorCard(
+                title: L10n.string("config.group.access"),
+                systemImage: "key",
+                tint: SplashPalette.rose
+            ) {
+                SettingRow(
+                    title: L10n.string("field.api_key"),
+                    help: L10n.string("help.api_key"),
+                    controlWidth: 300
+                ) {
+                    SecretField(text: $settings.apiKey)
+                }
+                rowDivider
+                SettingRow(
+                    title: L10n.string("field.served_names"),
+                    help: L10n.string("help.served_names"),
+                    controlWidth: 300
+                ) {
+                    EditorField(text: $settings.servedNames, prompt: "alias-a, alias-b")
+                }
+            }
+
+            EditorCard(
+                title: L10n.string("config.group.payload"),
+                systemImage: "doc.text",
+                tint: SplashPalette.cyan
+            ) {
+                SettingRow(
+                    title: L10n.string("field.max_request_size"),
+                    help: L10n.string("help.max_request_size")
+                ) {
+                    SizeField(text: $settings.maxRequestSize, prompt: "128M")
+                }
+                rowDivider
+                SettingRow(
+                    title: L10n.string("field.reasoning_effort"),
+                    help: L10n.string("help.reasoning_effort")
+                ) {
+                    Picker("", selection: $settings.reasoningEffort) {
+                        Text(verbatim: L10n.string("reasoning.default")).tag("")
+                        ForEach(ServerSettings.reasoningEfforts, id: \.self) { effort in
+                            Text(verbatim: effort).tag(effort)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    /// The four numbers a start would use, kept at the foot of every page so
+    /// the form has an answer without leaving the section being edited.
+    private var reviewCard: some View {
+        EditorCard(
+            title: L10n.string("config.review"),
+            systemImage: "play.circle",
+            tint: SplashPalette.mint
+        ) {
+            HStack(spacing: 0) {
+                ReviewStat(title: L10n.string("live.model"), value: modelLabel)
+                reviewDivider
+                ReviewStat(
+                    title: L10n.string("field.port"),
+                    value: String(settings.port),
+                    caption: settings.lanAccess
+                        ? L10n.string("config.review.lan")
+                        : L10n.string("config.review.local")
+                )
+                reviewDivider
+                ReviewStat(
+                    title: L10n.string("config.group.budget"),
+                    value: settings.maxMemory,
+                    caption: L10n.format("config.review.context", settings.maxContext)
+                )
+                reviewDivider
+                ReviewStat(
+                    title: L10n.string("field.max_concurrency"),
+                    value: String(settings.maxConcurrency),
+                    caption: settings.kvFormat.uppercased()
+                )
+            }
+            .padding(.top, 7)
+        }
+    }
+
+    private var modelLabel: String {
+        switch settings.modelMode {
+        case .upstream:
+            return settings.modelID.isEmpty
+                ? L10n.string("models.none")
+                : settings.modelID
+        case .local:
+            return settings.modelDirectory.isEmpty
+                ? L10n.string("models.none")
+                : (settings.modelDirectory as NSString).lastPathComponent
+        }
+    }
+
+    private var reviewDivider: some View {
+        Rectangle()
+            .fill(SplashPalette.hairline.opacity(0.55))
+            .frame(width: 0.6, height: 30)
+    }
+
+    private var rowDivider: some View {
+        Rectangle()
+            .fill(SplashPalette.hairline.opacity(0.55))
+            .frame(height: 0.6)
+    }
 }
 
-/// A directory path field with a browse button (NSOpenPanel) and a clear button.
-private struct DirectoryField: View {
-    let label: String
-    let prompt: String
+/// One figure in the "when you start" strip.
+private struct ReviewStat: View {
+    let title: String
+    let value: String
+    var caption: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(SplashPalette.faint)
+                .lineLimit(1)
+            Text(value.isEmpty ? "—" : value)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let caption, !caption.isEmpty {
+                Text(caption)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(SplashPalette.muted)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+    }
+}
+
+// MARK: - Rail
+
+/// One section in the editor's rail: an icon, a name, a one-line explanation,
+/// and a dot when the section differs from the configuration it opened on.
+private struct RailItem: View {
+    let section: SettingsSection
+    let selected: Bool
+    let changed: Bool
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: section.systemImage)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(selected ? .white : section.tint)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        selected
+                            ? AnyShapeStyle(
+                                LinearGradient(
+                                    colors: [section.tint, section.tint.opacity(0.72)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            : AnyShapeStyle(section.tint.opacity(0.13)),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(section.title)
+                        .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(.primary)
+                    Text(section.summary)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(SplashPalette.muted)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+                if changed {
+                    Circle()
+                        .fill(section.tint)
+                        .frame(width: 5, height: 5)
+                        .shadow(color: section.tint.opacity(0.7), radius: 3)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(
+                selected
+                    ? AnyShapeStyle(section.tint.opacity(0.14))
+                    : AnyShapeStyle(hovering ? SplashPalette.surface.opacity(0.5) : Color.clear),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        selected ? section.tint.opacity(0.38) : Color.clear,
+                        lineWidth: 0.8
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+// MARK: - Cards and rows
+
+/// A titled card in the form: a small section label above a stack of rows.
+private struct EditorCard<Content: View>: View {
+    let title: String
+    let systemImage: String
+    var tint: Color = SplashPalette.cyan
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            SectionLabel(title: title, systemImage: systemImage, tint: tint)
+                .padding(.bottom, 3)
+            content
+        }
+        .padding(14)
+        .glassPanel(radius: 14)
+    }
+}
+
+/// A labelled row: the name and its explanation on the left, the control on
+/// the right at a shared width so the form scans as a column.
+private struct SettingRow<Control: View>: View {
+    let title: String
+    var help: String?
+    var controlWidth: CGFloat = 250
+    @ViewBuilder var control: Control
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 12.5, weight: .medium))
+                if let help, !help.isEmpty {
+                    Text(help)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(SplashPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 12)
+            control
+                .frame(width: controlWidth, alignment: .trailing)
+        }
+        .padding(.vertical, 9)
+    }
+}
+
+/// A short note under a page or inside a card: a warning, or a quiet hint.
+private struct EditorNote: View {
+    let text: String
+    var tone: Color = SplashPalette.amber
+    var systemImage: String = "exclamationmark.triangle.fill"
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10.5, weight: .semibold))
+            Text(text)
+                .font(.system(size: 11))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(tone)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(tone.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(tone.opacity(0.24), lineWidth: 0.7)
+        )
+    }
+}
+
+/// The two mode choices, as cards rather than a menu: the difference between
+/// downloading a model and serving a folder is worth a sentence.
+private struct ModeChoice: View {
+    let mode: AppModel.ModelMode
+    let selected: Bool
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 7) {
+                    Image(systemName: mode == .upstream ? "cloud.fill" : "folder.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(selected ? SplashPalette.blue : SplashPalette.muted)
+                    Text(mode == .upstream
+                        ? L10n.string("mode.upstream")
+                        : L10n.string("mode.local"))
+                        .font(.system(size: 12.5, weight: .semibold))
+                    Spacer(minLength: 0)
+                    if selected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(SplashPalette.blue)
+                    }
+                }
+                Text(mode == .upstream
+                    ? L10n.string("config.mode.upstream.help")
+                    : L10n.string("config.mode.local.help"))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(SplashPalette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(10)
+            .background(
+                selected
+                    ? AnyShapeStyle(SplashPalette.blue.opacity(0.13))
+                    : AnyShapeStyle(
+                        SplashPalette.canvas.opacity(hovering ? 0.52 : 0.30)
+                    ),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        selected
+                            ? SplashPalette.blue.opacity(0.55)
+                            : SplashPalette.border.opacity(0.45),
+                        lineWidth: selected ? 1.1 : 0.8
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+// MARK: - Fields
+
+/// The rounded field chrome every editor text field shares, including the
+/// focus edge the plain text style otherwise hides.
+private struct EditorFieldShell: ViewModifier {
+    var focused = false
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(
+                SplashPalette.canvas.opacity(0.55),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        focused
+                            ? SplashPalette.blue.opacity(0.75)
+                            : SplashPalette.border.opacity(0.55),
+                        lineWidth: focused ? 1.2 : 0.8
+                    )
+            )
+            .shadow(
+                color: focused ? SplashPalette.blue.opacity(0.18) : .clear,
+                radius: 4
+            )
+    }
+}
+
+private struct EditorField: View {
+    @Binding var text: String
+    var prompt = ""
+    var monospaced = false
+    var suffix: String?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            TextField("", text: $text, prompt: Text(prompt))
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, design: monospaced ? .monospaced : .default))
+                .focused($focused)
+            if let suffix, !suffix.isEmpty {
+                Text(suffix)
+                    .font(.system(size: 10))
+                    .foregroundStyle(SplashPalette.faint)
+            }
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(SplashPalette.faint)
+                }
+                .buttonStyle(.plain)
+                .help(L10n.string("field.clear"))
+            }
+        }
+        .modifier(EditorFieldShell(focused: focused))
+    }
+}
+
+private struct EditorNumberField: View {
+    @Binding var value: Int
+    var range: ClosedRange<Int>?
+    var width: CGFloat = 90
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("", value: $value, format: .number.grouping(.never))
+            .textFieldStyle(.plain)
+            .font(.system(size: 12, design: .monospaced))
+            .multilineTextAlignment(.trailing)
+            .focused($focused)
+            .modifier(EditorFieldShell(focused: focused))
+            .frame(width: width)
+            .onSubmit {
+                if let range {
+                    value = min(max(value, range.lowerBound), range.upperBound)
+                }
+            }
+    }
+}
+
+/// A size field (`16G`, `off`, or empty for automatic) with the unit hint
+/// kept outside the text, so the value stays easy to copy.
+private struct SizeField: View {
+    @Binding var text: String
+    var prompt: String
+
+    var body: some View {
+        EditorField(text: $text, prompt: prompt, monospaced: true)
+    }
+}
+
+private struct SecretField: View {
+    @Binding var text: String
+    @State private var revealed = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Group {
+                if revealed {
+                    TextField("", text: $text, prompt: Text("sk-…"))
+                } else {
+                    SecureField("", text: $text, prompt: Text("sk-…"))
+                }
+            }
+            .textFieldStyle(.plain)
+            .font(.system(size: 12, design: .monospaced))
+            .focused($focused)
+            Button {
+                revealed.toggle()
+            } label: {
+                Image(systemName: revealed ? "eye.slash" : "eye")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(SplashPalette.faint)
+            }
+            .buttonStyle(.plain)
+            .help(L10n.string(revealed ? "field.hide_key" : "field.show_key"))
+        }
+        .modifier(EditorFieldShell(focused: focused))
+    }
+}
+
+/// A path field with a browse button, and a clear button inside the field.
+private struct DirectoryPicker: View {
     @Binding var path: String
-    let disabled: Bool
-    /// choose a GGUF file rather than a directory.
+    let prompt: String
+    /// Choose a GGUF file rather than a directory.
     var files = false
 
     var body: some View {
         HStack(spacing: 6) {
-            TextField(label, text: $path, prompt: Text(prompt))
-                .textFieldStyle(.roundedBorder)
-                .disabled(disabled)
-            Button(L10n.string("field.browse")) {
+            EditorField(text: $path, prompt: prompt, monospaced: true)
+            Button {
                 select()
+            } label: {
+                Image(systemName: files ? "doc.badge.plus" : "folder")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(SplashPalette.cyan)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        SplashPalette.surface.opacity(0.72),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(SplashPalette.border.opacity(0.5), lineWidth: 0.7)
+                    )
             }
-            .disabled(disabled)
-            if !path.isEmpty {
-                Button {
-                    path = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.borderless)
-                .help(L10n.string("field.clear"))
-                .disabled(disabled)
-            }
+            .buttonStyle(.plain)
+            .help(L10n.string("field.browse"))
         }
     }
 
