@@ -1038,6 +1038,22 @@ class HarnessTestCase(unittest.TestCase):
             time.sleep(0.005)
         self.assertEqual(admission.stats()["active"], expected)
 
+    def _fill_request_gate(self, harness):
+        """Takes every `--queue-size` slot, as a queue of generations would,
+        and gives them back when the test ends. An endpoint that holds no
+        request-gate slot must still answer while the gate is full."""
+        gate = harness.server.requests
+        held = 0
+        while gate.acquire():
+            held += 1
+
+        def release():
+            for _ in range(held):
+                gate.release()
+
+        self.addCleanup(release)
+        return held
+
 
 def chat_body(**extra):
     body = {

@@ -566,6 +566,9 @@ final class AppModel: ObservableObject {
                     ?? L10n.format("thermal.error.status", http.statusCode)
                 lastSmartDuty = nil
             } else {
+                // A change that goes through clears a refusal an earlier
+                // push got while the server was busy.
+                thermalError = nil
                 lastSmartDuty = duty
             }
         } catch {

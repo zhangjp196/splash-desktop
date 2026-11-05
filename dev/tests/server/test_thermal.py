@@ -123,6 +123,19 @@ class ThermalTests(HarnessTestCase):
                     status, payload = self.post(harness, {"prefill_duty_percent": 60})
                 self.assertEqual((status, payload["error"]["code"]), (503, code))
 
+    def test_a_queue_full_of_generations_does_not_refuse_the_change(self):
+        # Chat Completions, Responses and Messages hold `--queue-size` slots
+        # until their responses end; a control endpoint must still answer
+        # while every one of them is taken.
+        runtime = FakeRuntime()
+        harness = self.harness(runtime)
+        self._fill_request_gate(harness)
+        self.assertEqual(
+            self.post(harness, {"prefill_duty_percent": 60}),
+            (200, {"prefill_duty_percent": 60}),
+        )
+        self.assertEqual(runtime.duty_calls, [60.0])
+
     def test_the_change_needs_the_api_key(self):
         runtime = FakeRuntime()
         harness = self.harness(runtime, api_key="test-server-key")

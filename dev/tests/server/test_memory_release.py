@@ -64,6 +64,18 @@ class MemoryReleaseTests(HarnessTestCase):
                 )
         self.assertEqual(runtime.release_calls, 3)
 
+    def test_a_queue_full_of_generations_does_not_refuse_a_release(self):
+        # Only the LLM APIs hold `--queue-size` slots; a release must answer
+        # while every one of them is taken.
+        runtime = FakeRuntime()
+        harness = self.harness(runtime)
+        self._fill_request_gate(harness)
+        self.assertEqual(
+            self.post(harness, {}),
+            (200, {"released": True, "weights": RELEASED_WEIGHTS}),
+        )
+        self.assertEqual(runtime.release_calls, 1)
+
     def test_the_idle_release_off_does_not_stop_a_release(self):
         # --idle-release off turns only the timer off: the engine releases on
         # request, and the server answers its document as for any release.

@@ -200,16 +200,26 @@ class PostRoute:
     # engine's state refuses none of its requests, which hold slots of the
     # token-count gate instead of the request gate.
     prompt_only: bool = False
+    # Whether it is an LLM API the queue admits: it submits the engine's
+    # work and holds a `--queue-size` slot from its arrival until its
+    # response ends, so a request that arrives with every slot taken is
+    # refused 503 frontend_overloaded (529 on /v1/systemone). Chat
+    # Completions, Responses, Messages, text completions, judgments and
+    # systemone are these. The prompt tools keep their own preparation gate
+    # and a control endpoint answers at once, so neither holds a slot.
+    queued: bool = False
     # Whether it takes no fields: a request carries no body or an empty JSON
     # object.
     fieldless: bool = False
 
 
 POST_ROUTES = {
-    "/v1/chat/completions": PostRoute("_post_chat_completions", OPENAI_ERRORS),
-    "/v1/completions": PostRoute("_post_completions", OPENAI_ERRORS),
-    "/v1/responses": PostRoute("_post_responses", OPENAI_ERRORS),
-    "/v1/messages": PostRoute("_post_messages", ANTHROPIC_ERRORS),
+    "/v1/chat/completions": PostRoute(
+        "_post_chat_completions", OPENAI_ERRORS, queued=True
+    ),
+    "/v1/completions": PostRoute("_post_completions", OPENAI_ERRORS, queued=True),
+    "/v1/responses": PostRoute("_post_responses", OPENAI_ERRORS, queued=True),
+    "/v1/messages": PostRoute("_post_messages", ANTHROPIC_ERRORS, queued=True),
     "/v1/messages/count_tokens": PostRoute(
         "_post_count_tokens", ANTHROPIC_ERRORS, prompt_only=True
     ),
@@ -218,8 +228,8 @@ POST_ROUTES = {
     "/apply-template": PostRoute(
         "_post_apply_template", OPENAI_ERRORS, prompt_only=True
     ),
-    "/v1/judgments": PostRoute("_post_judgments", OPENAI_ERRORS),
-    "/v1/systemone": PostRoute("_post_systemone", SYSTEMONE_ERRORS),
+    "/v1/judgments": PostRoute("_post_judgments", OPENAI_ERRORS, queued=True),
+    "/v1/systemone": PostRoute("_post_systemone", SYSTEMONE_ERRORS, queued=True),
     "/v1/memory/release": PostRoute(
         "_post_memory_release", OPENAI_ERRORS, fieldless=True
     ),
@@ -655,11 +665,17 @@ class FrontendHandler(BaseHTTPRequestHandler):
             return
         # Hold one ingress slot through body parsing, preparation, and the
         # complete response. Slow uploads/readers cannot accumulate outside
-        # the native pending limit, and control endpoints need no such slot.
-        admission = (
-            self.server.token_counts if route.prompt_only else self.server.requests
-        )
-        if not admission.acquire():
+        # the native pending limit. Only the LLM APIs the queue admits hold
+        # one of the request gate's slots; the prompt tools hold a
+        # preparation slot of the token-count gate, and a control endpoint,
+        # which answers at once, holds none.
+        if route.prompt_only:
+            admission = self.server.token_counts
+        elif route.queued:
+            admission = self.server.requests
+        else:
+            admission = None
+        if admission is not None and not admission.acquire():
             self._safe_error(
                 APIError(
                     503,
@@ -702,7 +718,8 @@ class FrontendHandler(BaseHTTPRequestHandler):
             # freeing it returns the input it retains.
             self._submitted = None
             self._submitted_jobs = []
-            admission.release()
+            if admission is not None:
+                admission.release()
             self.app.latencies.observe("http_request", time.monotonic() - started_at)
 
     def _serve(self, route, started_at):
