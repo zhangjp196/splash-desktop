@@ -57,13 +57,14 @@ final class ChatBridge: ObservableObject {
 /// under one native band that holds the history, a new chat, and clearing it.
 struct ChatPane: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var bridge = ChatBridge()
     @State private var reloadToken = 0
     @State private var undoVisible = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 history
                 if bridge.running {
                     ProgressView()
@@ -71,6 +72,12 @@ struct ChatPane: View {
                         .padding(.leading, 2)
                 }
                 Spacer(minLength: 8)
+                if let tokens = model.contextTokens, model.phase == .ready {
+                    Text(L10n.format("context.tokens", tokens.formatted()))
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(SplashPalette.faint)
+                        .lineLimit(1)
+                }
                 iconButton("square.and.pencil", help: L10n.string("chat.new")) {
                     bridge.newChat()
                 }
@@ -84,20 +91,35 @@ struct ChatPane: View {
                 }
                 .disabled(model.phase != .ready)
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
-            .background(.bar)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .background {
+                ZStack {
+                    Rectangle().fill(.ultraThinMaterial)
+                    LinearGradient(
+                        colors: [
+                            SplashPalette.cyan.opacity(0.08),
+                            SplashPalette.canvas.opacity(0.10),
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                }
+            }
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(SplashPalette.border.opacity(0.35))
+                    .frame(height: 1)
+            }
 
             if undoVisible {
                 undoBar
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            Divider()
-
             content
         }
-        .background(.background)
+        .background(Color.clear)
         .animation(.easeOut(duration: 0.16), value: undoVisible)
         .onChange(of: model.phase) { _, phase in
             if phase == .ready { reloadToken += 1 }
@@ -144,7 +166,11 @@ struct ChatPane: View {
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
-            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 7))
+            .background(SplashPalette.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(SplashPalette.border.opacity(0.45), lineWidth: 0.7)
+            )
             .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
@@ -176,7 +202,12 @@ struct ChatPane: View {
 
     @ViewBuilder private var content: some View {
         if model.phase == .ready, let url = model.chatEmbedURL {
-            WebChat(url: url, reloadToken: reloadToken, bridge: bridge)
+            WebChat(
+                url: url,
+                reloadToken: reloadToken,
+                bridge: bridge,
+                dark: colorScheme == .dark
+            )
         } else if model.phase == .starting || model.phase == .stopping {
             VStack(spacing: 10) {
                 ProgressView()
@@ -219,6 +250,7 @@ private struct WebChat: NSViewRepresentable {
     let url: URL
     let reloadToken: Int
     let bridge: ChatBridge
+    let dark: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(bridge: bridge) }
 
@@ -228,10 +260,11 @@ private struct WebChat: NSViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "splash")
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
-        view.underPageBackgroundColor = .textBackgroundColor
+        view.underPageBackgroundColor = .clear
         view.allowsMagnification = false
         view.allowsBackForwardNavigationGestures = false
         view.setValue(false, forKey: "drawsBackground")
+        view.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         bridge.webView = view
         context.coordinator.loadedURL = url
         context.coordinator.loadedToken = reloadToken
@@ -241,6 +274,10 @@ private struct WebChat: NSViewRepresentable {
 
     func updateNSView(_ view: WKWebView, context: Context) {
         bridge.webView = view
+        let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        if view.appearance?.name != appearance?.name {
+            view.appearance = appearance
+        }
         guard context.coordinator.loadedURL != url
                 || context.coordinator.loadedToken != reloadToken else { return }
         context.coordinator.loadedURL = url

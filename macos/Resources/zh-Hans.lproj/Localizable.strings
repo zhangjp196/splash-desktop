@@ -102,9 +102,9 @@
 "live.context" = "上下文";
 "live.decode" = "解码速度";
 "live.prefill" = "输入速度";
-"live.draft_acceptance" = "Draft 接受率";
+"live.draft_acceptance" = "草稿接受率";
 "live.caption.tokens_per_second" = "token/秒";
-"live.caption.draft_acceptance" = "draft token 接受率";
+"live.caption.draft_acceptance" = "接受";
 "live.caption.queue" = "排队数 / 准入上限";
 "live.caption.context_setting" = "面板设置 %@";
 "live.caption.peak_of" = "峰值 %@";
@@ -146,7 +146,7 @@
 "models.configs" = "配置";
 "models.add_config" = "添加配置";
 "models.edit" = "编辑";
-"models.active" = "使用中";
+"models.active" = "运行中";
 "models.start" = "启动";
 "models.remove" = "移除";
 "models.remove.title" = "移除配置？";
@@ -259,3 +259,93 @@
 "chat.clear" = "清空历史";
 "chat.cleared" = "历史已清空";
 "chat.undo" = "撤销";
+
+// 仪表盘外壳：外观、命令面板与实时请求阶段。
+"appearance.title" = "外观";
+"appearance.system" = "跟随系统";
+"appearance.dark" = "深色";
+"appearance.light" = "浅色";
+"appearance.cycle" = "切换外观";
+
+"palette.placeholder" = "跳转到页面或运行命令";
+"palette.empty" = "没有匹配的操作";
+"palette.navigate" = "选择";
+"palette.run" = "运行";
+"palette.close" = "关闭";
+"palette.shortcut" = "命令面板（⌘K）";
+"palette.goto" = "前往";
+"palette.server" = "服务器";
+"palette.appearance" = "切换窗口主题";
+
+"sidebar.uptime" = "已运行 %@";
+"sidebar.offline" = "服务器已停止";
+"sidebar.working" = "处理中…";
+"sidebar.context" = "%@ 上下文";
+
+"live.eyebrow" = "引擎遥测";
+"live.updated" = "更新于";
+"live.lifecycle" = "请求生命周期";
+"live.lifecycle.caption" = "实时，每秒刷新";
+"live.memory_of_budget" = "占预算";
+"live.caption.allocated" = "Metal %@";
+"live.last_minute" = "最近一分钟";
+"live.caption.queue_short" = "排队";
+
+"stage.idle" = "空闲";
+"stage.queued" = "排队";
+"stage.prefilling" = "预填充";
+"stage.decoding" = "解码";
+"stage.idle.caption" = "等待下一个请求";
+"stage.queued.caption" = "%d 个请求正在等待推理槽位";
+"stage.prefilling.caption" = "读取提示词并填充 KV 缓存";
+"stage.decoding.caption" = "正在以 %@ tokens/s 生成";
+
+"menu.dashboard" = "实时仪表盘";
+"menu.memory" = "%@ / %@ 内存";
+
+"models.eyebrow" = "模型库";
+"thermal.eyebrow" = "散热控制";
+"log.eyebrow" = "服务器输出";
+
+"about.badge" = "Apple 芯片原生";
+"about.feature.speed" = "DFlash 2";
+"about.feature.memory" = "内存感知";
+"about.feature.local" = "默认本地私密";
+"about.footer" = "为 Apple 芯片上的 Splash 打造。";
+"live.memory.auto" = "自动预算";
+"live.memory.configured" = "手动预算";
+
+// 实时面板的附加内容：活动流、图表拖拽与操作提示。
+"activity.title" = "最近活动";
+"activity.empty" = "等待下一次请求完成。";
+"activity.completed" = "已完成";
+"activity.failed" = "失败";
+"activity.cancelled" = "已取消";
+"activity.rate" = "%@ tokens/秒";
+"activity.multi" = "%d 个请求";
+"activity.failed_detail" = "查看日志";
+"activity.cancelled_detail" = "客户端已停止";
+"activity.done" = "已完成 %d";
+
+"chart.now" = "现在";
+"chart.ago" = "%d 秒前";
+"chart.60s" = "60 秒";
+
+"toast.copied" = "API 地址已复制";
+
+// 来自 /status 的原生延迟直方图：首 token 延迟与 token 间隔。
+"live.latency" = "延迟";
+"live.ttft" = "首 token 延迟";
+"live.itl" = "token 间隔";
+"live.caption.latency" = "p95 %@ ms · %d 个样本";
+"live.caption.latency_empty" = "还没有样本";
+
+// 与推理端口保持连接的本机进程。
+"clients.title" = "已连接客户端";
+"clients.count" = "%d 个客户端";
+"clients.one" = "1 个客户端";
+"clients.empty" = "还没有客户端连接";
+"clients.hint" = "让应用连接到 %@";
+"clients.detail" = "PID %d · %d 个连接";
+"clients.detail.one" = "PID %d · 1 个连接";
+"clients.refresh" = "刷新已连接客户端";

@@ -104,7 +104,7 @@
 "live.prefill" = "Input rate";
 "live.draft_acceptance" = "Draft acceptance";
 "live.caption.tokens_per_second" = "tokens/s";
-"live.caption.draft_acceptance" = "draft tokens accepted";
+"live.caption.draft_acceptance" = "accepted";
 "live.caption.queue" = "queued against the admission limit";
 "live.caption.context_setting" = "panel setting %@";
 "live.caption.peak_of" = "peak %@";
@@ -146,7 +146,7 @@
 "models.configs" = "Configurations";
 "models.add_config" = "Add configuration";
 "models.edit" = "Edit";
-"models.active" = "In use";
+"models.active" = "Running";
 "models.start" = "Start";
 "models.remove" = "Remove";
 "models.remove.title" = "Remove configuration?";
@@ -259,3 +259,96 @@
 "chat.clear" = "Clear history";
 "chat.cleared" = "History cleared";
 "chat.undo" = "Undo";
+
+// The dashboard's shell: appearance, the command palette, and the live
+// request lifecycle.
+"appearance.title" = "Appearance";
+"appearance.system" = "System";
+"appearance.dark" = "Dark";
+"appearance.light" = "Light";
+"appearance.cycle" = "Cycle appearance";
+
+"palette.placeholder" = "Jump to a page or run a command";
+"palette.empty" = "No matching actions";
+"palette.navigate" = "navigate";
+"palette.run" = "run";
+"palette.close" = "close";
+"palette.shortcut" = "Command palette (⌘K)";
+"palette.goto" = "Go to";
+"palette.server" = "Server";
+"palette.appearance" = "Switch the window theme";
+
+"sidebar.uptime" = "Up %@";
+"sidebar.offline" = "Server offline";
+"sidebar.working" = "Working…";
+"sidebar.context" = "%@ ctx";
+
+"live.eyebrow" = "Engine telemetry";
+"live.updated" = "updated";
+"live.lifecycle" = "Request lifecycle";
+"live.lifecycle.caption" = "live, every second";
+"live.memory_of_budget" = "of budget";
+"live.caption.allocated" = "Metal %@";
+"live.last_minute" = "Last minute";
+"live.caption.queue_short" = "queued";
+
+"stage.idle" = "Idle";
+"stage.queued" = "Queued";
+"stage.prefilling" = "Prefill";
+"stage.decoding" = "Decode";
+"stage.idle.caption" = "Waiting for the next request";
+"stage.queued.caption" = "%d waiting for an inference slot";
+"stage.prefilling.caption" = "Reading the prompt and filling the KV cache";
+"stage.decoding.caption" = "Streaming tokens at %@ tokens/s";
+
+"menu.dashboard" = "Live Dashboard";
+"menu.memory" = "%@ / %@ memory";
+
+"models.eyebrow" = "Model library";
+"thermal.eyebrow" = "Heat control";
+"log.eyebrow" = "Server output";
+
+"about.badge" = "Apple silicon native";
+"about.feature.speed" = "DFlash 2";
+"about.feature.memory" = "Memory aware";
+"about.feature.local" = "Private by default";
+"about.footer" = "Built for Splash on Apple silicon.";
+"live.memory.auto" = "Auto budget";
+"live.memory.configured" = "Set budget";
+
+// The live board's extra layers: a short activity feed, chart scrubbing and
+// the confirmation toast.
+"activity.title" = "Recent activity";
+"activity.empty" = "Waiting for the next completion.";
+"activity.completed" = "Completed";
+"activity.failed" = "Failed";
+"activity.cancelled" = "Cancelled";
+"activity.rate" = "%@ tokens/s";
+"activity.multi" = "%d requests";
+"activity.failed_detail" = "see the log";
+"activity.cancelled_detail" = "stopped by the client";
+"activity.done" = "%d done";
+
+"chart.now" = "now";
+"chart.ago" = "%ds ago";
+"chart.60s" = "60s";
+
+"toast.copied" = "API address copied";
+
+// Native latency histograms from /status: time to first token and the gap
+// between tokens.
+"live.latency" = "Latency";
+"live.ttft" = "Time to first token";
+"live.itl" = "Inter-token latency";
+"live.caption.latency" = "p95 %@ ms · %d samples";
+"live.caption.latency_empty" = "no samples yet";
+
+// The processes with an established socket on the inference port.
+"clients.title" = "Connected clients";
+"clients.count" = "%d clients";
+"clients.one" = "1 client";
+"clients.empty" = "No clients connected";
+"clients.hint" = "Point an app at %@";
+"clients.detail" = "PID %d · %d connections";
+"clients.detail.one" = "PID %d · 1 connection";
+"clients.refresh" = "Refresh connected clients";

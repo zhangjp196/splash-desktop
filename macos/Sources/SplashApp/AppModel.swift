@@ -11,6 +11,15 @@ struct LiveStatus: Equatable {
     var decodeTokensPerSecond: Double?
     var prefillTokensPerSecond: Double?
     var draftAcceptanceRate: Double?
+    /// The engine's request latency histograms, in milliseconds. `samples` is
+    /// the window the percentiles cover; zero means the engine has not
+    /// completed a request since it started.
+    var ttftP50Milliseconds: Double?
+    var ttftP95Milliseconds: Double?
+    var ttftSamples = 0
+    var itlP50Milliseconds: Double?
+    var itlP95Milliseconds: Double?
+    var itlSamples = 0
     /// The fastest the engine has been seen to run since it started: the peak
     /// behind each rate above, kept by the panel because /status reports the
     /// engine's lifetime average, not its best batch.
@@ -68,6 +77,42 @@ struct LiveStatus: Equatable {
     var thermalScale: Double?
     var pacedWaits: Int?
     var pacedWaitMilliseconds: Double?
+}
+
+/// What the engine appears to be doing right now, inferred from the counters
+/// between two `/status` polls: a submitted request lights prefill, a completed
+/// batch lights decode, a pending queue lights the queue, and a quiet engine
+/// settles to idle. The polling interval is one second, so the view holds a
+/// stage for a moment after its edge instead of flickering.
+enum RequestStage: String, CaseIterable, Identifiable {
+    case idle, queued, prefilling, decoding
+
+    var id: String { rawValue }
+
+    var title: String { L10n.string("stage." + rawValue) }
+
+    var systemImage: String {
+        switch self {
+        case .idle: return "pause.fill"
+        case .queued: return "hourglass"
+        case .prefilling: return "arrow.down.to.line"
+        case .decoding: return "bolt.fill"
+        }
+    }
+}
+
+/// One request outcome the live board remembers for a few minutes, so the
+/// dashboard has a short history of what happened rather than only totals.
+struct RequestEvent: Identifiable, Equatable {
+    enum Kind: String {
+        case completed, failed, cancelled
+    }
+
+    let id = UUID()
+    let date: Date
+    let kind: Kind
+    let count: Int
+    let tokensPerSecond: Double?
 }
 
 /// One temperature sensor's reading: the engine reads them from the SMC, so
@@ -183,6 +228,24 @@ final class AppModel: ObservableObject {
     @Published var contextTokens: Int?
     @Published var live = LiveStatus()
 
+    // The dashboard's short memory: the last minute of the rates the live
+    // board draws as sparklines. The engine reports only its current reading,
+    // so the panel keeps the shape of the minute itself.
+    @Published var decodeHistory: [Double] = []
+    @Published var prefillHistory: [Double] = []
+    @Published var acceptanceHistory: [Double] = []
+    @Published var memoryHistory: [Double] = []
+    /// The last few completed, failed and cancelled requests, newest last.
+    @Published var recentEvents: [RequestEvent] = []
+    /// Processes with an established connection to the inference port, scanned
+    /// every few seconds while the server is up.
+    @Published var connectedClients: [ConnectedClient] = []
+    /// What the engine looks to be doing right now.
+    @Published var stage: RequestStage = .idle
+    /// When the current server first answered as ready, for the uptime line.
+    @Published var readySince: Date?
+    @Published var statusUpdatedAt: Date?
+
     // The first-launch values live in ServerSettings; the store replaces them
     // below before the window is shown.
     @Published var modelMode: ModelMode = .upstream
@@ -219,6 +282,10 @@ final class AppModel: ObservableObject {
     // JSON beside the settings.
     @Published var configs: [ModelConfig] = []
     @Published var activeConfigID: UUID?
+    /// The configuration the running server was started with. It stays put
+    /// while another configuration is edited, so "in use" never follows the
+    /// editor; a model that is merely selected is not running anything.
+    @Published private(set) var runningConfigID: UUID?
 
     /// The interface language follows the system unless the user fixes it.
     enum InterfaceLanguage: String, CaseIterable, Identifiable {
@@ -258,6 +325,9 @@ final class AppModel: ObservableObject {
     /// The last duty the smart mode pushed, so the poll pushes only when the
     /// fans and temperatures have moved it, not once a second forever.
     private var lastSmartDuty: Double?
+    /// How long the inferred stage may sit at its last edge before a quiet
+    /// engine settles back to idle.
+    private var stageHoldUntil = Date.distantPast
     /// True while stored settings are being applied, so the assignments do not
     /// read as edits and schedule a save of what was just loaded.
     private var restoring = false
@@ -269,6 +339,10 @@ final class AppModel: ObservableObject {
     var foreignPID: pid_t?
     private var offlineCount = 0
     private let statusFetcher = LiveStatusFetcher()
+    private let clientScanner = ClientScanner()
+    /// Counts status polls so the connection table is read every fourth
+    /// second rather than every one.
+    private var clientTick = 0
 
     let catalogIDs = Runtime.catalog
 
@@ -645,10 +719,20 @@ final class AppModel: ObservableObject {
         configs.first { $0.id == activeConfigID }
     }
 
+    /// The configuration behind the server that is actually running, or nil
+    /// when the server was attached from outside the app.
+    var runningConfig: ModelConfig? {
+        configs.first { $0.id == runningConfigID }
+    }
+
     func copyToClipboard(_ text: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        NotificationCenter.default.post(
+            name: .splashToast,
+            object: L10n.string("toast.copied")
+        )
     }
 
     var canStart: Bool {
@@ -677,7 +761,13 @@ final class AppModel: ObservableObject {
 
     var menuBarSymbol: String {
         switch phase {
-        case .ready: return "bolt.horizontal.circle.fill"
+        case .ready:
+            switch stage {
+            case .idle: return "bolt.horizontal.circle.fill"
+            case .queued: return "hourglass.circle.fill"
+            case .prefilling: return "arrow.down.circle.fill"
+            case .decoding: return "bolt.circle.fill"
+            }
         case .starting, .stopping, .idle: return "bolt.horizontal.circle"
         case .failed: return "exclamationmark.triangle"
         }
@@ -805,6 +895,17 @@ final class AppModel: ObservableObject {
         log = ""
         contextTokens = nil
         live = LiveStatus()
+        decodeHistory = []
+        prefillHistory = []
+        acceptanceHistory = []
+        memoryHistory = []
+        recentEvents = []
+        connectedClients = []
+        clientTick = 0
+        stage = .idle
+        readySince = nil
+        statusUpdatedAt = nil
+        runningConfigID = nil
         stopping = false
         let arguments = launchArguments(launcherPath: launcher.path)
 
@@ -846,6 +947,7 @@ final class AppModel: ObservableObject {
         }
         self.process = process
         phase = .starting
+        runningConfigID = activeConfigID
         pollStatus()
     }
 
@@ -881,6 +983,7 @@ final class AppModel: ObservableObject {
         } else {
             phase = .idle
             foreignPID = nil
+            settle()
         }
     }
 
@@ -975,6 +1078,7 @@ final class AppModel: ObservableObject {
         process = nil
         poll?.cancel()
         poll = nil
+        settle()
         if stopping {
             stopping = false
             phase = .idle
@@ -1016,11 +1120,43 @@ final class AppModel: ObservableObject {
                 foreignPID = nil
                 poll?.cancel()
                 poll = nil
+                settle()
             }
             return
         }
         offlineCount = 0
         applyStatus(snapshot)
+        if phase == .ready {
+            clientTick += 1
+            if clientTick % 4 == 1 {
+                await refreshClients()
+            }
+        }
+    }
+
+    /// Re-read the connection table on demand, for the clients panel's refresh
+    /// button.
+    func refreshConnectedClients() {
+        Task { @MainActor [weak self] in
+            await self?.refreshClients()
+        }
+    }
+
+    private func refreshClients() async {
+        guard phase == .ready else {
+            connectedClients = []
+            return
+        }
+        var excluding = Set<Int32>()
+        excluding.insert(getpid())
+        if let pid = process?.processIdentifier { excluding.insert(pid) }
+        if let pid = foreignPID { excluding.insert(pid) }
+        if let pid = servePID(port: port) { excluding.insert(pid) }
+        let scanned = await clientScanner.scan(port: port, excluding: excluding)
+        guard phase == .ready else { return }
+        if scanned != connectedClients {
+            connectedClients = scanned
+        }
     }
 
     /// The rate of the engine's most recent completed batch of one kind, when
@@ -1056,6 +1192,112 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Keep one minute of a reading, so the board draws its shape as well as
+    /// its current value. A metric the engine has not reported yet enters as
+    /// zero rather than widening the y-axis with a stale guess.
+    private func record(
+        _ value: Double?,
+        in path: ReferenceWritableKeyPath<AppModel, [Double]>
+    ) {
+        var series = self[keyPath: path]
+        series.append(max(0, value ?? 0))
+        if series.count > 60 {
+            series.removeFirst(series.count - 60)
+        }
+        self[keyPath: path] = series
+    }
+
+    /// The share of the memory budget in use, for the ring and its history.
+    private func memoryFraction(_ status: LiveStatus) -> Double? {
+        let limit = status.configuredMemoryLimitBytes ?? status.governorLimitBytes
+        guard let used = status.physicalBytes, let limit, limit > 0 else { return nil }
+        return min(1, Double(used) / Double(limit))
+    }
+
+    /// Turn the counter deltas into the live board's short activity feed. The
+    /// first sample of a server is skipped: it reports totals from before the
+    /// panel started watching, which are not events of this session.
+    private func recordEvents(from previous: LiveStatus, to next: LiveStatus) {
+        guard previous.updated else { return }
+        func append(_ kind: RequestEvent.Kind, _ count: Int, rate: Double? = nil) {
+            guard count > 0 else { return }
+            recentEvents.append(
+                RequestEvent(
+                    date: Date(),
+                    kind: kind,
+                    count: count,
+                    tokensPerSecond: rate
+                )
+            )
+        }
+        append(.completed, next.completed - previous.completed,
+               rate: next.decodeTokensPerSecond)
+        append(.failed, next.failed - previous.failed)
+        append(.cancelled, next.cancelled - previous.cancelled)
+        if recentEvents.count > 8 {
+            recentEvents.removeFirst(recentEvents.count - 8)
+        }
+    }
+
+    /// Read the counters that changed since the last poll, with a short hold so
+    /// a live stage does not blink between one-second samples. The engine's
+    /// `submitted - completed - failed - cancelled` is what is in flight; a
+    /// rising prefill rate names prompt ingestion, a rising decode rate names
+    /// generation, and a queue is a request waiting before it starts.
+    private func advanceStage(from previous: LiveStatus, to next: LiveStatus) {
+        let now = Date()
+        let active = max(0, next.submitted - next.completed - next.failed - next.cancelled)
+        if active > 0 {
+            let prefillRose = (next.prefillTokensPerSecond ?? 0) > (previous.prefillTokensPerSecond ?? 0) + 0.5
+            let decodeRose = (next.decodeTokensPerSecond ?? 0) > (previous.decodeTokensPerSecond ?? 0) + 0.5
+            if prefillRose {
+                setStage(.prefilling, hold: 3)
+            } else if decodeRose || stage == .decoding {
+                setStage(.decoding, hold: 3)
+            } else {
+                setStage(.prefilling, hold: 3)
+            }
+        } else if next.pending > 0 || next.waiting > 0 {
+            setStage(.queued)
+        } else if now < stageHoldUntil {
+            return
+        } else {
+            setStage(.idle)
+        }
+    }
+
+    private func setStage(_ new: RequestStage, hold: TimeInterval = 0) {
+        if stage != new {
+            stage = new
+        }
+        if hold > 0 {
+            stageHoldUntil = Date().addingTimeInterval(hold)
+        }
+    }
+
+    /// A stopped server has no live stage and no uptime, but keeps the last
+    /// minute of history so the dashboard does not blank between runs.
+    private func settle() {
+        stage = .idle
+        readySince = nil
+        statusUpdatedAt = nil
+        stageHoldUntil = .distantPast
+        runningConfigID = nil
+        connectedClients = []
+        clientTick = 0
+    }
+
+    /// The time the current server has been ready, in words for the sidebar.
+    var uptimeText: String? {
+        guard let readySince else { return nil }
+        let seconds = max(0, Int(Date().timeIntervalSince(readySince)))
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 {
+            return String(format: "%dm %02ds", seconds / 60, seconds % 60)
+        }
+        return String(format: "%dh %02dm", seconds / 3600, (seconds % 3600) / 60)
+    }
+
     private func applyStatus(_ snapshot: LiveSnapshot) {
         let object = snapshot.status
         var status = LiveStatus()
@@ -1070,6 +1312,16 @@ final class AppModel: ObservableObject {
             status.decodeTokensPerSecond = metrics["decode_tokens_per_second"] as? Double
             status.prefillTokensPerSecond = metrics["prefill_tokens_per_second"] as? Double
             status.draftAcceptanceRate = metrics["draft_acceptance_rate"] as? Double
+            if let ttft = metrics["ttft_ms"] as? [String: Any] {
+                status.ttftP50Milliseconds = ttft["p50"] as? Double
+                status.ttftP95Milliseconds = ttft["p95"] as? Double
+                status.ttftSamples = ttft["samples"] as? Int ?? 0
+            }
+            if let itl = metrics["itl_ms"] as? [String: Any] {
+                status.itlP50Milliseconds = itl["p50"] as? Double
+                status.itlP95Milliseconds = itl["p95"] as? Double
+                status.itlSamples = itl["samples"] as? Int ?? 0
+            }
             status.capacityFailures = metrics["capacity_failures"] as? Int ?? 0
             status.metalFailures = metrics["metal_failures"] as? Int ?? 0
             // The peaks: the fastest completed batch the engine has reported
@@ -1160,6 +1412,19 @@ final class AppModel: ObservableObject {
             status.pacedWaitMilliseconds = throttle["paced_wait_ms"] as? Double
         }
         status.updated = true
+        let previous = live
+        statusUpdatedAt = Date()
+        if status.ready {
+            if readySince == nil { readySince = Date() }
+        } else {
+            readySince = nil
+        }
+        record(status.decodeTokensPerSecond, in: \.decodeHistory)
+        record(status.prefillTokensPerSecond, in: \.prefillHistory)
+        record((status.draftAcceptanceRate ?? 0) * 100, in: \.acceptanceHistory)
+        record(memoryFraction(status), in: \.memoryHistory)
+        recordEvents(from: previous, to: status)
+        advanceStage(from: previous, to: status)
         live = status
         // The smart mode is the app's own pacer: each poll it reads the fans
         // and temperatures the engine just reported and takes the engine's

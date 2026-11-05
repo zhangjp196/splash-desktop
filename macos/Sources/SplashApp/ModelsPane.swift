@@ -11,13 +11,19 @@ struct ModelsPane: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                PaneHeader(title: L10n.string("view.models"), subtitle: subtitle) {
+                PaneHeader(
+                    title: L10n.string("view.models"),
+                    subtitle: subtitle,
+                    eyebrow: L10n.string("models.eyebrow")
+                ) {
                     Button {
                         editing = EditingConfig(config: model.newConfig(), isNew: true)
                     } label: {
                         Label(L10n.string("models.add_config"), systemImage: "plus")
+                            .font(.system(size: 12, weight: .semibold))
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(SplashPalette.blue)
                 }
                 if model.phase == .ready {
                     runningCard
@@ -43,7 +49,7 @@ struct ModelsPane: View {
             .frame(maxWidth: Theme.contentWidth, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .background(.background)
+        .background(Color.clear)
         .sheet(item: $editing) { session in
             ConfigEditor(
                 config: session.config,
@@ -77,12 +83,12 @@ struct ModelsPane: View {
         HStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 7) {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 7, height: 7)
-                        .shadow(color: .green.opacity(0.55), radius: 3)
-                    Text(verbatim: model.activeConfig?.displayName ?? model.live.modelID ?? L10n.string("models.none"))
-                        .font(.headline)
+                    StatusBeacon(color: SplashPalette.mint, active: true)
+                    Text(verbatim: model.runningConfig?.displayName
+                         ?? model.live.modelID
+                         ?? model.activeConfig?.displayName
+                         ?? L10n.string("models.none"))
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .lineLimit(1)
                 }
                 Text(model.statusText)
@@ -114,20 +120,7 @@ struct ModelsPane: View {
         }
         .padding(.horizontal, 15)
         .padding(.vertical, 13)
-        .background {
-            RoundedRectangle(cornerRadius: 14)
-                .fill(
-                    LinearGradient(
-                        colors: [Color.accentColor.opacity(0.07), Color.teal.opacity(0.05)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(Color.accentColor.opacity(0.16))
-        )
+        .glassPanel(tint: SplashPalette.mint, raised: true)
     }
 
     private var apiRow: some View {
@@ -150,8 +143,12 @@ struct ModelsPane: View {
             .help(L10n.string("menu.copy_api"))
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.quaternary.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
+        .padding(.vertical, 9)
+        .background(SplashPalette.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(SplashPalette.border.opacity(0.45), lineWidth: 0.7)
+        )
     }
 
     private func rate(_ value: Double?) -> String {
@@ -182,16 +179,20 @@ private struct ConfigRow: View {
 
     @State private var hovering = false
 
-    private var isActive: Bool { model.activeConfigID == config.id }
+    /// Green marks the configuration the running server was started with, and
+    /// nothing else: selecting or editing another configuration is not use.
+    private var isServing: Bool {
+        model.isRunning && model.runningConfigID == config.id
+    }
 
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: config.settings.modelMode == .local ? "folder.fill" : "shippingbox.fill")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(isActive ? .white : Color.accentColor)
+                .foregroundStyle(isServing ? .white : Color.accentColor)
                 .frame(width: 30, height: 30)
                 .background(
-                    isActive
+                    isServing
                         ? AnyShapeStyle(Color.accentColor)
                         : AnyShapeStyle(Color.accentColor.opacity(0.12)),
                     in: RoundedRectangle(cornerRadius: 8)
@@ -202,8 +203,8 @@ private struct ConfigRow: View {
                     Text(config.displayName)
                         .font(.body.weight(.medium))
                         .lineLimit(1)
-                    if isActive {
-                        Pill(text: L10n.string("models.active"), tint: .green)
+                    if isServing {
+                        Pill(text: L10n.string("models.active"), tint: SplashPalette.mint)
                     }
                 }
                 HStack(spacing: 5) {
@@ -222,9 +223,13 @@ private struct ConfigRow: View {
                 model.apply(config)
                 model.start()
             } label: {
-                Label(L10n.string("models.start"), systemImage: "play.fill")
+                Label(
+                    isServing ? L10n.string("models.active") : L10n.string("models.start"),
+                    systemImage: isServing ? "checkmark.circle.fill" : "play.fill"
+                )
             }
             .buttonStyle(.borderedProminent)
+            .tint(isServing ? SplashPalette.mint : SplashPalette.blue)
             .controlSize(.regular)
             .disabled(model.isRunning || model.isBusy)
 
@@ -245,13 +250,26 @@ private struct ConfigRow: View {
         .padding(.horizontal, 13)
         .padding(.vertical, 10)
         .background {
-            RoundedRectangle(cornerRadius: Theme.cardRadius)
-                .fill(isActive ? Color.green.opacity(0.08) : Color.primary.opacity(hovering ? 0.045 : 0.025))
+            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                .fill(
+                    isServing
+                        ? AnyShapeStyle(
+                            LinearGradient(
+                                colors: [SplashPalette.mint.opacity(0.14), SplashPalette.cyan.opacity(0.04)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        : AnyShapeStyle(SplashPalette.surface.opacity(hovering ? 0.58 : 0.40))
+                )
         }
         .overlay {
-            RoundedRectangle(cornerRadius: Theme.cardRadius)
+            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                 .strokeBorder(
-                    isActive ? Color.green.opacity(0.45) : Color(nsColor: .separatorColor).opacity(0.6)
+                    isServing
+                        ? SplashPalette.mint.opacity(0.45)
+                        : SplashPalette.border.opacity(0.5),
+                    lineWidth: isServing ? 1 : 0.8
                 )
         }
         .contentShape(Rectangle())

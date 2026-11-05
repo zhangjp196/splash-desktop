@@ -118,7 +118,11 @@ struct ThermalPane: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                PaneHeader(title: L10n.string("view.thermal"), subtitle: L10n.string("thermal.subtitle"))
+                PaneHeader(
+                    title: L10n.string("view.thermal"),
+                    subtitle: L10n.string("thermal.subtitle"),
+                    eyebrow: L10n.string("thermal.eyebrow")
+                )
                 ladder
                 if model.live.updated {
                     MetricSection(
@@ -145,7 +149,7 @@ struct ThermalPane: View {
             .padding(Theme.pagePadding)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .background(.background)
+        .background(Color.clear)
     }
 
     /// The modes, with the one in effect marked. While a server runs, what
@@ -205,10 +209,7 @@ struct ThermalPane: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14).strokeBorder(.separator.opacity(0.5))
-        )
+        .glassPanel(tint: SplashPalette.amber, raised: true)
     }
 
     /// The duty a mode carries in effect, for its button's label: the mode's
@@ -423,12 +424,26 @@ private struct RungButton: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 9)
             .background(
-                selected ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.08),
-                in: RoundedRectangle(cornerRadius: 10)
+                selected
+                    ? AnyShapeStyle(
+                        LinearGradient(
+                            colors: [
+                                SplashPalette.blue.opacity(0.24),
+                                SplashPalette.cyan.opacity(0.09),
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    : AnyShapeStyle(SplashPalette.surface.opacity(0.38)),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(selected ? Color.accentColor.opacity(0.7) : .clear)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        selected ? SplashPalette.cyan.opacity(0.6) : SplashPalette.border.opacity(0.35),
+                        lineWidth: selected ? 1 : 0.7
+                    )
             )
         }
         .buttonStyle(.plain)

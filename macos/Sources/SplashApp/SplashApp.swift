@@ -1,33 +1,208 @@
 import AppKit
 import SwiftUI
 
-/// The menu bar controls: start and stop without opening the window, and a way
-/// back to the window after it is closed.
+/// The menu bar controls: a small live dashboard, start and stop without
+/// opening the window, and a way back to the window after it is closed.
 struct MenuBarView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Text(verbatim: model.statusText)
-        if let tokens = model.contextTokens, model.phase == .ready {
-            Text(verbatim: L10n.format("context.tokens", tokens.formatted()))
-        }
-        Divider()
-        Button(L10n.string("menu.show")) {
-            NSApp.activate(ignoringOtherApps: true)
-            openWindow(id: "main")
-        }
-        if model.isRunning {
-            Button(L10n.string("menu.stop")) { model.stop() }
-            Button(L10n.string("menu.open")) { model.openInBrowser() }
-            Button(L10n.string("menu.copy_api")) { model.copyToClipboard(model.apiBaseURL) }
-        } else {
-            Button(L10n.string("menu.start")) { model.start() }
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 8) {
+                BrandMark(size: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(verbatim: "Splash")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                    Text(model.statusText)
+                        .font(.system(size: 9))
+                        .foregroundStyle(SplashPalette.faint)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                StatusBeacon(color: indicator, active: model.isRunning)
+                Text(model.stage.title.uppercased())
+                    .font(.system(size: 8, weight: .bold))
+                    .tracking(0.7)
+                    .foregroundStyle(stageColor(model.stage))
+            }
+
+            if model.phase == .ready {
+                HStack(spacing: 8) {
+                    metric(
+                        L10n.string("live.decode"),
+                        model.live.decodeTokensPerSecond.map { String(format: "%.0f", $0) } ?? "—",
+                        L10n.string("live.caption.tokens_per_second"),
+                        SplashPalette.mint
+                    )
+                    metric(
+                        L10n.string("live.prefill"),
+                        model.live.prefillTokensPerSecond.map { String(format: "%.0f", $0) } ?? "—",
+                        L10n.string("live.caption.tokens_per_second"),
+                        SplashPalette.cyan
+                    )
+                    metric(
+                        L10n.string("live.pending"),
+                        "\(model.live.pending)",
+                        L10n.string("live.caption.queue_short"),
+                        SplashPalette.amber
+                    )
+                }
+
+                Sparkline(values: model.decodeHistory, tint: SplashPalette.mint)
+                    .frame(height: 26)
+
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(memoryTint)
+                        .frame(width: 5, height: 5)
+                    Text(L10n.format(
+                        "menu.memory",
+                        bytes(model.live.physicalBytes),
+                        bytes(model.live.configuredMemoryLimitBytes ?? model.live.governorLimitBytes)
+                    ))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(SplashPalette.faint)
+                    Spacer(minLength: 0)
+                    if let uptime = model.uptimeText {
+                        Text(L10n.format("sidebar.uptime", uptime))
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(SplashPalette.faint)
+                    }
+                }
+            }
+
+            Divider()
+
+            Button {
+                show(.live)
+            } label: {
+                menuRow(L10n.string("menu.dashboard"), "waveform.path.ecg", SplashPalette.mint)
+            }
+            .buttonStyle(.plain)
+
+            if model.isRunning {
+                Button {
+                    model.openInBrowser()
+                } label: {
+                    menuRow(L10n.string("menu.open"), "safari.fill", SplashPalette.cyan)
+                }
+                .buttonStyle(.plain)
+                Button {
+                    model.copyToClipboard(model.apiBaseURL)
+                } label: {
+                    menuRow(L10n.string("menu.copy_api"), "doc.on.doc.fill", SplashPalette.blue)
+                }
+                .buttonStyle(.plain)
+                Button {
+                    model.stop()
+                } label: {
+                    menuRow(L10n.string("menu.stop"), "stop.fill", SplashPalette.rose)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button {
+                    model.start()
+                } label: {
+                    menuRow(L10n.string("menu.start"), "play.fill", SplashPalette.mint)
+                }
+                .buttonStyle(.plain)
                 .disabled(!model.canStart)
+            }
+
+            Divider()
+
+            HStack {
+                Button(L10n.string("menu.show")) {
+                    show(nil)
+                }
+                .buttonStyle(.link)
+                Spacer()
+                Button(L10n.string("menu.quit")) {
+                    NSApplication.shared.terminate(nil)
+                }
+                .buttonStyle(.link)
+                .keyboardShortcut("q")
+            }
+            .font(.system(size: 11))
         }
-        Divider()
-        Button(L10n.string("menu.quit")) { NSApplication.shared.terminate(nil) }
-            .keyboardShortcut("q")
+        .padding(13)
+        .frame(width: 302)
+    }
+
+    private func show(_ section: RootView.Section?) {
+        if let section {
+            UserDefaults.standard.set(section.rawValue, forKey: "sidebar.selection")
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "main")
+    }
+
+    private func metric(_ title: String, _ value: String, _ unit: String, _ tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title.uppercased())
+                .font(.system(size: 7.5, weight: .bold))
+                .tracking(0.6)
+                .foregroundStyle(SplashPalette.faint)
+                .lineLimit(1)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(value)
+                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(tint)
+                    .contentTransition(.numericText())
+                Text(unit)
+                    .font(.system(size: 7.5))
+                    .foregroundStyle(SplashPalette.faint)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(tint.opacity(0.18), lineWidth: 0.7)
+        )
+    }
+
+    private func menuRow(_ title: String, _ icon: String, _ tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(tint)
+                .frame(width: 22, height: 20)
+                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            Text(title)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
+    private var indicator: Color {
+        switch model.phase {
+        case .ready: return SplashPalette.mint
+        case .starting, .stopping: return SplashPalette.amber
+        case .failed: return SplashPalette.rose
+        case .idle: return SplashPalette.muted
+        }
+    }
+
+    private var memoryTint: Color {
+        guard let used = model.live.physicalBytes,
+              let limit = model.live.configuredMemoryLimitBytes ?? model.live.governorLimitBytes,
+              limit > 0 else { return SplashPalette.muted }
+        let share = Double(used) / Double(limit)
+        return share > 0.85 ? SplashPalette.rose : SplashPalette.blue
+    }
+
+    private func bytes(_ value: UInt64?) -> String {
+        guard let value else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .memory)
     }
 }
 
@@ -109,6 +284,13 @@ struct SplashApp: App {
             // The sidebar is the app's navigation and stays put; the standard
             // Hide/Show Sidebar commands would leave an empty window.
             CommandGroup(replacing: .sidebar) {}
+            CommandGroup(after: .sidebar) {
+                Divider()
+                Button(L10n.string("palette.shortcut")) {
+                    NotificationCenter.default.post(name: .showCommandPalette, object: nil)
+                }
+                .keyboardShortcut("k", modifiers: .command)
+            }
         }
 
         MenuBarExtra {

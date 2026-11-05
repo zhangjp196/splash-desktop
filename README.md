@@ -41,18 +41,25 @@ it over a name rather than an IP, such as `mymac.local` or a tunnel domain,
 also lists that name in **Extra host names** (each becomes `--allowed-host`).
 These edits apply to the next start.
 
-The window is a sidebar of **Chat**, **Models**, **Live**, **Thermal**,
-**Log**, and **About**, with the run state and Start and Stop pinned beneath
-it:
+The window is a dark-first dashboard — an aurora backdrop behind translucent
+cards — with a sidebar of **Chat**, **Models**, **Live**, **Thermal**, **Log**,
+and **About**, and the run state and Start and Stop pinned beneath it. Move
+between pages with ⌘1–⌘6, open the ⌘K command palette to jump or run a server
+action, and switch between dark, light, and the system appearance from the
+toolbar. Closing the window keeps a miniature live dashboard in the menu bar.
 
 - **Chat** — the conversation, in the window: history, a new chat, and one
   click to clear it. The same page still opens in a browser for anyone using
-  the server directly.
+  the server directly, in the same aurora palette.
 - **Models** — the configurations you have saved, each holding the whole set
   of server settings: add, edit, and switch between them, or aim one at a
   model folder on your disk.
-- **Live** — a live panel of decode and prefill rates, request counts, Metal
-  memory, and the caches.
+- **Live** — the engine's request lifecycle in real time (**Queued**,
+  **Prefill**, **Decode**, **Idle**), decode and prefill sparklines over the
+  last minute with hover scrubbing, DFlash 2 acceptance, a unified-memory ring
+  against the budget, TTFT and inter-token latency (p50/p95), the clients
+  connected to the port, a short feed of completed, failed and cancelled
+  requests, request counts, caches, and the heat at a glance.
 - **Thermal** — how hard the Mac may work and how loud it gets: **System
   default** (which sets nothing and leaves the fans to macOS), **Smart**
   (which paces prefill from the fans and the temperatures every second, at a
