@@ -23,14 +23,85 @@ enum class Format : uint32_t { Int8 = 1, BFloat16 = 2, Int4 = 3 };
   return format == Format::Int8 || format == Format::BFloat16 || format == Format::Int4;
 }
 
+// One element's bit width, and whether its scale is fp32 rather than carried
+// by the element: the quantized formats' scales are fp32, one per (KV head,
+// token).
+struct ElementFormat final {
+  uint32_t bits = 8;
+  bool floating = false;
+
+  bool operator==(const ElementFormat &) const = default;
+};
+
+// A layout's keys and values, each in its own element format. They share a
+// page, but not a size: Int4 packs two value elements per byte, one key
+// element.
+struct KvStorage final {
+  ElementFormat k = ElementFormat{8, false};
+  ElementFormat v = ElementFormat{8, false};
+
+  bool operator==(const KvStorage &) const = default;
+};
+
+[[nodiscard]] constexpr ElementFormat elementFormat(Format format) noexcept {
+  switch (format) {
+  case Format::Int8: return ElementFormat{8, false};
+  case Format::BFloat16: return ElementFormat{16, true};
+  case Format::Int4: return ElementFormat{4, false};
+  }
+  return ElementFormat{0, false};
+}
+
 // Whether a format's elements keep one fp32 scale per (KV head, token).
 [[nodiscard]] constexpr bool quantizedFormat(Format format) noexcept {
-  return format == Format::Int8 || format == Format::Int4;
+  return format != Format::BFloat16;
 }
 
 // How many elements of a format one byte of its data region holds.
 [[nodiscard]] constexpr uint32_t elementsPerByte(Format format) noexcept {
-  return format == Format::Int4 ? 2 : 1;
+  return format == Format::Int4 ? 2u : 1u;
+}
+
+[[nodiscard]] constexpr bool validElementFormat(ElementFormat format) noexcept {
+  return format.floating ? format.bits == 16 : format.bits == 8 || format.bits == 4;
+}
+
+// The storages the layouts implement: one element format for both tensors,
+// or INT8 keys with packed 4-bit values (k8v4). A 4-bit key with 8-bit
+// values is not a page any kernel or reader knows.
+[[nodiscard]] constexpr bool validKvStorage(const KvStorage &storage) noexcept {
+  if (!validElementFormat(storage.k) || !validElementFormat(storage.v))
+    return false;
+  return storage.k == storage.v ||
+         (storage.k.bits == 8 && !storage.k.floating && storage.v.bits == 4 &&
+          !storage.v.floating);
+}
+
+// A single-format layout's storage: the format's element for both keys and
+// values. A two-element layout (k8v4) names its own.
+[[nodiscard]] constexpr KvStorage storageOf(Format format) noexcept {
+  const ElementFormat element = elementFormat(format);
+  return {element, element};
+}
+
+// The one Format a storage holds for both keys and values: BF16, INT4, or
+// INT8 for the two-element k8v4 storage, whose keys are INT8.
+[[nodiscard]] constexpr Format singleFormat(const KvStorage &storage) noexcept {
+  if (storage.k.bits == 16 && storage.k.floating && storage.v.bits == 16 &&
+      storage.v.floating)
+    return Format::BFloat16;
+  if (storage.k.bits == 4 && !storage.k.floating && storage.v.bits == 4 &&
+      !storage.v.floating)
+    return Format::Int4;
+  return Format::Int8;
+}
+
+[[nodiscard]] constexpr bool quantizedFormat(ElementFormat format) noexcept {
+  return !format.floating;
+}
+
+[[nodiscard]] constexpr uint64_t dataBytes(uint64_t elements, ElementFormat format) noexcept {
+  return elements * format.bits / 8;
 }
 
 [[nodiscard]] constexpr std::string_view formatName(Format format) noexcept {
@@ -183,9 +254,24 @@ struct Layout final {
   // for the l-th; both are zero for a layout without a window.
   uint32_t windowTokens = 0;
   uint64_t windowedLayers = 0;
+  // The element format of the layout's keys and values. Int8 and BFloat16
+  // hold one element format for both; Int4 and k8v4 hold two, as the values
+  // pack two elements per byte while the keys keep one element per byte. Left
+  // at its default, it is the layout's single format; a two-element layout
+  // sets it and keeps Format::Int8 (its keys') as its `format`.
+  KvStorage storage = {{8, false}, {8, false}};
+
+  // The element formats the geometry uses: the explicit `storage` of a
+  // two-element layout, or the single format's for every other layout, whose
+  // `storage` is left at its default. A Layout built positionally from its
+  // format therefore keeps that format's elements.
+  [[nodiscard]] constexpr KvStorage effectiveStorage() const noexcept {
+    return storage == KvStorage{} ? storageOf(format) : storage;
+  }
 
   [[nodiscard]] constexpr bool valid() const noexcept {
-    return attentionLayers && kvHeads && headDimension && validFormat(format) &&
+    return attentionLayers && kvHeads && headDimension && validKvStorage(effectiveStorage()) &&
+           format == singleFormat(effectiveStorage()) &&
            !windowTokens == !windowedLayers &&
            (attentionLayers >= 64 || !(windowedLayers >> attentionLayers));
   }
@@ -218,25 +304,53 @@ struct Layout final {
   [[nodiscard]] constexpr uint32_t windowPages() const noexcept {
     return (windowTokens + kPageTokens - 1) / kPageTokens;
   }
-  [[nodiscard]] constexpr uint32_t elementsPerScale() const noexcept {
-    return quantizedFormat(format) ? headDimension : 0;
+  [[nodiscard]] constexpr uint32_t elementsPerScaleK() const noexcept {
+    return quantizedFormat(effectiveStorage().k) ? headDimension : 0;
+  }
+  [[nodiscard]] constexpr uint32_t elementsPerScaleV() const noexcept {
+    return quantizedFormat(effectiveStorage().v) ? headDimension : 0;
   }
   [[nodiscard]] constexpr uint64_t elementsPerLayerPage() const noexcept {
     return uint64_t{kPageTokens} * kvHeads * headDimension;
   }
-  [[nodiscard]] constexpr uint64_t scalesPerTensorLayerPage() const noexcept {
-    return quantizedFormat(format) ? uint64_t{kPageTokens} * kvHeads : 0;
+  [[nodiscard]] constexpr uint64_t scalesPerTensorLayerPageK() const noexcept {
+    return quantizedFormat(effectiveStorage().k) ? uint64_t{kPageTokens} * kvHeads : 0;
   }
-  // Keys and values share one data and one scale geometry per layer page.
-  [[nodiscard]] constexpr uint64_t dataBytesPerLayerPage() const noexcept {
-    return elementsPerLayerPage() / elementsPerByte(format) * (format == Format::BFloat16 ? 2 : 1);
+  [[nodiscard]] constexpr uint64_t scalesPerTensorLayerPageV() const noexcept {
+    return quantizedFormat(effectiveStorage().v) ? uint64_t{kPageTokens} * kvHeads : 0;
   }
-  [[nodiscard]] constexpr uint64_t scaleBytesPerLayerPage() const noexcept {
-    return scalesPerTensorLayerPage() * sizeof(float);
+  // Keys and values share a page, but not a size: Int4 packs two value
+  // elements per byte, one key element.
+  [[nodiscard]] constexpr uint64_t dataBytesPerLayerPageK() const noexcept {
+    return dataBytes(elementsPerLayerPage(), effectiveStorage().k);
+  }
+  [[nodiscard]] constexpr uint64_t dataBytesPerLayerPageV() const noexcept {
+    return dataBytes(elementsPerLayerPage(), effectiveStorage().v);
+  }
+  [[nodiscard]] constexpr uint64_t scaleBytesPerLayerPageK() const noexcept {
+    return scalesPerTensorLayerPageK() * sizeof(float);
+  }
+  [[nodiscard]] constexpr uint64_t scaleBytesPerLayerPageV() const noexcept {
+    return scalesPerTensorLayerPageV() * sizeof(float);
   }
   // The K/V bytes of one layer's page; the index bytes are apart.
   [[nodiscard]] constexpr uint64_t bytesPerLayerPage() const noexcept {
-    return 2 * (dataBytesPerLayerPage() + scaleBytesPerLayerPage());
+    return dataBytesPerLayerPageK() + scaleBytesPerLayerPageK() +
+           dataBytesPerLayerPageV() + scaleBytesPerLayerPageV();
+  }
+  // The data and scale bytes of one tensor of one layer's page, as the
+  // kernels' and the tests' single-tensor queries keep using them.
+  [[nodiscard]] constexpr uint32_t elementsPerScale() const noexcept {
+    return elementsPerScaleK();
+  }
+  [[nodiscard]] constexpr uint64_t scalesPerTensorLayerPage() const noexcept {
+    return scalesPerTensorLayerPageK();
+  }
+  [[nodiscard]] constexpr uint64_t dataBytesPerLayerPage() const noexcept {
+    return dataBytesPerLayerPageK();
+  }
+  [[nodiscard]] constexpr uint64_t scaleBytesPerLayerPage() const noexcept {
+    return scaleBytesPerLayerPageK();
   }
   [[nodiscard]] constexpr uint64_t indexBytesPerLayerPage() const noexcept {
     return uint64_t{kPageTokens} / SPLASH_ATTENTION_BLOCK_TOKENS * indexDimension * 2;
@@ -275,10 +389,18 @@ struct Layout final {
   // needs only 1 or 2 pages, or 32 with a 128-wide index. This is
   // allocation geometry only; prefix matching remains Page32 in both cases.
   [[nodiscard]] constexpr uint32_t extentAlignmentPages() const noexcept {
-    uint64_t pages = format == Format::BFloat16
-                         ? detail::pagesForAlignedRegion(dataBytesPerLayerPage())
-                         : detail::lcm(detail::pagesForAlignedRegion(dataBytesPerLayerPage()),
-                                       detail::pagesForAlignedRegion(scaleBytesPerLayerPage()));
+    // Every tensor region starts on a kExtentRegionAlignmentBytes boundary:
+    // the page count has to make each region's bytes a whole number of
+    // alignment units, and BF16 has no scales to align.
+    uint64_t pages = 0;
+    if (dataBytesPerLayerPageK())
+      pages = detail::pagesForAlignedRegion(dataBytesPerLayerPageK());
+    if (scaleBytesPerLayerPageK())
+      pages = detail::lcm(pages, detail::pagesForAlignedRegion(scaleBytesPerLayerPageK()));
+    if (dataBytesPerLayerPageV())
+      pages = detail::lcm(pages, detail::pagesForAlignedRegion(dataBytesPerLayerPageV()));
+    if (scaleBytesPerLayerPageV())
+      pages = detail::lcm(pages, detail::pagesForAlignedRegion(scaleBytesPerLayerPageV()));
     if (indexDimension)
       pages = detail::lcm(pages, detail::pagesForAlignedRegion(indexBytesPerLayerPage()));
     return static_cast<uint32_t>(pages);
@@ -331,7 +453,36 @@ struct Layout final {
     return static_cast<uint32_t>(best);
   }
 
-  bool operator==(const Layout &) const = default;
+  bool operator==(const Layout &other) const noexcept {
+    return attentionLayers == other.attentionLayers && kvHeads == other.kvHeads &&
+           headDimension == other.headDimension && format == other.format &&
+           indexDimension == other.indexDimension &&
+           valuesTokenMajor == other.valuesTokenMajor &&
+           windowTokens == other.windowTokens && windowedLayers == other.windowedLayers &&
+           effectiveStorage() == other.effectiveStorage();
+  }
 };
+
+// The layout's name: k8v4 for the two-element formats, the single format's
+// name otherwise. The storage name (storageFormatName) spells out the scales
+// and value order.
+[[nodiscard]] constexpr std::string_view formatName(const Layout &layout) noexcept {
+  const KvStorage storage = layout.effectiveStorage();
+  if (storage.k.bits == 8 && !storage.k.floating && storage.v.bits == 4 &&
+      !storage.v.floating)
+    return "k8v4";
+  return formatName(layout.format);
+}
+
+// The layout's element formats, as a name: q8s8 or q4s4 with the value
+// order, as the single format's storage name.
+[[nodiscard]] constexpr std::string_view storageFormatName(const Layout &layout) noexcept {
+  const KvStorage storage = layout.effectiveStorage();
+  if (storage.k.bits == 8 && !storage.k.floating && storage.v.bits == 4 && !storage.v.floating)
+    return layout.valuesTokenMajor
+               ? "q8s4_f32_scale_per_token_head_k_token_major_v_token_major"
+               : "q8s4_f32_scale_per_token_head_k_token_major_v_dimension_major";
+  return storageFormatName(layout.format, layout.valuesTokenMajor);
+}
 
 } // namespace splash::kv

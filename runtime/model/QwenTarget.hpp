@@ -26,6 +26,7 @@
 
 namespace splash::ops {
 class AneFfn;
+class AneProjection;
 } // namespace splash::ops
 
 namespace splash::kv {
@@ -481,7 +482,10 @@ public:
                                                                    std::span<const QwenTargetPrefillChunk> chunks,
                                                                    const kv::PageStorage &kv, SpilledKvReads &spilled,
                                                                    QwenPrefillLayers layers,
-                                                                   ops::AneFfn *aneFfn = nullptr) = 0;
+                                                                   ops::AneFfn *aneFfn = nullptr,
+                                                                   ops::AneProjection *aneMixerQkv = nullptr,
+                                                                   ops::AneProjection *aneMixerGdn = nullptr,
+                                                                   ops::AneProjection *aneMixerOut = nullptr) = 0;
   // Writes the inputs the target makes on the CPU of batch lane `lane`'s
   // verify rows, those from `position` on of `request`, before the cycle's
   // commands are encoded.
@@ -545,6 +549,11 @@ protected:
     // layer's load and its routed work (addPrefillExperts) share.
     ops::MoeBuffers ffn{};
     ops::AneFfn *aneFfn = nullptr;
+    ops::AneProjection *aneMixerQkv = nullptr;
+    ops::AneProjection *aneMixerGdn = nullptr;
+    ops::AneProjection *aneMixerOut = nullptr;
+    // The model layer index of this step, for the output split's layer index.
+    uint32_t mixerIndex = 0;
     uint32_t gdnLayer = 0;
     uint32_t attentionLayer = 0;
   };
@@ -578,12 +587,15 @@ protected:
   [[nodiscard]] std::vector<Step> prefillSteps(metal::CommandGraph &graph,
                                                std::span<const QwenTargetPrefillChunk> chunks,
                                                const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                               QwenPrefillLayers layers, ops::AneFfn *aneFfn) const {
-    requirePrefill(chunks, kv, layers, aneFfn);
+                                               QwenPrefillLayers layers, ops::AneFfn *aneFfn,
+                                               ops::AneProjection *aneMixerQkv = nullptr,
+                                               ops::AneProjection *aneMixerGdn = nullptr,
+                                               ops::AneProjection *aneMixerOut = nullptr) const {
+    requirePrefill(chunks, kv, layers, aneFfn, aneMixerQkv, aneMixerGdn, aneMixerOut);
     std::vector<Step> steps;
     steps.reserve(chunks.size());
     for (const QwenTargetPrefillChunk &chunk : chunks)
-      steps.push_back(Step{prefillStep(graph, chunk, kv, spilled, aneFfn)});
+      steps.push_back(Step{prefillStep(graph, chunk, kv, spilled, aneFfn, aneMixerQkv, aneMixerGdn, aneMixerOut)});
     return steps;
   }
   // A prefill's layers `range` over its steps (addPrefill), through a
@@ -711,10 +723,14 @@ protected:
 
 private:
   void requirePrefill(std::span<const QwenTargetPrefillChunk> chunks, const kv::PageStorage &kv,
-                      QwenPrefillLayers layers, const ops::AneFfn *aneFfn) const;
+                      QwenPrefillLayers layers, const ops::AneFfn *aneFfn,
+                      const ops::AneProjection *aneMixerQkv,
+                      const ops::AneProjection *aneMixerGdn,
+                      const ops::AneProjection *aneMixerOut) const;
   [[nodiscard]] PrefillStep prefillStep(metal::CommandGraph &graph, const QwenTargetPrefillChunk &chunk,
                                         const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                        ops::AneFfn *aneFfn) const;
+                                        ops::AneFfn *aneFfn, ops::AneProjection *aneMixerQkv,
+                                        ops::AneProjection *aneMixerGdn, ops::AneProjection *aneMixerOut) const;
 };
 
 // The target of a Qwen3.5-architecture family's weights (Qwen3.8-27B,

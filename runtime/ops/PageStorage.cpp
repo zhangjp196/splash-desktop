@@ -35,12 +35,15 @@ PageStorage::PageStorage(metal::MetalBackend &backend,
             "KV page pool is not a whole number of extents");
     }
     // splash_kv_offset places an extent's regions one after another; a
-    // layer's is the one Layout::region orders it at.
+    // layer's is the one Layout::region orders it at. The kernels' and the
+    // tests' single-tensor queries keep data and scale bytes apart.
     const auto data = static_cast<uint32_t>(layout_.dataBytesPerLayerPage());
     const auto scale = static_cast<uint32_t>(layout_.scaleBytesPerLayerPage());
+    const auto value_data = static_cast<uint32_t>(layout_.dataBytesPerLayerPageV());
+    const auto value_scale = static_cast<uint32_t>(layout_.scaleBytesPerLayerPageV());
     regionLayers_.resize(layout_.attentionLayers);
     for (uint32_t layer = 0; layer < layout_.attentionLayers; ++layer) {
-        layers_.push_back(splash_kv_layer(extentPages_, data, scale, layout_.region(layer)));
+        layers_.push_back(splash_kv_layer(extentPages_, data, scale, value_data, value_scale, layout_.region(layer)));
         regionLayers_[layout_.region(layer)] = layer;
     }
     extents_.resize(pageCount_ / extentPages_);
@@ -202,13 +205,11 @@ std::vector<std::span<std::byte>> PageStorage::spans(uint32_t page) const {
 
 std::vector<std::span<std::byte>> PageStorage::spans(uint32_t page, uint32_t regions) const {
     std::vector<std::span<std::byte>> result;
-    result.reserve(size_t{regions} * (layout_.scaleBytesPerLayerPage() ? 4 : 2) +
+    result.reserve(size_t{regions} * 4 +
                    (layout_.indexDimension ? layout_.attentionLayers : 0));
-    for (uint32_t region = 0; region < regions; ++region) {
-        for (const std::span<std::byte> tensor : layerSpans(page, regionLayers_[region])) {
+    for (uint32_t region = 0; region < regions; ++region)
+        for (const std::span<std::byte> tensor : layerSpans(page, regionLayers_[region]))
             if (!tensor.empty()) result.push_back(tensor);
-        }
-    }
     const std::vector<std::span<std::byte>> index = indexSpans(page);
     result.insert(result.end(), index.begin(), index.end());
     return result;
@@ -223,14 +224,23 @@ std::array<std::span<std::byte>, 4> PageStorage::layerSpans(uint32_t page, uint3
     if (layout_.region(layer) >= layout_.regions(extent.form))
         throw std::logic_error("KV page " + std::to_string(page) + " holds no windowed layer's K/V");
     auto *contents = static_cast<std::byte *>(extent.buffer.contents());
-    const auto data = static_cast<uint32_t>(layout_.dataBytesPerLayerPage());
-    const auto scale = static_cast<uint32_t>(layout_.scaleBytesPerLayerPage());
     const uint32_t index = page % extentPages_;
     std::array<std::span<std::byte>, 4> result;
+    // The tensors of one layer's region, in the order splash_kv_offset places
+    // them: the keys' data and scales, then the values' data and scales.
+    const uint32_t tensorBytes[4] = {
+        static_cast<uint32_t>(layout_.dataBytesPerLayerPageK()),
+        static_cast<uint32_t>(layout_.scaleBytesPerLayerPageK()),
+        static_cast<uint32_t>(layout_.dataBytesPerLayerPageV()),
+        static_cast<uint32_t>(layout_.scaleBytesPerLayerPageV())};
     for (uint32_t tensor = SPLASH_KV_KEYS; tensor <= SPLASH_KV_VALUE_SCALES; ++tensor) {
         result[tensor] = {
-            contents + splash_kv_offset(extentPages_, data, scale, layout_.region(layer), tensor, index),
-            splash_kv_page_bytes(data, scale, tensor)};
+            contents + splash_kv_offset(extentPages_, layout_.dataBytesPerLayerPageK(),
+                                        layout_.scaleBytesPerLayerPageK(),
+                                        layout_.dataBytesPerLayerPageV(),
+                                        layout_.scaleBytesPerLayerPageV(), layout_.region(layer), tensor,
+                                        index),
+            tensorBytes[tensor]};
     }
     return result;
 }

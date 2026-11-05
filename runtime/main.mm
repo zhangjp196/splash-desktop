@@ -147,7 +147,7 @@ void printUsage(std::string_view executable) {
       "usage: " + command +
       " serve-native MODEL_DIRECTORY"
       " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto [MAX_CACHE_DISK_BYTES]"
-      " [--kv-format int8|int4|bf16] [--state-format fp32|bf16] [--decode-share SHARE]"
+      " [--kv-format int8|bf16|int4|k8v4] [--state-format fp32|bf16] [--decode-share SHARE]"
       " [--max-image-patches PATCHES] [--persistent-cache on|off] [--cache-dir DIRECTORY]"
       " [--max-cache-disk-writes BYTES]"
       " [--idle-release SECONDS|off]"
@@ -196,16 +196,18 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.resources.maximumMemoryBytes = arguments.maxMemoryBytes;
   config.resources.cacheDisk = arguments.maxCacheDisk;
   config.resources.cacheDiskWritesPerDay = arguments.maxCacheDiskWritesBytes;
+  config.resources.cacheEviction = arguments.cacheEviction;
   config.resources.persistentCache = arguments.persistentCache;
   config.resources.cacheRoot = arguments.cacheRoot;
   if (const std::filesystem::path caches = splashCaches();
       config.resources.cacheRoot.empty() && !caches.empty())
     config.resources.cacheRoot = caches / "prefix-cache";
-  config.resources.kvFormat = arguments.kvFormat;
+  config.resources.kvStorage = arguments.kvStorage;
   config.resources.stateFormat = arguments.stateFormat;
   config.resources.maximumImagePatches = arguments.maxImagePatches;
   config.resources.idleReleaseSeconds = arguments.idleReleaseSeconds;
   config.resources.aneFfn.enabled = arguments.neuralEngine;
+  config.resources.aneMixer.enabled = arguments.neuralEngine && arguments.neuralEngineMixer;
   if (arguments.aneShare)
     config.resources.aneFfn = engine::AneFfnSetting::fromGiven(
         arguments.aneShare, std::nullopt);

@@ -6,16 +6,19 @@
 #include "engine/Engine.hpp"
 #include "metal/abi/ExecutionGeometry.h"
 #include "metal/abi/PagedAttention.h"
+#include "model/Bfloat16.hpp"
 #include "model/ExpertStore.hpp"
 #include "model/ModelSizing.hpp"
 #include "model/RuntimeArenas.hpp"
 #include "model/WeightStore.hpp"
 #include "ops/AneFfnMeasurement.hpp"
+#include "ops/AneProjection.hpp"
 #include "ops/KvSlotFormat.hpp"
 
 #import <Foundation/Foundation.h>
 
 #include <array>
+#include <cstdlib>
 #include <chrono>
 #include <iomanip>
 #include <limits>
@@ -544,6 +547,9 @@ std::string persistentCacheNamespace(const RuntimeCacheIdentity &identity,
             << identity.modelLayoutSha256 << '\n'
             << "kv " << kv::kPageTokens << ' ' << kv.attentionLayers << ' ' << kv.kvHeads << ' '
             << kv.headDimension << ' ' << kv::formatName(kv.format)
+            // The two-element formats keep Format::Int8 for their keys, so
+            // their storage name marks them apart from an INT8 cache.
+            << (kv::formatName(kv) == "k8v4" ? " k8v4" : "")
             // Dimension-major values add nothing, so dense layouts keep the
             // caches they wrote.
             << (kv.valuesTokenMajor ? " values-token-major" : "");
@@ -602,6 +608,9 @@ RuntimeResources::RuntimeResources(
     std::unique_ptr<KvPageTier> kvTier, std::unique_ptr<DiskSpace> diskSpace,
     std::unique_ptr<KvPool> kvPool, std::unique_ptr<engine::Cache> cache,
     std::unique_ptr<ops::AneFfn> aneFfn, AneFfnOutcome aneFfnOutcome,
+    std::unique_ptr<ops::AneProjection> aneMixerQkv,
+    std::unique_ptr<ops::AneProjection> aneMixerGdn,
+    std::unique_ptr<ops::AneProjection> aneMixerOut,
     std::unique_ptr<model::KvBlockCache> blockCache,
     std::unique_ptr<model::KvHistoryStream> historyStream, bool spillAlways,
     model::VerifyRows verifyRows)
@@ -613,7 +622,8 @@ RuntimeResources::RuntimeResources(
       memoryGovernor_(std::move(memoryGovernor)), kvPages_(std::move(kvPages)),
       stateStorage_(std::move(stateStorage)), kvTier_(std::move(kvTier)),
       diskSpace_(std::move(diskSpace)), kvPool_(std::move(kvPool)),
-      cache_(std::move(cache)), aneFfn_(std::move(aneFfn)),
+      cache_(std::move(cache)), aneFfn_(std::move(aneFfn)), aneMixerQkv_(std::move(aneMixerQkv)),
+      aneMixerGdn_(std::move(aneMixerGdn)), aneMixerOut_(std::move(aneMixerOut)),
       blockCache_(std::move(blockCache)), historyStream_(std::move(historyStream)),
       releasableMemory_({model_.images.get(), model_.expertStore()}, idleSplit(aneFfn_.get())),
       aneFfnOutcome_(std::move(aneFfnOutcome)), spillAlways_(spillAlways), verifyRows_(verifyRows) {}
@@ -622,7 +632,7 @@ std::unique_ptr<RuntimeResources>
 RuntimeResources::create(const RuntimeResourcesConfig &config,
                          uint32_t requestedContextTokens) {
   if (config.metallibPath.empty() || config.modelRoot.empty() ||
-      !kv::validFormat(config.kvFormat) || !ops::validFormat(config.stateFormat) ||
+      !kv::validKvStorage(config.kvStorage) || !ops::validFormat(config.stateFormat) ||
       !config.model.valid() || !config.hostMemory || !config.diskVolume ||
       config.buildId.empty() || !config.maximumImagePatches ||
       config.maximumImagePatches % 4 ||
@@ -718,7 +728,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   // streams of it (model::StreamedParts); and on the SSD cache's room for
   // active KV and whether its KV file opened.
   kv::Layout kvLayout = config.model.targetKvLayout;
-  kvLayout.format = config.kvFormat;
+  kvLayout.storage = config.kvStorage;
+  kvLayout.format = kv::singleFormat(config.kvStorage);
   // How the KV tier lays a page out in its slot, and so the slots' size.
   const kv::SlotFormat kvFormat(kvLayout);
   const uint64_t kvSlotBytes = model::SlotFile::slotBytesFor(kvFormat.payloadBytes());
@@ -892,14 +903,14 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
                                   error.what());
     }
     try {
-      modelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, config.kvFormat, config.stateFormat,
+      modelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, config.kvStorage, config.stateFormat,
                                                     model::StreamedParts::loaded(loaded));
       if (kvMaySpill)
-        spillModelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, config.kvFormat, config.stateFormat,
+        spillModelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, config.kvStorage, config.stateFormat,
                                                            model::StreamedParts::loaded(loaded, true));
       const auto arenas = [&](model::StreamedParts parts) {
         const model::ModelMemoryPlan streamed =
-            model::plannedRuntimeMemory(loaded, operators, config.kvFormat, config.stateFormat, parts);
+            model::plannedRuntimeMemory(loaded, operators, config.kvStorage, config.stateFormat, parts);
         return streamed.sharedPrefillPlannedAllocatedBytes + streamed.sharedDecodePlannedAllocatedBytes;
       };
       for (const bool table : {false, true}) {
@@ -918,33 +929,68 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   };
   load(false);
 
+  // The prefill attention mixers' split: its layers and the Metal memory it
+  // allocates, reserved beside the FFN split's from the same budget (the
+  // memory audit reports both as the Neural Engine split).
+  model::AneMixerLayers mixerLayers =
+      config.aneMixer.enabled ? model::aneMixerLayers(loaded) : model::AneMixerLayers{};
+  const auto mixerOff = [](const char *name, const char *reason) {
+    std::ostringstream out;
+    out << "Neural Engine " << name << " mixer split off: " << reason << '.';
+    return out.str();
+  };
+  const auto mixerCheck = [&mixerOff](std::span<const ops::Projection *const> layers, const char *name,
+                                      double share) {
+    if (const char *reason = ops::AneProjection::unsupported(layers)) {
+      logLine(mixerOff(name, reason));
+      if (!layers.empty()) {
+        std::ostringstream segments;
+        segments << "  " << name << " projection output " << layers.front()->outputSize << ':';
+        for (const ops::QuantizedSegment &segment : layers.front()->blocks().segments)
+          segments << ' ' << segment.outputSize << '@' << segment.columnOffset;
+        logLine(segments.str());
+      }
+      return uint64_t{0};
+    }
+    return ops::AneProjection::plannedBytes(layers, share);
+  };
+  uint64_t mixerQkvBytes = 0, mixerGdnBytes = 0, mixerOutBytes = 0;
+  if (!mixerLayers.qkv.empty())
+    mixerQkvBytes = mixerCheck(std::span(mixerLayers.qkv), "QKV", config.aneMixer.share);
+  if (!mixerLayers.gdn.empty())
+    mixerGdnBytes = mixerCheck(std::span(mixerLayers.gdn), "GDN", config.aneMixer.share);
+  if (!mixerLayers.output.empty())
+    mixerOutBytes = mixerCheck(std::span(mixerLayers.output), "output", config.aneMixer.share);
+  const uint64_t mixerBytes = mixerQkvBytes + mixerGdnBytes + mixerOutBytes;
+
   // The engine's memory plan, with `stagingBytes` set aside for the disk
   // tier's state staging and `aneFfnBytes` for the prefill FFN's Neural Engine
-  // split, each part as it loaded, whole or through its store, and the spill
-  // plan beside them, with the arenas of a runtime whose K/V spills where it
-  // spills. Floors that the spill plan refuses refuse it with the engine
-  // plan's breakdown.
+  // split, beside the mixer split's `mixerBytes`, each part as it loaded,
+  // whole or through its store, and the spill plan beside them, with the
+  // arenas of a runtime whose K/V spills where it spills. Floors that the
+  // spill plan refuses refuse it with the engine plan's breakdown.
   const auto planWith = [&](uint64_t stagingBytes, uint64_t aneFfnBytes) -> EngineMemoryPlanResult {
     const auto asLoaded = [](uint64_t storeBytes) {
       return storeBytes ? StreamedSetting{StreamedSetting::Mode::Size, storeBytes}
                         : StreamedSetting{StreamedSetting::Mode::Off, 0};
     };
     const StreamedMemoryResult streamed = streamedPlan(
-        asLoaded(loadOptions.expertMemoryBytes), asLoaded(loadOptions.streamedTableBytes), stagingBytes, aneFfnBytes);
+        asLoaded(loadOptions.expertMemoryBytes), asLoaded(loadOptions.streamedTableBytes), stagingBytes,
+        aneFfnBytes + mixerBytes);
     ModelMemoryFootprint footprint{
         loaded.targetActualAllocatedBytes(),
         loaded.draft.actualAllocatedBytes,
         loaded.vision.actualAllocatedBytes,
         streamed.plan && streamed.plan->spill.enabled ? spillModelMemoryPlan : modelMemoryPlan,
         stagingBytes,
-        aneFfnBytes,
+        aneFfnBytes + mixerBytes,
         loaded.streamedTable() ? loaded.streamedTable()->committedBytes() : 0,
     };
     // A lane's prefill command writes a group of chunks where the routed
     // experts stream (model::RuntimeGeometry::prefillChunks).
     const uint32_t commandPages = loadOptions.expertMemoryBytes ? groupPages : 0;
     ModelMemoryProfile modelProfile{
-        loaded.name(), loaded.maximumContextTokens(), loaded.targetKvLayout(config.kvFormat), footprint,
+        loaded.name(), loaded.maximumContextTokens(), loaded.targetKvLayout(config.kvStorage), footprint,
         config.stateFormat, streamed.plan ? streamed.plan->spill : KvSpillPlan{}, commandPages};
     EngineMemoryPlanResult result = evaluateEngineMemoryPlan(device, modelProfile, config.maximumMemoryBytes);
     if (streamed.plan || !result.plan)
@@ -981,9 +1027,12 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   }
   reportStreamedStores(loaded, streamable, config.expertMemory, config.pleMemory);
   reportVerifyRows(loaded, config.verifyRows);
+  // The stores' second load above may have replaced the target's images: the
+  // mixer split's layers point into the model as it now is.
+  if (config.aneMixer.enabled) mixerLayers = model::aneMixerLayers(loaded);
   // The model's side of the split (startAneFfn).
   const AneFfnModel splitModel =
-      aneFfnModel(*backend, loaded, operators, config.kvFormat, config.buildId, config.cancelled);
+      aneFfnModel(*backend, loaded, operators, config.kvStorage, config.buildId, config.cancelled);
 
   // The automatic tier keeps its staging only where the plan holds the model
   // and the requested context beside it, the parts as they load. The split
@@ -1030,7 +1079,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     cacheIdentity = makeRuntimeCacheIdentity(
         loaded.manifestFingerprintSha256,
         loaded.targetManifestFingerprint(), config.buildId,
-        loaded.targetKvLayout(config.kvFormat), loaded.descriptor.ropeScaling);
+        loaded.targetKvLayout(config.kvStorage), loaded.descriptor.ropeScaling);
   } catch (const std::exception &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::ModelLoading,
                                 error.what(),
@@ -1093,6 +1142,120 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     AneFfnStart aneFfn = startAneFfn(splitModel, config.aneFfn, splitContext, planMemory, config.cancelled);
     if (aneFfn.plan)
       memoryPlan = std::move(*aneFfn.plan);
+    // The mixer split compiles its program here; a failure leaves the GPU
+    // alone, as a stopped split does while serving.
+    // The GDN split shares the one service with the FFN split; with the FFN
+    // split running it measured slower than QKV and the output split alone
+    // (dev/benchmarks/ane-mixer-spike.md), so it is built only where the FFN
+    // split is not.
+    const bool ffnSplit = aneFfn.split != nullptr;
+    if (ffnSplit && mixerGdnBytes)
+      logLine("Neural Engine GDN mixer split off: the FFN split already uses the Neural Engine.");
+    std::unique_ptr<ops::AneProjection> mixerQkv, mixerGdn, mixerOut;
+    // A split's ANE rows against the GPU's whole projection of the same rows,
+    // at the least chunk: the int8 path leaves about 1.5%, and a split whose
+    // rows differ by more (or that stops) is dropped.
+    const auto verifyMixer = [&](ops::AneProjection &split, const ops::Projection &projection, bool residual) {
+      constexpr uint32_t rows = 2 * ops::AneProjection::kMinimumRows;
+      const uint32_t gpuRows = split.gpuRows(rows), outputSize = projection.outputSize,
+                     hidden = projection.inputSize;
+      const auto buffer = [&](uint64_t bytes, const char *label) {
+        return backend->allocateBuffer(bytes, metal::BufferStorage::Shared, label);
+      };
+      const metal::MetalBuffer input = buffer(uint64_t{rows} * hidden * sizeof(uint16_t), "ane mixer verify input");
+      const metal::MetalBuffer reference = buffer(uint64_t{rows} * outputSize * sizeof(uint16_t),
+                                                  "ane mixer verify reference");
+      const metal::MetalBuffer output = buffer(uint64_t{rows} * outputSize * sizeof(uint16_t),
+                                               "ane mixer verify output");
+      const metal::MetalBuffer zero = residual ? buffer(uint64_t{rows} * outputSize * sizeof(uint16_t),
+                                                        "ane mixer verify residual")
+                                               : metal::MetalBuffer{};
+      auto *values = static_cast<uint16_t *>(input.contents());
+      for (uint64_t i = 0; i < uint64_t{rows} * hidden; ++i)
+        values[i] = model::narrowBfloat16(std::sin(double(i) * 0.001));
+      const ops::Linear &linear = operators.linear();
+      {
+        metal::CommandGraph graph;
+        if (residual)
+          linear.addPrefillResidual(graph, input, projection, zero, reference, rows, {});
+        else
+          linear.addPrefill(graph, input, projection, reference, rows, {});
+        static_cast<void>(backend->submitCommandAsync(graph.dispatches()).wait());
+      }
+      if (!split.begin()) return false;
+      {
+        metal::CommandGraph graph;
+        const auto gpuPart = [&] {
+          if (residual)
+            linear.addPrefillResidual(graph, input, projection, zero, output, gpuRows, {});
+          else
+            linear.addPrefill(graph, input, projection, output, gpuRows, {});
+        };
+        split.add(graph, 0, input, output, rows, gpuPart, zero);
+        static_cast<void>(split.commit(graph, {}).wait());
+      }
+      if (!split.finish()) return false;
+      const auto *actual = static_cast<const uint16_t *>(output.contents());
+      const auto *expected = static_cast<const uint16_t *>(reference.contents());
+      double noise = 0.0, signal = 0.0;
+      for (uint32_t row = gpuRows; row < rows; ++row)
+        for (uint32_t column = 0; column < split.columns(); ++column) {
+          const uint64_t at = uint64_t{row} * outputSize + column;
+          const double value = model::widenBfloat16(actual[at]);
+          const double want = model::widenBfloat16(expected[at]);
+          noise += (value - want) * (value - want);
+          signal += want * want;
+        }
+      const double error = std::sqrt(noise / std::max(signal, 1e-9));
+      if (!(error < 0.05)) {
+        logWarning("Neural Engine mixer split verified at ", std::fixed, std::setprecision(2), error * 100.0,
+                   "%, more than 5%; the GPU runs the prefill projections alone.");
+        return false;
+      }
+      return true;
+    };
+    const auto buildMixer = [&](auto &split, uint64_t bytes, const auto &layers, const char *name,
+                                bool residual) {
+      if (!bytes) return;
+      if (std::getenv("SPLASH_ANE_DEBUG") && std::string_view(name) == "GDN") {
+        const auto &segments = layers.front()->blocks().segments;
+        for (size_t s = 0; s < segments.size(); ++s) {
+          if (segments[s].isFloat()) break;
+          ops::QuantizedSegment segment = segments[s];
+          segment.columnOffset = 0;
+          const ops::Projection single(segment.outputSize, layers.front()->inputSize,
+                                       ops::BlockWeights{{segment}});
+          const ops::Projection *one = &single;
+          try {
+            ops::AneProjection probe(*backend, std::span<const ops::Projection *const>(&one, 1),
+                                     config.aneMixer.share, config.cancelled);
+            const bool ok = verifyMixer(probe, single, false);
+            logLine("GDN segment ", s, " (", segments[s].outputSize, " rows, ", segments[s].name(), "): verify ",
+                    ok ? "ok" : "failed");
+          } catch (const std::exception &error) {
+            logLine("GDN segment ", s, " (", segments[s].outputSize, " rows): ", error.what());
+          }
+        }
+      }
+      try {
+        split = std::make_unique<ops::AneProjection>(*backend, layers, config.aneMixer.share, config.cancelled);
+        if (!verifyMixer(*split, *layers.front(), residual)) {
+          split.reset();
+          return;
+        }
+        logLine("Neural Engine ", name, " mixer split at share ", std::fixed, std::setprecision(2),
+                config.aneMixer.share, " over ", layers.size(), " projections, ",
+                (split->allocatedBytes() + (1u << 20) - 1) >> 20, " MiB.");
+      } catch (const ane::Interrupted &) {
+        throw;
+      } catch (const std::exception &error) {
+        logWarning("Neural Engine ", name, " mixer split unavailable (", error.what(),
+                   "); the GPU runs the prefill projections alone.");
+      }
+    };
+    buildMixer(mixerQkv, mixerQkvBytes, mixerLayers.qkv, "QKV", false);
+    buildMixer(mixerGdn, ffnSplit ? 0 : mixerGdnBytes, mixerLayers.gdn, "GDN", false);
+    buildMixer(mixerOut, mixerOutBytes, mixerLayers.output, "output", true);
     const EngineMemoryBreakdown &budget = memoryPlan.breakdown();
     const KvSpillPlan &spill = budget.kvSpill;
     const std::string spillOff = spillOffReason(config.model, kvLayout, spill, stateStagingBytes && kvFileOpen);
@@ -1134,7 +1297,9 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     if (kvLayout.windowedLayers)
       windowPolicy = CacheWindowPolicy{.windowPages = kvLayout.windowPages(),
                                        .trim = kvLayout.slimmable() && config.kvWindowTrim};
-    auto cache = std::make_unique<engine::Cache>(*kvPool, kvTier.get(), disk.budget, spillPolicy, windowPolicy);
+    auto cache = std::make_unique<engine::Cache>(*kvPool, kvTier.get(), disk.budget,
+                                                 spillPolicy, windowPolicy,
+                                                 config.cacheEviction);
     if (disk.space)
       cache->setDiskMeasure([space = disk.space.get()] { space->measure(); });
     // A target whose KV spills reads it back through one hot block cache and
@@ -1173,7 +1338,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
         std::move(operators), std::move(memoryPlan), std::move(cacheIdentity),
         std::move(memoryGovernor), std::move(kvPages), std::move(stateStorage),
         std::move(kvTier), std::move(disk.space), std::move(kvPool), std::move(cache),
-        std::move(aneFfn.split), std::move(aneFfn.outcome), std::move(blockCache),
+        std::move(aneFfn.split), std::move(aneFfn.outcome), std::move(mixerQkv), std::move(mixerGdn),
+        std::move(mixerOut), std::move(blockCache),
         std::move(historyStream), config.kvSpillAlways, config.verifyRows));
     result->adoptPersistentCache();
     return result;
@@ -1298,6 +1464,9 @@ model::RuntimeContext RuntimeResources::modelContext() noexcept {
       *stateStorage_,
       operators_,
       aneFfn_.get(),
+      aneMixerQkv_.get(),
+      aneMixerGdn_.get(),
+      aneMixerOut_.get(),
       blockCache_.get(),
       historyStream_.get(),
       verifyRows_,
@@ -1365,7 +1534,10 @@ ActualMemoryReport RuntimeResources::actualMemoryReport(
   if (historyStream_)
     report.kvHistoryStagingBytes = historyStream_->stats().stagingBytes;
   report.stateStagingBytes = modelMemory.stateStagingBytes;
-  report.aneFfnBytes = aneFfn_ ? aneFfn_->allocatedBytes() : 0;
+  report.aneFfnBytes = (aneFfn_ ? aneFfn_->allocatedBytes() : 0) +
+                         (aneMixerQkv_ ? aneMixerQkv_->allocatedBytes() : 0) +
+                         (aneMixerGdn_ ? aneMixerGdn_->allocatedBytes() : 0) +
+                         (aneMixerOut_ ? aneMixerOut_->allocatedBytes() : 0);
   if (const auto table = streamedTableStats()) report.streamedTableBytes = table->cacheBytes;
   // Optional warmup may end with a rolled-back allocation and no subsequent
   // command. Refresh the current counts after that rollback; peaks stay intact.
@@ -1380,8 +1552,8 @@ ActualMemoryReport RuntimeResources::actualMemoryReport(
 }
 
 AneFfnModel aneFfnModel(metal::MetalBackend &backend, const model::LoadedModel &loaded,
-                        const ops::ExecutionPlans &operators, kv::Format format, std::string_view buildId,
-                        std::function<bool()> cancelled) {
+                        const ops::ExecutionPlans &operators, const kv::KvStorage &kvStorage,
+                        std::string_view buildId, std::function<bool()> cancelled) {
   auto layers = std::make_shared<const std::vector<ops::SwiGluProjections>>(model::aneFfnLayers(loaded));
   AneFfnModel model;
   model.dense = !layers->empty();
@@ -1393,8 +1565,8 @@ AneFfnModel aneFfnModel(metal::MetalBackend &backend, const model::LoadedModel &
   model.unavailable = [] { return ane::unavailable(); };
   model.units = ops::AneFfn::units(*layers);
   model.plannedBytes = [layers](uint32_t aneUnits) { return ops::AneFfn::plannedBytes(*layers, aneUnits); };
-  const auto onArena = [&backend, &loaded, &operators, format](const auto &use) {
-    model::withPrefillArena(backend, loaded, operators, format, use);
+  const auto onArena = [&backend, &loaded, &operators, &kvStorage](const auto &use) {
+    model::withPrefillArena(backend, loaded, operators, kvStorage, use);
   };
   model.time = [&backend, layers, cancelled, onArena] {
     ops::ane_ffn::Timings timings;

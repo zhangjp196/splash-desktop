@@ -894,6 +894,43 @@ void testCopiesLeaveWithTheirBlocks() {
 }
 } // namespace
 
+void testEvictionPolicies() {
+  const auto tokensA = page(7001);
+  const auto tokensB = page(7002);
+  // The first leaf of a fresh cache is id 1 and the second id 2; each run
+  // inserts them, applies the touches, and reads the victim.
+  const auto victim = [&](EvictionSettings settings, uint32_t touches) {
+    test::TestKvStorage storage(8, 100, 1);
+    KvPool pool(storage, 8);
+    CacheRecency recency;
+    KvCache cache(pool, recency, false, false, 0, settings);
+    auto acquired = pool.acquirePages(2);
+    require(acquired.granted() && acquired.pages.size() == 2,
+            "eviction policy pages were not acquired");
+    const auto a = cache.insert(0, tokensA, acquired.pages[0], {});
+    const auto b = cache.insert(0, tokensB, acquired.pages[1], {});
+    require(a.id == 1 && b.id == 2, "unexpected eviction policy block ids");
+    for (uint32_t touch = 0; touch < touches; ++touch)
+      cache.touch(a.id);
+    const auto found = cache.evictionCandidate(0);
+    for (uint32_t physical : acquired.pages)
+      pool.releasePage(physical, false);
+    require(found.has_value(), "a cache with two leaves offered no victim");
+    const uint64_t id = found->id;
+    return id;
+  };
+
+  require(victim({}, 0) == 1, "LRU did not take the older block");
+  require(victim({}, 1) == 2, "LRU did not spare a block touched after the other");
+  require(victim({EvictionPolicy::Fifo, 0}, 1) == 1,
+          "FIFO took a later block because it was touched");
+  require(victim({EvictionPolicy::Lfu, 0}, 2) == 2,
+          "LFU did not take the less used block");
+  require(victim({EvictionPolicy::Lru, 1}, 1) == 2,
+          "a protected block did not outlive an unprotected one");
+  std::cout << "KV eviction policies ok\n";
+}
+
 int main() {
   try {
     testExactChainedBlocksAndPhysicalOwnership();
@@ -912,6 +949,7 @@ int main() {
     testStateTailsPinBoundedWindows();
     testWritersAndTheContentOfABlock();
     testCopiesLeaveWithTheirBlocks();
+    testEvictionPolicies();
     std::cout << "KV page cache tests passed\n";
     return 0;
   } catch (const std::exception &error) {

@@ -92,7 +92,7 @@ paths for `--model-dir`, `--draft-model` and `--mmproj`.
 | `--no-webui` | Off | Disable the chat page. |
 | `--max-memory` | Auto | Lower the ceiling on Metal allocations, e.g. `28G`; not combined process RSS. See [memory and context](#memory-and-context). |
 | `--max-context` | Auto | Set the context limit, e.g. `100K` or `1M` (K = 1024 tokens, M = 1,000,000), up to 1,010,000 tokens; past the 256K native window it turns on YaRN. See [memory and context](#memory-and-context). |
-| `--kv-format` | `int8` | Target KV storage: `int8`, `int4` or `bf16`. See [KV cache precision](#kv-cache-precision). |
+| `--kv-format` | `int8` | Target KV storage: `int8`, `int4`, `k8v4` or `bf16`. See [KV cache precision](#kv-cache-precision). |
 | `--state-format` | `fp32` | Recurrent state storage: `fp32` or `bf16`. See [state precision](#state-precision). |
 | `--ple-memory` | Auto | Qwen3.8-Flash-Next: read the PLE n-gram table from the SSD through a host row cache of this size, e.g. `2G`; `off` loads the whole table. Auto loads it where memory holds it, else streams it through its share of the budget. See [PLE table streaming](#ple-table-streaming). |
 | `--expert-memory` | Auto | MoE targets: hold routed experts in this much memory, e.g. `16G`, and read the others from the SSD when a step routes them; `off` loads every expert. Auto loads them all where memory holds them, else gives them what the context leaves. See [streamed experts](#streamed-experts). |
@@ -103,6 +103,8 @@ paths for `--model-dir`, `--draft-model` and `--mmproj`.
 | `--max-cache-disk-writes` | `0` (no limit) | The most the SSD cache writes a day, e.g. `200G`. See [SSD cache](#ssd-cache). |
 | `--persistent-cache` | Off in `splash serve`; on in the desktop app | Keep the SSD cache across restarts. See [persistent cache](#persistent-cache). |
 | `--cache-dir` | `~/Library/Caches/Splash/prefix-cache` | Where `--persistent-cache` keeps its files; needs `--persistent-cache`. |
+| `--cache-eviction` | `lru` | How a reclaim orders the cached KV blocks and states it gives up: `lru` by last use, `fifo` by entry, `lfu` by touches, or `largest` by the memory held. See [admission and eviction](internals.md#admission-and-eviction). |
+| `--cache-eviction-protect` | `0` (off) | Touches that put a cached object in a protected tier, which a reclaim gives up only after every unprotected one, 0 to 8. See [admission and eviction](internals.md#admission-and-eviction). |
 | `--served-model-name` | None | Additional model name the API accepts; repeatable. See [API model aliases](#api-model-aliases). |
 | `--announce-served-name` | Off | Report the first `--served-model-name` in responses; needs `--served-model-name`. |
 | `--default-reasoning-effort` | `SPLASH_DEFAULT_REASONING_EFFORT` or the template's | Effort of Chat and Responses requests that set none. See [default reasoning effort](#default-reasoning-effort). |
@@ -116,6 +118,7 @@ paths for `--model-dir`, `--draft-model` and `--mmproj`.
 | `--prefill-duty` | The rung's | The same share in percent, 10 to 100, whatever the rung says; a running engine's duty changes through `POST /v1/thermal`. |
 | `--decode-share` | `0.5` | Decode time owed per unit of prefill time while other requests generate. Higher keeps their output faster during a long prompt and slows that prompt; `0` alternates one command each. |
 | `--disable-ane` | Off | Prefill on the GPU alone. By default a dense model's long prompts also use the Neural Engine when that is faster. See [Neural Engine prefill](internals.md#neural-engine-prefill). |
+| `--disable-ane-mixer` | Off | Prefill the mixers' projections (QKV and the output projection) on the GPU alone. By default they also split by row with the Neural Engine: measured 3-5% of a 3.6K prefill and 8-12% of a 24-27K one on an M3 Max. The GDN input projection joins only where the FFN split is not set up, since the one Neural Engine serves both. See `dev/benchmarks/ane-mixer-spike.md`. |
 | `--verify-rows` | `auto` | The rows of each draft block decode cycles verify: `auto` lets the verify budget choose a MoE target's rows, which is faster but makes its greedy and seeded outputs vary from run to run, and verifies every row of a dense target; `all` verifies every row the output limit leaves on every target, so those outputs repeat when a request runs alone with the same cached prefixes. See [drafts](models.md#drafts) and [sampling](api.md#sampling). |
 | `--allow-idle-sleep` | Off | Let the Mac sleep automatically while requests run; by default it stays awake until they finish (the display may still sleep). |
 
@@ -437,7 +440,11 @@ each byte, so a page is half of `int8`'s: on a 27B (16 attention layers, 4 KV
 heads, head_dim 256) about 16.5 KiB a token against `int8`'s 32.5 KiB, which
 roughly doubles the context a given budget of KV memory reaches. It spends 7
 signed bits a value instead of `int8`'s 127, against the same per-(head, token)
-scale. `bf16` avoids quantization and uses about twice `int8`'s memory, and can
+scale. `k8v4` keeps the keys at `int8` (the safer side of the two) and packs
+only the values, so a page is three quarters of `int8`'s: about 24.5 KiB a
+token on the same 27B, with the values' 7 signed bits and their own
+per-(head, token) scales. It is the middle setting between accuracy and
+memory. `bf16` avoids quantization and uses about twice `int8`'s memory, and can
 be slower at long contexts. Model weights are unchanged. Restart to switch
 formats. Every format serves both a dense target and a block-sparse one
 (Qwen3.8-Flash-Next), whose gathered attention has its own kernels for each.

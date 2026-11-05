@@ -59,6 +59,9 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.diskCache = false
     edited.maxCacheDisk = "64G"
     edited.maxCacheDiskWrites = "200G"
+    edited.cacheEvictionPreset = "custom"
+    edited.cacheEvictionPolicy = "lfu"
+    edited.cacheEvictionProtect = 3
     edited.maxRequestSize = "128M"
     edited.apiKey = "selfcheck-key"
     edited.servedNames = "one, two"
@@ -71,6 +74,9 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && edited.rows.contains { $0.key == "modelMode" && $0.value == AppModel.ModelMode.local.rawValue }
         && edited.rows.contains { $0.key == "modelDirectory" && $0.value == "/tmp/selfcheck" }
         && edited.rows.contains { $0.key == "mmproj" && $0.value == "/tmp/selfcheck-mmproj.gguf" }
+        && edited.rows.contains { $0.key == "cacheEvictionPreset" && $0.value == "custom" }
+        && edited.resolvedCacheEviction.policy == "lfu"
+        && edited.resolvedCacheEviction.protect == 3
 
     var replaced = edited
     replaced.port = 8000
@@ -87,6 +93,9 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     broken.pleMemory = "-2G"
     broken.sparseKvMemory = "0"
     broken.verifyRows = "every"
+    broken.cacheEvictionPreset = "turbo"
+    broken.cacheEvictionPolicy = "random"
+    broken.cacheEvictionProtect = 9
     _ = store.save(broken)
     let repaired = store.load()
     passed = passed
@@ -98,6 +107,9 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && repaired.pleMemory == ServerSettings.default.pleMemory
         && repaired.sparseKvMemory == ServerSettings.default.sparseKvMemory
         && repaired.verifyRows == ServerSettings.default.verifyRows
+        && repaired.cacheEvictionPreset == ServerSettings.First.cacheEvictionPreset
+        && repaired.cacheEvictionPolicy == ServerSettings.First.cacheEvictionPolicy
+        && repaired.cacheEvictionProtect == ServerSettings.First.cacheEvictionProtect
 
     // A configuration stored before a setting existed still decodes: a missing
     // key keeps its first-launch value instead of dropping the user's saved
@@ -111,6 +123,9 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && decoded?.maxConcurrency == ServerSettings.First.maxConcurrency
         && decoded?.diskCache == ServerSettings.First.diskCache
         && decoded?.maxCacheDiskWrites == ServerSettings.First.maxCacheDiskWrites
+        && decoded?.cacheEvictionPreset == ServerSettings.First.cacheEvictionPreset
+        && decoded?.cacheEvictionPolicy == ServerSettings.First.cacheEvictionPolicy
+        && decoded?.cacheEvictionProtect == ServerSettings.First.cacheEvictionProtect
         && decoded?.lanAccess == ServerSettings.default.lanAccess
         && decoded?.allowedHosts == ServerSettings.default.allowedHosts
     // A configuration that turned the SSD cache off through its quota keeps
@@ -219,6 +234,20 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && cached.contains("--persistent-cache")
             && carries(cached, "--max-cache-disk", edited.maxCacheDisk)
             && carries(cached, "--max-cache-disk-writes", edited.maxCacheDiskWrites)
+        // A custom eviction preset passes the policy and its protected tier;
+        // the default level passes neither, leaving the engine's own order.
+        reloaded.cacheEvictionPreset = "custom"
+        reloaded.cacheEvictionPolicy = "largest"
+        reloaded.cacheEvictionProtect = 4
+        let evicted = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed
+            && carries(evicted, "--cache-eviction", "largest")
+            && carries(evicted, "--cache-eviction-protect", "4")
+        reloaded.cacheEvictionPreset = "light"
+        let defaultEviction = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed
+            && !defaultEviction.contains("--cache-eviction")
+            && !defaultEviction.contains("--cache-eviction-protect")
         reloaded.restoreDefaultSettings()
         let restored = AppModel()
         let defaultLaunch = restored.launchArguments(launcherPath: "/tmp/launcher.py")
@@ -233,6 +262,10 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && !defaultLaunch.contains("--persistent-cache")
             && carries(defaultLaunch, "--max-memory", ServerSettings.First.maxMemory)
             && carries(defaultLaunch, "--max-context", ServerSettings.First.maxContext)
+            // The default preset is level 2: the plain policy with the reuse
+            // protection threshold on the command.
+            && ServerSettings.default.cacheEvictionPreset == "balanced"
+            && carries(defaultLaunch, "--cache-eviction-protect", "2")
     }
 
     discard()

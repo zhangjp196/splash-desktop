@@ -70,6 +70,10 @@ uint32_t verifyTileParts(uint32_t queryHeads, kv::Layout layout) {
 // A layout's KV format, as its kernels' names hold it, without the separator:
 // "q8", "q4" or "bf16".
 std::string kernelFormatName(kv::Layout layout) {
+  const kv::KvStorage storage = layout.effectiveStorage();
+  if (storage.k.bits == 8 && !storage.k.floating && storage.v.bits == 4 &&
+      !storage.v.floating)
+    return "k8v4";
   switch (layout.format) {
   case kv::Format::BFloat16: return "bf16";
   case kv::Format::Int4: return "q4";
@@ -297,9 +301,10 @@ struct Case final {
     const uint32_t id = page(lane, token);
     const uint64_t index = splash_kv_key_element(head, token % 32, dimension);
     const uint64_t scale = splash_kv_scale_element(head, token % 32);
-    if (layout.format == kv::Format::BFloat16)
+    const kv::ElementFormat element = layout.effectiveStorage().k;
+    if (element.floating)
       return bf16ToFloat(pool.slab<uint16_t>(kLayer, SPLASH_KV_KEYS, id)[index]);
-    if (layout.format == kv::Format::Int4)
+    if (element.bits == 4)
       return float(packedNibble(pool.slab<uint8_t>(kLayer, SPLASH_KV_KEYS, id), index)) *
              pool.slab<float>(kLayer, SPLASH_KV_KEY_SCALES, id)[scale];
     return pool.slab<int8_t>(kLayer, SPLASH_KV_KEYS, id)[index] *
@@ -311,9 +316,10 @@ struct Case final {
     const uint32_t id = page(lane, token);
     const uint64_t index = pool.valueElement(head, token % 32, dimension);
     const uint64_t scale = splash_kv_scale_element(head, token % 32);
-    if (layout.format == kv::Format::BFloat16)
+    const kv::ElementFormat element = layout.effectiveStorage().v;
+    if (element.floating)
       return bf16ToFloat(pool.slab<uint16_t>(kLayer, SPLASH_KV_VALUES, id)[index]);
-    if (layout.format == kv::Format::Int4)
+    if (element.bits == 4)
       return float(packedNibble(pool.slab<uint8_t>(kLayer, SPLASH_KV_VALUES, id), index)) *
              pool.slab<float>(kLayer, SPLASH_KV_VALUE_SCALES, id)[scale];
     return pool.slab<int8_t>(kLayer, SPLASH_KV_VALUES, id)[index] *
@@ -373,15 +379,17 @@ Case makeCase(metal::MetalBackend &backend, uint32_t queryHeads,
     for (uint32_t token = 0; token < historyLengths[lane]; ++token) {
       const uint32_t id = data.page(lane, token);
       for (uint32_t head = 0; head < layout.kvHeads; ++head) {
+        const kv::ElementFormat keyElement = layout.effectiveStorage().k;
+        const kv::ElementFormat valueElement = layout.effectiveStorage().v;
         const uint64_t slot = splash_kv_scale_element(head, token % 32);
-        // INT8 and INT4 scales differ from token to token, so that a scale
-        // read at another token's place shows.
-        if (layout.format == kv::Format::Int8 || layout.format == kv::Format::Int4) {
+        // Quantized scales differ from token to token, so that a scale read
+        // at another token's place shows.
+        if (!keyElement.floating)
           data.pool.slab<float>(kLayer, SPLASH_KV_KEY_SCALES, id)[slot] =
               0.006f * (1 + float((token + head) % 9) / 16);
+        if (!valueElement.floating)
           data.pool.slab<float>(kLayer, SPLASH_KV_VALUE_SCALES, id)[slot] =
               0.007f * (1 + float((token * 5 + head) % 11) / 16);
-        }
         for (uint32_t dimension = 0; dimension < 256; ++dimension) {
           const int key = int((token * 37 + head * 101 + dimension * 17 +
                                token * dimension * 3 + lane * 7) % 255) - 127;
@@ -389,22 +397,25 @@ Case makeCase(metal::MetalBackend &backend, uint32_t queryHeads,
                                  token * dimension * 5 + lane * 19) % 255) - 127;
           const uint64_t keyIndex = splash_kv_key_element(head, token % 32, dimension);
           const uint64_t valueIndex = data.pool.valueElement(head, token % 32, dimension);
-          if (layout.format == kv::Format::Int8) {
-            data.pool.slab<int8_t>(kLayer, SPLASH_KV_KEYS, id)[keyIndex] = key;
-            data.pool.slab<int8_t>(kLayer, SPLASH_KV_VALUES, id)[valueIndex] = value;
-          } else if (layout.format == kv::Format::Int4) {
-            // A packed page spends 7 signed bits a value, so the INT8 pattern
-            // has to narrow to the nibble's range.
-            writePackedNibble(data.pool.slab<uint8_t>(kLayer, SPLASH_KV_KEYS, id),
-                              keyIndex, std::clamp(key, -7, 7));
-            writePackedNibble(data.pool.slab<uint8_t>(kLayer, SPLASH_KV_VALUES, id),
-                              valueIndex, std::clamp(value, -7, 7));
-          } else {
+          // Each tensor's element format decides how its value is stored: a
+          // BF16 element, an INT8 byte, or a nibble of a packed 4-bit page,
+          // which spends 7 signed bits and so narrows the INT8 pattern.
+          if (keyElement.floating)
             data.pool.slab<uint16_t>(kLayer, SPLASH_KV_KEYS, id)[keyIndex] =
                 floatToBf16(key * 0.006f);
+          else if (keyElement.bits == 4)
+            writePackedNibble(data.pool.slab<uint8_t>(kLayer, SPLASH_KV_KEYS, id),
+                              keyIndex, std::clamp(key, -7, 7));
+          else
+            data.pool.slab<int8_t>(kLayer, SPLASH_KV_KEYS, id)[keyIndex] = key;
+          if (valueElement.floating)
             data.pool.slab<uint16_t>(kLayer, SPLASH_KV_VALUES, id)[valueIndex] =
                 floatToBf16(value * 0.007f);
-          }
+          else if (valueElement.bits == 4)
+            writePackedNibble(data.pool.slab<uint8_t>(kLayer, SPLASH_KV_VALUES, id),
+                              valueIndex, std::clamp(value, -7, 7));
+          else
+            data.pool.slab<int8_t>(kLayer, SPLASH_KV_VALUES, id)[valueIndex] = value;
         }
       }
     }
@@ -780,7 +791,7 @@ void checkPrefill(metal::MetalBackend &backend, uint32_t heads, kv::Layout layou
     }
     require(offset == rows, "chunk comparison dropped logical query rows");
   }
-  std::cout << "paged prefill: format=" << kv::formatName(layout.format) << " q=" << heads << " history=" << history
+  std::cout << "paged prefill: format=" << kv::formatName(layout) << " q=" << heads << " history=" << history
             << " rows=" << rows << " PASS\n";
 }
 
@@ -839,7 +850,7 @@ void checkStagedPrefill(metal::MetalBackend &backend, uint32_t heads, kv::Layout
       require(kept, "staging differs from its pool pages or changed a page it does not stage");
     }
   }
-  std::cout << "staged prefill: format=" << kv::formatName(layout.format) << " q=" << heads
+  std::cout << "staged prefill: format=" << kv::formatName(layout) << " q=" << heads
             << " history=" << history << " rows=" << rows << (masks ? " lists" : "") << " PASS\n";
 }
 
@@ -901,7 +912,7 @@ void checkVerifyLocations(metal::MetalBackend &backend, uint32_t heads, kv::Layo
   for (uint32_t index = 1; index < placed; ++index) extents |= extent(index) != extent(0);
   require(paged && extents, "the location test left no block to the page table or placed blocks in one extent");
   require(output == baseline, "verify through block locations differs from the lists alone");
-  std::cout << "paged sparse verify through locations: format=" << kv::formatName(layout.format)
+  std::cout << "paged sparse verify through locations: format=" << kv::formatName(layout)
             << " located=" << placed << " paged=" << paged << " PASS\n";
 }
 
@@ -913,7 +924,7 @@ void checkVerify(metal::MetalBackend &backend, uint32_t heads, kv::Layout layout
   auto oneExtent = makeCase(backend, heads, layout, lanes, 8, history, true, true);
   require(run<Phase::Verify>(backend, oneExtent, false) == output,
           "verify attention over extents differs from one extent of the same pages");
-  std::cout << "paged verify: format=" << kv::formatName(layout.format) << " q=" << heads << " history=" << history
+  std::cout << "paged verify: format=" << kv::formatName(layout) << " q=" << heads << " history=" << history
             << " lanes=" << lanes << " PASS\n";
 }
 
@@ -1184,8 +1195,11 @@ void stageEncoding(metal::MetalBackend &backend) {
     std::memcpy(&params, stage.bytes[0].data, sizeof(params));
     require(params.pool.extent_pages == pool.extent_pages && params.pool.offset == pool.offset &&
                 params.staged.extent_pages == staged.extent_pages && params.staged.offset == staged.offset &&
-                params.first_page == firstPage && params.data_bytes == layout.dataBytesPerLayerPage() &&
-                params.scale_bytes == layout.scaleBytesPerLayerPage(),
+                params.first_page == firstPage &&
+                params.k_data_bytes == layout.dataBytesPerLayerPageK() &&
+                params.k_scale_bytes == layout.scaleBytesPerLayerPageK() &&
+                params.v_data_bytes == layout.dataBytesPerLayerPageV() &&
+                params.v_scale_bytes == layout.scaleBytesPerLayerPageV(),
             "a stage's parameters do not place its layers, its first page and its tensors' bytes");
     const uint64_t tableBytes = (firstPage + pages) * sizeof(SplashKvPage);
     test::requireExtents(backend,
@@ -1565,12 +1579,23 @@ int main(int argc, char **argv) {
     require(argc >= 1 && argc <= 3, "usage: paged-attention-plan [METALLIB [--long]]");
     // Every format over every geometry: the packed 4-bit format runs the same
     // page loop and the same sparse staging as INT8, its slabs read as
-    // int4b_format operands.
+    // int4b_format operands. k8v4 keeps INT8 keys and packs only the values,
+    // so it is a second storage of the same layouts.
     const std::vector<kv::Format> formats{kv::Format::Int8, kv::Format::BFloat16,
                                           kv::Format::Int4};
-    for (auto format : formats)
-      for (const Geometry geometry : kGeometries)
-        checkPlans(geometry.queryHeads, geometry.layout(format));
+    const auto layouts = [](const Geometry &geometry) {
+      std::vector<kv::Layout> result;
+      for (const kv::Format format : {kv::Format::Int8, kv::Format::BFloat16,
+                                      kv::Format::Int4})
+        result.push_back(geometry.layout(format));
+      kv::Layout k8v4 = geometry.layout(kv::Format::Int8);
+      k8v4.storage = {{8, false}, {4, false}};
+      result.push_back(k8v4);
+      return result;
+    };
+    for (const Geometry geometry : kGeometries)
+      for (const kv::Layout layout : layouts(geometry))
+        checkPlans(geometry.queryHeads, layout);
     if (argc == 1) {
       std::cout << "paged attention plans: CPU PASS\n";
       return 0;
@@ -1607,10 +1632,9 @@ int main(int argc, char **argv) {
       return 0;
     }
     require(argc == 2, "usage: paged-attention-plan [METALLIB [--long]]");
-    for (auto format : formats)
-    for (const Geometry geometry : kGeometries) {
+    for (const Geometry geometry : kGeometries)
+    for (const kv::Layout layout : layouts(geometry)) {
       const uint32_t heads = geometry.queryHeads;
-      const kv::Layout layout = geometry.layout(format);
       for (const auto [history, rows] :
            std::array<std::array<uint32_t, 2>, 10>{{{0, 1}, {33, 7}, {255, 17},
                                                   {1023, 8}, {0, 2048},
@@ -1633,7 +1657,7 @@ int main(int argc, char **argv) {
         auto verify = makeCase(backend, heads, layout, 3, 8, 1023, true);
         setQsaMasks(verify);
         checkReference(verify, run<Phase::Verify>(backend, verify, false));
-        std::cout << "paged sparse attention: format=" << kv::formatName(format) << " PASS\n";
+        std::cout << "paged sparse attention: format=" << kv::formatName(layout) << " PASS\n";
         checkVerifyLocations(backend, heads, layout);
       }
       for (const auto [history, rows] : std::array<std::array<uint32_t, 2>, 2>{{{6145, 77}, {4096, 130}}}) {

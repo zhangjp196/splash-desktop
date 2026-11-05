@@ -16,6 +16,8 @@ inline void splash_prefill_attention_split_phase(
     threadgroup float *previous_scale, threadgroup atomic_uint *rescale, uint3 group,
     uint thread_index) {
   constexpr uint Parts = SPLASH_ATTENTION_TILE_PARTS(QueryHeadsPerKVHead);
+  using Key = typename SplashKvNamedElements<CacheElement>::Key;
+  using Value = typename SplashKvNamedElements<CacheElement>::Value;
   const uint split = group.z;
   const uint kv_head = group.x / Parts;
   const SplashAttentionTile tile =
@@ -24,8 +26,8 @@ inline void splash_prefill_attention_split_phase(
           group.x % Parts, params.split_count);
   if (!tile.active || split >= tile.splits)
     return;
-  splash_paged_attention_tile<KVHeads, QueryHeadsPerKVHead,
-                              SPLASH_PREFILL_ATTENTION_TILE_ROWS / Parts, HeadDim, Window, CacheElement>(
+  splash_paged_attention_tile<Key, Value, KVHeads, QueryHeadsPerKVHead,
+                              SPLASH_PREFILL_ATTENTION_TILE_ROWS / Parts, HeadDim, Window>(
       queries + tile.offset, page_table, params.kv, kv_head, tile.first_position,
       tile.active_rows, tile.splits, split, partials, statistics,
       tile.first_slot + split, scores, probabilities, row_max, row_sum,
@@ -101,6 +103,15 @@ PAGED_PREFILL_SPLIT(prefill_attention_q4_split_kv2_g8, 2, 8, 256, 0, SplashKvInt
 PAGED_PREFILL_SPLIT(prefill_attention_q4_split_kv2_g16, 2, 16, 256, 0, SplashKvInt4)
 PAGED_PREFILL_SPLIT(prefill_attention_q4_split_kv4_g8_d128, 4, 8, 128, 0, SplashKvInt4)
 PAGED_PREFILL_SPLIT(prefill_attention_q4_split_kv4_g8_d128_w512, 4, 8, 128, 512, SplashKvInt4)
+// INT8 keys and packed 4-bit values: the keys' data is int8_t, the
+// values' is two int4b elements per byte, each (head, token) carrying
+// its own float scale, in the region's tensor order.
+PAGED_PREFILL_SPLIT(prefill_attention_k8v4_split, 4, 6, 256, 0, SplashKvK8V4)
+PAGED_PREFILL_SPLIT(prefill_attention_k8v4_split_kv2_g8, 2, 8, 256, 0, SplashKvK8V4)
+PAGED_PREFILL_SPLIT(prefill_attention_k8v4_split_kv2_g16, 2, 16, 256, 0, SplashKvK8V4)
+PAGED_PREFILL_SPLIT(prefill_attention_k8v4_split_kv4_g8_d128, 4, 8, 128, 0, SplashKvK8V4)
+PAGED_PREFILL_SPLIT(prefill_attention_k8v4_split_kv4_g8_d128_w512, 4, 8, 128, 512, SplashKvK8V4)
+
 #undef PAGED_PREFILL_SPLIT
 
 #define PAGED_PREFILL_REDUCE(Name, Heads, Group, HeadDim, Window)              \

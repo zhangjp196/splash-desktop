@@ -126,12 +126,17 @@ void testServerCommandLines(const char *path) {
          read.persistentCache = true;
          read.cacheRoot = "/srv/cache";
        }},
-      {"bf16", [](NativeArguments &read) { read.kvFormat = kv::Format::BFloat16; }},
-      {"int4", [](NativeArguments &read) { read.kvFormat = kv::Format::Int4; }},
+      {"cache_eviction",
+       [](NativeArguments &read) {
+         read.cacheEviction = {engine::EvictionPolicy::Fifo, 2};
+       }},
+      {"bf16", [](NativeArguments &read) { read.kvStorage = kv::storageOf(kv::Format::BFloat16); }},
+      {"int4", [](NativeArguments &read) { read.kvStorage = kv::storageOf(kv::Format::Int4); }},
+      {"k8v4", [](NativeArguments &read) { read.kvStorage = kv::KvStorage{{8, false}, {4, false}}; }},
       {"disk_bf16",
        [](NativeArguments &read) {
          read.maxCacheDisk = {.bytes = 5 * kGiB};
-         read.kvFormat = kv::Format::BFloat16;
+         read.kvStorage = kv::storageOf(kv::Format::BFloat16);
        }},
       {"state_bf16",
        [](NativeArguments &read) { read.stateFormat = ops::GdnStateFormat::BFloat16; }},
@@ -216,7 +221,8 @@ void testServerCommandLines(const char *path) {
            read.maxCacheDisk.bytes == meant.maxCacheDisk.bytes &&
            read.maxCacheDiskWritesBytes == meant.maxCacheDiskWritesBytes &&
            read.persistentCache == meant.persistentCache && read.cacheRoot == meant.cacheRoot &&
-           read.kvFormat == meant.kvFormat && read.stateFormat == meant.stateFormat &&
+           read.cacheEviction == meant.cacheEviction &&
+           read.kvStorage == meant.kvStorage && read.stateFormat == meant.stateFormat &&
            read.decodeShare == meant.decodeShare &&
            read.prefillDutyPercent == meant.prefillDutyPercent &&
            read.maxImagePatches == meant.maxImagePatches &&
@@ -304,9 +310,9 @@ void testRefusals() {
             "the engine read a command line it must refuse");
   };
   refuses({"auto", "auto", "--kv-format", "fp16"},
-          "--kv-format requires int8, int4 or bf16");
+          "--kv-format requires int8, bf16, int4 or k8v4");
   // An option's missing value fails its check.
-  refuses({"auto", "auto", "--kv-format"}, "--kv-format requires int8, int4 or bf16");
+  refuses({"auto", "auto", "--kv-format"}, "--kv-format requires int8, bf16, int4 or k8v4");
   refuses({"auto", "auto", "--state-format", "fp16"},
           "--state-format requires fp32 or bf16");
   refuses({"auto", "auto", "--state-format"}, "--state-format requires fp32 or bf16");
@@ -352,6 +358,12 @@ void testRefusals() {
           "--cache-dir requires --persistent-cache on");
   refuses({"auto", "auto", "5368709120", "--persistent-cache", "on", "--cache-dir", ""},
           "--cache-dir requires a directory");
+  for (const char *policy : {"random", "LRU", ""})
+    refuses({"auto", "auto", "--cache-eviction", policy},
+            "--cache-eviction requires lru, fifo, lfu or largest");
+  for (const char *protect : {"9", "-1", "two", ""})
+    refuses({"auto", "auto", "--cache-eviction-protect", protect},
+            "--cache-eviction-protect requires a count from 0 to 8");
   refuses({"auto", "auto", "5G"},
           "MAX_CACHE_DISK_BYTES must be a nonnegative integer");
   for (const char *writes : {"200G", "-1", "1.5", ""})

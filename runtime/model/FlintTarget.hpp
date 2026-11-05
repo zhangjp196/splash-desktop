@@ -32,7 +32,9 @@ public:
   [[nodiscard]] std::vector<metal::MetalBuffer> addPrefill(metal::CommandGraph &graph,
                                                            std::span<const QwenTargetPrefillChunk> chunks,
                                                            const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                                           QwenPrefillLayers layers, ops::AneFfn *aneFfn) override;
+                                                           QwenPrefillLayers layers, ops::AneFfn *aneFfn, ops::AneProjection *aneMixerQkv,
+                                                                                 ops::AneProjection *aneMixerGdn,
+                                                                                 ops::AneProjection *aneMixerOut) override;
   void addVerify(metal::CommandGraph &graph, QwenTargetVerifyBuffers buffers, const kv::PageStorage &kv,
                  SpilledKvReads &spilled, std::span<const kv::ChunkedPrefillParams> chunks,
                  uint32_t lanes) const override;

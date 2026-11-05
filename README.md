@@ -187,10 +187,11 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | `--idle-release off` | Keep the model in memory while idle (default: release after 10m). The cache still spills to disk after 5m, or is evicted if the SSD cache is off; `--cache-idle-spill off` keeps it too. |
 | `--max-context 100K` | Set the context limit. Up to `1M` tokens. |
 | `--language-only` | Skip vision; serve text only. |
-| `--kv-format bf16` | Use BF16 KV cache. Default: 8-bit (INT8), or `int4` for a page half its size. |
+| `--kv-format bf16` | Use BF16 KV cache. Default: 8-bit (INT8), or `int4` for a page half its size, `k8v4` for INT8 keys with 4-bit values (three quarters). |
 | `--state-format bf16` | Use BF16 recurrent states, half the size. Default: FP32. |
 | `--disable-ane` | Prefill on the GPU alone. Default: the 27B also uses the Neural Engine. |
 | `--max-cache-disk 16G` | Cap the SSD cache (default: auto, up to 64 GiB; `0` turns it off). |
+| `--cache-eviction lfu` | Pick the cached prefixes a reclaim gives up by last use (`lru`, default), entry (`fifo`), touches (`lfu`) or memory held (`largest`); `--cache-eviction-protect 2` protects an object used that many times. |
 | `--persistent-cache` | Keep the SSD cache across restarts. Off in `splash serve`; the desktop app turns it on when the SSD cache is switched on for coding conversations (off by default). |
 | `--thermal-policy quiet` | Make prefill quieter: it keeps the GPU busy 33 percent of the wall time (`moderate` 48, `balanced` 68), so prompts take longer and the fans answer less. The default, `auto`, paces nothing and leaves the Mac's own thermal management in charge. A running server's rung changes through `POST /v1/thermal`. |
 

@@ -22,20 +22,23 @@ std::span<const ImageSpan> spansFrom(std::span<const ImageSpan> images, uint64_t
   return {std::partition_point(images.begin(), images.end(), ended), images.end()};
 }
 
-// The left candidate exists and was used before the right one, if any.
+// The left candidate exists and leaves before the right one, if any.
 bool older(const std::optional<CacheEvictionCandidate> &left,
            const std::optional<CacheEvictionCandidate> &right) noexcept {
-  return left && (!right || left->lastUsed < right->lastUsed);
+  return left && (!right || evictsBefore(*left, *right));
 }
 
 } // namespace
 
 Cache::Cache(KvPool &pool, KvTier *kvTier, std::shared_ptr<model::DiskBudget> diskBudget,
-             std::optional<CacheSpillPolicy> spill, std::optional<CacheWindowPolicy> window)
+             std::optional<CacheSpillPolicy> spill, std::optional<CacheWindowPolicy> window,
+             EvictionSettings eviction)
     : pool_(pool), tier_(kvTier), spill_(spill), persistent_(kvTier && kvTier->persistent()),
       window_(window), diskBudget_(std::move(diskBudget)),
-      kv_(pool, recency_, spill.has_value(), persistent_, window ? window->windowPages : 0),
-      states_(kv_, recency_, [this](bool inUse) { return freeDiskSpace(inUse); }, persistent_) {
+      kv_(pool, recency_, spill.has_value(), persistent_, window ? window->windowPages : 0,
+          eviction),
+      states_(kv_, recency_, [this](bool inUse) { return freeDiskSpace(inUse); }, persistent_,
+              eviction) {
   // Spilled K/V lives in the tier's copies, within its quota.
   if (spill_ && (!tier_ || !diskBudget_))
     throw std::invalid_argument("a cache whose requests spill needs a disk tier and its quota");
@@ -737,7 +740,7 @@ std::optional<Cache::Victim> Cache::reclaimOldest(const VictimScan &scan) {
   std::optional<CacheEvictionCandidate> kv = oldestKvLeaf(0, scan.inUse, scan.pagesOnly);
   ReclaimTiming timing = scan.timing;
   while (state || kv) {
-    if (state && (!kv || state->lastUsed <= kv->lastUsed)) {
+    if (state && (!kv || !evictsBefore(*kv, *state))) {
       if (states_.reclaim(state->id, scan.unwritten).evicted)
         return Victim{false};
       state.reset();

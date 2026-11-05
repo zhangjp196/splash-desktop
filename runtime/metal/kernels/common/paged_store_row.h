@@ -53,7 +53,26 @@ inline ulong splash_current_value_index(uint stride, uint head, uint token,
 // 4-bit format derives the same per-row scale as INT8 and writes two
 // dimensions' nibbles per byte. Slots are addressed inside the head's slab of
 // the page: the page index functions at page zero and head zero.
-template <uint KVHeads, uint HeadDim, typename CacheElement, bool ValuesTokenMajor = false>
+// Writes one element of a packed 4-bit slab: the even element's nibble is
+// the low one, the odd element's the high one. When the pair's other
+// element is in this chunk its nibble is written too; otherwise only this
+// element's nibble is replaced, leaving the other chunk's bits intact.
+inline void splash_store_packed_pair(device uchar *slab, ulong element,
+                                     int quantized, int pairQuantized,
+                                     bool pairPresent, bool firstOfPair) {
+  device uchar *byte = slab + splash_kv_stored<SplashKvInt4>(element);
+  const uint own = uint(quantized) & 0xFu;
+  const uint partner = uint(pairQuantized) & 0xFu;
+  if (pairPresent)
+    *byte = uchar(own | (partner << 4));
+  else if (firstOfPair)
+    *byte = uchar((*byte & 0xF0u) | own);
+  else
+    *byte = uchar((*byte & 0x0Fu) | (own << 4));
+}
+
+template <uint KVHeads, uint HeadDim, typename KeyElement,
+          typename ValueElement, bool ValuesTokenMajor = false>
 __attribute__((always_inline)) inline void splash_store_kv_row(
     device const bfloat *chunk_keys, device const bfloat *chunk_values,
     device const SplashKvPage *page_table,
@@ -62,8 +81,8 @@ __attribute__((always_inline)) inline void splash_store_kv_row(
     uint simd_lane, uint simd_group) {
   uint logical_token = params.committed_tokens + chunk_token;
   const SplashKvPage page = page_table[logical_token / SplashKvPageTokens];
-  const SplashKvPageTensors<CacheElement> slab =
-      SplashKvAddressing<KVHeads, HeadDim, CacheElement>(params.kv, head).page(page);
+  const SplashKvPageTensors<KeyElement, ValueElement> slab =
+      SplashKvAddressing<KVHeads, HeadDim, KeyElement, ValueElement>(params.kv, head).page(page);
   uint page_token = logical_token % SplashKvPageTokens;
   ulong source_index =
       value_tensor ? splash_current_value_index<HeadDim>(params.chunk_stride, head,
@@ -72,65 +91,56 @@ __attribute__((always_inline)) inline void splash_store_kv_row(
                                                          chunk_token, dimension);
   bfloat source = value_tensor ? chunk_values[source_index] : chunk_keys[source_index];
 
-  if constexpr (is_same<CacheElement, bfloat>::value) {
-    if (value_tensor)
-      slab.values[splash_kv_value_index<KVHeads, HeadDim, ValuesTokenMajor>(0, 0, page_token, dimension)] = source;
-    else
+  if constexpr (is_same<KeyElement, bfloat>::value) {
+    if (!value_tensor) {
+      // BF16 keys: one element per byte, a copy without a scale.
       slab.keys[splash_kv_key_index<KVHeads, HeadDim>(0, 0, page_token, dimension)] = source;
-    return;
-  } else {
-
-    float value = float(source);
-    float local_maximum = simd_max(abs(value));
-    if (simd_lane == 0)
-      maxima[simd_group] = local_maximum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (simd_group == 0) {
-      for (uint offset = HeadDim / 64; offset != 0; offset >>= 1) {
-        if (simd_lane < offset)
-          maxima[simd_lane] = max(maxima[simd_lane], maxima[simd_lane + offset]);
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-      }
+      return;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float maximum = maxima[0];
-    // The packed format spends the same 7 signed bits INT8 does, so its
-    // per-row scale is unchanged; only the step count of the rounding differs.
-    constexpr int QuantizedMaximum = is_same<CacheElement, SplashKvInt4>::value ? 7 : 127;
-    constexpr int QuantizedMinimum = -QuantizedMaximum;
-    float scale = maximum == 0.0f ? 0.0f : maximum / float(QuantizedMaximum);
-    int quantized = maximum == 0.0f
-                        ? 0
-                        : clamp(int(rint(value * float(QuantizedMaximum) / maximum)),
-                                QuantizedMinimum, QuantizedMaximum);
+  }
+  if constexpr (is_same<ValueElement, bfloat>::value) {
+    if (value_tensor) {
+      // BF16 values: one element per byte, a copy without a scale.
+      slab.values[splash_kv_value_index<KVHeads, HeadDim, ValuesTokenMajor>(
+          0, 0, page_token, dimension)] = source;
+      return;
+    }
+  }
 
-    if constexpr (is_same<CacheElement, SplashKvInt4>::value) {
-      // Two elements share a byte, and a byte packs a pair of *neighbouring
-      // element indices*: the even index in the low nibble, the odd one in the
-      // high nibble. That is how MPP's int4b_format operand reads a slab,
-      // verified at runtime against a CPU reference.
-      //
-      // Which two (token, dimension) an element index pairs follows from the
-      // slab's order, so it is worked out from the index itself rather than
-      // assumed:
-      //
-      // - keys are token-major, element = (head * tokens + token) * D +
-      //   dimension, so a byte pairs two dimensions of one token and both
-      //   come from this threadgroup's own chunk rows;
-      // - values are dimension-major by default, element = (head * D +
-      //   dimension) * tokens + token, so a byte pairs two tokens of one
-      //   dimension, and the partner token can be in another chunk.
-      //
-      // Only the thread owning the even index writes the byte, so no two
-      // threads race for it; its partner's source is read here.
-      const bool pairAlongDimension = !value_tensor || ValuesTokenMajor;
-      // A value byte pairs two tokens of one dimension, and either token of the
-      // pair can be the one this chunk ends on: the even token when the chunk
-      // ends right after it (its partner opens the next chunk), the odd token
-      // when it opens this chunk (its partner closed the previous one). A token
-      // whose partner is in another chunk writes its own nibble, so no nibble
-      // waits on a chunk that never returns for it. Two dimensions of one token
-      // always meet in one chunk, as HeadDim is even.
+  // Quantize the row: one fp32 scale per (head, token), the same 7 signed
+  // bits INT8 spends for the packed format.
+  float value = float(source);
+  float local_maximum = simd_max(abs(value));
+  if (simd_lane == 0)
+    maxima[simd_group] = local_maximum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (simd_group == 0) {
+    for (uint offset = HeadDim / 64; offset != 0; offset >>= 1) {
+      if (simd_lane < offset)
+        maxima[simd_lane] = max(maxima[simd_lane], maxima[simd_lane + offset]);
+      simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float maximum = maxima[0];
+  constexpr int KeyQuantizedMaximum = is_same<KeyElement, SplashKvInt4>::value ? 7 : 127;
+  constexpr int ValueQuantizedMaximum =
+      is_same<ValueElement, SplashKvInt4>::value ? 7 : 127;
+  const int QuantizedMaximum = value_tensor ? ValueQuantizedMaximum : KeyQuantizedMaximum;
+  const int QuantizedMinimum = -QuantizedMaximum;
+  float scale = maximum == 0.0f ? 0.0f : maximum / float(QuantizedMaximum);
+  int quantized = maximum == 0.0f
+                      ? 0
+                      : clamp(int(rint(value * float(QuantizedMaximum) / maximum)),
+                              QuantizedMinimum, QuantizedMaximum);
+
+  if (value_tensor) {
+    if constexpr (is_same<ValueElement, SplashKvInt4>::value) {
+      // Values are dimension-major unless the layout stores them token-major.
+      // Dimension-major values pair two tokens of one dimension, so a byte's
+      // partner can be in another chunk; token-major values pair two
+      // dimensions of one token, which always meet in one chunk.
+      const bool pairAlongDimension = ValuesTokenMajor;
       const bool partnerInChunk =
           pairAlongDimension ||
           (page_token % 2 == 0 ? chunk_token + 1 < params.chunk_tokens
@@ -140,10 +150,8 @@ __attribute__((always_inline)) inline void splash_store_kv_row(
       const bool ownsByte = firstOfPair || !partnerInChunk;
       if (!ownsByte) {
         // The partner owns the byte; this thread only contributes its scale.
-        if (dimension == 0) {
-          device float *scales = value_tensor ? slab.value_scales : slab.key_scales;
-          scales[splash_q8_scale_index<KVHeads>(0, 0, page_token)] = scale;
-        }
+        if (dimension == 0)
+          slab.value_scales[splash_q8_scale_index<KVHeads>(0, 0, page_token)] = scale;
         return;
       }
       float pairValue = 0.0F;
@@ -151,24 +159,15 @@ __attribute__((always_inline)) inline void splash_store_kv_row(
       if (pairAlongDimension) {
         const uint pairDimension = dimension + 1;
         pairPresent = pairDimension < HeadDim;
-        if (pairPresent) {
-          const ulong pairIndex =
-              value_tensor
-                  ? splash_current_value_index<HeadDim>(params.chunk_stride, head,
-                                                        chunk_token, pairDimension)
-                  : splash_current_key_index<HeadDim>(params.chunk_stride, head,
-                                                      chunk_token, pairDimension);
-          pairValue = float(value_tensor ? chunk_values[pairIndex] : chunk_keys[pairIndex]);
-        }
+        if (pairPresent)
+          pairValue = float(chunk_values[splash_current_value_index<HeadDim>(
+              params.chunk_stride, head, chunk_token, pairDimension)]);
       } else {
-        // The partner token is the other one of the pair: the next token for an
-        // even one, the previous for an odd one, and both sit in this page.
         pairPresent = partnerInChunk;
         if (pairPresent) {
           const uint pairToken = page_token % 2 == 0 ? chunk_token + 1 : chunk_token - 1;
-          const ulong pairIndex = splash_current_value_index<HeadDim>(
-              params.chunk_stride, head, pairToken, dimension);
-          pairValue = float(chunk_values[pairIndex]);
+          pairValue = float(chunk_values[splash_current_value_index<HeadDim>(
+              params.chunk_stride, head, pairToken, dimension)]);
         }
       }
       const int pairQuantized =
@@ -176,38 +175,44 @@ __attribute__((always_inline)) inline void splash_store_kv_row(
               ? 0
               : clamp(int(rint(pairValue * float(QuantizedMaximum) / maximum)),
                       QuantizedMinimum, QuantizedMaximum);
-      // Bytes are read-modified-written: a chunk that ends between the two
-      // elements of one byte leaves the other nibble to the chunk that stores
-      // it, which must find its neighbour's bits intact. The even element's
-      // nibble is the low one, the odd element's the high one.
       const ulong element =
-          value_tensor
-              ? splash_kv_value_index<KVHeads, HeadDim, ValuesTokenMajor>(
-                    0, 0, page_token, dimension)
-              : splash_kv_key_index<KVHeads, HeadDim>(0, 0, page_token, dimension);
-      device uchar *byte =
-          (value_tensor ? slab.values : slab.keys) + splash_kv_stored<CacheElement>(element);
-      const uint own = uint(quantized) & 0xFu;
-      const uint partner = uint(pairQuantized) & 0xFu;
-      if (pairPresent)
-        *byte = uchar(own | (partner << 4));
-      else if (firstOfPair)
-        *byte = uchar((*byte & 0xF0u) | own);
-      else
-        *byte = uchar((*byte & 0x0Fu) | (own << 4));
-      if (dimension == 0) {
-        device float *scales = value_tensor ? slab.value_scales : slab.key_scales;
-        scales[splash_q8_scale_index<KVHeads>(0, 0, page_token)] = scale;
-      }
-      return;
-    }
-
-    if (value_tensor) {
-      slab.values[splash_kv_value_index<KVHeads, HeadDim, ValuesTokenMajor>(0, 0, page_token, dimension)] =
-          char(quantized);
+          splash_kv_value_index<KVHeads, HeadDim, ValuesTokenMajor>(
+              0, 0, page_token, dimension);
+      splash_store_packed_pair(slab.values, element, quantized, pairQuantized,
+                               pairPresent, firstOfPair);
       if (dimension == 0)
         slab.value_scales[splash_q8_scale_index<KVHeads>(0, 0, page_token)] = scale;
-    } else {
+    } else if constexpr (is_same<ValueElement, int8_t>::value) {
+      // INT8 values: one element per byte, a scale per (head, token).
+      slab.values[splash_kv_value_index<KVHeads, HeadDim, ValuesTokenMajor>(
+          0, 0, page_token, dimension)] = char(quantized);
+      if (dimension == 0)
+        slab.value_scales[splash_q8_scale_index<KVHeads>(0, 0, page_token)] = scale;
+    }
+  } else {
+    if constexpr (is_same<KeyElement, SplashKvInt4>::value) {
+      // Keys are token-major, element = (head * tokens + token) * D +
+      // dimension, so a byte pairs two dimensions of one token and both come
+      // from this threadgroup's own chunk rows.
+      const bool pairPresent = dimension + 1 < HeadDim;
+      const bool firstOfPair = dimension % 2 == 0;
+      float pairValue = 0.0F;
+      if (pairPresent)
+        pairValue = float(chunk_keys[splash_current_key_index<HeadDim>(
+            params.chunk_stride, head, chunk_token, dimension + 1)]);
+      const int pairQuantized =
+          !pairPresent || maximum == 0.0f
+              ? 0
+              : clamp(int(rint(pairValue * float(QuantizedMaximum) / maximum)),
+                      QuantizedMinimum, QuantizedMaximum);
+      const ulong element =
+          splash_kv_key_index<KVHeads, HeadDim>(0, 0, page_token, dimension);
+      splash_store_packed_pair(slab.keys, element, quantized, pairQuantized,
+                               pairPresent, firstOfPair);
+      if (dimension == 0)
+        slab.key_scales[splash_q8_scale_index<KVHeads>(0, 0, page_token)] = scale;
+    } else if constexpr (is_same<KeyElement, int8_t>::value) {
+      // INT8 keys: one element per byte, a scale per (head, token).
       slab.keys[splash_kv_key_index<KVHeads, HeadDim>(0, 0, page_token, dimension)] =
           char(quantized);
       if (dimension == 0)

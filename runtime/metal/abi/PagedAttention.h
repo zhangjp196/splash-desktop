@@ -166,21 +166,20 @@ struct SplashVerifyAttentionParams {
 static_assert(sizeof(SplashVerifyAttentionParams) == 32,
               "Verify attention parameters are 32 bytes on both sides");
 
-// A prefill whose history has pages that hold only their index reads one
-// layer's history staged (kernels/shared/kv_stage.metal, ops::PagedAttention::
-// addStageLayer): pages of the pool's layer from first_page on, a threadgroup
-// each, reached through a page table, copied to the same pages of a staging
-// table, whose storage holds that one layer; a pool entry that is
-// SPLASH_KV_PAGE_ABSENT is left to the reads that fill it. data_bytes and
-// scale_bytes are a page's bytes of one tensor of the layer (zero scale bytes
-// for BF16).
+// One layer's staging: pages of a pool's layer copied to a table's own
+// layer. A prefill's history reads staged pages, whose storage holds that
+// one layer: the copies' bytes per page, then the first page's index.
 struct SplashKvStageParams {
   SplashKvLayer pool;
   SplashKvLayer staged;
   uint32_t first_page;
-  uint32_t data_bytes;
-  uint32_t scale_bytes;
+  // One page's bytes of the stage's keys and of its values: data and scales
+  // of each, as a page's regions order them.
+  uint32_t k_data_bytes;
+  uint32_t k_scale_bytes;
+  uint32_t v_data_bytes;
+  uint32_t v_scale_bytes;
 };
 
-static_assert(sizeof(SplashKvStageParams) == 28,
-              "KV stage parameters are 28 bytes on both sides");
+static_assert(sizeof(SplashKvStageParams) == 36,
+              "KV stage parameters are 36 bytes on both sides");

@@ -24,14 +24,17 @@ namespace {
 
 using Element = ane::Surface::Element;
 
-// The ANE program multiplies gate's and up's hidden inputs, and down's ANE
-// inputs, in segments of kSegment channels, a matmul each: on an M5 Pro, two
-// of 2560 run a 5120-channel FFN about 14% faster than one of 5120 (ane-ffn's
-// FFN, 2048 rows). The weights of a segment are staged in whole blocks of
-// either rotation, and its inputs packed in whole tiles.
-constexpr uint32_t kSegment = 2560;
-static_assert(kSegment % ANE_FFN_INPUT_BLOCK == 0 && kSegment % ANE_FFN_INTERMEDIATE_BLOCK == 0 &&
-                  kSegment % ANE_FFN_TILE == 0,
+// The most channels one matmul of the ANE program's segments multiplies: on an
+// M5 Pro, two segments of 2560 run a 5120-channel FFN about 14% faster than
+// one of 5120 (ane-ffn's FFN, 2048 rows). A hidden size that is not a multiple
+// of it takes the largest whole number of rotation blocks below it that
+// divides the hidden size (segmentFor), so that a 2048- or 1536-channel
+// segment serves the narrower dense FFNs of MoE targets. The weights of a
+// segment are staged in whole blocks of either rotation, and its inputs
+// packed in whole tiles.
+constexpr uint32_t kMaximumSegment = 2560;
+static_assert(kMaximumSegment % ANE_FFN_INPUT_BLOCK == 0 && kMaximumSegment % ANE_FFN_INTERMEDIATE_BLOCK == 0 &&
+                  kMaximumSegment % ANE_FFN_TILE == 0,
               "segments hold whole rotation blocks and packing tiles");
 // The hidden channels ane_ffn_rotate's simdgroups rotate a block each of.
 constexpr uint32_t kRotateGroup = ANE_FFN_INPUT_BLOCK * (ANE_FFN_ROTATE_THREADS / 32);
@@ -39,7 +42,7 @@ constexpr uint32_t kRotateGroup = ANE_FFN_INPUT_BLOCK * (ANE_FFN_ROTATE_THREADS 
 // for the ANE, whole plane tiles of the weight planes (QUANT_TILE_ROWS) for
 // the GPU.
 constexpr uint32_t kChannelUnit = std::max(QUANT_TILE_ROWS, ANE_FFN_INTERMEDIATE_BLOCK);
-static_assert(kChannelUnit % ANE_FFN_WEIGHT_ROWS == 0 && kSegment % ANE_FFN_WEIGHT_ROWS == 0,
+static_assert(kChannelUnit % ANE_FFN_WEIGHT_ROWS == 0 && kMaximumSegment % ANE_FFN_WEIGHT_ROWS == 0,
               "the weight kernels' threadgroups take whole rows of every matrix the split stages");
 // How long an ANE evaluation may run once the GPU has raised its `ready`
 // before the split stops (ane::Handoff). An evaluation takes 10-60 ms. Metal
@@ -71,9 +74,21 @@ uint32_t gpuChannels(uint32_t intermediate, uint32_t aneUnits) {
   return intermediate - aneUnits * kChannelUnit;
 }
 
-std::vector<uint32_t> segments(uint32_t channels) {
+// The segment of `hidden` channels the ANE program multiplies: the largest
+// whole number of rotation blocks at most kMaximumSegment that divides them,
+// or 0 for a hidden size that takes none (the rotate's check refuses those
+// before the program does).
+uint32_t segmentFor(uint32_t hidden) {
+  for (uint32_t segment = kMaximumSegment; segment >= ANE_FFN_INTERMEDIATE_BLOCK;
+       segment -= ANE_FFN_INTERMEDIATE_BLOCK)
+    if (hidden % segment == 0) return segment;
+  return 0;
+}
+
+std::vector<uint32_t> segments(uint32_t channels, uint32_t segment) {
   std::vector<uint32_t> result;
-  for (uint32_t begin = 0; begin < channels; begin += kSegment) result.push_back(std::min(kSegment, channels - begin));
+  for (uint32_t begin = 0; begin < channels; begin += segment)
+    result.push_back(std::min(segment, channels - begin));
   return result;
 }
 
@@ -82,7 +97,7 @@ std::vector<uint32_t> segments(uint32_t channels) {
 const char *AneFfn::unsupported(std::span<const SwiGluProjections> layers) {
   if (layers.empty()) return "ANE FFN split has no layers";
   const uint32_t hidden = layers.front().gate->inputSize, intermediate = layers.front().gate->outputSize;
-  if (hidden % kSegment) return "ANE FFN split needs a hidden size of whole 2560-channel segments";
+  if (!segmentFor(hidden)) return "ANE FFN split needs a hidden size of whole rotation blocks";
   if (hidden % kRotateGroup || hidden / kRotateGroup > ANE_FFN_ROTATE_BLOCKS)
     return "ANE FFN split needs a hidden size ane_ffn_rotate takes";
   if (intermediate % kChannelUnit || intermediate < 2 * kChannelUnit)
@@ -210,28 +225,30 @@ AneFfn::Shape AneFfn::shapeOf(std::span<const SwiGluProjections> layers, uint32_
   shape.hidden = layers.front().gate->inputSize;
   shape.intermediate = layers.front().gate->outputSize;
   shape.layers = static_cast<uint32_t>(layers.size());
+  shape.segment = segmentFor(shape.hidden);
   shape.gpu = gpuChannels(shape.intermediate, aneUnits);
   shape.ane = shape.intermediate - shape.gpu;
-  shape.downSegments = segments(shape.ane);
+  shape.downSegments = segments(shape.ane, shape.segment);
   return shape;
 }
 
 template <class MakeBuffer, class MakeSurface>
 AneFfn::Memory AneFfn::allocate(const Shape &shape, MakeBuffer &&buffer, MakeSurface &&surface) {
-  const uint32_t inputSegments = shape.hidden / kSegment;
+  const uint32_t inputSegments = shape.hidden / shape.segment;
   Memory memory;
   memory.signs = buffer(ANE_FFN_INTERMEDIATE_BLOCK * sizeof(float), "ane ffn signs");
   memory.rowScales = buffer(uint64_t{shape.layers} * (2 * shape.ane + shape.hidden) * sizeof(_Float16),
                             "ane ffn row scales");
   memory.rotated = buffer(uint64_t{kMaximumRows} * shape.hidden * sizeof(_Float16), "ane ffn rotated input");
   memory.status = buffer(sizeof(uint32_t), "ane ffn status");
-  for (uint32_t k = 0; k < inputSegments; ++k) memory.inputs.push_back(surface(kSegment, kMaximumRows, Element::Int8));
+  for (uint32_t k = 0; k < inputSegments; ++k)
+    memory.inputs.push_back(surface(shape.segment, kMaximumRows, Element::Int8));
   memory.tokenScale = surface(1, kMaximumRows, Element::Float16);
   memory.partial = surface(shape.hidden + 1, kMaximumRows, Element::Float16);
   for (Weights &set : memory.sets) {
     for (uint32_t k = 0; k < inputSegments; ++k) {
-      set.gate.push_back(surface(shape.ane, kSegment, Element::Int8));
-      set.up.push_back(surface(shape.ane, kSegment, Element::Int8));
+      set.gate.push_back(surface(shape.ane, shape.segment, Element::Int8));
+      set.up.push_back(surface(shape.ane, shape.segment, Element::Int8));
     }
     for (const uint32_t width : shape.downSegments) set.down.push_back(surface(shape.hidden, width, Element::Int8));
     set.gateScale = surface(shape.ane, 1, Element::Float16);
@@ -266,12 +283,13 @@ std::vector<AneFfn::Input> AneFfn::programInputs(const Shape &shape, const Memor
   };
   std::vector<Input> inputs;
   for (uint32_t k = 0; k < memory.inputs.size(); ++k)
-    inputs.push_back({"x" + std::to_string(k), {&memory.inputs[k], &memory.inputs[k]}, kSegment, 0});
+    inputs.push_back({"x" + std::to_string(k), {&memory.inputs[k], &memory.inputs[k]}, shape.segment, 0});
   inputs.push_back({"tx", {&memory.tokenScale, &memory.tokenScale}, 1, 0});
   for (uint32_t k = 0; k < memory.inputs.size(); ++k) {
     inputs.push_back(
-        {"wg" + std::to_string(k), {&memory.sets[0].gate[k], &memory.sets[1].gate[k]}, shape.ane, kSegment});
-    inputs.push_back({"wu" + std::to_string(k), {&memory.sets[0].up[k], &memory.sets[1].up[k]}, shape.ane, kSegment});
+        {"wg" + std::to_string(k), {&memory.sets[0].gate[k], &memory.sets[1].gate[k]}, shape.ane, shape.segment});
+    inputs.push_back(
+        {"wu" + std::to_string(k), {&memory.sets[0].up[k], &memory.sets[1].up[k]}, shape.ane, shape.segment});
   }
   inputs.push_back({"sg", both(&Weights::gateScale), shape.ane, 1});
   inputs.push_back({"su", both(&Weights::upScale), shape.ane, 1});
@@ -292,7 +310,7 @@ std::vector<AneFfn::Input> AneFfn::programInputs(const Shape &shape, const Memor
 // of the chunk's surfaces.
 std::string AneFfn::function(const Shape &shape, std::span<const Input> inputs, const ane::Surface &output,
                              uint32_t rows) {
-  const uint32_t inputSegments = shape.hidden / kSegment, channels = shape.ane;
+  const uint32_t inputSegments = shape.hidden / shape.segment, channels = shape.ane;
   const std::string unit = fp16(1.0 / ANE_FFN_INT8_UNIT);
   std::string parameters, body;
   const auto line = [&](const std::string &text) { body += "        " + text + ";\n"; };
@@ -324,13 +342,13 @@ std::string AneFfn::function(const Shape &shape, std::span<const Input> inputs, 
 
   for (uint32_t k = 0; k < inputSegments; ++k) {
     const std::string x = "x" + std::to_string(k);
-    f16(x + "_d", kSegment, rows, "dequantize(input = " + x + "_t, scale = " + unit + ")");
+    f16(x + "_d", shape.segment, rows, "dequantize(input = " + x + "_t, scale = " + unit + ")");
   }
   for (const char *projection : {"g", "u"}) {
     const std::string p = projection;
     for (uint32_t k = 0; k < inputSegments; ++k)
       matmul(p + "m" + std::to_string(k), "w" + p + std::to_string(k), "x" + std::to_string(k) + "_d", channels,
-             kSegment);
+             shape.segment);
     f16(p + "s", channels, rows, "mul(x = " + sum(p + "m", inputSegments, channels) + ", y = s" + p + "_t)");
   }
   const std::string c = std::to_string(channels), r = std::to_string(rows),
@@ -492,9 +510,10 @@ void AneFfn::addWeights(metal::CommandGraph &graph, uint32_t layer, uint32_t set
               {rows / ANE_FFN_WEIGHT_ROWS, width / blockOf(rotation), 1}, {ANE_FFN_WEIGHT_THREADS, 1, 1});
   };
   for (uint32_t k = 0; k < target.gate.size(); ++k) {
-    add(Matrix::Gate, target.gate[k], target.gateScale, shape_.gpu, k * kSegment, kSegment, shape_.ane,
+    add(Matrix::Gate, target.gate[k], target.gateScale, shape_.gpu, k * shape_.segment, shape_.segment, shape_.ane,
         Rotation::Inputs);
-    add(Matrix::Up, target.up[k], target.upScale, shape_.gpu, k * kSegment, kSegment, shape_.ane, Rotation::Inputs);
+    add(Matrix::Up, target.up[k], target.upScale, shape_.gpu, k * shape_.segment, shape_.segment, shape_.ane,
+        Rotation::Inputs);
   }
   uint32_t begin = shape_.gpu;
   for (size_t i = 0; i < shape_.downSegments.size(); ++i) {
@@ -544,8 +563,8 @@ void AneFfn::encode(metal::CommandGraph &graph, uint32_t layer, const PrefillFfn
             AneFfnRotateParams{shape_.hidden}, {rows, 1, 1}, {ANE_FFN_ROTATE_THREADS, 1, 1});
   for (uint32_t k = 0; k < memory_.inputs.size(); ++k)
     graph.add("ane_ffn_pack", {memory_.rotated, memory_.inputs[k].buffer},
-              AneFfnPackParams{shape_.hidden, k * kSegment, memory_.inputs[k].strideBytes},
-              {tiles, kSegment / ANE_FFN_TILE, 1}, {ANE_FFN_TILE, ANE_FFN_TILE_ROWS, 1});
+              AneFfnPackParams{shape_.hidden, k * shape_.segment, memory_.inputs[k].strideBytes},
+              {tiles, shape_.segment / ANE_FFN_TILE, 1}, {ANE_FFN_TILE, ANE_FFN_TILE_ROWS, 1});
   const uint64_t ready = ane ? handoff_.next() : 0;
   if (ane) graph.signal(handoff_.event(), ready);
   linear_.addPrefillSwiGlu(graph, {&current.gate, &current.up, &current.down}, ffn, residual, output, rows);

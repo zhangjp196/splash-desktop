@@ -208,6 +208,9 @@ final class AppModel: ObservableObject {
     @Published var diskCache = ServerSettings.First.diskCache
     @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
     @Published var maxCacheDiskWrites = ServerSettings.First.maxCacheDiskWrites
+    @Published var cacheEvictionPreset = ServerSettings.First.cacheEvictionPreset
+    @Published var cacheEvictionPolicy = ServerSettings.First.cacheEvictionPolicy
+    @Published var cacheEvictionProtect = ServerSettings.First.cacheEvictionProtect
     @Published var maxRequestSize = ""
     @Published var reasoningEffort = ""
     @Published var maxConcurrency = ServerSettings.First.maxConcurrency
@@ -354,6 +357,9 @@ final class AppModel: ObservableObject {
         settings.diskCache = diskCache
         settings.maxCacheDisk = maxCacheDisk
         settings.maxCacheDiskWrites = maxCacheDiskWrites
+        settings.cacheEvictionPreset = cacheEvictionPreset
+        settings.cacheEvictionPolicy = cacheEvictionPolicy
+        settings.cacheEvictionProtect = cacheEvictionProtect
         settings.maxRequestSize = maxRequestSize
         settings.apiKey = apiKey
         settings.servedNames = servedNames
@@ -418,6 +424,9 @@ final class AppModel: ObservableObject {
         diskCache = settings.diskCache
         maxCacheDisk = settings.maxCacheDisk
         maxCacheDiskWrites = settings.maxCacheDiskWrites
+        cacheEvictionPreset = settings.cacheEvictionPreset
+        cacheEvictionPolicy = settings.cacheEvictionPolicy
+        cacheEvictionProtect = settings.cacheEvictionProtect
         maxRequestSize = settings.maxRequestSize
         apiKey = settings.apiKey
         servedNames = settings.servedNames
@@ -749,6 +758,18 @@ final class AppModel: ObservableObject {
             }
         } else {
             arguments += ["--max-cache-disk", "0"]
+        }
+        // How the prefix cache picks what a reclaim gives up. The default
+        // preset passes nothing, leaving the engine's own LRU; the custom one
+        // passes its policy and protected tier.
+        let eviction = ServerSettings.cacheEviction(
+            preset: cacheEvictionPreset, policy: cacheEvictionPolicy,
+            protect: cacheEvictionProtect)
+        if eviction.policy != "lru" {
+            arguments += ["--cache-eviction", eviction.policy]
+        }
+        if eviction.protect != 0 {
+            arguments += ["--cache-eviction-protect", String(eviction.protect)]
         }
         if let seconds = Int(residencySeconds), seconds >= 1, seconds <= 86_400 {
             arguments += ["--idle-release", String(seconds)]

@@ -134,11 +134,17 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
     const std::string_view option(argv[next]);
     const std::string_view value(next + 1 < argc ? argv[next + 1] : "");
     if (option == "--kv-format") {
-      if (value != "int8" && value != "bf16" && value != "int4")
-        throw UsageError("--kv-format requires int8, int4 or bf16");
-      result.kvFormat = value == "int8"  ? kv::Format::Int8
-                        : value == "bf16" ? kv::Format::BFloat16
-                                          : kv::Format::Int4;
+      if (value == "int8") {
+        result.kvStorage = {{8, false}, {8, false}};
+      } else if (value == "bf16") {
+        result.kvStorage = {{16, true}, {16, true}};
+      } else if (value == "int4") {
+        result.kvStorage = {{4, false}, {4, false}};
+      } else if (value == "k8v4") {
+        result.kvStorage = {{8, false}, {4, false}};
+      } else {
+        throw UsageError("--kv-format requires int8, bf16, int4 or k8v4");
+      }
     } else if (option == "--state-format") {
       if (value != "fp32" && value != "bf16")
         throw UsageError("--state-format requires fp32 or bf16");
@@ -165,6 +171,22 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       if (value.empty())
         throw UsageError("--cache-dir requires a directory");
       result.cacheRoot = std::filesystem::absolute(std::filesystem::path(value));
+    } else if (option == "--cache-eviction") {
+      if (value == "lru")
+        result.cacheEviction.policy = EvictionPolicy::Lru;
+      else if (value == "fifo")
+        result.cacheEviction.policy = EvictionPolicy::Fifo;
+      else if (value == "lfu")
+        result.cacheEviction.policy = EvictionPolicy::Lfu;
+      else if (value == "largest")
+        result.cacheEviction.policy = EvictionPolicy::Largest;
+      else
+        throw UsageError("--cache-eviction requires lru, fifo, lfu or largest");
+    } else if (option == "--cache-eviction-protect") {
+      uint32_t hits = 0;
+      if (value != "0" && (!parsePositive(value, hits) || hits > 8))
+        throw UsageError("--cache-eviction-protect requires a count from 0 to 8");
+      result.cacheEviction.protectHits = static_cast<uint8_t>(hits);
     } else if (option == "--idle-release") {
       result.idleReleaseSeconds = parseIdleRelease(value);
     } else if (option == "--cache-idle-spill") {
@@ -194,6 +216,10 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       if (value != "on" && value != "off")
         throw UsageError("--ane requires on or off");
       result.neuralEngine = value == "on";
+    } else if (option == "--ane-mixer") {
+      if (value != "on" && value != "off")
+        throw UsageError("--ane-mixer requires on or off");
+      result.neuralEngineMixer = value == "on";
     } else if (option == "--ane-share") {
       double share = 0.0;
       if (!parseFinite(value, share) || share < 0.0 || share >= 1.0)

@@ -4144,7 +4144,7 @@ int main(int argc, char **argv) {
       ane::ProgramInstrumentation::arm({.failingEvaluation = aneFfnFault});
     }
     const engine::AneFfnModel aneFfnModel =
-        engine::aneFfnModel(backend, model, operators, format, "model-runtime-oracle " SPLASH_BUILD_ID, {});
+        engine::aneFfnModel(backend, model, operators, kv::storageOf(format), "model-runtime-oracle " SPLASH_BUILD_ID, {});
     engine::AneFfnStart aneFfnStart =
         engine::startAneFfn(aneFfnModel, aneFfnSetting, {.tokens = checksContext}, planMemory, {});
     std::cout << "ane_ffn_outcome=" << engine::aneFfnOutcomeName(aneFfnStart.outcome.kind) << ' '

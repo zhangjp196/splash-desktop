@@ -126,7 +126,8 @@ public:
   [[nodiscard]] SplashKvLayer layer(uint32_t index) const {
     if (index >= layout_.attentionLayers)
       throw std::out_of_range("host KV layer is outside the layout");
-    return splash_kv_layer(extentPages_, dataBytes(), scaleBytes(), layout_.region(index));
+    return splash_kv_layer(extentPages_, dataBytes(), scaleBytes(), valueDataBytes(), valueScaleBytes(),
+                           layout_.region(index));
   }
   // Writes the entries of `pages` to the start of a CPU-visible table, as
   // kv::PageStorage::writeEntries: SPLASH_KV_PAGE_ABSENT for an Index page.
@@ -171,7 +172,9 @@ public:
       throw std::out_of_range("host KV layer is outside the layout");
     std::array<std::span<std::byte>, 4> result;
     for (uint32_t tensor = SPLASH_KV_KEYS; tensor <= SPLASH_KV_VALUE_SCALES; ++tensor)
-      result[tensor] = {slab<std::byte>(layer, tensor, page), splash_kv_page_bytes(dataBytes(), scaleBytes(), tensor)};
+      result[tensor] = {slab<std::byte>(layer, tensor, page),
+                        splash_kv_tensor_bytes(dataBytes(), scaleBytes(), valueDataBytes(),
+                                               valueScaleBytes(), tensor)};
     return result;
   }
   [[nodiscard]] std::vector<std::span<std::byte>> indexSpans(uint32_t page) const {
@@ -251,8 +254,15 @@ private:
   [[nodiscard]] uint32_t scaleBytes() const noexcept {
     return static_cast<uint32_t>(layout_.scaleBytesPerLayerPage());
   }
+  [[nodiscard]] uint32_t valueDataBytes() const noexcept {
+    return static_cast<uint32_t>(layout_.dataBytesPerLayerPageV());
+  }
+  [[nodiscard]] uint32_t valueScaleBytes() const noexcept {
+    return static_cast<uint32_t>(layout_.scaleBytesPerLayerPageV());
+  }
   [[nodiscard]] uint64_t offset(uint32_t layer, uint32_t tensor, uint32_t index) const {
-    return splash_kv_offset(extentPages_, dataBytes(), scaleBytes(), layout_.region(layer), tensor, index);
+    return splash_kv_offset(extentPages_, dataBytes(), scaleBytes(), valueDataBytes(), valueScaleBytes(),
+                            layout_.region(layer), tensor, index);
   }
 
   kv::Layout layout_;

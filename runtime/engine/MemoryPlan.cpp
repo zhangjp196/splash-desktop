@@ -326,9 +326,9 @@ std::string modelStatusJson(const ModelMemoryProfile &model) {
       << "\"kv_heads\":" << model.targetKvLayout.kvHeads << ','
       << "\"head_dimension\":" << model.targetKvLayout.headDimension << ','
       << "\"kv_page_tokens\":" << kv::kPageTokens << ','
-      << "\"kv_format\":" << json::quote(kv::formatName(model.targetKvLayout.format)) << ','
+      << "\"kv_format\":" << json::quote(kv::formatName(model.targetKvLayout)) << ','
       << "\"kv_elements_per_scale\":"
-      << model.targetKvLayout.elementsPerScale() << ','
+      << model.targetKvLayout.elementsPerScaleK() << ','
       << "\"kv_page_bytes\":" << model.targetKvLayout.bytesPerModelPage() << ','
       << "\"state_format\":" << json::quote(ops::formatName(model.stateFormat)) << ','
       << "\"memory\":{" << "\"target_weights_bytes\":"

@@ -20,6 +20,7 @@
 "field.kv" = "KV cache";
 "kv.int8" = "8-bit";
 "kv.int4" = "4-bit";
+"kv.k8v4" = "8/4-bit";
 "kv.bf16" = "BF16";
 "field.neural_engine" = "Use Neural Engine (ANE)";
 "help.lan_access.no_key" = "No API key is set: anyone who can reach this Mac can use the model.";
@@ -37,6 +38,19 @@
 "field.disk_cache" = "Use the SSD cache (off by default)";
 "field.cache_quota" = "SSD cache quota (e.g. 16G)";
 "field.cache_writes" = "Daily SSD write budget (e.g. 32G)";
+"field.cache_eviction" = "Cache eviction";
+"field.cache_policy" = "Eviction policy";
+"field.cache_protect" = "Protect reused entries after (uses)";
+"eviction.protect.off" = "Off";
+"eviction.light" = "Level 1 · Light (LRU)";
+"eviction.balanced" = "Level 2 · Balanced (LRU + reuse protection)";
+"eviction.strong" = "Level 3 · Strong (LFU + reuse protection)";
+"eviction.custom" = "Custom";
+"eviction.policy.lru" = "LRU (least recently used)";
+"eviction.policy.fifo" = "FIFO (first in, first out)";
+"eviction.policy.lfu" = "LFU (least frequently used)";
+"eviction.policy.largest" = "Largest first";
+"help.cache_eviction" = "How pressure gives cached prefixes up. The default keeps the engine's LRU; higher levels protect prefixes that prove reused.";
 "control.saved" = "Saved automatically";
 "control.defaults" = "Restore defaults";
 "field.api_key" = "API key";

@@ -38,6 +38,10 @@ constexpr uint32_t kBlockTokens = SPLASH_ATTENTION_BLOCK_TOKENS;
 // values and a 128-wide index.
 constexpr kv::Layout kFlashNext{12, 2, 256, kv::Format::Int8, 128, true};
 constexpr kv::Layout kFlashNextBf16{12, 2, 256, kv::Format::BFloat16, 128, true};
+// Its INT8 keys with packed 4-bit values: a record is 3,136 B, so the pitch
+// rule rounds it to one 4 KiB read unit and the slot keeps only a little.
+constexpr kv::Layout kFlashNextK8V4{12, 2, 256, kv::Format::Int8, 128, true, 0, 0,
+                                    kv::KvStorage{{8, false}, {4, false}}};
 
 // The bytes a write of the page stores, in slot order.
 std::vector<std::byte> gather(const SlotFormat &format, const test::HostKvPages &pages, uint32_t page) {
@@ -53,16 +57,25 @@ std::vector<std::byte> gather(const SlotFormat &format, const test::HostKvPages 
 std::vector<std::byte> expectedRecord(const kv::Layout &layout, const test::HostKvPages &pages, uint32_t page,
                                       uint32_t layer, uint32_t block) {
   const SlotFormat::LayerSpans tensors = pages.layerSpans(page, layer);
-  const uint64_t element = layout.format == kv::Format::Int8 ? 1 : 2;
+  // Each tensor's element width: a k8v4 page's keys are bytes where its
+  // token-major values are half a byte each.
+  const kv::KvStorage storage = layout.effectiveStorage();
+  const auto bitsOf = [&](uint32_t tensor) {
+    return tensor == SPLASH_KV_VALUES ? storage.v.bits : storage.k.bits;
+  };
+  const auto quantized = [&](uint32_t tensor) {
+    return tensor == SPLASH_KV_VALUES ? !storage.v.floating : !storage.k.floating;
+  };
   std::vector<std::byte> record;
   for (uint32_t tensor = SPLASH_KV_KEYS; tensor <= SPLASH_KV_VALUE_SCALES; ++tensor) {
     const bool scales = tensor % 2;
-    if (scales && layout.format != kv::Format::Int8) continue;
+    if (scales && !quantized(tensor - 1)) continue;
+    const uint64_t bits = bitsOf(tensor);
     for (uint32_t head = 0; head < layout.kvHeads; ++head) {
       const uint32_t token = block * kBlockTokens;
       const uint64_t first = scales ? splash_kv_scale_element(head, token) * sizeof(float)
-                                    : splash_kv_key_element(head, token, 0) * element;
-      const uint64_t bytes = kBlockTokens * (scales ? sizeof(float) : SPLASH_KV_HEAD_DIMENSION * element);
+                                    : splash_kv_key_element(head, token, 0) * bits / 8;
+      const uint64_t bytes = kBlockTokens * (scales ? sizeof(float) : SPLASH_KV_HEAD_DIMENSION * bits / 8);
       const auto run = tensors[tensor].subspan(first, bytes);
       record.insert(record.end(), run.begin(), run.end());
     }
@@ -81,6 +94,7 @@ const std::vector<kv::Layout> &spillableLayouts() {
   static const std::vector<kv::Layout> layouts{
       kFlashNext,
       kFlashNextBf16,
+      kFlashNextK8V4,
       {12, 4, 256, kv::Format::Int8, 128, true},
       {12, 4, 256, kv::Format::BFloat16, 128, true},
       {12, 2, 256, kv::Format::Int8, 64, true},
@@ -117,6 +131,13 @@ void testFlashNextSlots() {
   require(bf16.recordBytes() == 8192 && bf16.recordPitch() == 8192 && bf16.payloadBytes() == 811008 &&
               bf16.recordRange(11, 7) == SlotRange{24576 + 95 * 8192, 8192},
           "Flash-Next BF16 slots are not 8 KiB records after a 24 KiB index");
+  // k8v4's record is 3,136 B: several fit one 4 KiB read unit, so the pitch
+  // rule keeps it at 4,096 B and the slot shrinks only a little from int8's
+  // 423,936 B.
+  const SlotFormat k8v4(kFlashNextK8V4);
+  require(k8v4.recordBytes() == 3136 && k8v4.recordPitch() == 4096 &&
+              k8v4.payloadBytes() == 416832 && k8v4.recordRange(0, 0) == SlotRange{24576, 3136},
+          "Flash-Next k8v4 slots are not 3,136 B records at a 4 KiB pitch");
 }
 
 // The pitch rule: records follow the index from its aligned end, each within
@@ -126,7 +147,7 @@ void testPitchRule() {
   for (const kv::Layout &layout : spillableLayouts()) {
     const SlotFormat format(layout);
     const std::string name = std::to_string(layout.attentionLayers) + " layers of " + std::to_string(layout.kvHeads) +
-                             " heads, " + std::string(kv::formatName(layout.format)) + ", index " +
+                             " heads, " + std::string(kv::formatName(layout)) + ", index " +
                              std::to_string(layout.indexDimension);
     const uint64_t record = format.recordBytes(), pitch = format.recordPitch();
     const uint64_t base = format.recordRange(0, 0).offset, units = (record + kUnit - 1) / kUnit;

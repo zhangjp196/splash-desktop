@@ -86,9 +86,8 @@ using splash::test::floatToBf16;
 
 namespace {
 
-// The smallest hidden size both the ANE programs (segments of 2560 channels) and ane_ffn_rotate (groups of 1024)
-// take, and an intermediate size whose ANE share, kAneUnits of its 12 channel units, spans two segments of down's
-// inputs.
+// A hidden size both the ANE programs (a segment of 2560 channels) and ane_ffn_rotate (groups of 1024) take, and an
+// intermediate size whose ANE share, kAneUnits of its 12 channel units, spans two segments of down's inputs.
 constexpr uint32_t kHidden = 5120, kSegment = 2560, kIntermediate = 6144, kLayers = 3, kAneUnits = 6;
 // The most the split's output may differ from the GPU's alone, as the RMS of their difference relative to the GPU's:
 // int8 leaves about 1%.
@@ -431,14 +430,14 @@ void takes(const Model &mlx, const Model &gguf) {
   if (AneFfn::unsupported(mlx.layers) || AneFfn::unsupported(gguf.layers))
     fail("the split does not take the models");
   if (!AneFfn::unsupported({})) fail("the split takes no layers");
-  // A hidden size the programs' segments do not take, and layers of two shapes.
+  // A hidden size the rotate does not take, and layers of two shapes.
   const auto projection = [](uint32_t outputs, uint32_t inputs) {
     return Projection(outputs, inputs,
                       BlockWeights{{QuantizedSegment::planes(GGUF_FMT_AF4G64, outputs, inputs, {}, {}, {})}});
   };
-  const Projection gate = projection(kIntermediate, 4096), down = projection(4096, kIntermediate);
+  const Projection gate = projection(kIntermediate, 512), down = projection(512, kIntermediate);
   const std::vector<SwiGluProjections> narrow{{&gate, &gate, &down}}, mixed{mlx.layers[0], narrow[0]};
-  if (!AneFfn::unsupported(narrow)) fail("the split takes a hidden size of 4096");
+  if (!AneFfn::unsupported(narrow)) fail("the split takes a hidden size of 512");
   if (!AneFfn::unsupported(mixed)) fail("the split takes layers of two shapes");
   if (AneFfn::units(mlx.layers) != kIntermediate / 512) fail("the split moves other units than 512 channels");
   // Units that leave the GPU or the ANE no channels.

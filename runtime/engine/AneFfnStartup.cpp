@@ -242,6 +242,22 @@ AneFfnStart decide(const AneFfnModel &model, const AneFfnSetting &setting, Reque
     throw;
   } catch (const std::exception &error) {
     if ((cancelled && cancelled()) || !model.healthy()) throw;
+    // A calibration whose timed program the ANE's compiler refuses (0.8 does
+    // on some Macs) would otherwise lose the split: a fixed 0.5 share
+    // compiles where the calibration's shapes do, and the split runs from
+    // the least chunk.
+    try {
+      const uint32_t fallback = ane_ffn::nearestUnits(0.5, model.units);
+      AneFfnPrepared prepared = model.prepare(fallback, false);
+      if (prepared.split) {
+        prepared.split->setMinimumRows(ops::AneFfn::kMinimumRows);
+        return serve(std::move(prepared), fallback, ops::AneFfn::kMinimumRows, "",
+                     "set up at a 0.5 fallback after calibration failed");
+      }
+    } catch (const ane::Interrupted &) {
+      throw;
+    } catch (const std::exception &) {
+    }
     return gpuAloneServing(Kind::Unavailable, error.what());
   }
 }

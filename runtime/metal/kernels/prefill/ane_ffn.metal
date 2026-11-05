@@ -268,3 +268,53 @@ kernel void ane_ffn_join(device bfloat *output [[buffer(0)]],
     output[index] = bfloat(float(output[index]) + staged[position.x][j] * scale[j]);
   }
 }
+
+// ANE_FFN_TILE x ANE_FFN_TILE tiles of rows x columns of a projection's split
+// (ops/AneProjection.cpp): the ANE's channel-major fp16 rows into the output's
+// trailing bf16 rows, after the GPU's leading ones. A partial value that is
+// not finite sets `status`, which the host reads once the command completes.
+kernel void ane_projection_out(device bfloat *output [[buffer(0)]],
+                               device const half *partial [[buffer(1)]],
+                               device atomic_uint *status [[buffer(2)]],
+                               constant AneProjectionParams &params [[buffer(3)]],
+                               uint2 tile [[threadgroup_position_in_grid]],
+                               uint2 position [[thread_position_in_threadgroup]]) {
+  const uint row = tile.x * ANE_FFN_TILE, channel = tile.y * ANE_FFN_TILE, token = row + position.x;
+  const bool chunk = token < params.rows;
+  bool finite = true;
+  for (uint j = position.y; j < ANE_FFN_TILE; j += ANE_FFN_TILE_ROWS) {
+    const half value = partial[(channel + j) * params.partial_stride + token];
+    finite &= !(chunk && ane_ffn_not_finite(value));
+  }
+  if (!finite) atomic_store_explicit(status, 1u, memory_order_relaxed);
+  for (uint j = position.y; j < ANE_FFN_TILE; j += ANE_FFN_TILE_ROWS) {
+    if (!chunk || channel + j >= params.columns) continue;
+    output[(params.row + token) * params.stride + params.channel + channel + j] =
+        bfloat(float(partial[(channel + j) * params.partial_stride + token]));
+  }
+}
+
+// The same, with the residual the GPU's epilogue would add: the ANE's rows
+// of a projection whose output is added to the layer's input (an attention
+// output projection).
+kernel void ane_projection_out_residual(device bfloat *output [[buffer(0)]],
+                                        device const half *partial [[buffer(1)]],
+                                        device const bfloat *residual [[buffer(2)]],
+                                        device atomic_uint *status [[buffer(3)]],
+                                        constant AneProjectionParams &params [[buffer(4)]],
+                                        uint2 tile [[threadgroup_position_in_grid]],
+                                        uint2 position [[thread_position_in_threadgroup]]) {
+  const uint row = tile.x * ANE_FFN_TILE, channel = tile.y * ANE_FFN_TILE, token = row + position.x;
+  const bool chunk = token < params.rows;
+  bool finite = true;
+  for (uint j = position.y; j < ANE_FFN_TILE; j += ANE_FFN_TILE_ROWS) {
+    const half value = partial[(channel + j) * params.partial_stride + token];
+    finite &= !(chunk && ane_ffn_not_finite(value));
+  }
+  if (!finite) atomic_store_explicit(status, 1u, memory_order_relaxed);
+  for (uint j = position.y; j < ANE_FFN_TILE; j += ANE_FFN_TILE_ROWS) {
+    if (!chunk || channel + j >= params.columns) continue;
+    const uint index = (params.row + token) * params.stride + params.channel + channel + j;
+    output[index] = bfloat(float(residual[index]) + float(partial[(channel + j) * params.partial_stride + token]));
+  }
+}

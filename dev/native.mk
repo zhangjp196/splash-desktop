@@ -84,6 +84,7 @@ TEST_ANE_FFN := $(ENGINE_TEST_BUILD)/ane-ffn
 TEST_ANE_FFN_CALIBRATION := $(ENGINE_TEST_BUILD)/ane-ffn-calibration
 TEST_ANE_FFN_STARTUP := $(ENGINE_TEST_BUILD)/ane-ffn-startup
 TEST_ANE_PROGRAM_FAULTS := $(ENGINE_TEST_BUILD)/ane-program-faults
+TEST_ANE_PROJECTION_SPLIT := $(ENGINE_TEST_BUILD)/ane-projection-split
 TEST_GGUF_DEQUANT := $(ENGINE_TEST_BUILD)/gguf-dequant
 TEST_GGUF_ROTATION := $(ENGINE_TEST_BUILD)/gguf-rotation
 TEST_GGUF_MOE := $(ENGINE_TEST_BUILD)/gguf-moe
@@ -132,6 +133,7 @@ TEST_PREFILL_PACER_TEST := $(ENGINE_TEST_BUILD)/prefill-pacer
 TEST_FAN_STATE_TEST := $(ENGINE_TEST_BUILD)/fan-state
 TEST_Q8_CPU_TEST := $(ENGINE_TEST_BUILD)/q8-paged-kv
 TEST_Q4_CPU_TEST := $(ENGINE_TEST_BUILD)/q4-paged-kv
+TEST_K8V4_CPU_TEST := $(ENGINE_TEST_BUILD)/k8v4-paged-kv
 TEST_Q8_METAL_TEST := $(ENGINE_TEST_BUILD)/q8-paged-kv-metal
 TEST_Q8_STORAGE_TEST := $(ENGINE_TEST_BUILD)/q8-page-storage
 TEST_Q8_ATTENTION_TEST := $(ENGINE_TEST_BUILD)/q8-flash-attention
@@ -156,6 +158,7 @@ TEST_TEACHER_LOGITS := $(ENGINE_TEST_BUILD)/teacher-logits
 TEST_ATTENTION_SWEEP := $(ENGINE_TEST_BUILD)/attention-sweep
 TEST_GGUF_PROJECTION_BENCHMARK := $(ENGINE_TEST_BUILD)/gguf-projection-benchmark
 TEST_ANE_PROJECTION_BENCHMARK := $(ENGINE_TEST_BUILD)/ane-projection-benchmark
+TEST_ANE_MIXER_PROBE := $(ENGINE_TEST_BUILD)/ane-mixer-probe
 TEST_GGUF_MOE_BENCHMARK := $(ENGINE_TEST_BUILD)/gguf-moe-benchmark
 TEST_MODEL_RUNTIME_ORACLE := $(ENGINE_TEST_BUILD)/model-runtime-oracle
 WEIGHT_DIGESTS := $(ENGINE_TEST_BUILD)/weight-digests
@@ -231,12 +234,14 @@ TEST_CPU_TARGETS := $(TEST_SLOT_FILE) $(TEST_SPARSE_ROW_STORE) $(TEST_SSD_READER
 	$(TEST_PREFILL_PACER_TEST) \
 	$(TEST_FAN_STATE_TEST) \
 	$(TEST_Q8_CPU_TEST) \
-	$(TEST_Q4_CPU_TEST)
+	$(TEST_Q4_CPU_TEST) \
+	$(TEST_K8V4_CPU_TEST)
 
 TEST_METAL_TARGETS := $(TEST_DRAFT_PREPARATION) \
 	$(TEST_GGUF_PROJECTION) \
 	$(TEST_ANE_FFN) \
 	$(TEST_ANE_PROGRAM_FAULTS) \
+	$(TEST_ANE_PROJECTION_SPLIT) \
 	$(TEST_GGUF_DEQUANT) \
 	$(TEST_GGUF_ROTATION) \
 	$(TEST_GGUF_MOE) \
@@ -277,6 +282,7 @@ TEST_CONFIG_TARGETS := $(filter-out $(LIB) $(HOST_STEP_LIB),$(sort $(TEST_CPU_TA
 	$(TEST_MODEL_RUNTIME_ORACLE) $(TEST_VISION_ENCODER_TEST) \
 	$(TEST_DECODE_PROFILE) $(TEST_TEACHER_LOGITS) $(TEST_ATTENTION_SWEEP) \
 	$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) \
+	$(TEST_ANE_PROJECTION_BENCHMARK) $(TEST_ANE_MIXER_PROBE) \
 	$(TEST_Q8_AIR) $(TEST_Q8_KERNEL_AIRS) $(TEST_RESIDENCY_AIR) $(TEST_HOST_STEP_AIR) $(TEST_METAL_BACKEND_AIR) \
 	$(TEST_GGUF_DEQUANT_AIR)
 # Benchmarks and tools that build with the production flags.
@@ -343,6 +349,7 @@ $(TEST_MEMORY_GOVERNOR_TEST): runtime/metal/DeviceCapabilities.cpp \
 		dev/tests/engine/memory_governor_test.cpp
 $(TEST_Q8_CPU_TEST): dev/tests/engine/q8_paged_kv_test.cc
 $(TEST_Q4_CPU_TEST): dev/tests/engine/q4_paged_kv_test.cc
+$(TEST_K8V4_CPU_TEST): dev/tests/engine/k8v4_paged_kv_test.cc
 $(TEST_LEGACY_WEIGHT_CACHE): dev/tests/engine/legacy_weight_cache_test.cpp
 
 $(TEST_WEIGHT_SOURCE) $(TEST_GGUF_FILE) $(TEST_MEMORY_TEST) $(TEST_KV_PAGE_CACHE_TEST) \
@@ -352,7 +359,7 @@ $(TEST_WEIGHT_SOURCE) $(TEST_GGUF_FILE) $(TEST_MEMORY_TEST) $(TEST_KV_PAGE_CACHE
 		$(TEST_RECALL_MATCH_TEST) \
 		$(TEST_MEMORY_AUDIT_TEST) $(TEST_MEMORY_GOVERNOR_TEST) $(TEST_STATUS_TEST) \
 		$(TEST_PREFILL_PACER_TEST) \
-		$(TEST_Q8_CPU_TEST) $(TEST_Q4_CPU_TEST) $(TEST_SLOT_FILE) $(TEST_SPARSE_ROW_STORE) $(TEST_SSD_READERS) $(TEST_SLOT_RECYCLER) \
+		$(TEST_Q8_CPU_TEST) $(TEST_Q4_CPU_TEST) $(TEST_K8V4_CPU_TEST) $(TEST_SLOT_FILE) $(TEST_SPARSE_ROW_STORE) $(TEST_SSD_READERS) $(TEST_SLOT_RECYCLER) \
 		$(TEST_VERIFY_BUDGET) \
 		$(TEST_CACHE_DIRECTORY) $(TEST_DISK_SPACE) $(TEST_KV_SLOT_FORMAT) $(TEST_KV_PAGE_TIER_HOST) \
 		$(TEST_LEGACY_WEIGHT_CACHE) $(TEST_PERSISTENT_CACHE) $(TEST_ENGINE_CACHE_TEST) $(TEST_CACHE_PROPERTY) \
@@ -392,6 +399,8 @@ $(TEST_SAFETENSORS_CHECKPOINT) $(TEST_MODEL_CONFIGURATION) $(TEST_FAMILY_VALUES)
 $(TEST_DRAFT_PREPARATION): dev/tests/engine/draft_preparation_test.mm $(ENGINE_LIBRARY)
 $(TEST_GGUF_PROJECTION): dev/tests/engine/gguf_projection_test.mm $(ENGINE_LIBRARY) $(LIB)
 $(TEST_ANE_FFN): dev/tests/engine/ane_ffn_test.mm $(ENGINE_INSTRUMENTED_ANE_OBJECT) $(ENGINE_LIBRARY) $(LIB)
+$(TEST_ANE_PROJECTION_SPLIT): dev/tests/engine/ane_projection_test.mm \
+		$(ENGINE_LIBRARY) $(LIB)
 $(TEST_ANE_PROGRAM_FAULTS): dev/tests/engine/ane_program_faults_test.mm \
 		$(ENGINE_INSTRUMENTED_ANE_OBJECT) $(ENGINE_LIBRARY) $(LIB)
 $(TEST_GGUF_DEQUANT): dev/tests/engine/gguf_dequant_test.mm $(ENGINE_LIBRARY)
@@ -484,6 +493,8 @@ $(TEST_GGUF_MOE_BENCHMARK): dev/benchmarks/gguf_moe_benchmark.mm \
 		$(ENGINE_LIBRARY) $(LIB)
 $(TEST_ANE_PROJECTION_BENCHMARK): dev/benchmarks/ane_projection_benchmark.mm \
 		$(ENGINE_LIBRARY)
+$(TEST_ANE_MIXER_PROBE): dev/benchmarks/ane_mixer_probe.mm \
+		$(ENGINE_LIBRARY) $(LIB)
 
 $(TEST_DRAFT_PREPARATION) $(TEST_GGUF_PROJECTION) $(TEST_ANE_FFN) \
 		$(TEST_ANE_PROGRAM_FAULTS) $(TEST_GGUF_DEQUANT) $(TEST_GGUF_ROTATION) \
@@ -501,7 +512,7 @@ $(TEST_DRAFT_PREPARATION) $(TEST_GGUF_PROJECTION) $(TEST_ANE_FFN) \
 		$(TEST_MODEL_RUNTIME_ORACLE) \
 		$(TEST_DECODE_PROFILE) $(TEST_TEACHER_LOGITS) $(TEST_ATTENTION_SWEEP) \
 		$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) \
-		$(TEST_ANE_PROJECTION_BENCHMARK): | $(ENGINE_TEST_BUILD)
+		$(TEST_ANE_PROJECTION_BENCHMARK) $(TEST_ANE_PROJECTION_SPLIT) $(TEST_ANE_MIXER_PROBE): | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $(TEST_INPUTS) \
 		$(ENGINE_LINKFLAGS) -o $@
 
@@ -619,6 +630,7 @@ test-engine-cpu: $(TEST_CPU_TARGETS) $(TEST_ATTENTION_SWEEP) $(TEST_BACKEND_BENC
 	$(TEST_FAN_STATE_TEST)
 	$(TEST_Q8_CPU_TEST)
 	$(TEST_Q4_CPU_TEST)
+	$(TEST_K8V4_CPU_TEST)
 
 test-engine-metal: $(TEST_METAL_TARGETS)
 	$(METAL_TEST_ENV) $(BUILD_ID_PYTHON) dev/tests/engine/run_draft_preparation.py $(TEST_DRAFT_PREPARATION) $(LIB) \
@@ -632,6 +644,7 @@ test-engine-metal: $(TEST_METAL_TARGETS)
 	$(TEST_ANE_FFN) $(LIB) faults
 	$(TEST_ANE_FFN) $(LIB) program
 	$(TEST_ANE_PROGRAM_FAULTS) $(LIB)
+	$(TEST_ANE_PROJECTION_SPLIT) $(LIB) 2048 0.65 5120 8192 3
 	$(METAL_TEST_ENV) $(TEST_GGUF_MOE) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_GGUF_MOE_E512) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_GGUF_MOE_SIGMOID) $(LIB)
@@ -688,7 +701,7 @@ test-real: preflight $(TARGET) $(TEST_MODEL_RUNTIME_ORACLE) \
 
 .PHONY: benchmark-backend \
 	benchmark-concurrency benchmark-decode-profile benchmark-attention-sweep \
-	benchmark-gguf-projection benchmark-gguf-moe teacher-logits
+	benchmark-gguf-projection benchmark-gguf-moe benchmark-ane-mixer teacher-logits
 # decode-profile replays the installed model's prefill and decode commands as
 # separate dispatches; DECODE_PROFILE_ARGS passes --prompt-tokens/--cycles,
 # or --images HxW[,HxW...] for the vision encoder on synthetic images.
@@ -723,6 +736,13 @@ benchmark-gguf-projection: $(TEST_GGUF_PROJECTION_BENCHMARK) $(LIB)
 # default).
 benchmark-gguf-moe: $(TEST_GGUF_MOE_BENCHMARK) $(LIB)
 	$(TEST_GGUF_MOE_BENCHMARK) $(LIB) $(GGUF_MOE_ARGS)
+
+# A dense FFN's shape through the ANE split's own program, against the GPU
+# alone (dev/benchmarks/ane_mixer_probe.mm); ANE_MIXER_ARGS passes
+# [rows] [ane units] [hidden] [intermediate], the mixer's by default.
+ANE_MIXER_ARGS ?= 2048 8 5120 8192
+benchmark-ane-mixer: $(TEST_ANE_MIXER_PROBE) $(LIB)
+	$(TEST_ANE_MIXER_PROBE) $(LIB) $(ANE_MIXER_ARGS)
 
 benchmark-backend: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
 	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)"

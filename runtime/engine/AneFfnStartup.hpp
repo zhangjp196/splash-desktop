@@ -71,6 +71,15 @@ struct AneFfnModel final {
   std::function<bool()> healthy;
 };
 
+// Whether the prefill's mixers split with the Neural Engine (on by default;
+// --ane-mixer off leaves them on the GPU), and the share of each chunk's
+// rows the ANE takes. The GDN input joins only where the FFN split is not set
+// up; see dev/benchmarks/ane-mixer-spike.md.
+struct AneProjectionSetting final {
+  bool enabled = false;
+  double share = 0.65;
+};
+
 // The context a start asks the split to leave: --max-context's, or with
 // `relaunch` a relaunch's, the context the server's first engine served
 // (RuntimeResourcesConfig::relaunchContext). Zero tokens ask for none: the

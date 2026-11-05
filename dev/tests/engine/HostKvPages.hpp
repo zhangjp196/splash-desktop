@@ -31,8 +31,17 @@ public:
     std::byte *at =
         bytes_.data() + page * layout_.bytesPerModelPage() + layout_.region(layer) * layout_.bytesPerLayerPage();
     kv::SlotFormat::LayerSpans result;
+    const uint32_t TensorData[4] = {
+        static_cast<uint32_t>(layout_.dataBytesPerLayerPage()),
+        static_cast<uint32_t>(layout_.scaleBytesPerLayerPage()),
+        static_cast<uint32_t>(layout_.dataBytesPerLayerPageV()),
+        static_cast<uint32_t>(layout_.scaleBytesPerLayerPageV())};
+    const uint32_t TensorScale[4] = {0u,
+                                         static_cast<uint32_t>(layout_.scaleBytesPerLayerPage()),
+                                         0u,
+                                         static_cast<uint32_t>(layout_.scaleBytesPerLayerPageV())};
     for (uint32_t tensor = SPLASH_KV_KEYS; tensor <= SPLASH_KV_VALUE_SCALES; ++tensor) {
-      const uint64_t bytes = tensor % 2 ? layout_.scaleBytesPerLayerPage() : layout_.dataBytesPerLayerPage();
+      const uint64_t bytes = tensor % 2 ? TensorScale[tensor] : TensorData[tensor];
       result[tensor] = {at, bytes};
       at += bytes;
     }

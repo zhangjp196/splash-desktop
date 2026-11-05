@@ -169,8 +169,10 @@ struct CacheFixture {
   // With running, the request that cached the chain stays unfinished, so
   // none of its KV is a victim, as for a request publishing its states.
   explicit CacheFixture(engine::KvTier *tier = nullptr, bool running = false,
-                        std::shared_ptr<model::DiskBudget> budget = nullptr)
-      : cache(pool, tier, std::move(budget)) {
+                        std::shared_ptr<model::DiskBudget> budget = nullptr,
+                        EvictionSettings eviction = {})
+      : cache(pool, tier, std::move(budget), std::nullopt, std::nullopt,
+              eviction) {
     storage.budgetPages = 4;
     for (uint32_t block = 0; block < 4; ++block) {
       for (uint32_t row = 0; row < KvCache::pageTokens; ++row)
@@ -671,6 +673,39 @@ void testLazyJunctionOnlyAtABranchPoint() {
   fixture.publish(3);
   require(junction(branch) == 64 && lazyJunctions() == 1,
           "a branch point with a state below did not request a lazy junction");
+}
+
+void testProtectedStateOutlivesAnOlderOne() {
+  CacheFixture fixture(nullptr, false, nullptr, {EvictionPolicy::Lru, 1});
+  fixture.publish(0, 100);
+  fixture.publish(1, 100);
+  fixture.publish(2, 100);
+  fixture.publish(3, 100);
+  auto warmed = fixture.lookup(33);
+  require(warmed.resumeBoundary() == 32, "the warmed state did not resume");
+  warmed.state.reset();
+  // The first state has now been recalled once, so it waits in the protected
+  // tier and the newer, unprotected state goes first.
+  require(reclaimStateBytes(fixture.cache, CacheReclaimMode::ReleaseExtents) == 100,
+          "the protected state did not outlive the unprotected one");
+  auto resumed = fixture.lookup(33);
+  require(resumed.resumeBoundary() == 32,
+          "the protected state was evicted before an unprotected one");
+  resumed.state.reset();
+}
+
+void testLargestEvictsTheLargestState() {
+  CacheFixture fixture(nullptr, false, nullptr, {EvictionPolicy::Largest, 0});
+  fixture.publish(0, 100);
+  fixture.publish(1, 300);
+  fixture.publish(2, 200);
+  fixture.publish(3, 150);
+  require(reclaimStateBytes(fixture.cache, CacheReclaimMode::ReleaseExtents) == 300,
+          "the largest policy did not take the largest state");
+  auto resumed = fixture.lookup(65);
+  require(resumed.resumeBoundary() == 32,
+          "the largest state's prefix survived its eviction");
+  resumed.state.reset();
 }
 
 void testByteLruAndPins() {
@@ -5829,6 +5864,8 @@ int main() {
     testLazyJunctionMaterialization();
     testLazyJunctionOnlyAtABranchPoint();
     testByteLruAndPins();
+    testProtectedStateOutlivesAnOlderOne();
+    testLargestEvictsTheLargestState();
     testSpeculativeReclaimKeepsTheResumePoint();
     testCheckpointDoesNotOutrankTheResumePoint();
     testKvEvictionInvalidatesStateFirst();

@@ -100,7 +100,7 @@ struct CacheDiskQuota final {
 };
 
 struct RuntimeResourcesConfig {
-  kv::Format kvFormat = kv::Format::Int8;
+  kv::KvStorage kvStorage = {{8, false}, {8, false}};
   ops::GdnStateFormat stateFormat = ops::GdnStateFormat::Float32;
   std::filesystem::path metallibPath;
   std::filesystem::path modelRoot;
@@ -113,6 +113,10 @@ struct RuntimeResourcesConfig {
   // (--max-cache-disk-writes, model::DiskBudget::setWriteBudget); zero for
   // none, when every write passes.
   uint64_t cacheDiskWritesPerDay = 0;
+  // How the prefix cache orders the KV blocks and states a reclaim gives up,
+  // and the touches that put one in the protected tier (--cache-eviction,
+  // --cache-eviction-protect).
+  EvictionSettings cacheEviction;
   // Where persistent caches live, one directory per persistentCacheNamespace():
   // every start removes those nobody used for two weeks. Empty for none.
   std::filesystem::path cacheRoot;
@@ -174,6 +178,9 @@ struct RuntimeResourcesConfig {
   // --disable-ane, and a benchmark round runs the split of the first so that
   // rounds repeat one another.
   AneFfnSetting aneFfn;
+  // The prefill mixers' Neural Engine split (ops::AneProjection): on by
+  // default, off with --ane-mixer off or --ane off.
+  AneProjectionSetting aneMixer;
   // A relaunch's context (--relaunch-context): the context the server's
   // first engine served without --max-context, which the server passes to
   // every relaunch. The relaunch decides the rest as an automatic start, as
@@ -331,6 +338,9 @@ private:
                    std::unique_ptr<KvPool> kvPool,
                    std::unique_ptr<engine::Cache> cache,
                    std::unique_ptr<ops::AneFfn> aneFfn, AneFfnOutcome aneFfnOutcome,
+                   std::unique_ptr<ops::AneProjection> aneMixerQkv,
+                   std::unique_ptr<ops::AneProjection> aneMixerGdn,
+                   std::unique_ptr<ops::AneProjection> aneMixerOut,
                    std::unique_ptr<model::KvBlockCache> blockCache,
                    std::unique_ptr<model::KvHistoryStream> historyStream, bool spillAlways,
                    model::VerifyRows verifyRows);
@@ -357,6 +367,9 @@ private:
   std::unique_ptr<KvPool> kvPool_;
   std::unique_ptr<engine::Cache> cache_;
   std::unique_ptr<ops::AneFfn> aneFfn_;
+  std::unique_ptr<ops::AneProjection> aneMixerQkv_;
+  std::unique_ptr<ops::AneProjection> aneMixerGdn_;
+  std::unique_ptr<ops::AneProjection> aneMixerOut_;
   // A spill-capable target's readers of its spilled KV; none for another.
   std::unique_ptr<model::KvBlockCache> blockCache_;
   std::unique_ptr<model::KvHistoryStream> historyStream_;
@@ -382,7 +395,8 @@ private:
 // formats, the device, the macOS version, the engine's `buildId` and the
 // most units the plan holds.
 [[nodiscard]] AneFfnModel aneFfnModel(metal::MetalBackend &backend, const model::LoadedModel &loaded,
-                                      const ops::ExecutionPlans &operators, kv::Format format,
+                                      const ops::ExecutionPlans &operators,
+                                      const kv::KvStorage &kvStorage,
                                       std::string_view buildId, std::function<bool()> cancelled);
 
 // Connects an engine to the governor that admits its memory: the engine asks

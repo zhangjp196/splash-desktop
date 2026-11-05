@@ -19,8 +19,10 @@ FlintTarget::FlintTarget(const FlintWeights &weights, const QwenTargetGeometry &
 std::vector<metal::MetalBuffer> FlintTarget::addPrefill(metal::CommandGraph &graph,
                                                         std::span<const QwenTargetPrefillChunk> chunks,
                                                         const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                                        QwenPrefillLayers layers, ops::AneFfn *aneFfn) {
-  std::vector<PrefillStep> steps = prefillSteps(graph, chunks, kv, spilled, layers, aneFfn);
+                                                        QwenPrefillLayers layers, ops::AneFfn *aneFfn, ops::AneProjection *aneMixerQkv,
+                                                                                  ops::AneProjection *aneMixerGdn,
+                                                                                  ops::AneProjection *aneMixerOut) {
+  std::vector<PrefillStep> steps = prefillSteps(graph, chunks, kv, spilled, layers, aneFfn, aneMixerQkv, aneMixerGdn, aneMixerOut);
   return addPrefillLayers(std::span(steps), *this, layers);
 }
 

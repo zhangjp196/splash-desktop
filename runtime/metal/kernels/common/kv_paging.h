@@ -21,6 +21,24 @@ constant uint SplashKvPageTokens = SPLASH_TARGET_KV_BLOCK_TOKENS;
 // SplashKvBits makes every index below byte-accurate for it.
 struct SplashKvInt4 {};
 
+// INT8 keys with packed 4-bit values: the keys' element is int8_t and the
+// values' is SplashKvInt4, so the named elements differ; every other
+// format keeps one element type for both.
+struct SplashKvK8V4 {};
+
+// The element type of a layout's keys and values: the named elements of
+// SplashKvK8V4, the format's own element for every other format.
+template <typename Nominator>
+struct SplashKvNamedElements {
+  using Key = Nominator;
+  using Value = Nominator;
+};
+template <>
+struct SplashKvNamedElements<SplashKvK8V4> {
+  using Key = int8_t;
+  using Value = SplashKvInt4;
+};
+
 // Bits of one KV element: 4 for the packed format, the stored width otherwise.
 template <typename CacheElement> struct SplashKvBits {
   static constexpr constant uint Value = sizeof(CacheElement) * 8;

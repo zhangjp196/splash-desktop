@@ -19,6 +19,7 @@
 
 namespace splash::ops {
 class AneFfn;
+class AneProjection;
 } // namespace splash::ops
 
 namespace splash::model {
@@ -60,6 +61,13 @@ struct LoadedModel final {
   [[nodiscard]] kv::Layout targetKvLayout(kv::Format format) const noexcept {
     auto layout = descriptor.targetKvLayout;
     layout.format = format;
+    layout.storage = kv::storageOf(format);
+    return layout;
+  }
+  [[nodiscard]] kv::Layout targetKvLayout(const kv::KvStorage &storage) const noexcept {
+    auto layout = descriptor.targetKvLayout;
+    layout.storage = storage;
+    layout.format = kv::singleFormat(storage);
     return layout;
   }
   [[nodiscard]] CompositeStateLayout stateLayout(ops::GdnStateFormat format) const noexcept {
@@ -123,6 +131,9 @@ struct RuntimeContext final {
   const ops::ExecutionPlans &operators;
   // The prefill FFN's Neural Engine split (engine::startAneFfn), if any.
   ops::AneFfn *aneFfn = nullptr;
+  ops::AneProjection *aneMixerQkv = nullptr;
+  ops::AneProjection *aneMixerGdn = nullptr;
+  ops::AneProjection *aneMixerOut = nullptr;
   // The readers of a spill-capable target's spilled K/V, both or neither:
   // the hot block cache its verifies resolve through, and the stream of its
   // prefills' history (StreamedParts::kv).
@@ -161,10 +172,22 @@ loadModel(metal::MetalBackend &backend,
 // The FFN layers of a dense target, which the prefill FFN's Neural Engine
 // split (ops::AneFfn) may take; none for another target.
 [[nodiscard]] std::vector<ops::SwiGluProjections> aneFfnLayers(const LoadedModel &model);
+// The input projections of the target's full-attention mixers, in model order,
+// which the prefill's projection split may take (ops::AneProjection); none for
+// a target whose mixers are not attention.
+// Which mixer projections a target exposes, split per shape, in model order.
+// The projections a target does not expose are left empty: none for MoE
+// families with no full-attention layers, and no output split for a target
+// whose output projection is not the same width on every layer.
+struct AneMixerLayers final {
+  std::vector<const ops::Projection *> qkv, gdn, output;
+};
+[[nodiscard]] AneMixerLayers aneMixerLayers(const LoadedModel &model);
 // Runs `use` on a prefill arena allocated for the call: on the dense FFN's
 // buffers of a full chunk and the hidden rows layers alternate between.
 void withPrefillArena(
-    metal::MetalBackend &backend, const LoadedModel &model, const ops::ExecutionPlans &operators, kv::Format format,
+    metal::MetalBackend &backend, const LoadedModel &model, const ops::ExecutionPlans &operators,
+    const kv::KvStorage &kvStorage,
     const std::function<void(const ops::PrefillFfnBuffers &, const std::array<metal::MetalBuffer, 2> &)> &use);
 // What of a model streams from the SSD, which its arenas rest on: a target
 // whose routed experts stream runs its prefill commands as groups
@@ -187,7 +210,14 @@ struct StreamedParts final {
 [[nodiscard]] ModelMemoryPlan
 plannedRuntimeMemory(const LoadedModel &model,
                      const ops::ExecutionPlans &operators,
-                     kv::Format kvFormat, ops::GdnStateFormat stateFormat, StreamedParts parts);
+                     const kv::KvStorage &kvStorage, ops::GdnStateFormat stateFormat,
+                     StreamedParts parts);
+// A single-format layout's storage, for the callers that hold one Format.
+[[nodiscard]] inline ModelMemoryPlan
+plannedRuntimeMemory(const LoadedModel &model, const ops::ExecutionPlans &operators,
+                     kv::Format kvFormat, ops::GdnStateFormat stateFormat, StreamedParts parts) {
+  return plannedRuntimeMemory(model, operators, kv::storageOf(kvFormat), stateFormat, parts);
+}
 [[nodiscard]] std::unique_ptr<RuntimeModel>
 createRuntime(RuntimeContext context);
 

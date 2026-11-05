@@ -4,6 +4,8 @@
 #include "model/Qwen3_8.hpp"
 #include "model/WeightStore.hpp"
 #include "ops/AneFfn.hpp"
+#include "ops/AneProjection.hpp"
+#include "ops/RowCopy.hpp"
 #include "ops/Embedding.hpp"
 #include "ops/Normalization.hpp"
 #include "ops/PageStorage.hpp"
@@ -163,18 +165,23 @@ void QwenTarget::requireLayerPartition(uint32_t gdnLayers, uint32_t attentionLay
 }
 
 void QwenTarget::requirePrefill(std::span<const QwenTargetPrefillChunk> chunks, const kv::PageStorage &kv,
-                                QwenPrefillLayers layers, const ops::AneFfn *aneFfn) const {
+                                QwenPrefillLayers layers, const ops::AneFfn *aneFfn,
+                                const ops::AneProjection *aneMixerQkv,
+                                const ops::AneProjection *aneMixerGdn,
+                                const ops::AneProjection *aneMixerOut) const {
   // The Neural Engine splits a dense target's commands, which are one chunk
   // and run whole.
   const bool whole = !layers.first && layers.end == geometry_.layers;
   if (chunks.empty() || kv.layers().size() != geometry_.kvLayout.attentionLayers ||
-      (aneFfn && (chunks.size() > 1 || !whole)) || layers.first >= layers.end || layers.end > geometry_.layers)
+      ((aneFfn || aneMixerQkv || aneMixerGdn || aneMixerOut) && (chunks.size() > 1 || !whole)) ||
+      layers.first >= layers.end || layers.end > geometry_.layers)
     throw std::invalid_argument("invalid Qwen prefill");
 }
 
 QwenTarget::PrefillStep QwenTarget::prefillStep(metal::CommandGraph &graph, const QwenTargetPrefillChunk &chunk,
                                                 const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                                ops::AneFfn *aneFfn) const {
+                                                ops::AneFfn *aneFfn, ops::AneProjection *aneMixerQkv,
+                                                ops::AneProjection *aneMixerGdn, ops::AneProjection *aneMixerOut) const {
   if (chunk.sequences.empty() || chunk.sequences.size() > ExecutionLimits::maximumBatchWidth || !chunk.rows ||
       chunk.rows > ExecutionLimits::prefillTokenBudget)
     throw std::invalid_argument("invalid Qwen prefill chunk");
@@ -190,6 +197,9 @@ QwenTarget::PrefillStep QwenTarget::prefillStep(metal::CommandGraph &graph, cons
   }
   if (geometry_.ffnKind == QwenFfnKind::SparseMoe) step.moe = operators_.moePrefill(geometry_.moeShape(), chunk.rows);
   if (aneFfn && aneFfn->splits(chunk.rows)) step.aneFfn = aneFfn;
+  if (aneMixerQkv && aneMixerQkv->splits(chunk.rows)) step.aneMixerQkv = aneMixerQkv;
+  if (aneMixerGdn && aneMixerGdn->splits(chunk.rows)) step.aneMixerGdn = aneMixerGdn;
+  if (aneMixerOut && aneMixerOut->splits(chunk.rows)) step.aneMixerOut = aneMixerOut;
   return step;
 }
 
@@ -226,12 +236,23 @@ namespace {
 // A mixer's output projection of a prefill step's `hidden` rows.
 void addPrefillOutput(const ops::Linear &linear, metal::CommandGraph &graph, metal::MetalBuffer hidden,
                       const ops::Projection &projection, uint32_t rows, ops::LinearScratch scratch,
-                      metal::MetalBuffer output, metal::MetalBuffer residual) {
-  if (residual)
+                      metal::MetalBuffer output, metal::MetalBuffer residual,
+                      ops::AneProjection *aneMixerOut = nullptr, uint32_t mixerIndex = 0) {
+  if (residual) {
+    if (aneMixerOut && aneMixerOut->splits(rows)) {
+      // The GPU part reads its own handles: add() takes its copies by value.
+      const uint32_t gpuRows = aneMixerOut->gpuRows(rows);
+      const metal::MetalBuffer input = hidden, gpuOutput = output, gpuResidual = residual;
+      aneMixerOut->add(graph, mixerIndex, hidden, output, rows, [&] {
+        linear.addPrefillResidual(graph, input, projection, gpuResidual, gpuOutput, gpuRows, scratch);
+      }, residual);
+      return;
+    }
     linear.addPrefillResidual(graph, std::move(hidden), projection, std::move(residual), std::move(output), rows,
                               scratch);
-  else
-    linear.addPrefill(graph, std::move(hidden), projection, std::move(output), rows, scratch);
+    return;
+  }
+  linear.addPrefill(graph, std::move(hidden), projection, std::move(output), rows, scratch);
 }
 
 } // namespace
@@ -239,8 +260,44 @@ void addPrefillOutput(const ops::Linear &linear, metal::CommandGraph &graph, met
 void QwenTarget::addPrefillMixer(PrefillStep &step, const QwenGdnWeights &mixer, BlockOutput output) const {
   const QwenTargetPrefillBuffers &b = step.buffers;
   const uint32_t layer = step.gdnLayer++;
-  operators_.linear().addPrefill(step.graph, b.normalized, mixer.inputProjection, b.gdnPacked, step.rows,
-                                 b.linearScratch);
+  if (step.aneMixerGdn && step.aneMixerGdn->splits(step.rows)) {
+    ops::AneProjection &split = *step.aneMixerGdn;
+    const uint32_t gpuRows = split.gpuRows(step.rows), aneRows = step.rows - gpuRows;
+    // The split's ANE columns are the leading quantized segments; a float
+    // tail (GDN's 96 alpha/beta rows) is the GPU's, for the ANE's rows too.
+    ops::BlockWeights tailBlocks;
+    uint32_t tailColumns = 0;
+    bool tail = false;
+    for (const ops::QuantizedSegment &segment : mixer.inputProjection.blocks().segments) {
+      if (!tail) {
+        if (!segment.isFloat()) continue;
+        tail = true;
+      }
+      ops::QuantizedSegment block = segment;
+      block.columnOffset = tailColumns;
+      tailBlocks.segments.push_back(block);
+      tailColumns += segment.outputSize;
+    }
+    // The linear tile needs whole 64-row matrices: 96 float alpha/beta rows
+    // pad to 128, of which the copy takes the 96.
+    const uint32_t tailStride = (tailColumns + 63) / 64 * 64;
+    const ops::Projection tailProjection(tailStride, geometry_.hiddenSize, std::move(tailBlocks));
+    split.add(step.graph, layer, b.normalized, b.gdnPacked, step.rows, [&] {
+      operators_.linear().addPrefill(step.graph, b.normalized, mixer.inputProjection, b.gdnPacked, gpuRows,
+                                     b.linearScratch);
+      if (tailColumns) {
+        const metal::MetalBuffer input =
+            backend_.view(b.normalized, uint64_t{gpuRows} * geometry_.hiddenSize * sizeof(uint16_t),
+                          uint64_t{aneRows} * geometry_.hiddenSize * sizeof(uint16_t));
+        operators_.linear().addPrefill(step.graph, input, tailProjection, split.tail(), aneRows, b.linearScratch);
+        ops::RowCopy::add(step.graph, split.tail(), {0, tailStride, 0}, b.gdnPacked,
+                          {gpuRows, geometry_.packedGdnWidth, split.columns()}, aneRows, tailColumns);
+      }
+    });
+  } else {
+    operators_.linear().addPrefill(step.graph, b.normalized, mixer.inputProjection, b.gdnPacked, step.rows,
+                                   b.linearScratch);
+  }
   for (const QwenTargetPrefillSequence &sequence : step.sequences) {
     const auto u16 = [&](const metal::MetalBuffer &buffer, uint32_t width) {
       return rowsOf<uint16_t>(buffer, sequence.rowBegin, sequence.rows, width);
@@ -263,7 +320,7 @@ void QwenTarget::addPrefillMixer(PrefillStep &step, const QwenGdnWeights &mixer,
         geometry_.gdnShape(), sequence.rows, geometry_.stateLayout.format, mixer.outputHeadOrder, captures);
   }
   addPrefillOutput(operators_.linear(), step.graph, b.gdnHidden, mixer.outputProjection, step.rows, b.linearScratch,
-                   std::move(output.rows), std::move(output.residual));
+                   std::move(output.rows), std::move(output.residual), step.aneMixerOut, step.mixerIndex++);
 }
 
 // A sequence with blocks attends through the lists of its tiles of rows,
@@ -287,8 +344,19 @@ void QwenTarget::addPrefillMixer(PrefillStep &step, const QwenAttentionWeights &
                            uint32_t width) {
     return rowsOf<float>(buffer, sequence.rowBegin, sequence.rows, width);
   };
-  operators_.linear().addPrefill(step.graph, b.normalized, mixer.inputProjection, b.fullPacked, step.rows,
-                                 b.linearScratch);
+  if (step.aneMixerQkv && step.aneMixerQkv->splits(step.rows)) {
+    // The ANE takes the chunk's trailing rows of the projection, the GPU its
+    // leading ones: the layer is the split's attention ordinal, which a
+    // command that runs whole counts from zero.
+    const uint32_t gpuRows = step.aneMixerQkv->gpuRows(step.rows);
+    step.aneMixerQkv->add(step.graph, layer, b.normalized, b.fullPacked, step.rows, [&] {
+      operators_.linear().addPrefill(step.graph, b.normalized, mixer.inputProjection, b.fullPacked, gpuRows,
+                                     b.linearScratch);
+    });
+  } else {
+    operators_.linear().addPrefill(step.graph, b.normalized, mixer.inputProjection, b.fullPacked, step.rows,
+                                   b.linearScratch);
+  }
   for (size_t index = 0; index < step.sequences.size(); ++index) {
     const QwenTargetPrefillSequence &sequence = step.sequences[index];
     const uint64_t headBytes = uint64_t{sequence.attentionStride} * geometry_.attentionHeadDimension * sizeof(uint16_t);
@@ -319,7 +387,7 @@ void QwenTarget::addPrefillMixer(PrefillStep &step, const QwenAttentionWeights &
         geometry_.attentionQueryHeads, geometry_.kvLayout);
   }
   addPrefillOutput(operators_.linear(), step.graph, b.attentionHidden, mixer.outputProjection, step.rows,
-                   b.linearScratch, std::move(output.rows), std::move(output.residual));
+                   b.linearScratch, std::move(output.rows), std::move(output.residual), step.aneMixerOut, step.mixerIndex++);
 }
 
 ops::LinearInput QwenTarget::decodeInput(const ops::Projection &projection, uint32_t lanes) const {
@@ -489,8 +557,10 @@ public:
 
   std::vector<metal::MetalBuffer> addPrefill(metal::CommandGraph &graph, std::span<const QwenTargetPrefillChunk> chunks,
                                              const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                             QwenPrefillLayers layers, ops::AneFfn *aneFfn) override {
-    std::vector<PrefillStep> steps = prefillSteps(graph, chunks, kv, spilled, layers, aneFfn);
+                                             QwenPrefillLayers layers, ops::AneFfn *aneFfn, ops::AneProjection *aneMixerQkv,
+                                                                                  ops::AneProjection *aneMixerGdn,
+                                                                                  ops::AneProjection *aneMixerOut) override {
+    std::vector<PrefillStep> steps = prefillSteps(graph, chunks, kv, spilled, layers, aneFfn, aneMixerQkv, aneMixerGdn, aneMixerOut);
     return addPrefillLayers(std::span(steps), *this, layers);
   }
 

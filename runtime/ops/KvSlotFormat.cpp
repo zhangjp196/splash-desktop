@@ -33,8 +33,18 @@ uint64_t pitchFor(uint64_t base, uint64_t record, uint32_t records) noexcept {
 
 // Whether `layer` holds the layout's tensors of one page.
 bool holdsLayer(const Layout &layout, const SlotFormat::LayerSpans &layer) noexcept {
+  const uint32_t TensorData[4] = {
+      static_cast<uint32_t>(layout.dataBytesPerLayerPage()),
+      static_cast<uint32_t>(layout.scaleBytesPerLayerPage()),
+      static_cast<uint32_t>(layout.dataBytesPerLayerPageV()),
+      static_cast<uint32_t>(layout.scaleBytesPerLayerPageV())};
+  const uint32_t TensorScale[4] = {0u,
+                                   static_cast<uint32_t>(layout.scaleBytesPerLayerPage()),
+                                   0u,
+                                   static_cast<uint32_t>(layout.scaleBytesPerLayerPageV())};
   for (uint32_t tensor = SPLASH_KV_KEYS; tensor <= SPLASH_KV_VALUE_SCALES; ++tensor)
-    if (layer[tensor].size() != (tensor % 2 ? layout.scaleBytesPerLayerPage() : layout.dataBytesPerLayerPage()))
+    if (layer[tensor].size() !=
+            (tensor % 2 ? TensorScale[tensor] : TensorData[tensor]))
       return false;
   return true;
 }

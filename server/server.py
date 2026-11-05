@@ -1905,6 +1905,10 @@ def _native_command(args, model_root, relaunch_context=None):
         command.extend(("--persistent-cache", "on"))
     if args.cache_dir is not None:
         command.extend(("--cache-dir", str(args.cache_dir)))
+    if args.cache_eviction != "lru":
+        command.extend(("--cache-eviction", args.cache_eviction))
+    if args.cache_eviction_protect:
+        command.extend(("--cache-eviction-protect", str(args.cache_eviction_protect)))
     if args.kv_format != "int8":
         command.extend(("--kv-format", args.kv_format))
     if args.state_format != "fp32":
@@ -1922,6 +1926,8 @@ def _native_command(args, model_root, relaunch_context=None):
         )
     if args.disable_ane:
         command.extend(("--ane", "off"))
+    if args.disable_ane_mixer:
+        command.extend(("--ane-mixer", "off"))
     if share := os.environ.get("SPLASH_ANE_SHARE"):
         try:
             value = float(share)

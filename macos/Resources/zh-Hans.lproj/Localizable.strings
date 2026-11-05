@@ -20,6 +20,7 @@
 "field.kv" = "KV 缓存";
 "kv.int8" = "8 位";
 "kv.int4" = "4 位";
+"kv.k8v4" = "8/4 位";
 "kv.bf16" = "BF16";
 "field.neural_engine" = "使用神经引擎（ANE）";
 "help.lan_access.no_key" = "未设置 API 密钥：任何能连到这台 Mac 的人都能使用模型。";
@@ -37,6 +38,19 @@
 "field.disk_cache" = "使用磁盘缓存（默认关闭）";
 "field.cache_quota" = "SSD 缓存配额（如 16G）";
 "field.cache_writes" = "SSD 每日写入预算（如 32G）";
+"field.cache_eviction" = "缓存淘汰";
+"field.cache_policy" = "淘汰策略";
+"field.cache_protect" = "复用保护阈值（次）";
+"eviction.protect.off" = "关闭";
+"eviction.light" = "1 级 · 轻量（LRU）";
+"eviction.balanced" = "2 级 · 均衡（LRU + 复用保护）";
+"eviction.strong" = "3 级 · 强化（LFU + 复用保护）";
+"eviction.custom" = "自定义";
+"eviction.policy.lru" = "LRU（最近最少使用）";
+"eviction.policy.fifo" = "FIFO（先进先出）";
+"eviction.policy.lfu" = "LFU（最不经常使用）";
+"eviction.policy.largest" = "大对象优先";
+"help.cache_eviction" = "内存紧张时如何放弃缓存前缀。默认保持引擎原有的 LRU；级别越高，越保护被反复复用的前缀。";
 "control.saved" = "已自动保存";
 "control.defaults" = "恢复默认";
 "field.api_key" = "API 密钥";

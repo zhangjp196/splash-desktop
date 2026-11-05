@@ -15,6 +15,7 @@
 
 #include "metal/CommandGraph.hpp"
 #include "ops/AneFfn.hpp"
+#include "ops/AneProjection.hpp"
 #include "ops/Linear.hpp"
 #include "ops/PagedAttention.hpp"
 #include "ops/PagedKv.hpp"
@@ -36,6 +37,8 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <memory>
+#include <variant>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -457,6 +460,9 @@ struct Runtime::Impl {
   // the cycles verify every row.
   std::optional<VerifyBudget> verifyBudget;
   ops::AneFfn *aneFfn;
+  ops::AneProjection *aneMixerQkv;
+  ops::AneProjection *aneMixerGdn;
+  ops::AneProjection *aneMixerOut;
   // The readers of spilled K/V, when the target's K/V spills.
   KvBlockCache *blockCache;
   KvHistoryStream *historyStream;
@@ -473,7 +479,7 @@ struct Runtime::Impl {
   explicit Impl(RuntimeContext value)
       : backend(value.backend),
         model(value.model),
-        geometry(RuntimeGeometry::from(value.model, value.kvPages.layout().format,
+        geometry(RuntimeGeometry::from(value.model, value.kvPages.layout().storage,
                                        value.stateStorage.layout().target.format,
                                        StreamedParts::loaded(value.model, value.blockCache != nullptr))),
         operators(value.operators),
@@ -487,9 +493,10 @@ struct Runtime::Impl {
                         },
                         value.model.target)),
         draftModel(value.model.draft, value.backend, operators),
-        aneFfn(value.aneFfn), blockCache(value.blockCache), historyStream(value.historyStream) {
+        aneFfn(value.aneFfn), aneMixerQkv(value.aneMixerQkv), aneMixerGdn(value.aneMixerGdn),
+        aneMixerOut(value.aneMixerOut), blockCache(value.blockCache), historyStream(value.historyStream) {
     if (states.layout() != model.stateLayout(states.layout().target.format) ||
-        kvPages.layout() != model.targetKvLayout(kvPages.layout().format) || !blockCache != !historyStream) {
+        kvPages.layout() != model.targetKvLayout(kvPages.layout().storage) || !blockCache != !historyStream) {
       throw std::invalid_argument(
           "model runtime resources do not match the loaded model");
     }
@@ -1986,7 +1993,8 @@ struct Runtime::Impl {
       model.sequences = sequences[c];
     }
     const std::vector<MetalBuffer> finalHidden =
-        targetModel->addPrefill(graph, modelChunks, kvPages, reads, layers, aneFfn);
+        targetModel->addPrefill(graph, modelChunks, kvPages, reads, layers, aneFfn, aneMixerQkv,
+                                 aneMixerGdn, aneMixerOut);
     for (uint32_t c = 0; ends && c < chunks.size(); ++c) addDraftContext(graph, chunks, c);
 
     PrefillOutputs outputs;
@@ -2962,10 +2970,13 @@ Runtime::prefillAsync(const BatchPlan &plan,
   // Each request's draws before the chunk, which a rerun of it restores.
   std::array<uint64_t, kLaneCount> draws{};
   CommandGraph graph;
-  if (impl_->aneFfn) {
+  if (impl_->aneFfn || impl_->aneMixerQkv || impl_->aneMixerGdn || impl_->aneMixerOut) {
     for (uint32_t lane = 0; lane < items.size(); ++lane)
       draws[lane] = impl_->request(items[lane].requestId).rngCounter;
-    impl_->aneFfn->begin();
+    if (impl_->aneFfn) impl_->aneFfn->begin();
+    if (impl_->aneMixerQkv) impl_->aneMixerQkv->begin();
+    if (impl_->aneMixerGdn) impl_->aneMixerGdn->begin();
+    if (impl_->aneMixerOut) impl_->aneMixerOut->begin();
   }
   const std::shared_ptr<SpilledKvReads> reads = impl_->prefillReads(items);
   CommandGraph encodes;
@@ -3003,18 +3014,32 @@ Runtime::prefillAsync(const BatchPlan &plan,
     // the first run could not read. The first ticket was released before
     // this completion runs (DeferredMetalTicket::wait), so the backend takes
     // the rerun's command, whose time counts in the chunk's.
-    if (impl->aneFfn && !impl->aneFfn->finish()) {
+    const bool ffnFailed = impl->aneFfn && !impl->aneFfn->finish();
+    const bool qkvFailed = impl->aneMixerQkv && !impl->aneMixerQkv->finish();
+    const bool gdnFailed = impl->aneMixerGdn && !impl->aneMixerGdn->finish();
+    const bool outFailed = impl->aneMixerOut && !impl->aneMixerOut->finish();
+    if (ffnFailed || qkvFailed || gdnFailed || outFailed) {
       for (uint32_t lane = 0; lane < items.size(); ++lane)
         entries[lane]->rngCounter = draws[lane];
       reads->end();
+      // The rerun runs the GPU alone: no split takes the command, even the
+      // ones that finished.
+      ops::AneFfn *const ffn = std::exchange(impl->aneFfn, nullptr);
+      ops::AneProjection *const qkv = std::exchange(impl->aneMixerQkv, nullptr);
+      ops::AneProjection *const gdn = std::exchange(impl->aneMixerGdn, nullptr);
+      ops::AneProjection *const out = std::exchange(impl->aneMixerOut, nullptr);
       CommandGraph again, encodes;
       static_cast<void>(
           impl->encodePrefillGraph(again, encodes, items, entries, *reads, {0, impl->geometry.target.layers}));
       const CommandTiming rerun = impl->backend.submitCommandAsync(again.command()).wait();
+      impl->aneFfn = ffn;
+      impl->aneMixerQkv = qkv;
+      impl->aneMixerGdn = gdn;
+      impl->aneMixerOut = out;
       timing.gpuSeconds += rerun.gpuSeconds;
       timing.wallSeconds += rerun.wallSeconds;
       timing.hostSeconds += rerun.hostSeconds;
-      ++impl->counters.aneFfnReruns;
+      if (ffnFailed) ++impl->counters.aneFfnReruns;
     }
     reads->end();
     // A pass before the last commits nothing: the rows go on in the next.
@@ -3191,8 +3216,22 @@ Runtime::prefillAsync(const BatchPlan &plan,
     return results;
   };
   const auto submit = [impl, graph = std::make_shared<CommandGraph>(std::move(graph)), completion] {
-    return impl->aneFfn ? impl->aneFfn->commit(*graph, completion)
-                        : impl->backend.submitCommandAsync(graph->command(), completion);
+    if (impl->aneFfn) {
+      if (impl->aneMixerQkv) impl->aneMixerQkv->prepare();
+      if (impl->aneMixerGdn) impl->aneMixerGdn->prepare();
+      if (impl->aneMixerOut) impl->aneMixerOut->prepare();
+      return impl->aneFfn->commit(*graph, completion);
+    }
+    if (impl->aneMixerQkv || impl->aneMixerGdn || impl->aneMixerOut) {
+      if (impl->aneMixerQkv) impl->aneMixerQkv->prepare();
+      if (impl->aneMixerGdn) impl->aneMixerGdn->prepare();
+      if (impl->aneMixerOut) impl->aneMixerOut->prepare();
+      ops::AneProjection *const first = impl->aneMixerQkv ? impl->aneMixerQkv
+                                        : impl->aneMixerGdn ? impl->aneMixerGdn
+                                                             : impl->aneMixerOut;
+      return first->commit(*graph, completion);
+    }
+    return impl->backend.submitCommandAsync(graph->command(), completion);
   };
   if (encodes.empty())
     return std::make_unique<DeferredMetalTicket>(submit(), std::move(finish), reads);
@@ -3357,7 +3396,10 @@ uint32_t Runtime::prefillGroupRows(bool spills) const noexcept {
 // almost all of them however few its rows: such a command may run a pass
 // per layer. The Neural Engine's split runs a command whole.
 uint32_t Runtime::prefillPasses() const noexcept {
-  return impl_->model.expertStore() && !impl_->aneFfn ? impl_->geometry.target.layers : 1;
+  return impl_->model.expertStore() && !impl_->aneFfn && !impl_->aneMixerQkv && !impl_->aneMixerGdn &&
+                   !impl_->aneMixerOut
+               ? impl_->geometry.target.layers
+               : 1;
 }
 
 uint32_t Runtime::statesToActivate() const noexcept {
@@ -3744,11 +3786,37 @@ std::vector<ops::SwiGluProjections> aneFfnLayers(const LoadedModel &model) {
   return layers;
 }
 
+AneMixerLayers aneMixerLayers(const LoadedModel &model) {
+  AneMixerLayers result;
+  if (const auto *dense = std::get_if<Qwen3_8Weights>(&model.target)) {
+    bool first = true;
+    uint32_t outputWidth = 0;
+    for (const Qwen3_8LayerWeights &layer : dense->layers) {
+      std::visit([&](const auto &mixer) {
+        using Weights = std::remove_cvref_t<std::decay_t<decltype(mixer)>>;
+        if constexpr (std::is_same_v<Weights, QwenAttentionWeights>) {
+          result.qkv.push_back(&mixer.inputProjection);
+          result.output.push_back(&mixer.outputProjection);
+          if (first) outputWidth = mixer.outputProjection.outputSize;
+        } else {
+          result.gdn.push_back(&mixer.inputProjection);
+          result.output.push_back(&mixer.outputProjection);
+          if (first) outputWidth = mixer.outputProjection.outputSize;
+        }
+        first = false;
+      }, layer.mixer);
+    }
+    if (!outputWidth) result.output.clear();
+  }
+  return result;
+}
+
 void withPrefillArena(
-    MetalBackend &backend, const LoadedModel &model, const ops::ExecutionPlans &operators, kv::Format format,
+    MetalBackend &backend, const LoadedModel &model, const ops::ExecutionPlans &operators,
+    const kv::KvStorage &kvStorage,
     const std::function<void(const ops::PrefillFfnBuffers &, const std::array<MetalBuffer, 2> &)> &use) {
   // A prefill arena holds no state cell, so either state format sizes it.
-  const PrefillArena arena(backend, RuntimeGeometry::from(model, format, ops::GdnStateFormat::Float32),
+  const PrefillArena arena(backend, RuntimeGeometry::from(model, kvStorage, ops::GdnStateFormat::Float32),
                            operators);
   const QwenTargetPrefillBuffers buffers = prefillBuffers(arena, 0);
   use(buffers.ffn(), buffers.hidden);
@@ -3756,10 +3824,10 @@ void withPrefillArena(
 
 ModelMemoryPlan plannedRuntimeMemory(const LoadedModel &model,
                                      const ops::ExecutionPlans &operators,
-                                     kv::Format kvFormat,
+                                     const kv::KvStorage &kvStorage,
                                      ops::GdnStateFormat stateFormat, StreamedParts parts) {
   requireCompatibleModel(model);
-  const RuntimeGeometry geometry = RuntimeGeometry::from(model, kvFormat, stateFormat, parts);
+  const RuntimeGeometry geometry = RuntimeGeometry::from(model, kvStorage, stateFormat, parts);
   return {model.stateLayout(stateFormat).laneBytes(),
           plannedPrefillBytes(geometry, operators),
           plannedDecodeBytes(geometry, operators)};

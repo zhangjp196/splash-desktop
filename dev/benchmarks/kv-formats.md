@@ -1,11 +1,14 @@
 # Optional BF16 target KV
 
-`--kv-format bf16` selects unquantized BF16 target KV at startup, and
-`--kv-format int4` the packed 4-bit format. INT8 remains the default. Target
-weights, draft KV, GDN state, sampling, and scheduling are unchanged. BF16 uses
-about twice the target KV memory; it is a quality/memory choice, not a general
-speed improvement. INT4 uses half of INT8's: two dimensions share a byte, at
-INT8's one fp32 scale per (KV head, token) and 7 signed bits a value.
+`--kv-format bf16` selects unquantized BF16 target KV at startup,
+`--kv-format int4` the packed 4-bit format and `--kv-format k8v4` INT8 keys
+with packed 4-bit values. INT8 remains the default. Target weights, draft KV,
+GDN state, sampling, and scheduling are unchanged. BF16 uses about twice the
+target KV memory; it is a quality/memory choice, not a general speed
+improvement. INT4 uses half of INT8's: two dimensions share a byte, at INT8's
+one fp32 scale per (KV head, token) and 7 signed bits a value. K8V4 uses three
+quarters: the keys keep INT8's byte and 127 levels, the values pack two
+dimensions into a byte at their own per-(head, token) scale and 7 levels.
 
 ## Implementation boundaries
 
@@ -30,6 +33,14 @@ INT8's one fp32 scale per (KV head, token) and 7 signed bits a value.
   read as an `int4b_format` operand like the page loop's slabs.
   Both formats share the FP32 split reduction. Format-generic code is named for
   paged KV; only the INT8 entry points, quantization and scales say q8.
+- K8V4 makes the keys' and values' element formats two template parameters of
+  the page loop, the store and the sparse staging, and splits the page's
+  region geometry into a keys' and a values' data and scale run
+  (`Layout::dataBytesPerLayerPageK/V`). Its store writes INT8 key bytes and
+  packed value nibbles from one pass, and its sparse step stages INT8 keys in
+  the full 8 KiB with the values filling half of it. A spill slot's block
+  record is 3,136 B, which the 4 KiB read pitch rounds to one unit, so K8V4
+  shrinks a Flash-Next slot only from 423,936 B to 416,832 B.
 - Status reports the selected format and its actual byte geometry.
 
 ## Validation on 2026-09-21
@@ -64,7 +75,7 @@ power condition.
   state cells returned to zero after each request. The M5 INT8 output also
   matched the retained main run on the same input token-for-token.
 
-The benchmark tools accept `--kv-format int8|bf16`. `attention-sweep` accepts
+The benchmark tools accept `--kv-format int8|int4|bf16`. `attention-sweep` accepts
 `--compare-metallib BASELINE` and checks exact output equality (the baseline
 must be built from a tree with `residency_kick`, which every backend loads);
 `paged-attention-plan METALLIB --long` runs the long independent references.
@@ -83,7 +94,7 @@ The combined Python suite ran 766 tests: 764 passed and two opt-in external CLI
 routing tests were skipped. Production/CPU/sanitizers and Python 3.12–3.14 CI
 passed, as did the full Metal gate with shader validation on M5 Pro 20.
 
-The real HTTP smoke and ABBA tools accept `--kv-format int8|int4|bf16` and check
+The real HTTP smoke and ABBA tools accept `--kv-format int8|int4|k8v4|bf16` and check
 the running format and its quantization/scale identity. M5 Pro 20 HTTP ABBA
 against main passed transcript/usage equality and the unchanged 2% regression
 limit for both models (three samples per build, 2K/8K cold and cached requests,
@@ -116,3 +127,26 @@ token at all eight positions. Mean KL against those references was
 were byte-identical and retained the original state-cosine failure. This is a
 focused reproducer check, not a general task-quality or long-generation bound.
 Diagnostic capture code and model tensors are not part of production sources.
+
+## K8V4 validation on 2026-11-05
+
+M3 Max, macOS 27.0.1, Metal 32023. No model was installed on this machine, so
+this is kernel and geometry validation, not generation quality.
+
+- `paged-attention-plan build/splash.metallib`: every format over every
+  production geometry, K8V4 included — 10 prefill histories through 2,048 rows,
+  B1–B4 verify, 16,384-token verify, staged prefill with and without block
+  lists, and the sparse Qwen3.8-Flash-Next geometry through located block
+  lists — all PASS.
+- `k8v4-paged-kv`: the CPU oracle's round trip (keys within half a step of
+  127, values within half a step of 7), region order, extent alignment and the
+  `q8s4` storage name.
+- `kv-slot-format`: a K8V4 Flash-Next slot is 3,136 B records at a 4,096 B
+  pitch, a 416,832 B payload against INT8's 423,936 B.
+- `native-arguments`: `--kv-format k8v4` reads as INT8 keys and packed
+  values.
+- Python and the desktop app expose the format; the Swift package builds.
+
+Still open: a real-model logit comparison (the suggested quality gate is
+within 1.5 percentage points of INT8), and decode/prefill throughput against
+INT8 and INT4.

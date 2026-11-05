@@ -1168,8 +1168,20 @@ the KV it restores through. When the last request using it ends, the point
 becomes the newest ordinary state; the older points on its chain keep their age.
 Cache victims come in three classes: checkpoints, then ordinary states and KV
 (first the KV no state restores through, which saves no prefill), then what is
-in use. No work displaces anything of a class above its own. Memory for running
-requests takes what is in use after everything else, and so does a paced pass
+in use. No work displaces anything of a class above its own. Within a class,
+`--cache-eviction` orders the victims: `lru` by last use (`LRU`, the default
+and the order before the setting existed), `fifo` by entry, `lfu` by the
+touches an object has taken, or `largest` by the memory it holds; a KV leaf
+and the state on it still give the state up first, each at its place in the
+policy's order. `--cache-eviction-protect` puts an object that many touches
+into a protected tier: a reclaim gives up every object of the ordinary tier
+first, whatever the policy's order says, and zero, the engine's default,
+leaves one tier. The desktop app opens a new configuration at level 2, which
+passes a threshold of two; level 1 is the plain LRU. The touch counts live in
+memory, so a restart starts them over. The choices sit beside the cache
+settings in the app's model editor.
+
+Memory for running requests takes what is in use after everything else, and so does a paced pass
 that a request waits for. Three kinds of work take nothing in use: a paced pass
 that nothing waits for, under macOS's warning too, and the two that follow. A
 start that a resident lane holds back waits for that lane. And when no lane's

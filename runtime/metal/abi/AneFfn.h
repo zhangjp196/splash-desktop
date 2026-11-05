@@ -73,7 +73,21 @@ struct AneFfnJoinParams {
   uint32_t rows;
 };
 
+// output[row + t][channel + c] = partial[c][t], rounded to bf16, for rows
+// t < rows and c < columns, setting a status word if one of the partial
+// values is not finite. `stride` bf16 values per output row,
+// `partial_stride` halves per channel of the partial (ops/AneProjection.cpp).
+struct AneProjectionParams {
+  uint32_t row;
+  uint32_t channel;
+  uint32_t stride;
+  uint32_t partial_stride;
+  uint32_t rows;
+  uint32_t columns;
+};
+
 static_assert(sizeof(AneFfnRotateParams) == 4, "ANE FFN rotate parameters are 4 bytes");
 static_assert(sizeof(AneFfnPackParams) == 12, "ANE FFN pack parameters are 12 bytes");
 static_assert(sizeof(AneFfnWeightParams) == 28, "ANE FFN weight parameters are 28 bytes");
 static_assert(sizeof(AneFfnJoinParams) == 12, "ANE FFN join parameters are 12 bytes");
+static_assert(sizeof(AneProjectionParams) == 24, "ANE projection parameters are 24 bytes");

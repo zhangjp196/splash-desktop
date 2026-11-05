@@ -24,11 +24,14 @@ kernel void paged_kv_stage_layer(device const SplashKvPage *pool_table [[buffer(
   device const uchar *from = splash_kv_extent(pool, pool_index) + p.pool.offset;
   device uchar *to = splash_kv_extent(staged, staged_index) + p.staged.offset;
   for (uint tensor = SPLASH_KV_KEYS; tensor <= SPLASH_KV_VALUE_SCALES; ++tensor) {
-    const uint chunks = splash_kv_page_bytes(p.data_bytes, p.scale_bytes, tensor) / 16;
+    const uint chunks = splash_kv_tensor_bytes(p.k_data_bytes, p.k_scale_bytes,
+                                                p.v_data_bytes, p.v_scale_bytes, tensor) / 16;
     device const uint4 *source = reinterpret_cast<device const uint4 *>(
-        from + splash_kv_offset(p.pool.extent_pages, p.data_bytes, p.scale_bytes, 0, tensor, pool_index));
+        from + splash_kv_offset(p.pool.extent_pages, p.k_data_bytes, p.k_scale_bytes,
+                                p.v_data_bytes, p.v_scale_bytes, 0, tensor, pool_index));
     device uint4 *target = reinterpret_cast<device uint4 *>(
-        to + splash_kv_offset(p.staged.extent_pages, p.data_bytes, p.scale_bytes, 0, tensor, staged_index));
+        to + splash_kv_offset(p.staged.extent_pages, p.k_data_bytes, p.k_scale_bytes,
+                               p.v_data_bytes, p.v_scale_bytes, 0, tensor, staged_index));
     for (uint chunk = thread_index; chunk < chunks; chunk += threads)
       target[chunk] = source[chunk];
   }

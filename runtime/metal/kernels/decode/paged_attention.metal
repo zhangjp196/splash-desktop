@@ -51,9 +51,11 @@
   PAGED_VERIFY_SPLIT_SIGNATURE(Name) {                                         \
     PAGED_VERIFY_SCRATCH(Group, Window)                                        \
     PAGED_VERIFY_TILE_AT(Heads, Group, HeadDim, Window)                        \
-    splash_paged_attention_tile<Heads, Group,                                  \
+    using Key = typename SplashKvNamedElements<CacheElement>::Key;             \
+    using Value = typename SplashKvNamedElements<CacheElement>::Value;         \
+    splash_paged_attention_tile<Key, Value, Heads, Group,                      \
                                 SPLASH_TARGET_VERIFY_ROWS / Parts, HeadDim,    \
-                                Window, CacheElement>(                         \
+                                Window>(                                       \
         queries + tile.offset,                                                 \
         SPLASH_LANE_BINDING(group.z, page_table0, page_table1, page_table2,    \
                             page_table3),                                      \
@@ -83,6 +85,14 @@ PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv2_g8, 2, 8, 256, 0, SplashKvInt4)
 PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv2_g16, 2, 16, 256, 0, SplashKvInt4)
 PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv4_g8_d128, 4, 8, 128, 0, SplashKvInt4)
 PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv4_g8_d128_w512, 4, 8, 128, 512, SplashKvInt4)
+// INT8 keys and packed 4-bit values: the same page loop and verify
+// geometry as the 4-bit format, with two element types.
+PAGED_VERIFY_SPLIT(verify_attention_k8v4_split, 4, 6, 256, 0, SplashKvK8V4)
+PAGED_VERIFY_SPLIT(verify_attention_k8v4_split_kv2_g8, 2, 8, 256, 0, SplashKvK8V4)
+PAGED_VERIFY_SPLIT(verify_attention_k8v4_split_kv2_g16, 2, 16, 256, 0, SplashKvK8V4)
+PAGED_VERIFY_SPLIT(verify_attention_k8v4_split_kv4_g8_d128, 4, 8, 128, 0, SplashKvK8V4)
+PAGED_VERIFY_SPLIT(verify_attention_k8v4_split_kv4_g8_d128_w512, 4, 8, 128, 512, SplashKvK8V4)
+
 #undef PAGED_VERIFY_SPLIT
 #undef PAGED_VERIFY_TILE_AT
 #undef PAGED_VERIFY_SCRATCH

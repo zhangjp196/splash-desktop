@@ -4,7 +4,8 @@
 // all speculative rows; acceptance is represented solely by the host-visible
 // committed length. A rejected suffix remains unreachable and is overwritten
 // by the next command starting at the same logical position.
-template <uint KVHeads, uint HeadDim, typename CacheElement, bool ValuesTokenMajor>
+template <uint KVHeads, uint HeadDim, typename KeyElement,
+          typename ValueElement, bool ValuesTokenMajor>
 inline void splash_store_chunk_phase(
     device const bfloat *chunk_keys, device const bfloat *chunk_values,
     device const SplashKvPage *page_table,
@@ -20,12 +21,12 @@ inline void splash_store_chunk_phase(
   uint row = value_tensor ? group - rows : group;
   uint chunk_token = row % params.chunk_tokens;
   uint head = row / params.chunk_tokens;
-  splash_store_kv_row<KVHeads, HeadDim, CacheElement, ValuesTokenMajor>(
+  splash_store_kv_row<KVHeads, HeadDim, KeyElement, ValueElement, ValuesTokenMajor>(
       chunk_keys, chunk_values, page_table, params, maxima, value_tensor, head,
       chunk_token, thread_index, simd_lane, simd_group);
 }
 
-#define PAGED_PREFILL_STORE(Name, Heads, HeadDim, CacheElement, ValuesTokenMajor) \
+#define PAGED_PREFILL_STORE(Name, Heads, HeadDim, KeyElement, ValueElement, ValuesTokenMajor) \
   kernel void Name(                                                            \
       device const bfloat *chunk_keys [[buffer(0)]],                           \
       device const bfloat *chunk_values [[buffer(1)]],                         \
@@ -35,24 +36,31 @@ inline void splash_store_chunk_phase(
       uint thread_index [[thread_index_in_threadgroup]],                       \
       uint simd_lane [[thread_index_in_simdgroup]],                            \
       uint simd_group [[simdgroup_index_in_threadgroup]]) {                    \
-    SPLASH_STORE_MAXIMA_##CacheElement(HeadDim)                                \
-    splash_store_chunk_phase<Heads, HeadDim, CacheElement, ValuesTokenMajor>(  \
+    SPLASH_STORE_MAXIMA_##ValueElement(HeadDim)                               \
+    splash_store_chunk_phase<Heads, HeadDim, KeyElement, ValueElement, ValuesTokenMajor>(  \
         chunk_keys, chunk_values, page_table, params, maxima, group,           \
         thread_index, simd_lane, simd_group);                                  \
   }
-PAGED_PREFILL_STORE(prefill_attention_q8_store, 4, 256, int8_t, false)
-PAGED_PREFILL_STORE(prefill_attention_q8_store_kv2_g8, 2, 256, int8_t, false)
-PAGED_PREFILL_STORE(prefill_attention_bf16_store, 4, 256, bfloat, false)
-PAGED_PREFILL_STORE(prefill_attention_bf16_store_kv2_g8, 2, 256, bfloat, false)
+PAGED_PREFILL_STORE(prefill_attention_q8_store, 4, 256, int8_t, int8_t, false)
+PAGED_PREFILL_STORE(prefill_attention_q8_store_kv2_g8, 2, 256, int8_t, int8_t, false)
+PAGED_PREFILL_STORE(prefill_attention_bf16_store, 4, 256, bfloat, bfloat, false)
+PAGED_PREFILL_STORE(prefill_attention_bf16_store_kv2_g8, 2, 256, bfloat, bfloat, false)
 // Four KV heads of 128 dimensions.
-PAGED_PREFILL_STORE(prefill_attention_q8_store_kv4_d128, 4, 128, int8_t, false)
-PAGED_PREFILL_STORE(prefill_attention_bf16_store_kv4_d128, 4, 128, bfloat, false)
+PAGED_PREFILL_STORE(prefill_attention_q8_store_kv4_d128, 4, 128, int8_t, int8_t, false)
+PAGED_PREFILL_STORE(prefill_attention_bf16_store_kv4_d128, 4, 128, bfloat, bfloat, false)
 // Two KV heads whose values are token-major (sparse attention).
-PAGED_PREFILL_STORE(prefill_attention_q8_store_kv2_vt, 2, 256, int8_t, true)
-PAGED_PREFILL_STORE(prefill_attention_bf16_store_kv2_vt, 2, 256, bfloat, true)
+PAGED_PREFILL_STORE(prefill_attention_q8_store_kv2_vt, 2, 256, int8_t, int8_t, true)
+PAGED_PREFILL_STORE(prefill_attention_bf16_store_kv2_vt, 2, 256, bfloat, bfloat, true)
 // The packed 4-bit format: INT8's scale geometry, two dimensions per byte.
-PAGED_PREFILL_STORE(prefill_attention_q4_store, 4, 256, SplashKvInt4, false)
-PAGED_PREFILL_STORE(prefill_attention_q4_store_kv2_g8, 2, 256, SplashKvInt4, false)
-PAGED_PREFILL_STORE(prefill_attention_q4_store_kv4_d128, 4, 128, SplashKvInt4, false)
-PAGED_PREFILL_STORE(prefill_attention_q4_store_kv2_vt, 2, 256, SplashKvInt4, true)
+PAGED_PREFILL_STORE(prefill_attention_q4_store, 4, 256, SplashKvInt4, SplashKvInt4, false)
+PAGED_PREFILL_STORE(prefill_attention_q4_store_kv2_g8, 2, 256, SplashKvInt4, SplashKvInt4, false)
+PAGED_PREFILL_STORE(prefill_attention_q4_store_kv4_d128, 4, 128, SplashKvInt4, SplashKvInt4, false)
+PAGED_PREFILL_STORE(prefill_attention_q4_store_kv2_vt, 2, 256, SplashKvInt4, SplashKvInt4, true)
+// INT8 keys with packed 4-bit values: each row quantizes to its own
+// scale, the keys to a byte, the values to two nibbles.
+PAGED_PREFILL_STORE(prefill_attention_k8v4_store, 4, 256, int8_t, SplashKvInt4, false)
+PAGED_PREFILL_STORE(prefill_attention_k8v4_store_kv2_g8, 2, 256, int8_t, SplashKvInt4, false)
+PAGED_PREFILL_STORE(prefill_attention_k8v4_store_kv4_d128, 4, 128, int8_t, SplashKvInt4, false)
+PAGED_PREFILL_STORE(prefill_attention_k8v4_store_kv2_vt, 2, 256, int8_t, SplashKvInt4, true)
+
 #undef PAGED_PREFILL_STORE

@@ -127,8 +127,12 @@ std::string projectionKernel(std::string_view phase, const CompiledAttention &co
   return kernelName(phase, "qkv", std::string(compiled.suffix) + (variant.rotated ? "" : "_nope"));
 }
 
-// A layout's KV format, as its kernels' names hold it.
+// A layout's KV format, as its kernels' names hold it. The two-element
+// formats have no single Format value: their keys and values differ.
 std::string kernelFormat(kv::Layout layout) {
+  if (layout.effectiveStorage().k.bits == 8 && !layout.effectiveStorage().k.floating &&
+      layout.effectiveStorage().v.bits == 4 && !layout.effectiveStorage().v.floating)
+    return "k8v4";
   switch (layout.format) {
   case kv::Format::BFloat16: return "bf16";
   case kv::Format::Int4: return "q4";
@@ -626,9 +630,13 @@ void PagedAttention::addStageLayer(metal::CommandGraph &graph, SplashKvLayer poo
   const uint64_t tableBytes = (uint64_t{firstPage} + pages) * sizeof(SplashKvPage);
   requireBytes(poolTable, tableBytes, "KV stage pool table");
   requireBytes(stagedTable, tableBytes, "KV stage staged table");
-  const SplashKvStageParams params{poolLayer, stagedLayer, firstPage,
+  const SplashKvStageParams params{poolLayer,
+                                   stagedLayer,
+                                   firstPage,
                                    static_cast<uint32_t>(layout.dataBytesPerLayerPage()),
-                                   static_cast<uint32_t>(layout.scaleBytesPerLayerPage())};
+                                   static_cast<uint32_t>(layout.scaleBytesPerLayerPage()),
+                                   static_cast<uint32_t>(layout.dataBytesPerLayerPageV()),
+                                   static_cast<uint32_t>(layout.scaleBytesPerLayerPageV())};
   graph.add("paged_kv_stage_layer", {std::move(poolTable), std::move(stagedTable)}, params, {pages, 1, 1});
 }
 

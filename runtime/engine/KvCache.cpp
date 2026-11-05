@@ -270,7 +270,8 @@ void KvCache::retainActive(uint64_t blockId) {
     throw std::overflow_error("KV cache active user count overflowed");
   }
   ++entry.activeUsers;
-  entry.lastUsed = recency_.next();
+  if (refreshOnUse())
+    entry.lastUsed = recency_.next();
   reindex(entry);
 }
 
@@ -281,8 +282,8 @@ void KvCache::releaseActive(uint64_t blockId) noexcept {
   Block &entry = found->second;
   --entry.activeUsers;
   // A released leaf is the newest; a parent keeps the recency its children
-  // pass on.
-  if (!entry.activeUsers && !entry.children)
+  // pass on. Fifo keeps the order the block entered the cache in.
+  if (!entry.activeUsers && !entry.children && refreshOnUse())
     entry.lastUsed = recency_.next();
   reindex(entry);
   erasePoisonedLeaf(blockId);
@@ -292,7 +293,9 @@ void KvCache::touch(uint64_t blockId) noexcept {
   auto found = blocks_.find(blockId);
   if (found == blocks_.end())
     std::terminate();
-  found->second.lastUsed = recency_.next();
+  countHit(found->second);
+  if (refreshOnUse())
+    found->second.lastUsed = recency_.next();
   reindex(found->second);
 }
 
@@ -621,7 +624,7 @@ void KvCache::dropPage(uint64_t blockId) {
 // ahead of colder chains.
 void KvCache::inherit(Block &parent, uint64_t lastUsed) noexcept {
   const bool leaf = parent.page != noPage ? !parent.residentChildren : !parent.children;
-  if (leaf && !parent.activeUsers)
+  if (leaf && !parent.activeUsers && refreshOnUse())
     parent.lastUsed = std::max(parent.lastUsed, lastUsed);
   reindex(parent);
 }
@@ -663,7 +666,7 @@ std::optional<CacheEvictionCandidate>
 KvCache::evictionCandidate(uint64_t after) const {
   if (!after)
     return ramLeaves_.oldest();
-  return ramLeaves_.next({after, block(after).lastUsed});
+  return ramLeaves_.next(candidateFor(block(after)));
 }
 
 std::optional<CacheEvictionCandidate>
@@ -671,7 +674,7 @@ KvCache::diskCandidate(bool duplicate, uint64_t after) const {
   const RecencyOrder &order = duplicate ? duplicates_ : diskLeaves_;
   if (!after)
     return order.oldest();
-  return order.next({after, block(after).lastUsed});
+  return order.next(candidateFor(block(after)));
 }
 
 std::vector<uint64_t> KvCache::subtree(uint64_t blockId) const {
@@ -785,22 +788,42 @@ KvCache::Orders KvCache::orders(const Block &entry) const noexcept {
   return result;
 }
 
+void KvCache::countHit(Block &entry) noexcept {
+  if (entry.hits != std::numeric_limits<uint32_t>::max())
+    ++entry.hits;
+}
+
+CacheEvictionCandidate KvCache::candidateFor(const Block &entry) const noexcept {
+  uint64_t bytes = 0;
+  if (eviction_.policy == EvictionPolicy::Largest) {
+    bytes = entry.page != noPage ? pool_.bytesPerPage(entry.form)
+                                 : pool_.bytesPerPage(entry.copyForm);
+  }
+  return {entry.id, entry.lastUsed,
+          evictionRank(eviction_.policy, bytes, entry.hits),
+          evictionTier(eviction_.protectHits, entry.hits)};
+}
+
 void KvCache::reindex(Block &entry) noexcept {
   RecencyOrder::unlink(entry.ramNode);
   RecencyOrder::unlink(entry.diskNode);
   RecencyOrder::unlink(entry.unneededNode);
   RecencyOrder::unlink(entry.trimNode);
   const Orders placed = orders(entry);
+  const CacheEvictionCandidate candidate = candidateFor(entry);
   if (placed.ramLeaf)
-    ramLeaves_.link(entry.ramNode, entry.lastUsed, entry.id);
+    ramLeaves_.link(entry.ramNode, candidate.tier, candidate.rank,
+                    candidate.lastUsed, entry.id);
   if (placed.trimmable)
-    trimmable_.link(entry.trimNode, entry.lastUsed, entry.id);
+    trimmable_.link(entry.trimNode, 0, 0, entry.lastUsed, entry.id);
   if (placed.duplicate)
-    duplicates_.link(entry.diskNode, entry.lastUsed, entry.id);
+    duplicates_.link(entry.diskNode, candidate.tier, candidate.rank,
+                     candidate.lastUsed, entry.id);
   else if (placed.diskLeaf)
-    diskLeaves_.link(entry.diskNode, entry.lastUsed, entry.id);
+    diskLeaves_.link(entry.diskNode, candidate.tier, candidate.rank,
+                     candidate.lastUsed, entry.id);
   if (placed.unneeded)
-    unneeded_.link(entry.unneededNode, entry.lastUsed, entry.id);
+    unneeded_.link(entry.unneededNode, 0, 0, entry.lastUsed, entry.id);
 }
 
 void KvCache::checkInvariants(const std::function<bool(uint64_t blockId)> &stateOnDisk) const {

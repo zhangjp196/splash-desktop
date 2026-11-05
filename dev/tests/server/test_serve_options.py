@@ -78,12 +78,25 @@ OPTIONS = {
         (),
     ),
     "--kv-format": values(
-        "--kv-format", {"int8": "int8", "int4": "int4", "bf16": "bf16"}, ("fp16",)
+        "--kv-format",
+        {"int8": "int8", "int4": "int4", "k8v4": "k8v4", "bf16": "bf16"},
+        ("fp16",),
     ),
     "--state-format": values(
         "--state-format", {"fp32": "fp32", "bf16": "bf16"}, ("fp16", "int8")
     ),
+    "--cache-eviction": values(
+        "--cache-eviction",
+        {"lru": "lru", "fifo": "fifo", "lfu": "lfu", "largest": "largest"},
+        ("random", "LRU"),
+    ),
+    "--cache-eviction-protect": values(
+        "--cache-eviction-protect",
+        {"0": 0, "3": 3, "8": 8},
+        ("-1", "9", "two"),
+    ),
     "--disable-ane": ([(["--disable-ane"], True)], []),
+    "--disable-ane-mixer": ([(["--disable-ane-mixer"], True)], []),
     "--loop-guard": ([(["--loop-guard"], True)], []),
     "--compact-at": values(
         "--compact-at",

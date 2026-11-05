@@ -113,6 +113,7 @@ class SmokeRealTests(unittest.TestCase):
         expected = {
             "int8": ("symmetric_int8", "float32"),
             "int4": ("symmetric_int4", "float32"),
+            "k8v4": ("symmetric_k8v4", "float32"),
             "bf16": ("none", "none"),
         }
         for format, (quantization, scale_type) in expected.items():

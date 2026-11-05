@@ -349,7 +349,8 @@ public:
   // treats copies as it always has.
   Cache(KvPool &pool, KvTier *kvTier, std::shared_ptr<model::DiskBudget> diskBudget,
         std::optional<CacheSpillPolicy> spill = std::nullopt,
-        std::optional<CacheWindowPolicy> window = std::nullopt);
+        std::optional<CacheWindowPolicy> window = std::nullopt,
+        EvictionSettings eviction = {});
   Cache(const Cache &) = delete;
   Cache &operator=(const Cache &) = delete;
 

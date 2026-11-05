@@ -201,6 +201,18 @@ def parse_max_cache_disk_writes(value):
     return size
 
 
+def parse_cache_eviction_protect(value):
+    """How many touches put a cached object in the protected tier, 0 for
+    none."""
+    try:
+        count = int(value, 10)
+    except ValueError:
+        raise argparse.ArgumentTypeError("use a whole number from 0 to 8") from None
+    if not 0 <= count <= 8:
+        raise argparse.ArgumentTypeError("use a whole number from 0 to 8")
+    return count
+
+
 def _memory_size(value, example, choices):
     """'auto' (None), one of `choices` as given in lowercase, or a byte count
     with an optional K, M or G suffix: the memory of a store the engine plans
@@ -610,10 +622,12 @@ SERVE_OPTIONS = (
         "--kv-format",
         "memory",
         dict(
-            choices=("int8", "int4", "bf16"),
+            choices=("int8", "int4", "k8v4", "bf16"),
             default="int8",
             help="target KV cache storage (default: int8); int4 packs two "
-            "dimensions per byte at half of int8's page, bf16 uses more memory",
+            "dimensions per byte at half of int8's page, k8v4 keeps int8 keys "
+            "and packs only the values (three quarters of int8's page), bf16 "
+            "uses more memory",
         ),
     ),
     ServeOption(
@@ -699,6 +713,28 @@ SERVE_OPTIONS = (
             metavar="DIRECTORY",
             help="where --persistent-cache keeps its files; needs "
             "--persistent-cache (default: ~/Library/Caches/Splash/prefix-cache)",
+        ),
+    ),
+    ServeOption(
+        "--cache-eviction",
+        "cache",
+        dict(
+            choices=("lru", "fifo", "lfu", "largest"),
+            default="lru",
+            help="how a reclaim orders cached KV and states: lru by last use, "
+            "fifo by entry, lfu by touches, largest by memory held (default: lru)",
+        ),
+    ),
+    ServeOption(
+        "--cache-eviction-protect",
+        "cache",
+        dict(
+            type=parse_cache_eviction_protect,
+            default=0,
+            metavar="COUNT",
+            help="touches that put a cached object in a protected tier a "
+            "reclaim gives up only after every unprotected one; 0 disables "
+            "(default: 0)",
         ),
     ),
     ServeOption(
@@ -890,6 +926,16 @@ SERVE_OPTIONS = (
             help="the share of wall time prefill may keep the GPU busy, in percent "
             f"from {MINIMUM_PREFILL_DUTY:.0f} to 100, whatever the thermal policy "
             "says",
+        ),
+    ),
+    ServeOption(
+        "--disable-ane-mixer",
+        "requests",
+        dict(
+            action="store_true",
+            default=False,
+            help="run the prefill mixers' projections on the GPU alone "
+            "(default: their long prompts also use the Neural Engine)",
         ),
     ),
     ServeOption(

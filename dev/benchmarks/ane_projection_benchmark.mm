@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -148,15 +149,21 @@ int main(int argc, char **argv) {
         source, blob, splash::ane::Program::Limits{std::chrono::seconds(180), [] { return false; }},
         "build/ane-cache");
     const uint32_t procedure = program.procedure("f" + std::to_string(rows));
-    // The program's inputs in the order its function declares them: each
-    // segment's activations, then its weights, then the scales.
-    std::vector<Surface> bound;
+    // The program's inputs in the order the compiled function declares them,
+    // by the names the MIL gives them: a declaration order is not one.
+    std::map<std::string, Surface> named;
     for (uint32_t segment = 0; segment < segments; ++segment) {
-      bound.push_back(activations[segment]);
-      bound.push_back(weights[segment]);
+      named.emplace("x" + std::to_string(segment), activations[segment]);
+      named.emplace("w" + std::to_string(segment), weights[segment]);
     }
-    bound.push_back(weightScale);
-    bound.push_back(tokenScale);
+    named.emplace("sw", weightScale);
+    named.emplace("sx", tokenScale);
+    std::vector<Surface> bound;
+    for (const std::string &name : program.inputs(procedure)) {
+      const auto found = named.find(name);
+      if (found == named.end()) throw std::runtime_error("the program names an unknown input " + name);
+      bound.push_back(found->second);
+    }
     const splash::ane::Program::Binding binding = program.bind(procedure, bound, output);
 
     splash::metal::SharedEvent event = backend.newSharedEvent();

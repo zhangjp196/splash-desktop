@@ -67,16 +67,25 @@ struct RuntimeGeometry final {
   [[nodiscard]] static RuntimeGeometry from(const LoadedModel &model,
                                             kv::Format kvFormat,
                                             ops::GdnStateFormat stateFormat) {
-    return from(model, kvFormat, stateFormat, StreamedParts::loaded(model));
+    return from(model, kv::storageOf(kvFormat), stateFormat);
   }
   [[nodiscard]] static RuntimeGeometry from(const LoadedModel &model, kv::Format kvFormat,
+                                            ops::GdnStateFormat stateFormat, StreamedParts parts) {
+    return from(model, kv::storageOf(kvFormat), stateFormat, parts);
+  }
+  [[nodiscard]] static RuntimeGeometry from(const LoadedModel &model,
+                                            const kv::KvStorage &kvStorage,
+                                            ops::GdnStateFormat stateFormat) {
+    return from(model, kvStorage, stateFormat, StreamedParts::loaded(model));
+  }
+  [[nodiscard]] static RuntimeGeometry from(const LoadedModel &model, const kv::KvStorage &kvStorage,
                                             ops::GdnStateFormat stateFormat, StreamedParts parts) {
     RuntimeGeometry result;
     result.draft = model.draft.layout;
     result.target = std::visit(
         [&](const auto &weights) { return qwenTargetGeometry(weights, result.draft.targetLayerIds()); },
         model.target);
-    result.target.kvLayout = model.targetKvLayout(kvFormat);
+    result.target.kvLayout = model.targetKvLayout(kvStorage);
     result.target.stateLayout = model.stateLayout(stateFormat).target;
     result.target.ropeScaling = model.descriptor.ropeScaling;
     if (parts.kv) result.spilledKv = model.descriptor.capabilities.sparseKv;

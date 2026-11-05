@@ -276,8 +276,9 @@ inline void splash_attention_page_softmax(
 // entry (kv_extent.h).
 // Three barriers per page order the score store, the softmax and the
 // probability reads of PV.
-template <uint KVHeads, uint QueryHeadsPerKVHead, uint RowsPerTile, uint HeadDim,
-          uint Window, typename CacheElement>
+template <typename KeyElement, typename ValueElement,
+          uint KVHeads, uint QueryHeadsPerKVHead, uint RowsPerTile, uint HeadDim,
+          uint Window>
 inline void splash_paged_attention_tile(
     device bfloat *tile_queries, device const SplashKvPage *page_table,
     SplashKvLayer kv, uint kv_head, uint committed_tokens, uint active_rows, uint splits,
@@ -287,9 +288,10 @@ inline void splash_paged_attention_tile(
     threadgroup float *previous_scale, threadgroup atomic_uint *rescale,
     uint thread_index) {
   constexpr ushort M = RowsPerTile * QueryHeadsPerKVHead;
-  constexpr bool Quantized = is_same<CacheElement, int8_t>::value ||
-                             is_same<CacheElement, SplashKvInt4>::value;
-  constexpr bool Packed4 = is_same<CacheElement, SplashKvInt4>::value;
+  constexpr bool Quantized = is_same<KeyElement, int8_t>::value ||
+                             is_same<ValueElement, SplashKvInt4>::value;
+  constexpr bool KeyPacked4 = is_same<KeyElement, SplashKvInt4>::value;
+  constexpr bool ValuePacked4 = is_same<ValueElement, SplashKvInt4>::value;
   constexpr ushort N = SplashKvPageTokens;
   constexpr ushort D = HeadDim;
   uint visible_tokens = committed_tokens + active_rows;
@@ -312,31 +314,27 @@ inline void splash_paged_attention_tile(
   auto st = tensor(scores, dextents<int, 2>{N, M}, array<int, 2>{1, N});
   auto pt = tensor(probabilities, dextents<int, 2>{N, M}, array<int, 2>{1, N});
   auto p0 = pt.slice<N, M>(0, 0);
-  // BF16 and INT8 read their slab as elements. The packed 4-bit format has no
-  // addressable 4-bit element, so its slab is declared as an MPP int4b_format
-  // tensor with dynamic extents: static extents would have to satisfy the
-  // implied-stride rule that extent(0) be a multiple of 256 elements (1024
-  // bits), which excludes a 128-wide head. The element type must be written
-  // out: a uchar* operand deduces uchar and silently reads whole bytes.
-  auto key_type =
-      [&]() {
-        if constexpr (Packed4)
-          return tensor<device int4b_format, dextents<int, 2>, tensor_inline>(
-              static_cast<device uchar *>(nullptr), dextents<int, 2>{D, N});
-        else
-          return tensor(static_cast<device CacheElement *>(nullptr),
-                        dextents<int, 2>{D, N}, array<int, 2>{1, D});
-      }();
+  // The page's key slab: INT8 elements for INT8 keys, the packed 4-bit
+  // element for INT4b keys. Only the type matters here; each page's slab is
+  // bound below.
+  auto key_type = [&]() {
+    if constexpr (is_same<KeyElement, SplashKvInt4>::value)
+      return tensor<device int4b_format, dextents<int, 2>, tensor_inline>(
+          static_cast<device uchar *>(nullptr), dextents<int, 2>{D, N});
+    else
+      return tensor(static_cast<device KeyElement *>(nullptr),
+                    dextents<int, 2>{D, N}, array<int, 2>{1, D});
+  }();
   auto value_type =
       [&]() {
-        if constexpr (Packed4)
+        if constexpr (is_same<ValueElement, SplashKvInt4>::value)
           return tensor<device int4b_format, dextents<int, 2>, tensor_inline>(
               static_cast<device uchar *>(nullptr), dextents<int, 2>{N, D});
         else
-          return tensor(static_cast<device CacheElement *>(nullptr),
+          return tensor(static_cast<device ValueElement *>(nullptr),
                         dextents<int, 2>{N, D}, array<int, 2>{1, N});
       }();
-  const SplashKvAddressing<KVHeads, HeadDim, CacheElement> addressing(kv, kv_head);
+  const SplashKvAddressing<KVHeads, HeadDim, KeyElement, ValueElement> addressing(kv, kv_head);
   auto q0 = qt.slice<D, M>(0, 0);
   auto k0 = key_type.template slice<D, N>(0, 0);
   auto v0 = value_type.template slice<N, D>(0, 0);
@@ -363,14 +361,14 @@ inline void splash_paged_attention_tile(
   }
 
   for (uint page = page_begin; page < page_end; ++page) {
-    const SplashKvPageTensors<CacheElement> tensors =
+    const SplashKvPageTensors<KeyElement, ValueElement> tensors =
         addressing.page(page_table[page]);
     uint token_start = page * N;
     // The page's slabs as device tensor operands: elements for INT8 and BF16,
     // packed 4-bit for SplashKvInt4 (same declarations as key_type above).
     auto kt =
         [&]() {
-          if constexpr (Packed4)
+          if constexpr (KeyPacked4)
             return tensor<device int4b_format, dextents<int, 2>, tensor_inline>(
                 tensors.keys, dextents<int, 2>{D, N});
           else
@@ -379,7 +377,7 @@ inline void splash_paged_attention_tile(
         }();
     auto vt =
         [&]() {
-          if constexpr (Packed4)
+          if constexpr (ValuePacked4)
             return tensor<device int4b_format, dextents<int, 2>, tensor_inline>(
                 tensors.values, dextents<int, 2>{N, D});
           else

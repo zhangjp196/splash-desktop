@@ -26,13 +26,23 @@ struct ServerSettings: Codable, Equatable {
         // server's own default, so the panel and the engine open on the same
         // number.
         static let maxConcurrency = 8
+        // The cache eviction presets: level 2 is the default, and protects
+        // objects that prove reused; level 1 keeps the engine's plain LRU as
+        // it was, and level 3 orders the protected tier by use count. The
+        // policy and threshold are what a custom preset edits.
+        static let cacheEvictionPreset = "balanced"
+        static let cacheEvictionPolicy = "lru"
+        static let cacheEvictionProtect = 2
     }
 
     /// The reasoning levels the server accepts; the empty string is the model
     /// default and is not one of them.
     static let reasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-    static let kvFormats = ["int8", "int4", "bf16"]
+    static let kvFormats = ["int8", "int4", "k8v4", "bf16"]
     static let verifyRowsOptions = ["auto", "all"]
+    /// The eviction presets by level, and the policies a custom one picks.
+    static let cacheEvictionPresets = ["light", "balanced", "strong", "custom"]
+    static let cacheEvictionPolicies = ["lru", "fifo", "lfu", "largest"]
 
     var modelMode = AppModel.ModelMode.upstream
     var modelID = First.modelID
@@ -78,6 +88,15 @@ struct ServerSettings: Codable, Equatable {
     /// The most the SSD cache writes a day: the default paces the drive, and
     /// empty is no limit.
     var maxCacheDiskWrites = First.maxCacheDiskWrites
+    /// The cache eviction preset: `light` (level 1, the LRU as it was),
+    /// `balanced` (level 2, the default), `strong` (level 3), or `custom`,
+    /// which uses the policy and threshold below.
+    var cacheEvictionPreset = First.cacheEvictionPreset
+    /// The policy a custom preset runs: `lru`, `fifo`, `lfu` or `largest`.
+    var cacheEvictionPolicy = First.cacheEvictionPolicy
+    /// The touches that put an object in the protected tier (0 to 8, 0
+    /// disables it).
+    var cacheEvictionProtect = First.cacheEvictionProtect
     var maxRequestSize = ""
     var apiKey = ""
     var servedNames = ""
@@ -94,6 +113,23 @@ struct ServerSettings: Codable, Equatable {
     /// What the panel shows before anything is edited or stored.
     static let `default` = ServerSettings()
 
+    /// The policy and protected tier a start passes to the engine: the
+    /// preset's own, or a custom preset's.
+    var resolvedCacheEviction: (policy: String, protect: Int) {
+        Self.cacheEviction(preset: cacheEvictionPreset, policy: cacheEvictionPolicy,
+                           protect: cacheEvictionProtect)
+    }
+
+    static func cacheEviction(preset: String, policy: String,
+                              protect: Int) -> (policy: String, protect: Int) {
+        switch preset {
+        case "balanced": return ("lru", 2)
+        case "strong": return ("lfu", 2)
+        case "custom": return (policy, protect)
+        default: return ("lru", 0)
+        }
+    }
+
     // The stored JSON is decoded field by field: a value a later build added,
     // or one a hand edit corrupted, keeps its first-launch default instead of
     // failing the whole decode and dropping the user's configurations.
@@ -104,6 +140,7 @@ struct ServerSettings: Codable, Equatable {
         case residencySeconds, maxRequestSize, apiKey, servedNames
         case reasoningEffort, maxConcurrency
         case diskCache, maxCacheDisk, maxCacheDiskWrites
+        case cacheEvictionPreset, cacheEvictionPolicy, cacheEvictionProtect
         case expertMemory, pleMemory, sparseKvMemory, verifyRows
         case settingsVersion
     }
@@ -151,6 +188,18 @@ struct ServerSettings: Codable, Equatable {
             ?? (storedQuota.map { $0.trimmingCharacters(in: .whitespaces) != "0" }
                 ?? First.diskCache)
         maxCacheDiskWrites = value(String.self, .maxCacheDiskWrites) ?? maxCacheDiskWrites
+        if let preset = value(String.self, .cacheEvictionPreset),
+           Self.cacheEvictionPresets.contains(preset) {
+            cacheEvictionPreset = preset
+        }
+        if let policy = value(String.self, .cacheEvictionPolicy),
+           Self.cacheEvictionPolicies.contains(policy) {
+            cacheEvictionPolicy = policy
+        }
+        if let protect = value(Int.self, .cacheEvictionProtect),
+           (0...8).contains(protect) {
+            cacheEvictionProtect = protect
+        }
         maxRequestSize = value(String.self, .maxRequestSize) ?? maxRequestSize
         apiKey = value(String.self, .apiKey) ?? apiKey
         servedNames = value(String.self, .servedNames) ?? servedNames
@@ -197,6 +246,9 @@ struct ServerSettings: Codable, Equatable {
             ("diskCache", diskCache ? "1" : "0"),
             ("maxCacheDisk", maxCacheDisk),
             ("maxCacheDiskWrites", maxCacheDiskWrites),
+            ("cacheEvictionPreset", cacheEvictionPreset),
+            ("cacheEvictionPolicy", cacheEvictionPolicy),
+            ("cacheEvictionProtect", String(cacheEvictionProtect)),
             ("maxRequestSize", maxRequestSize),
             ("apiKey", apiKey),
             ("servedNames", servedNames),
@@ -248,6 +300,17 @@ struct ServerSettings: Codable, Equatable {
             diskCache = value == "1"
         }
         if let value = rows["maxCacheDiskWrites"] { maxCacheDiskWrites = value }
+        if let value = rows["cacheEvictionPreset"],
+           Self.cacheEvictionPresets.contains(value) {
+            cacheEvictionPreset = value
+        }
+        if let value = rows["cacheEvictionPolicy"],
+           Self.cacheEvictionPolicies.contains(value) {
+            cacheEvictionPolicy = value
+        }
+        if let value = Self.number(rows["cacheEvictionProtect"], in: 0...8) {
+            cacheEvictionProtect = value
+        }
         if let value = rows["maxRequestSize"] { maxRequestSize = value }
         if let value = rows["apiKey"] { apiKey = value }
         if let value = rows["servedNames"] { servedNames = value }

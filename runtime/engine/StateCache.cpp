@@ -93,6 +93,9 @@ std::optional<CompositeStateLease> StateCache::acquireBlock(uint64_t kvBlock) {
   if (!entry.pins)
     ++pinnedEntries_;
   ++entry.pins;
+  // A lookup that resumes from this state is a use of it: the Lfu order and
+  // the protected tier count what a conversation actually recalls.
+  countHit(entry);
   reindex(kvBlock, entry);
   const uint32_t boundary = kv_.chainLength(kvBlock) * KvCache::pageTokens;
   return CompositeStateLease(*this, kvBlock, boundary, copy(entry));
@@ -112,7 +115,8 @@ bool StateCache::reuseStoredState(uint64_t kvBlock, bool checkpoint) {
   Entry &entry = found->second;
   if (!checkpoint)
     makeOrdinary(kvBlock, entry);
-  if (!entry.pins)
+  countHit(entry);
+  if (!entry.pins && refreshOnUse())
     entry.lastUsed = recency_.next();
   reindex(kvBlock, entry);
   return true;
@@ -148,8 +152,9 @@ void StateCache::unuse(uint64_t kvBlock) noexcept {
   if (auto entry = entries_.find(kvBlock); entry != entries_.end()) {
     kv_.countStateInUse(kvBlock, false);
     // The conversation resumes here next: the point becomes the newest of
-    // its class, newer than the finished KV tail endRequest released.
-    if (!entry->second.pins)
+    // its class, newer than the finished KV tail endRequest released. Fifo
+    // keeps the order the state entered the cache in.
+    if (!entry->second.pins && refreshOnUse())
       entry->second.lastUsed = recency_.next();
     reindex(kvBlock, entry->second);
   }
@@ -264,11 +269,24 @@ uint64_t StateCache::resumePoint() const noexcept {
   // one: checkpoints can survive cancellation but remain disposable. A state
   // in use needs no such protection: a pass that nothing waits for takes
   // nothing in use (MemoryReclaimDirective::upTo), and other work takes it
-  // after everything else.
-  std::optional<CacheEvictionCandidate> newest = ordinary_.newest();
-  if (!newest)
-    newest = checkpoints_.newest();
-  return newest ? newest->id : 0;
+  // after everything else. The policy's order is no guide to what is newest
+  // (Lfu, Largest), so the newest is read from the entries' use.
+  const auto newest = [&](bool checkpoint) {
+    uint64_t id = 0;
+    uint64_t used = 0;
+    for (const auto &[kvBlock, entry] : entries_) {
+      if (entry.invalid || entry.pins || !entry.ram ||
+          entry.checkpoint != checkpoint || inUse(kvBlock))
+        continue;
+      if (entry.lastUsed > used) {
+        used = entry.lastUsed;
+        id = kvBlock;
+      }
+    }
+    return id;
+  };
+  const uint64_t ordinaryPoint = newest(false);
+  return ordinaryPoint ? ordinaryPoint : newest(true);
 }
 
 bool StateCache::ordinary(uint64_t kvBlock) const noexcept {
@@ -328,9 +346,11 @@ void StateCache::relabel() const {
 
 std::optional<CacheEvictionCandidate>
 StateCache::oldestOf(const RecencyOrder &order, bool keepResumePoint) const noexcept {
-  const std::optional<CacheEvictionCandidate> oldest = order.oldest();
+  std::optional<CacheEvictionCandidate> oldest = order.oldest();
+  // The policy's order need not put the resume point last, so one that is
+  // the oldest member is skipped for the next, not for nothing.
   if (oldest && keepResumePoint && oldest->id == resumePoint())
-    return std::nullopt;
+    oldest = order.next(*oldest);
   return oldest;
 }
 
@@ -565,7 +585,8 @@ void StateCache::release(uint64_t kvBlock) noexcept {
     if (!pinnedEntries_)
       std::terminate();
     --pinnedEntries_;
-    target.lastUsed = recency_.next();
+    if (refreshOnUse())
+      target.lastUsed = recency_.next();
     reindex(kvBlock, target);
     if (target.invalid)
       evict(kvBlock);
@@ -602,6 +623,7 @@ StateCache::Entry &StateCache::publicationEntry(uint64_t kvBlock, bool checkpoin
     discardRam(entry);
     discardDisk(kvBlock, entry);
     entry.invalid = false;
+    entry.hits = 0;
   }
   const bool disposable = checkpoint && !inUse(kvBlock);
   if (fresh && disposable) {
@@ -646,6 +668,24 @@ void StateCache::labelDisk(uint64_t kvBlock, const Entry &target) const {
       target.checkpoint ? 1u : 0u}));
 }
 
+CacheEvictionCandidate StateCache::candidateFor(uint64_t kvBlock,
+                                                const Entry &target) const noexcept {
+  uint64_t bytes = 0;
+  if (eviction_.policy == EvictionPolicy::Largest) {
+    const std::shared_ptr<const CompositeState> &copy =
+        target.ram ? target.ram : target.disk;
+    bytes = copy ? copy->bytes() : 0;
+  }
+  return {kvBlock, target.lastUsed,
+          evictionRank(eviction_.policy, bytes, target.hits),
+          evictionTier(eviction_.protectHits, target.hits)};
+}
+
+void StateCache::countHit(Entry &target) noexcept {
+  if (target.hits != std::numeric_limits<uint32_t>::max())
+    ++target.hits;
+}
+
 // RAM copies wait for eviction in one order per class: checkpoints,
 // ordinary states, states in use. Disk copies wait for replacement as
 // redundant copies or as the only copy, of a state in use or not. A pinned
@@ -657,12 +697,15 @@ void StateCache::reindex(uint64_t kvBlock, Entry &target) noexcept {
   if (target.pins || target.invalid)
     return;
   const bool used = inUse(kvBlock);
+  const CacheEvictionCandidate candidate = candidateFor(kvBlock, target);
   if (target.ram && !persisting(kvBlock))
     (used ? inUse_ : target.checkpoint ? checkpoints_ : ordinary_)
-        .link(target.ramNode, target.lastUsed, kvBlock);
+        .link(target.ramNode, candidate.tier, candidate.rank, candidate.lastUsed,
+              kvBlock);
   if (target.disk && !writing(kvBlock))
     (target.ram ? duplicates_ : used ? inUseOnDisk_ : diskOnly_)
-        .link(target.diskNode, target.lastUsed, kvBlock);
+        .link(target.diskNode, candidate.tier, candidate.rank, candidate.lastUsed,
+              kvBlock);
 }
 
 void StateCache::discardRam(Entry &target) noexcept {

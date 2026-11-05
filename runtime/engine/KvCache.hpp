@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/CacheRecency.hpp"
+#include "engine/EvictionPolicy.hpp"
 #include "engine/KvPool.hpp"
 #include "engine/KvTier.hpp"
 #include "engine/RecencyOrder.hpp"
@@ -84,11 +85,12 @@ public:
   // window of windowPages pages (kv::Layout::windowPages), a state pins the
   // windowPages blocks that end at its block, its tail, which a restore
   // reads whole (windowPinned), and the Full blocks no tail holds wait in an
-  // order of their own (trimCandidate).
+  // order of their own (trimCandidate). The eviction settings choose how
+  // the reclaim orders resident and disk blocks (EvictionPolicy).
   KvCache(KvPool &pool, CacheRecency &recency, bool spill = false, bool persistent = false,
-          uint32_t windowPages = 0)
-      : pool_(pool), recency_(recency), spill_(spill), persistent_(persistent), windowPages_(windowPages),
-        blockOnPage_(pool.pageCount()) {}
+          uint32_t windowPages = 0, EvictionSettings eviction = {})
+      : pool_(pool), recency_(recency), spill_(spill), persistent_(persistent),
+        windowPages_(windowPages), eviction_(eviction), blockOnPage_(pool.pageCount()) {}
   KvCache(const KvCache &) = delete;
   KvCache &operator=(const KvCache &) = delete;
   ~KvCache() noexcept;
@@ -321,6 +323,9 @@ private:
     uint32_t activeUsers = 0;
     uint32_t depth = 0;
     uint64_t lastUsed = 0;
+    // Successful uses (touch, retainActive) for the Lfu order and the
+    // protection tier; the last-used order is unaffected.
+    uint32_t hits = 0;
     Transfer transfer = Transfer::None;
     // Its page's form, kept here so that reindex reads no pool state, and
     // what its copy holds (copyForm).
@@ -356,6 +361,13 @@ private:
   [[nodiscard]] Block &block(uint64_t blockId);
   [[nodiscard]] const Block &block(uint64_t blockId) const;
   [[nodiscard]] Orders orders(const Block &entry) const noexcept;
+  // The candidate the policy's order places this block at, and whether the
+  // policy refreshes the use order at all.
+  [[nodiscard]] CacheEvictionCandidate candidateFor(const Block &entry) const noexcept;
+  [[nodiscard]] bool refreshOnUse() const noexcept {
+    return eviction_.policy != EvictionPolicy::Fifo;
+  }
+  void countHit(Block &entry) noexcept;
   // Places the block in its orders.
   void reindex(Block &entry) noexcept;
   // Gives the block a copy, written from a page of the form, or none.
@@ -383,6 +395,7 @@ private:
   const bool spill_;
   const bool persistent_;
   const uint32_t windowPages_;
+  const EvictionSettings eviction_;
   std::unordered_map<uint64_t, Block> blocks_;
   // The resident block on each page, 0 for none. A resident block owns its
   // page: a writer whose block already exists moves onto that block's page,

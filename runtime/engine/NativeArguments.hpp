@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/Engine.hpp"
+#include "engine/EvictionPolicy.hpp"
 #include "engine/RuntimeResources.hpp"
 #include "model/ModelDescriptor.hpp"
 
@@ -43,7 +44,11 @@ struct NativeArguments final {
   // --cache-dir: where persistent caches live; empty for the default,
   // ~/Library/Caches/Splash/prefix-cache.
   std::filesystem::path cacheRoot;
-  kv::Format kvFormat = kv::Format::Int8;
+  // --cache-eviction and --cache-eviction-protect: how a reclaim orders
+  // cached KV and states, and the touches that put one in the protected tier.
+  EvictionSettings cacheEviction;
+  // int8, bf16 or int4 elements; k8v4: INT8 keys with INT4b values.
+  kv::KvStorage kvStorage = {{8, false}, {8, false}};
   ops::GdnStateFormat stateFormat = ops::GdnStateFormat::Float32;
   double decodeShare = EngineConfig{}.decodeShare;
   // --prefill-duty PERCENT: the share of wall time prefill may keep the GPU
@@ -68,6 +73,10 @@ struct NativeArguments final {
   // --ane-share SHARE: the prefill FFN's Neural Engine share in [0, 1), in
   // place of the calibration; zero runs the GPU alone. Unset calibrates.
   std::optional<double> aneShare;
+  // --ane-mixer on|off: whether the prefill mixers' projections (QKV and the
+  // output projection) split with the Neural Engine (on by default; the GDN
+  // input joins only where the FFN split is not set up).
+  bool neuralEngineMixer = true;
   // --ple-memory BYTES|auto|off and --expert-memory BYTES|auto|off: a
   // Qwen3.8-Flash-Next GGUF's PLE table and a MoE target's routed experts,
   // through a store of BYTES that streams the rest from the SSD, as the

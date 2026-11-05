@@ -123,6 +123,7 @@ struct SettingsTabs: View {
             Picker(L10n.string("field.kv"), selection: $settings.kvFormat) {
                 Text(verbatim: L10n.string("kv.int8")).tag("int8")
                 Text(verbatim: L10n.string("kv.int4")).tag("int4")
+                Text(verbatim: L10n.string("kv.k8v4")).tag("k8v4")
                 Text(verbatim: L10n.string("kv.bf16")).tag("bf16")
             }
             .pickerStyle(.segmented)
@@ -180,6 +181,37 @@ struct SettingsTabs: View {
                 .disabled(disabled || !settings.diskCache)
             TextField(L10n.string("field.cache_writes"), text: $settings.maxCacheDiskWrites)
                 .disabled(disabled || !settings.diskCache)
+            Picker(L10n.string("field.cache_eviction"), selection: $settings.cacheEvictionPreset) {
+                Text(verbatim: L10n.string("eviction.light")).tag("light")
+                Text(verbatim: L10n.string("eviction.balanced")).tag("balanced")
+                Text(verbatim: L10n.string("eviction.strong")).tag("strong")
+                Text(verbatim: L10n.string("eviction.custom")).tag("custom")
+            }
+            .pickerStyle(.menu)
+            .disabled(disabled)
+            if settings.cacheEvictionPreset == "custom" {
+                Picker(L10n.string("field.cache_policy"), selection: $settings.cacheEvictionPolicy) {
+                    Text(verbatim: L10n.string("eviction.policy.lru")).tag("lru")
+                    Text(verbatim: L10n.string("eviction.policy.fifo")).tag("fifo")
+                    Text(verbatim: L10n.string("eviction.policy.lfu")).tag("lfu")
+                    Text(verbatim: L10n.string("eviction.policy.largest")).tag("largest")
+                }
+                .pickerStyle(.menu)
+                .disabled(disabled)
+                Picker(L10n.string("field.cache_protect"), selection: $settings.cacheEvictionProtect) {
+                    ForEach(0...8, id: \.self) { count in
+                        Text(verbatim: count == 0
+                            ? L10n.string("eviction.protect.off")
+                            : String(count))
+                            .tag(count)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(disabled)
+            }
+            Text(L10n.string("help.cache_eviction"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

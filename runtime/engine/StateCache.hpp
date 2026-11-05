@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/CacheRecency.hpp"
+#include "engine/EvictionPolicy.hpp"
 #include "engine/KvCache.hpp"
 #include "engine/RecencyOrder.hpp"
 #include "model/Model.hpp"
@@ -148,8 +149,12 @@ public:
 
   // makeRoom gives up disk copies for a state's write the quota refuses. In
   // a persistent tier every write labels its disk copy (CompositeState::label).
-  StateCache(KvCache &kv, CacheRecency &recency, DiskRoom makeRoom, bool persistent)
-      : kv_(kv), recency_(recency), makeRoom_(std::move(makeRoom)), persistent_(persistent) {}
+  // The eviction settings choose how a reclaim orders RAM and disk copies
+  // (EvictionPolicy).
+  StateCache(KvCache &kv, CacheRecency &recency, DiskRoom makeRoom, bool persistent,
+             EvictionSettings eviction = {})
+      : kv_(kv), recency_(recency), makeRoom_(std::move(makeRoom)), persistent_(persistent),
+        eviction_(eviction) {}
   StateCache(const StateCache &) = delete;
   StateCache &operator=(const StateCache &) = delete;
 
@@ -289,6 +294,9 @@ private:
     std::shared_ptr<const CompositeState> disk;
     uint32_t pins = 0;
     uint64_t lastUsed = 0;
+    // Successful reuses (reuseStoredState) for the Lfu order and the
+    // protection tier; the last-used order is unaffected.
+    uint32_t hits = 0;
     bool checkpoint = false;
     bool invalid = false;
     uint64_t publication = 0;
@@ -340,6 +348,14 @@ private:
   acquireBlock(uint64_t kvBlock);
   // Places the entry in the orders its copies call for.
   void reindex(uint64_t kvBlock, Entry &entry) noexcept;
+  // The candidate the policy's order places this entry at, and whether the
+  // policy refreshes the use order at all.
+  [[nodiscard]] CacheEvictionCandidate candidateFor(uint64_t kvBlock,
+                                                    const Entry &target) const noexcept;
+  [[nodiscard]] bool refreshOnUse() const noexcept {
+    return eviction_.policy != EvictionPolicy::Fifo;
+  }
+  void countHit(Entry &target) noexcept;
   void discardRam(Entry &entry) noexcept;
   void discardDisk(uint64_t kvBlock, Entry &entry) noexcept;
   // An ordinary publication or reuse: the block has held a reusable state,
@@ -358,6 +374,7 @@ private:
   CacheRecency &recency_;
   DiskRoom makeRoom_;
   bool persistent_;
+  const EvictionSettings eviction_;
   std::function<void()> completion_;
   std::unordered_map<uint64_t, Entry> entries_;
   RecencyOrder ordinary_;

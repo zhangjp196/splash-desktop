@@ -464,13 +464,15 @@ void testRelaunchContext() {
 
 // A failure of the timings or of the prepared split leaves the GPU alone, the plan as it was and nothing
 // remembered, and warns; cancellation, an interrupted wait and a backend that stopped serving end the start.
+// A failed timing first tries an untimed 0.5 split, which the ANE's compiler takes where the calibration's
+// shapes are refused; here that prepare yields no split, so the GPU still runs alone.
 void testFailures() {
   Fake fake;
   fake.time = []() -> Timings { throw std::runtime_error("calibration timings are not usable"); };
   Started started = start(fake);
   require(started.start.outcome.kind == Kind::Unavailable && !started.start.plan && !started.start.split &&
-              !fake.prepared && !fake.remembered,
-          "a timing that failed did not leave the GPU alone");
+              !fake.remembered && fake.prepared && !fake.prepared->second,
+          "a timing that failed did not try the untimed fallback and leave the GPU alone");
   require(has(started.log, "Warning · Neural Engine FFN split unavailable (calibration timings are not usable); the "
                            "GPU runs the prefill FFN alone; context ") &&
               has(started.log, " with --disable-ane). --disable-ane silences this line."),

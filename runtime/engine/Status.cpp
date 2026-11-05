@@ -373,7 +373,15 @@ std::string runtimeStatusJson(
   const double kvDiskHitRate =
       core.reusedTokens ? double(kvDiskHitTokens) / double(core.reusedTokens) : 0.0;
 
-  const kv::Format kvFormat = cacheIdentity.kvLayout.format;
+  const kv::Layout &kvLayout = cacheIdentity.kvLayout;
+  const kv::KvStorage kvStorage = kvLayout.effectiveStorage();
+  // The names the desktop and the API report: the two-element format apart
+  // from the single ones, whose scales the values' element width tells.
+  const std::string_view kvQuantization =
+      kv::formatName(kvLayout) == "k8v4" ? "symmetric_k8v4"
+      : !kv::quantizedFormat(kvStorage.v) ? "none"
+      : kvStorage.v.bits == 4               ? "symmetric_int4"
+                                            : "symmetric_int8";
 
   std::ostringstream out;
   out << std::setprecision(10) << '{' << "\"schema_version\":" << protocol::kStatusSchemaVersion << ','
@@ -401,18 +409,15 @@ std::string runtimeStatusJson(
       << json::quote(cacheIdentity.modelLayoutSha256)
       << ",\"build_id\":" << json::quote(cacheIdentity.buildId)
       << ",\"dtype\":"
-      << json::quote(kv::storageFormatName(kvFormat, cacheIdentity.kvLayout.valuesTokenMajor))
+      << json::quote(kv::storageFormatName(kvLayout))
       << ",\"block_tokens\":" << kv::kPageTokens << ",\"rope_scaling\":";
   appendRopeScaling(out, cacheIdentity.ropeScaling);
   out << "},\"kv\":{\"target_model_sha256\":"
       << json::quote(cacheIdentity.targetModelSha256)
-      << ",\"format\":" << json::quote(kv::formatName(kvFormat))
-      << ",\"quantization\":"
-      << json::quote(kvFormat == kv::Format::Int8   ? "symmetric_int8"
-                     : kvFormat == kv::Format::Int4 ? "symmetric_int4"
-                                                    : "none")
+      << ",\"format\":" << json::quote(kv::formatName(kvLayout))
+      << ",\"quantization\":" << json::quote(kvQuantization)
       << ",\"scale_type\":"
-      << json::quote(kv::quantizedFormat(kvFormat) ? "float32" : "none")
+      << json::quote(kv::quantizedFormat(kvStorage.k) ? "float32" : "none")
       << ",\"key_layout\":\"token_major\""
       << ",\"value_layout\":"
       << json::quote(cacheIdentity.kvLayout.valuesTokenMajor ? "token_major" : "dimension_major") << "}},"
