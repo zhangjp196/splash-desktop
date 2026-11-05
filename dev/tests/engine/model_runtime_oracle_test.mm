@@ -3349,8 +3349,8 @@ public:
     // Every row verified: the two runs of one schedule that
     // requireSpilledKvMatchesResident compares must verify the same rows.
     require(static_cast<bool>(admission(arenaBytes, [&] {
-              runtime_.emplace(model::RuntimeContext{backend, model, kv_, states_, operators, nullptr, &cache_,
-                                                     &stream_, model::VerifyRows::All});
+              runtime_.emplace(model::RuntimeContext{backend, model, kv_, states_, operators, nullptr, nullptr,
+                                                     nullptr, nullptr, &cache_, &stream_, model::VerifyRows::All});
             })),
             "the spill runtime's arenas exceed the oracle Metal budget");
   }
