@@ -66,6 +66,15 @@ constexpr float kFloatMax = std::numeric_limits<float>::max();
 // SPLASH_NO_TOKEN.
 constexpr StopTokens kStopTokens{1, 2};
 
+// A bias table none of its lanes uses: addBias reads one count for every
+// lane and dispatches nothing while they are all zero, so the test's own
+// bias buffers stay empty. Every request without a logit_bias passes one
+// like it (model/Runtime.cpp).
+const std::array<uint32_t, kLanes> kNoBiasCounts{};
+BiasTable noBias(const SamplingBuffers &buffers) {
+  return {buffers.biasTokens, buffers.biasValues, kNoBiasCounts};
+}
+
 using splash::test::penaltyMatches;
 using splash::test::referencePenalty;
 using splash::test::rejects;
@@ -165,7 +174,13 @@ Batch makeBatch(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes) {
               allocate(backend, proposals.candidatesBytes),
               allocate(backend, proposals.proposalProbabilitiesBytes),
               allocate(backend, space.vocabularyRangesBytes),
-              allocate(backend, space.vocabularyArrivalsBytes)},
+              allocate(backend, space.vocabularyArrivalsBytes),
+              allocate(backend,
+                       uint64_t{lanes} * SPLASH_MAXIMUM_LOGIT_BIAS *
+                           sizeof(uint32_t)),
+              allocate(backend,
+                       uint64_t{lanes} * SPLASH_MAXIMUM_LOGIT_BIAS *
+                           sizeof(float))},
           vocabulary, rows};
 }
 
@@ -556,7 +571,7 @@ void penalties(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes,
 
   batch.poison();
   CommandGraph verify;
-  sampling.addVerify(verify, policies, batch.buffers, kStopTokens, {table, rows});
+  sampling.addVerify(verify, policies, batch.buffers, kStopTokens, {table, rows}, noBias(batch.buffers));
   static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
   for (uint32_t lane = 0; lane < lanes; ++lane) {
     requirePenalizedRows(batch, original, lane, 0, kRows, words(lane),
@@ -592,7 +607,7 @@ void penalties(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes,
   batch.poison();
   CommandGraph initial;
   sampling.addInitial(initial, policies, batch.buffers, kOffset,
-                      kStopTokens, {table, rows});
+                      kStopTokens, {table, rows}, noBias(batch.buffers));
   static_cast<void>(backend.submitCommandAsync(initial.dispatches()).wait());
   for (uint32_t lane = 0; lane < lanes; ++lane) {
     const SamplingPolicy &policy = policies[lane];
@@ -745,7 +760,7 @@ void speculativeExactness(MetalBackend &backend, uint32_t samplingMask) {
 
   batch.poison();
   CommandGraph graph;
-  sampling.addVerify(graph, policies, batch.buffers, kStopTokens, {table, kSlots});
+  sampling.addVerify(graph, policies, batch.buffers, kStopTokens, {table, kSlots}, noBias(batch.buffers));
   const std::array<uint32_t, lanes> maximumRetained{kRows, kRows};
   sampling.addAcceptance(graph, acceptance, maximumRetained, policies,
                          kStopTokens);
@@ -826,7 +841,7 @@ void extremes(MetalBackend &backend) {
                                     {c.repetition, 0.0F, 0.0F}};
         CommandGraph graph;
         sampling.addInitial(graph, {&policy, 1}, batch.buffers, 0,
-                            kStopTokens, {table, rows});
+                            kStopTokens, {table, rows}, noBias(batch.buffers));
         static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
         const std::string label =
             "repetition " + std::to_string(c.repetition) + " temperature " +
@@ -902,7 +917,7 @@ void bufferExtents(MetalBackend &backend) {
     const std::array policies{sampled, constrainedGreedy, greedy};
     const std::array<uint32_t, lanes> tableRows{0, 2, 0};
     const auto encode = [&](CommandGraph &graph, const SamplingBuffers &buffers, const MetalBuffer &words) {
-      sampling.addInitial(graph, policies, buffers, 3, kStopTokens, {words, tableRows});
+      sampling.addInitial(graph, policies, buffers, 3, kStopTokens, {words, tableRows}, noBias(buffers));
     };
     // One row of every lane up to the last greedy lane, three, and up to the
     // last sampled lane, one.
@@ -929,7 +944,7 @@ void bufferExtents(MetalBackend &backend) {
     const std::array policies{greedy, constrainedSampled, penalizedGreedy};
     const std::array<uint32_t, lanes> tableRows{0, 0, 1};
     const auto encode = [&](CommandGraph &graph, const SamplingBuffers &buffers, const MetalBuffer &words) {
-      sampling.addVerify(graph, policies, buffers, kStopTokens, {words, tableRows});
+      sampling.addVerify(graph, policies, buffers, kStopTokens, {words, tableRows}, noBias(buffers));
     };
     // Every row of every lane up to the last greedy lane, three, and up to
     // the last sampled lane, two, whose draft reads its candidates at all
@@ -961,7 +976,7 @@ void bufferExtents(MetalBackend &backend) {
     const std::array policies{greedy, sampled};
     requireExtents({{&SamplingBuffers::inputTokens, 2 * kRows * 4, 4, "verify input token"}},
                    [&](CommandGraph &graph, const SamplingBuffers &buffers) {
-                     sampling.addVerify(graph, policies, buffers, kStopTokens, {});
+                     sampling.addVerify(graph, policies, buffers, kStopTokens, {}, noBias(buffers));
                    });
   }
 
@@ -1013,23 +1028,23 @@ void invalidPenalties(MetalBackend &backend) {
   const std::array<uint32_t, 1> outside{kLanes};
   CommandGraph graph;
   rejects([&] {
-    sampling.addVerify(graph, {&penalized, 1}, batch.buffers, kStopTokens, {});
+    sampling.addVerify(graph, {&penalized, 1}, batch.buffers, kStopTokens, {}, noBias(batch.buffers));
   }, "penalized lane has no penalty table row",
           "penalties without a table were accepted");
   rejects([&] {
     sampling.addVerify(graph, {&penalized, 1}, batch.buffers, kStopTokens,
-                       {table, outside});
+                       {table, outside}, noBias(batch.buffers));
   }, "penalty table buffer holds",
           "a table row outside the table was accepted");
   rejects([&] {
     sampling.addInitial(graph, {&penalized, 1}, batch.buffers, 0, kStopTokens,
-                        {table, outside});
+                        {table, outside}, noBias(batch.buffers));
   }, "penalty table buffer holds",
           "an initial table row outside the table was accepted");
   require(graph.empty(), "a refused penalty request encoded a dispatch");
   // Unpenalized lanes need no table row.
   const SamplingPolicy greedy{1, 0.0F, 1.0F, false};
-  sampling.addVerify(graph, {&greedy, 1}, batch.buffers, kStopTokens, {});
+  sampling.addVerify(graph, {&greedy, 1}, batch.buffers, kStopTokens, {}, noBias(batch.buffers));
   require(!graph.empty(), "an unpenalized batch encoded nothing");
 }
 
@@ -1170,7 +1185,7 @@ void sampledRows(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes,
 
   batch.poison();
   CommandGraph verify;
-  sampling.addVerify(verify, policies, batch.buffers, kStopTokens, {});
+  sampling.addVerify(verify, policies, batch.buffers, kStopTokens, {}, noBias(batch.buffers));
   static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
   for (uint32_t index = 0; index < batch.rows; ++index) {
     const uint32_t lane = index / kRows;
@@ -1196,7 +1211,7 @@ void sampledRows(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes,
           0.5F * (random.unit() + 1.0F);
       CommandGraph initial;
       sampling.addInitial(initial, {&policy, 1}, batch.buffers, offset,
-                          kStopTokens, {});
+                          kStopTokens, {}, noBias(batch.buffers));
       static_cast<void>(backend.submitCommandAsync(initial.dispatches()).wait());
       const Admission admits{policy.constrained ? batch.masks() : nullptr,
                              policy.excludesStopTokens};
@@ -1249,7 +1264,7 @@ void mixedVerify(MetalBackend &backend, uint32_t lanes, uint32_t samplingMask) {
     batch.uniforms()[uniform] = 0.5F * (random.unit() + 1.0F);
   const auto stops = shardEdgeStopTokens(vocabulary);
   CommandGraph graph;
-  sampling.addVerify(graph, policies, batch.buffers, stops, {});
+  sampling.addVerify(graph, policies, batch.buffers, stops, {}, noBias(batch.buffers));
   static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
   for (uint32_t lane = 0; lane < lanes; ++lane) {
     const Batch single = makeBatch(backend, vocabulary, 1);
@@ -1267,7 +1282,7 @@ void mixedVerify(MetalBackend &backend, uint32_t lanes, uint32_t samplingMask) {
     copy(batch.buffers.uniforms, single.buffers.uniforms);
     CommandGraph reference;
     sampling.addVerify(reference, std::span(policies).subspan(lane, 1),
-                       single.buffers, stops, {});
+                       single.buffers, stops, {}, noBias(single.buffers));
     static_cast<void>(backend.submitCommandAsync(reference.dispatches()).wait());
     if (policies[lane].samples())
       require(std::memcmp(&batch.record(lane * kRows), &single.record(0),
@@ -1314,12 +1329,12 @@ void unconstrainedRowsIgnoreMasks(MetalBackend &backend) {
     std::fill_n(batch.masks(), lanes * (kRows + 1) * batch.maskWords(),
                 maskWord);
     CommandGraph verify;
-    sampling.addVerify(verify, policies, batch.buffers, stops, {});
+    sampling.addVerify(verify, policies, batch.buffers, stops, {}, noBias(batch.buffers));
     static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
     std::vector<uint32_t> tokens(batch.outputTokens(),
                                  batch.outputTokens() + batch.rows);
     CommandGraph initial;
-    sampling.addInitial(initial, policies, batch.buffers, 3, stops, {});
+    sampling.addInitial(initial, policies, batch.buffers, 3, stops, {}, noBias(batch.buffers));
     static_cast<void>(backend.submitCommandAsync(initial.dispatches()).wait());
     tokens.insert(tokens.end(), batch.outputTokens(),
                   batch.outputTokens() + lanes);
@@ -1376,7 +1391,7 @@ void targetTop1(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes) {
       CommandGraph initial;
       const SamplingPolicy single{1, temperature, 0.5F, true};
       sampling.addInitial(initial, {&single, 1}, batch.buffers, offset,
-                          stops, {});
+                          stops, {}, noBias(batch.buffers));
       static_cast<void>(backend.submitCommandAsync(initial.dispatches()).wait());
       require(tokens[0] == expected(offset, 0),
               "initial target differs from masked CPU argmax");
@@ -1384,7 +1399,7 @@ void targetTop1(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes) {
     batch.poison();
     CommandGraph initialArgmax;
     sampling.addInitial(initialArgmax, {&greedy, 1}, batch.buffers, offset,
-                        stops, {});
+                        stops, {}, noBias(batch.buffers));
     static_cast<void>(backend.submitCommandAsync(initialArgmax.dispatches()).wait());
     require(tokens[0] == expected(offset, kUnmasked),
             "initial argmax differs from CPU argmax");
@@ -1402,7 +1417,7 @@ void targetTop1(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes) {
   for (uint32_t lane = 0; lane < lanes; ++lane)
     policies[lane] = {1, lane % 2 ? 0.8F : 0.0F, 0.5F, true};
   CommandGraph verify;
-  sampling.addVerify(verify, policies, batch.buffers, stops, {});
+  sampling.addVerify(verify, policies, batch.buffers, stops, {}, noBias(batch.buffers));
   static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
   for (uint32_t row = 0; row < batch.rows; ++row) {
     const uint32_t maskRow = row / kRows * (kRows + 1) + row % kRows + 1;
@@ -1422,7 +1437,7 @@ void targetTop1(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes) {
   batch.poison();
   CommandGraph verifyArgmax;
   sampling.addVerify(verifyArgmax, std::vector<SamplingPolicy>(lanes, greedy),
-                     batch.buffers, stops, {});
+                     batch.buffers, stops, {}, noBias(batch.buffers));
   static_cast<void>(backend.submitCommandAsync(verifyArgmax.dispatches()).wait());
   for (uint32_t row = 0; row < batch.rows; ++row)
     require(tokens[row] == expected(row, kUnmasked),
@@ -1465,7 +1480,7 @@ void excludedStopTokens(MetalBackend &backend, uint32_t vocabulary) {
         CommandGraph initial;
         const SamplingPolicy policy{32, temperature, 1.0F, false, excludes};
         sampling.addInitial(initial, {&policy, 1}, batch.buffers, kRows - 1,
-                            stops, {});
+                            stops, {}, noBias(batch.buffers));
         static_cast<void>(backend.submitCommandAsync(initial.dispatches()).wait());
         if (excludes)
           require(tokens[0] == best(kRows - 1) ||
@@ -1510,7 +1525,7 @@ void excludedStopTokens(MetalBackend &backend, uint32_t vocabulary) {
                               1.0F, false, (excludeMask >> lane & 1U) != 0});
         batch.poison();
         CommandGraph verify;
-        sampling.addVerify(verify, policies, batch.buffers, stops, {});
+        sampling.addVerify(verify, policies, batch.buffers, stops, {}, noBias(batch.buffers));
         static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
         // Only an excluding lane's distribution leaves out the stop token
         // drafted at row 0, and none of its rows draws a stop token.
@@ -1566,7 +1581,7 @@ void excludedStopTokens(MetalBackend &backend, uint32_t vocabulary) {
   const std::vector<SamplingPolicy> greedy(kLanes, {32, 0.0F, 1.0F, false, true});
   batch.poison();
   CommandGraph padded;
-  sampling.addVerify(padded, greedy, batch.buffers, two, {});
+  sampling.addVerify(padded, greedy, batch.buffers, two, {}, noBias(batch.buffers));
   static_cast<void>(backend.submitCommandAsync(padded.dispatches()).wait());
   for (uint32_t row = 0; row < batch.rows; ++row)
     require(tokens[row] == 0, "the padding of two stop tokens excluded another token");
@@ -1630,7 +1645,7 @@ void thinkingCutoffs(MetalBackend &backend, uint32_t vocabulary) {
         SamplingPolicy policy{32, temperature};
         policy.thinkingCutoff = ThinkingCutoff{row, end, alsoEnds};
         CommandGraph initial;
-        sampling.addInitial(initial, {&policy, 1}, batch.buffers, kRows - 1, stops, {});
+        sampling.addInitial(initial, {&policy, 1}, batch.buffers, kRows - 1, stops, {}, noBias(batch.buffers));
         require(cutoffDispatches(initial) == (row == 0 ? 1 : 0), "the first token's cutoff dispatch is wrong");
         static_cast<void>(backend.submitCommandAsync(initial.dispatches()).wait());
         require(tokens[0] == (row == 0 ? end[0] : best(kRows - 1)), "the first token missed its cutoff");
@@ -1658,7 +1673,7 @@ void thinkingCutoffs(MetalBackend &backend, uint32_t vocabulary) {
         SamplingPolicy policy{32, temperature, 1.0F, true};
         policy.thinkingCutoff = ThinkingCutoff{0, end, alsoEnds, true};
         CommandGraph initial;
-        sampling.addInitial(initial, {&policy, 1}, batch.buffers, kRows - 1, stops, {});
+        sampling.addInitial(initial, {&policy, 1}, batch.buffers, kRows - 1, stops, {}, noBias(batch.buffers));
         static_cast<void>(backend.submitCommandAsync(initial.dispatches()).wait());
         require(tokens[0] == (admitted ? end[0] : best(kRows - 1)), "a first token's end did not wait for its mask");
       }
@@ -1696,7 +1711,7 @@ void thinkingCutoffs(MetalBackend &backend, uint32_t vocabulary) {
                                const std::array<std::array<uint32_t, kRows>, kLanes> &expected,
                                const std::array<std::array<uint32_t, kPositions>, kLanes> &drafts) {
     std::fill(uniforms, uniforms + kLanes * kUniforms, 0.5F);
-    sampling.addVerify(verify, policies, batch.buffers, stops, {});
+    sampling.addVerify(verify, policies, batch.buffers, stops, {}, noBias(batch.buffers));
     require(cutoffDispatches(verify) == 1, "a verify with cutoffs dispatched them other than once");
     sampling.addAcceptance(verify, acceptance, maximumRetained, policies, stops);
     static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
@@ -1925,7 +1940,7 @@ void thinkingCutoffs(MetalBackend &backend, uint32_t vocabulary) {
     sampling.addThinkingDrafts(verify, policies, acceptance.proposedTokens);
     Embedding::addVerifyInput(verify, draftInput, acceptance.proposedTokens, batch.buffers.inputTokens, vocabulary,
                               kLanes);
-    sampling.addVerify(verify, policies, batch.buffers, stops, {});
+    sampling.addVerify(verify, policies, batch.buffers, stops, {}, noBias(batch.buffers));
     sampling.addAcceptance(verify, acceptance, maximumRetained, policies, stops);
     static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
     const auto *retained = static_cast<const uint32_t *>(acceptance.retainedCounts.contents());
@@ -1942,7 +1957,7 @@ void thinkingCutoffs(MetalBackend &backend, uint32_t vocabulary) {
   const std::array<SamplingPolicy, 2> uncut{none, SamplingPolicy{}};
   CommandGraph graph;
   sampling.addThinkingDrafts(graph, uncut, acceptance.proposedTokens);
-  sampling.addVerify(graph, uncut, batch.buffers, stops, {});
+  sampling.addVerify(graph, uncut, batch.buffers, stops, {}, noBias(batch.buffers));
   require(cutoffDispatches(graph) == 0 && draftDispatches(graph) == 0,
           "a verify without a cutoff in its rows dispatched one");
 
@@ -1960,7 +1975,7 @@ void thinkingCutoffs(MetalBackend &backend, uint32_t vocabulary) {
     rejects(
         [&] {
           CommandGraph refused;
-          sampling.addVerify(refused, {&policy, 1}, batch.buffers, stops, {});
+          sampling.addVerify(refused, {&policy, 1}, batch.buffers, stops, {}, noBias(batch.buffers));
         },
         refusal, "a thinking end waited for a mask it cannot read");
   }
@@ -2036,7 +2051,7 @@ void ties(MetalBackend &backend) {
       batch.uniforms()[uniform] = 0.5F * (random.unit() + 1.0F);
     batch.poison();
     CommandGraph verify;
-    sampling.addVerify(verify, {&c.policy, 1}, batch.buffers, kStopTokens, {table, tableRows});
+    sampling.addVerify(verify, {&c.policy, 1}, batch.buffers, kStopTokens, {table, tableRows}, noBias(batch.buffers));
     static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
     for (uint32_t row = 0; row < kRows; ++row)
       requireSampledRow(batch, row, target,
@@ -2117,7 +2132,7 @@ void minPCuts(MetalBackend &backend) {
       batch.uniforms()[uniform] = 0.5F * (random.unit() + 1.0F);
     batch.poison();
     CommandGraph verify;
-    sampling.addVerify(verify, {&c.policy, 1}, batch.buffers, kStopTokens, {});
+    sampling.addVerify(verify, {&c.policy, 1}, batch.buffers, kStopTokens, {}, noBias(batch.buffers));
     static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
     for (uint32_t row = 0; row < kRows; ++row)
       requireSampledRow(batch, row, target,
@@ -2215,7 +2230,7 @@ void speculativeWholeVocabulary(MetalBackend &backend) {
   }
   batch.poison();
   CommandGraph graph;
-  sampling.addVerify(graph, policies, batch.buffers, kStopTokens, {});
+  sampling.addVerify(graph, policies, batch.buffers, kStopTokens, {}, noBias(batch.buffers));
   const std::array<uint32_t, lanes> maximumRetained{kRows, kRows, kRows, kRows};
   sampling.addAcceptance(graph, acceptance, maximumRetained, policies,
                          kStopTokens);
@@ -2298,7 +2313,7 @@ void overProposedResidual(MetalBackend &backend) {
     batch.uniforms()[SPLASH_UNIFORM_CORRECTION] = correction;
     batch.poison();
     CommandGraph graph;
-    sampling.addVerify(graph, {&policy, 1}, batch.buffers, kStopTokens, {});
+    sampling.addVerify(graph, {&policy, 1}, batch.buffers, kStopTokens, {}, noBias(batch.buffers));
     const std::array<uint32_t, 1> maximumRetained{kRows};
     sampling.addAcceptance(graph, acceptance, maximumRetained, {&policy, 1},
                            kStopTokens);
@@ -2351,7 +2366,7 @@ void extremeSearches(MetalBackend &backend) {
       std::copy(original.begin(), original.end(), batch.logits());
       batch.poison();
       CommandGraph verify;
-      sampling.addVerify(verify, {&policy, 1}, batch.buffers, kStopTokens, {table, tableRows});
+      sampling.addVerify(verify, {&policy, 1}, batch.buffers, kStopTokens, {table, tableRows}, noBias(batch.buffers));
       fastest = std::min(
           fastest, backend.submitCommandAsync(verify.dispatches()).wait().gpuSeconds);
     }
@@ -2443,14 +2458,14 @@ void nonFiniteRowsSelectTheSentinel(MetalBackend &backend) {
         batch.poison();
         CommandGraph initial;
         sampling.addInitial(initial, {&policy, 1}, batch.buffers, 0,
-                            kStopTokens, penalties);
+                            kStopTokens, penalties, noBias(batch.buffers));
         static_cast<void>(backend.submitCommandAsync(initial.dispatches()).wait());
         require(batch.outputTokens()[0] == kSentinel,
                 label + ": a first token from a row with no selectable logit is " +
                     std::to_string(batch.outputTokens()[0]));
         batch.poison();
         CommandGraph verify;
-        sampling.addVerify(verify, {&policy, 1}, batch.buffers, kStopTokens, penalties);
+        sampling.addVerify(verify, {&policy, 1}, batch.buffers, kStopTokens, penalties, noBias(batch.buffers));
         static_cast<void>(backend.submitCommandAsync(verify.dispatches()).wait());
         for (uint32_t row = 0; row < kRows; ++row) {
           require(batch.outputTokens()[row] == kSentinel,
