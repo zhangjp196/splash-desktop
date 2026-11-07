@@ -728,4 +728,3 @@ as it does to an upstream model. The API model ID is derived from the target's
 name (a GGUF's without its extension), reduced to the characters a repository
 ID allows; `--served-model-name` adds aliases as usual. A Hugging Face cache is
 not involved: the files are read where they are.
-

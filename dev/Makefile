@@ -121,6 +121,7 @@ architecture-check: install-environment
 check: check-source check-native-engine check-python
 
 check-source: architecture-check
+	$(PYTHON) dev/tools/check_history.py
 	@git diff --check
 	@empty_tree=$$(git hash-object -t tree /dev/null); \
 		git diff --check $$empty_tree HEAD
