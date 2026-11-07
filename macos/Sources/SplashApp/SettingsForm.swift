@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 /// a short description, so the rail explains the form instead of only naming
 /// it.
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case model, serving, storage
+    case model, server, schedule, memory, cache, request
 
     var id: String { rawValue }
 
@@ -16,16 +16,22 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .model: return "cube.box"
-        case .serving: return "cpu"
-        case .storage: return "internaldrive"
+        case .server: return "network"
+        case .schedule: return "speedometer"
+        case .memory: return "memorychip"
+        case .cache: return "internaldrive"
+        case .request: return "text.bubble"
         }
     }
 
     var tint: Color {
         switch self {
         case .model: return SplashPalette.blue
-        case .serving: return SplashPalette.mint
-        case .storage: return SplashPalette.violet
+        case .server: return SplashPalette.cyan
+        case .schedule: return SplashPalette.amber
+        case .memory: return SplashPalette.mint
+        case .cache: return SplashPalette.violet
+        case .request: return SplashPalette.rose
         }
     }
 }
@@ -114,26 +120,19 @@ struct SettingsEditor: View {
             return s.modelMode != b.modelMode || s.modelID != b.modelID
                 || s.modelDirectory != b.modelDirectory
                 || s.draftDirectory != b.draftDirectory || s.mmproj != b.mmproj
-                || s.port != b.port || s.lanAccess != b.lanAccess
+        case .server:
+            return s.port != b.port || s.lanAccess != b.lanAccess
                 || s.allowedHosts != b.allowedHosts || s.allowedOrigins != b.allowedOrigins
-                || s.apiKey != b.apiKey || s.servedNames != b.servedNames
-                || s.announceServedName != b.announceServedName
-        case .serving:
-            return s.kvFormat != b.kvFormat || s.stateFormat != b.stateFormat
+                || s.kvFormat != b.kvFormat || s.stateFormat != b.stateFormat
                 || s.neuralEngine != b.neuralEngine || s.languageOnly != b.languageOnly
-                || s.maxMemory != b.maxMemory || s.maxContext != b.maxContext
+        case .schedule:
+            return s.maxConcurrency != b.maxConcurrency || s.verifyRows != b.verifyRows
+                || s.decodeShare != b.decodeShare
+        case .memory:
+            return s.maxMemory != b.maxMemory || s.maxContext != b.maxContext
                 || s.expertMemory != b.expertMemory || s.pleMemory != b.pleMemory
                 || s.sparseKvMemory != b.sparseKvMemory
-                || s.maxConcurrency != b.maxConcurrency || s.verifyRows != b.verifyRows
-                || s.decodeShare != b.decodeShare
-                || s.maxRequestSize != b.maxRequestSize
-                || s.requestTimeout != b.requestTimeout
-                || s.maxImagePixels != b.maxImagePixels
-                || s.allowIdleSleep != b.allowIdleSleep
-                || s.thinkingTokenBudget != b.thinkingTokenBudget
-                || s.thinkingEndText != b.thinkingEndText
-                || s.reasoningEffort != b.reasoningEffort
-        case .storage:
+        case .cache:
             return s.residencySeconds != b.residencySeconds || s.diskCache != b.diskCache
                 || s.cacheIdleSpill != b.cacheIdleSpill || s.cacheDir != b.cacheDir
                 || s.maxCacheDisk != b.maxCacheDisk
@@ -141,6 +140,16 @@ struct SettingsEditor: View {
                 || s.cacheEvictionPreset != b.cacheEvictionPreset
                 || s.cacheEvictionPolicy != b.cacheEvictionPolicy
                 || s.cacheEvictionProtect != b.cacheEvictionProtect
+        case .request:
+            return s.apiKey != b.apiKey || s.servedNames != b.servedNames
+                || s.announceServedName != b.announceServedName
+                || s.maxRequestSize != b.maxRequestSize
+                || s.requestTimeout != b.requestTimeout
+                || s.maxImagePixels != b.maxImagePixels
+                || s.allowIdleSleep != b.allowIdleSleep
+                || s.thinkingTokenBudget != b.thinkingTokenBudget
+                || s.thinkingEndText != b.thinkingEndText
+                || s.reasoningEffort != b.reasoningEffort
         }
     }
 
@@ -177,14 +186,32 @@ struct SettingsEditor: View {
     @ViewBuilder private var page: some View {
         switch section {
         case .model:
+            modelPage
+        case .server:
             VStack(alignment: .leading, spacing: 14) {
-                modelPage
                 endpointCard
                 endpointNote
-                accessCard
+                runtimeCard
             }
-        case .serving: servingPage
-        case .storage: storagePage
+        case .schedule:
+            scheduleCard
+        case .memory:
+            VStack(alignment: .leading, spacing: 14) {
+                budgetCard
+                if profile.experts || profile.ple || profile.sparseKv {
+                    streamedCard
+                }
+            }
+        case .cache:
+            VStack(alignment: .leading, spacing: 14) {
+                idleCard
+                diskCard
+            }
+        case .request:
+            VStack(alignment: .leading, spacing: 14) {
+                accessCard
+                payloadCard
+            }
         }
     }
 
@@ -420,19 +447,7 @@ struct SettingsEditor: View {
         }
     }
 
-    // MARK: Serving
-
-    private var servingPage: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            runtimeCard
-            budgetCard
-            if profile.experts || profile.ple || profile.sparseKv {
-                streamedCard
-            }
-            scheduleCard
-            payloadCard
-        }
-    }
+    // MARK: Memory and scheduling
 
     private var budgetCard: some View {
         EditorCard(
@@ -560,14 +575,7 @@ struct SettingsEditor: View {
         }
     }
 
-    // MARK: Storage
-
-    private var storagePage: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            idleCard
-            diskCard
-        }
-    }
+    // MARK: Cache
 
     private var idleCard: some View {
         EditorCard(
