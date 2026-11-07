@@ -1005,6 +1005,33 @@ uint32_t Cache::spillingWrites() const noexcept {
   return std::min(spillable, pool_.freePageCount(kv::PageForm::Index));
 }
 
+bool Cache::owedCopiesReturn(uint32_t pages, kv::PageForm form) const {
+  if (form != kv::PageForm::Full)
+    return false;
+  const uint32_t needed = pages ? pages : pool_.extentPages();
+  const uint32_t free = std::min(pool_.freePageCount(kv::PageForm::Full), needed);
+  const uint32_t copies = copiesToSpill(std::max(needed - free, 1u));
+  return copies && free + copies >= needed;
+}
+
+uint32_t Cache::copiesToSpill(uint32_t enough) const {
+  if (!spill_ || !writes(WriteClass::Spill))
+    return 0;
+  // Requests on one prefix owe its blocks each, one maybe a block another
+  // writes.
+  std::unordered_set<uint64_t> blocks;
+  for (const Write &write : writes_)
+    if (write.write == WriteClass::Spill && spillEligibility(write.block) == Eligibility::Eligible)
+      blocks.insert(write.block);
+  for (const auto &[_, active] : requests_)
+    for (auto block = active.owedCopies.begin();
+         active.mode == KvMode::Spill && block != active.owedCopies.end() && blocks.size() < enough;
+         ++block)
+      if (spillEligibility(*block) == Eligibility::Eligible)
+        blocks.insert(*block);
+  return static_cast<uint32_t>(blocks.size());
+}
+
 // Spilling: commitments of quota, write-through of Spill requests' pages,
 // and their moves to the index form once their copies landed.
 
@@ -1180,8 +1207,11 @@ TokenAdmission Cache::moveLandedPages(bool allocate, SpilledExtents extents) {
     const auto blocks = static_cast<uint32_t>(active.cachedBlocks.size());
     const uint32_t end = blocks > spill_->windowPages ? blocks - spill_->windowPages : 0;
     // The scan's mark passes what is spilled or kept Full, and stops at the
-    // first page that may spill later. Copies land in the order they were
-    // written, so the scan ends at the first page whose copy has not.
+    // first page that may spill later. A page waits for its own copy to
+    // land: one being written, or whose block has none of its own, as a
+    // block recomputed over another conversation's copy (KvCache::insert)
+    // until its rewrite lands. The pages past it whose copies landed, as a
+    // chain's persisted points have them, spill now.
     bool settled = true;
     for (uint32_t index = std::max(active.spillScan, spill_->densePages); index < end; ++index) {
       const uint32_t page = active.pages[index];
@@ -1189,11 +1219,10 @@ TokenAdmission Cache::moveLandedPages(bool allocate, SpilledExtents extents) {
       // A writer that kept a page of its own beside its block's restore
       // keeps it Full.
       Eligibility eligibility = Eligibility::KeptFull;
-      if (pool_.form(page) == kv::PageForm::Full && kv_.page(block) == page) {
-        if (!kv_.kvCopied(block) || kv_.transfer(block) != KvCache::Transfer::None)
-          break;
-        eligibility = spillEligibility(block);
-      }
+      if (pool_.form(page) == kv::PageForm::Full && kv_.page(block) == page)
+        eligibility = kv_.kvCopied(block) && kv_.transfer(block) == KvCache::Transfer::None
+                          ? spillEligibility(block)
+                          : Eligibility::Later;
       if (eligibility == Eligibility::Eligible)
         pages.push_back(page);
       settled = settled && eligibility == Eligibility::KeptFull;
@@ -1382,8 +1411,8 @@ void Cache::checkInvariants() const {
     }
     check(active.mode == KvMode::Spill || (!active.committedPages && active.owedCopies.empty()),
           "only a Spill request commits quota or owes copies");
-    // Its pages spill only up to the first block on its own page whose copy
-    // has not landed.
+    // Each block on its own page without a copy of its own is owed: its
+    // page spills once that copy lands.
     if (active.mode == KvMode::Spill) {
       const std::unordered_set<uint64_t> owed(active.owedCopies.begin(), active.owedCopies.end());
       for (uint32_t index = 0; index < active.cachedBlocks.size(); ++index) {
@@ -1844,9 +1873,9 @@ bool Cache::pollTierTransfers() {
     // drew the slot on its commitment. It commits a slot for it once more,
     // which the copy it writes draws or the copy another writes returns, as
     // when it published the block; one that still owes it keeps the slot it
-    // committed. The pages past the block spill once its copy has landed. A
-    // writer that kept a page of its own beside the block never spills that
-    // page, and owes nothing.
+    // committed. Its page spills once that copy lands. A writer that kept a
+    // page of its own beside the block never spills that page, and owes
+    // nothing.
     if (!written) {
       kv_.setSlot(block, nullptr);
       const uint32_t index = kv_.chainLength(block) - 1;

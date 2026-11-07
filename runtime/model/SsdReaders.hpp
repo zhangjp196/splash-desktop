@@ -139,6 +139,11 @@ public:
   void finish(Batch &batch);
 
   [[nodiscard]] unsigned readers() const noexcept { return static_cast<unsigned>(threads_.size()); }
+  // Rises whenever a batch of reads starts, whatever it reads for: the
+  // engine attributes a decode gap to SSD reads when it moved.
+  [[nodiscard]] uint64_t readSerial() const noexcept {
+    return readSerial_.load(std::memory_order_relaxed);
+  }
   // A batch runs now, from its start until its last task ended: a step waits
   // for reads, which writes to the same drive yield to.
   [[nodiscard]] bool criticalBusy() const noexcept { return running_->load(std::memory_order_acquire) != 0; }
@@ -168,6 +173,7 @@ private:
   // Batches running now, from their start until their last task ended,
   // shared with criticalBusyProbe().
   const std::shared_ptr<std::atomic<unsigned>> running_ = std::make_shared<std::atomic<unsigned>>(0);
+  std::atomic<uint64_t> readSerial_{0};
   bool stopping_ = false;
   std::vector<std::thread> threads_;
 };

@@ -16,12 +16,12 @@ namespace {
 
 // The context a spill-capable target keeps resident before the streamed
 // stores take the rest of the budget, and a dense target too once its
-// experts stream: requests up to it never spill while they decode alone.
+// routed stream: requests up to it never spill while they decode alone.
 constexpr uint64_t kResidentAllowanceTokens = 65'536;
-// The streamed PLE table's row cache before the experts take the rest. It
+// The streamed PLE table's row cache before the routed take the rest. It
 // hits only rows read before, and a request reads few distinct rows: a
 // 128K-token prompt about 1.1M, a quarter of what 512 MiB holds. A larger
-// cache hits no more often and leaves streamed experts less.
+// cache hits no more often and leaves streamed routed less.
 constexpr uint64_t kTableShareBytes = 512 * kMiB;
 // A Spill request's tail window: the pages before its open page that it
 // keeps Full. A decode selects about a tenth of its blocks in its last 64
@@ -164,7 +164,7 @@ KvSpillPlan planSpill(const StreamedMemoryInputs &in, uint64_t floors) {
 
 // The plan of the parts as resolved beside arenas of `arenaBytes`, or of
 // `spillArenaBytes` where the plan spills (planStreamedMemory).
-StreamedMemoryResult planParts(const StreamedMemoryInputs &in, const Part &experts, const Part &table,
+StreamedMemoryResult planParts(const StreamedMemoryInputs &in, const Part &routed, const Part &table,
                                uint64_t arenaBytes, uint64_t spillArenaBytes) {
   const kv::Layout &layout = in.kvLayout;
   const auto overflow = [] { return StreamedMemoryResult{std::nullopt, "the memory plan overflows uint64"}; };
@@ -172,7 +172,7 @@ StreamedMemoryResult planParts(const StreamedMemoryInputs &in, const Part &exper
   // lane's state and the KV runway, and a spill-capable target's spill
   // floors.
   uint64_t loaded = 0;
-  for (const uint64_t bytes : {in.fixedBytes, arenaBytes, experts.floor, table.floor})
+  for (const uint64_t bytes : {in.fixedBytes, arenaBytes, routed.floor, table.floor})
     if (!checkedAdd(loaded, bytes, loaded)) return overflow();
   const std::optional<uint64_t> minimum = minimumRequiredBytes(loaded, in.laneStateBytes, layout);
   if (!minimum) return overflow();
@@ -209,7 +209,7 @@ StreamedMemoryResult planParts(const StreamedMemoryInputs &in, const Part &exper
     floors += target - spill.hotFloorBytes;
   }
 
-  // Then the priorities, out of what the floors leave: the experts first,
+  // Then the priorities, out of what the floors leave: the routed first,
   // then the table. The KV allowance a part leaves holds the context kept
   // resident, with its speculative rows, as one request's KV capacity does:
   // in the fewest pages whose whole extents hold its pages, of which the
@@ -232,22 +232,25 @@ StreamedMemoryResult planParts(const StreamedMemoryInputs &in, const Part &exper
   };
   const int64_t tableShare =
       table.automatic ? static_cast<int64_t>(remaining(std::min(table.all, kTableShareBytes), table.floor)) : 0;
-  bool expertsStream = experts.streams;
-  plan.expertBytes = experts.streams ? experts.floor : 0;
-  if (experts.automatic) {
-    const auto above = static_cast<int64_t>(experts.all - experts.floor);
-    if (rest - allowance(false) - tableShare >= above) {
+  plan.routedBytes = routed.streams ? routed.floor : 0;
+  if (routed.automatic) {
+    const auto above = static_cast<int64_t>(routed.all - routed.floor);
+    // Experts load whole only where they leave the first 64K tokens of
+    // context, or --max-context: loading them whole wherever they fit made a
+    // larger memory budget serve less context on a target whose KV cannot
+    // spill (Qwen3.6-35B-A3B).
+    if (rest - allowance(true) - tableShare >= above) {
       rest -= above;
     } else {
-      expertsStream = true;
       const int64_t bytes = std::clamp<int64_t>(rest - allowance(true) - tableShare, 0, above);
-      plan.expertBytes = experts.floor + static_cast<uint64_t>(bytes);
+      plan.routedBytes = routed.floor + static_cast<uint64_t>(bytes);
       rest -= bytes;
     }
   }
   plan.tableBytes = table.streams ? table.floor : 0;
   if (table.automatic) {
-    const int64_t kept = rest - allowance(expertsStream);
+    // The PLE table leaves the same context the routed do.
+    const int64_t kept = rest - allowance(true);
     if (kept < static_cast<int64_t>(table.all - table.floor))
       plan.tableBytes = table.floor + static_cast<uint64_t>(std::clamp<int64_t>(kept, 0, tableShare));
   }
@@ -409,20 +412,20 @@ StreamedMemoryResult planStreamedMemory(const StreamedMemoryInputs &in) {
       (in.sparseKv && !in.sparseKv->laneSlots()))
     return {std::nullopt, "invalid memory planner inputs"};
   std::string error;
-  const std::optional<Part> experts = resolve(in.experts, "--expert-memory", error);
-  const std::optional<Part> table = experts ? resolve(in.table, "--ple-memory", error) : std::nullopt;
+  const std::optional<Part> routed = resolve(in.routed, "--expert-memory", error);
+  const std::optional<Part> table = routed ? resolve(in.table, "--ple-memory", error) : std::nullopt;
   if (!table) return {std::nullopt, error};
   // The arenas of the parts set to stream, and where that plan streams
   // more, those of the parts it streams: a part that streams with smaller
   // arenas streams with larger ones, so a plan streams no more than the
   // arenas it was made with after three at most.
-  bool expertsStream = experts->streams, tableStreams = table->streams;
+  bool routedStream = routed->streams, tableStreams = table->streams;
   for (;;) {
-    StreamedMemoryResult result = planParts(in, *experts, *table, in.arenaBytes[expertsStream][tableStreams],
+    StreamedMemoryResult result = planParts(in, *routed, *table, in.arenaBytes[routedStream][tableStreams],
                                             in.spillArenaBytes[tableStreams]);
-    if (!result.plan || ((expertsStream || !result.plan->expertBytes) && (tableStreams || !result.plan->tableBytes)))
+    if (!result.plan || ((routedStream || !result.plan->routedBytes) && (tableStreams || !result.plan->tableBytes)))
       return result;
-    expertsStream = expertsStream || result.plan->expertBytes;
+    routedStream = routedStream || result.plan->routedBytes;
     tableStreams = tableStreams || result.plan->tableBytes;
   }
 }
@@ -506,7 +509,6 @@ std::string EngineMemoryBreakdown::toStatusJson() const {
     out << "\"kv_window\":{\"slim_page_bytes\":" << kvSlimPageBytes << ",\"floor_pages\":" << kvWindowFloorPages
         << "},";
   out << "\"kv_spill\":" << spillStatusJson(kvSpill) << ','
-      << "\"resident_kv_bytes\":" << residentKvBytes << ','
       << "\"context_bounds\":{\"window\":" << contextBounds.window
       << ",\"resident\":" << contextBounds.resident << ",\"spilled\":" << contextBounds.spilled
       << ",\"disk\":" << contextBounds.disk << ",\"bound\":" << json::quote(contextBounds.bound()) << "},"

@@ -151,8 +151,8 @@ void Scheduler::maskReady(uint64_t id) {
   startDecodeGap(request);
 }
 
-void Scheduler::setStreamsHistory(uint64_t id, bool streams) {
-  get(id).streamsHistory = streams;
+void Scheduler::setSpillsHistory(uint64_t id, bool streams) {
+  get(id).spillsHistory = streams;
 }
 
 void Scheduler::setPrefillGroupRows(uint64_t id, uint32_t rows) {
@@ -382,7 +382,7 @@ Scheduler::planPrefill(std::vector<PrefillRequestView> ready) const {
     // A lane that streams its history runs alone: nothing joins a command
     // it leads, and it joins none it does not lead; overtaken often enough,
     // it leads one.
-    if (view.request->streamsHistory && &view != &leader)
+    if (view.request->spillsHistory && &view != &leader)
       continue;
     uint32_t rows =
         std::min(view.request->spec.prefillTokens - view.promptProcessed, budget);
@@ -401,7 +401,7 @@ Scheduler::planPrefill(std::vector<PrefillRequestView> ready) const {
         {view.request->spec.id, rows, view.promptProcessed});
     planned += rows;
     budget -= rows;
-    if (leader.request->streamsHistory)
+    if (leader.request->spillsHistory)
       break;
     // A leader whose command runs in passes runs alone.
     if (&view == &leader) {
@@ -419,7 +419,7 @@ uint32_t Scheduler::prefillBudget(
   const uint32_t leaderRemaining =
       leader.request->spec.prefillTokens - leader.promptProcessed;
   // Passes bound a command's time, which fewer rows would not shorten.
-  if (leader.request->spec.prefillPasses > 1 && !leader.request->streamsHistory)
+  if (leader.request->spec.prefillPasses > 1 && !leader.request->spillsHistory)
     return uncontendedRows(leaderRemaining, leader.request->spec.prefillGroupRows);
   const uint32_t maximum = model::ExecutionLimits::prefillTokenBudget;
   if (prefillMillisecondsPerToken_ <= 0.0 && prefillFixedMilliseconds_ <= 0.0)
@@ -430,7 +430,7 @@ uint32_t Scheduler::prefillBudget(
          prefillFixedMilliseconds_ + rows * prefillMillisecondsPerToken_ > slice)
     rows /= 2;
   const bool leaderFinishing = leaderRemaining <= rows;
-  const bool streams = leader.request->streamsHistory;
+  const bool streams = leader.request->spillsHistory;
   const bool contended = std::any_of(
       requests_.begin(), requests_.end(), [&](const auto &entry) {
         const Request &peer = entry.second;
@@ -460,7 +460,7 @@ uint32_t Scheduler::prefillBudget(
 }
 
 uint32_t Scheduler::passesFor(const Request &leader, uint32_t rows) const {
-  if (leader.spec.prefillPasses <= 1 || leader.streamsHistory)
+  if (leader.spec.prefillPasses <= 1 || leader.spillsHistory)
     return 1;
   const double estimate = prefillFixedMilliseconds_ + rows * prefillMillisecondsPerToken_;
   return static_cast<uint32_t>(std::clamp(std::ceil(estimate / kContendedPrefillMilliseconds), 1.0,

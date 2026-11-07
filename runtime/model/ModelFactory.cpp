@@ -87,7 +87,9 @@ LoadedModel loadModel(metal::MetalBackend &backend,
   const auto vision = planVisionLoader(root, result.descriptor);
   DraftCheckpointLoader draft(backend, images, root / "draft", result.descriptor.draft);
   // The weights that stream from their files read on the engine's readers.
-  const ExpertStoreOptions experts{.memoryBytes = options.expertMemoryBytes, .readers = options.readers};
+  const ExpertStoreOptions experts{.memoryBytes = options.streamedMemoryBytes,
+                                   .readers = options.readers,
+                                   .elastic = options.streamedMemoryElastic};
   result.target = std::visit(
       [&](const auto &layout) -> TargetWeights {
         const std::filesystem::path directory = root / "target";

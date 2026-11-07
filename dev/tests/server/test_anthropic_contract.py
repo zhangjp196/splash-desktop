@@ -23,11 +23,8 @@ from dev.tests.server_fixtures import (
 )
 from server import documents
 from server import frontend as request_frontend
-from server.api_shapes import (
-    anthropic_to_chat_body,
-    anthropic_to_chat_prompt,
-    normalize_messages,
-)
+from server.chat_messages import normalize_messages
+from server.dialects.anthropic import anthropic_to_chat_body, anthropic_to_chat_prompt
 from server.errors import APIError
 from server.tool_schema import normalize_tools
 
@@ -1748,6 +1745,24 @@ class AnthropicHTTPContractTest(HarnessTestCase):
             )
             self.assertEqual(status, 200)
         self.assertEqual(len(runtime.requests), 2)
+
+    def test_anthropic_stop_sequences_must_be_an_array_of_nonblank_strings(self):
+        harness = self.harness()
+        for stops, message in (
+            ("single", "stop_sequences must be an array of strings"),
+            ([1], "stop_sequences must be an array of strings"),
+            (["  "], "each of stop_sequences must contain non-whitespace"),
+            (
+                ["x" * (16 * 1024 + 1)],
+                "each of stop_sequences must be at most 16384 characters",
+            ),
+        ):
+            with self.subTest(stops=stops):
+                status, _, payload = harness.request(
+                    "POST", "/v1/messages", anthropic_body(stop_sequences=stops)
+                )
+                self.assertEqual(status, 400, payload)
+                self.assertEqual(json.loads(payload)["error"]["message"], message)
 
     def test_anthropic_cache_usage_and_matched_stop_sequence(self):
         for stream in (False, True):

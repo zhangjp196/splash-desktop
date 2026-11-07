@@ -14,7 +14,8 @@ from dev.tests.server_fixtures import (
     pdf_bytes,
     render_pdf,
 )
-from server import api_shapes, documents
+from server import chat_messages, documents
+from server.dialects import responses as responses_dialect
 from server.errors import APIError
 
 
@@ -27,7 +28,7 @@ class PdfProtocolTests(unittest.TestCase):
         }
 
     def chat(self, file=None, deadline=FOREVER):
-        return api_shapes.normalize_messages(
+        return chat_messages.normalize_messages(
             [
                 {
                     "role": "user",
@@ -45,7 +46,7 @@ class PdfProtocolTests(unittest.TestCase):
         expected = render_pdf(pdf_bytes(pages=2))
         chat = self.chat()[0]["content"]
         self.assertEqual(chat, expected)
-        response, _ = api_shapes.responses_to_chat_body(
+        response, _ = responses_dialect.responses_to_chat_body(
             {},
             [
                 {
@@ -58,7 +59,7 @@ class PdfProtocolTests(unittest.TestCase):
                 }
             ],
         )
-        actual = api_shapes.normalize_messages(
+        actual = chat_messages.normalize_messages(
             response["messages"],
             vision=True,
             deadline=FOREVER,
@@ -213,7 +214,7 @@ class PdfProtocolTests(unittest.TestCase):
         with mock.patch.object(
             documents, "_render", side_effect=AssertionError("early render")
         ):
-            response, _ = api_shapes.responses_to_chat_body(
+            response, _ = responses_dialect.responses_to_chat_body(
                 {},
                 [
                     {
@@ -236,9 +237,9 @@ class PdfProtocolTests(unittest.TestCase):
                 deadline=FOREVER, remaining_bytes=remaining_bytes
             )
             with mock.patch.object(
-                api_shapes, "DocumentBudget", return_value=request_budget
+                chat_messages, "DocumentBudget", return_value=request_budget
             ):
-                api_shapes.normalize_messages(
+                chat_messages.normalize_messages(
                     messages, vision=True, deadline=FOREVER, without_slot=nullcontext
                 )
 
@@ -268,7 +269,7 @@ class PdfProtocolTests(unittest.TestCase):
                             "output": [{"type": "input_file", **self.file}],
                         },
                     ]
-                    messages = api_shapes.responses_to_chat_body({}, items)[0][
+                    messages = responses_dialect.responses_to_chat_body({}, items)[0][
                         "messages"
                     ]
                 normalize(messages, 2 * one_file)
@@ -300,7 +301,7 @@ class PdfProtocolTests(unittest.TestCase):
         ):
             for file in values:
                 with self.subTest(file=file), self.assertRaises(APIError):
-                    api_shapes.normalize_messages(
+                    chat_messages.normalize_messages(
                         [{"role": "user", "content": [{"type": "file", "file": file}]}],
                         vision=True,
                         deadline=FOREVER,

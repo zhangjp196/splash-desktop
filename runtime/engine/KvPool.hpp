@@ -122,6 +122,8 @@ public:
   [[nodiscard]] uint32_t pageCount() const noexcept;
   [[nodiscard]] uint64_t bytesPerPage(kv::PageForm form = kv::PageForm::Full) const noexcept;
   [[nodiscard]] uint32_t extentPages() const noexcept { return extentPages_; }
+  // Extents released since the pool was built, the decode-gap causes' count.
+  [[nodiscard]] uint64_t extentReleases() const noexcept { return extentReleases_; }
   // Free pages of the form's allocated extents; acquisition hands these out
   // first.
   [[nodiscard]] uint32_t freePageCount(kv::PageForm form = kv::PageForm::Full) const noexcept;

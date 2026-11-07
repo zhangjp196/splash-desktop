@@ -125,9 +125,14 @@ def icon_pixels(size: int) -> bytes:
 
 
 def build_icon(workdir: Path) -> Path:
-    """A SplashDesktop.icns beside the iconset, from the generated master."""
+    """A SplashDesktop.icns beside the iconset, from the app's icon master."""
     master = workdir / "icon-1024.png"
-    _write_png(master, 1024, icon_pixels(1024))
+    source = ROOT / MACOS_BUILD / "Resources" / "AppIcon.png"
+    if source.is_file():
+        shutil.copy2(source, master)
+    else:
+        # Kept for a checkout without the rendered master.
+        _write_png(master, 1024, icon_pixels(1024))
     iconset = workdir / f"{PRODUCT_NAME}.iconset"
     iconset.mkdir(parents=True, exist_ok=True)
     for size in ICON_SIZES:
@@ -200,6 +205,10 @@ def build_app(
     macos.mkdir(parents=True)
     resources.mkdir(parents=True)
     shutil.copy2(swift_binary, macos / PRODUCT_NAME)
+    # SwiftPM's resource bundles (SwiftTerm's) sit beside the executable in
+    # the build products; Bundle.module finds them in Contents/Resources.
+    for bundle in sorted(swift_binary.parent.glob("*.bundle")):
+        shutil.copytree(bundle, resources / bundle.name)
     (contents / "Info.plist").write_text(info_plist(version))
     with tempfile.TemporaryDirectory() as temporary:
         icon = build_icon(Path(temporary))

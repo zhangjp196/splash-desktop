@@ -491,6 +491,19 @@ public:
   // moved; none with trim off.
   uint32_t trimWindows(bool allocate = true);
   [[nodiscard]] bool holdsIndexPages(uint64_t requestId) const;
+  // Extents the pool released since it was built: a decode gap it moved in
+  // counts as one a release held.
+  [[nodiscard]] uint64_t poolReleases() const noexcept {
+    return pool_.extentReleases();
+  }
+  // Whether the copies Spill requests owe give back what a refusal lacks
+  // while the SSD cache writes them: `pages` Full pages of KV, or with none
+  // named memory, an extent's Full pages, as reclaimForMemory asks. The
+  // copies in flight land, the owed ones follow (writeThrough), and each
+  // frees its Full page as it spills: into the free Index pages and the
+  // Index extents the Full extents they empty fund. pendingPages counts only
+  // the copies in flight, as far as free Index pages take them.
+  [[nodiscard]] bool owedCopiesReturn(uint32_t pages, kv::PageForm form) const;
   // The block's copy could not be read (ModelStepResult::unreadableKvBlocks):
   // it matches nothing any more, and its copy goes with the block.
   void poisonCopy(uint64_t block);
@@ -1039,6 +1052,13 @@ private:
   [[nodiscard]] uint32_t writes(WriteClass write) const noexcept;
   // Pages written through whose Full pages free once their copies land.
   [[nodiscard]] uint32_t spillingWrites() const noexcept;
+  // While the SSD cache writes Spill requests' copies (a Spill write in
+  // flight), the blocks whose Full pages their copies free as they land and
+  // spill: those being written, then those still owed, counted up to
+  // `enough`. None while no copy is being written: what holds the writes
+  // back (the tier's share, the quota, a file that takes none) holds the
+  // owed ones back too.
+  [[nodiscard]] uint32_t copiesToSpill(uint32_t enough) const;
   // Rescans every Spill request's blocks from its dense history: a holder
   // that kept some of them Full ended or began to spill.
   void rescanSpills() noexcept;

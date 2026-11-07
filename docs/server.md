@@ -34,9 +34,10 @@ upgrading.
 ### Engine restarts and sleep
 
 An engine that fails is restarted at once. If it fails again within 60 s of
-starting, the next restart waits 5 s; after a third such failure (failed
-restarts count) Splash stops restarting it, and requests get 500 `engine_failed`
-until the server is restarted; its message names the crash trace when
+starting, the next restart waits 5 s, doubling up to 60 s; after the sixth such
+failure in a row (failed restarts count) Splash stops restarting it, and
+requests get 500 `engine_failed` until the server is restarted; its message
+names the crash trace when
 `SPLASH_CRASH_TRACE=1` recorded one
 ([crash traces](internals.md#failures-and-crash-traces)). Meanwhile generation requests get
 503 `engine_recovering`, whose message names the last failure. An engine whose
@@ -49,11 +50,27 @@ options give it the same concurrency and image input, and without
 limits, as once the Mac's memory budget shrank below that context, stops the
 restarts at once.
 
+A request the engine had started at each of the last two failures it died by a
+fault signal (SIGSEGV, SIGBUS, SIGABRT and the like) is refused with 400
+`request_quarantined` until the server restarts, so resending it cannot crash
+the engine a third time. Its message names the crash trace when one was
+recorded.
+
 Timeouts and keep-alives count only time the Mac is awake: a request in flight
 when the Mac sleeps continues when it wakes. While requests run, Splash keeps
 the Mac from sleeping automatically, as `caffeinate -i` does; the display may
 still sleep, and closing the lid or choosing Sleep still sleeps the Mac.
 `serve --allow-idle-sleep` lets it sleep automatically.
+
+### Serve record
+
+The launcher writes `serve-PORT.json` beside its `serve-PORT.lock`, in the
+runtime directory (`~/Library/Application Support/Splash/runtime` for a
+packaged install, `build/runtime` in a checkout): the process, the phase of its
+start (`starting`, `loading`, `ready`, `failed`), and, for a start that failed,
+a kind (`port`, `upgrade`, `install`, `model`, `configuration`, `device`,
+`internal`) and a message. The desktop app follows a server it started through
+the record, so a failed start shows why instead of a bare exit status.
 
 ### Shell completion
 
@@ -95,7 +112,7 @@ paths for `--model-dir`, `--draft-model` and `--mmproj`.
 | `--kv-format` | `int8` | Target KV storage: `int8`, `int4`, `k8v4` or `bf16`. See [KV cache precision](#kv-cache-precision). |
 | `--state-format` | `fp32` | Recurrent state storage: `fp32` or `bf16`. See [state precision](#state-precision). |
 | `--ple-memory` | Auto | Qwen3.8-Flash-Next: read the PLE n-gram table from the SSD through a host row cache of this size, e.g. `2G`; `off` loads the whole table. Auto loads it where memory holds it, else streams it through its share of the budget. See [PLE table streaming](#ple-table-streaming). |
-| `--expert-memory` | Auto | MoE targets: hold routed experts in this much memory, e.g. `16G`, and read the others from the SSD when a step routes them; `off` loads every expert. Auto loads them all where memory holds them, else gives them what the context leaves. See [streamed experts](#streamed-experts). |
+| `--expert-memory` | Auto | MoE targets: hold routed experts in this much memory, e.g. `16G`, and read the others from the SSD when a step routes them; `off` loads every expert. Auto loads them all where memory holds them, else gives them what the context leaves, and then grows and gives back its arenas a gigabyte at a time as memory allows and requests need it. A size fixes the store. See [streamed experts](#streamed-experts). |
 | `--sparse-kv-memory` | Auto | Qwen3.8-Flash-Next: memory for the KV blocks read back from the SSD for requests whose KV is there, e.g. `1200M`; never below its floor, which auto keeps. See [KV on the SSD](#kv-on-the-ssd). |
 | `--idle-release` | `10m` | Time without a request before the engine unwires its memory and frees the weights; the next request restores them. `off` keeps both, though `POST /v1/memory/release` still frees the weights. See [weight loading](internals.md#weight-loading). |
 | `--cache-idle-spill` | `5m` | Time without a request before the engine writes the cached prefixes to disk and releases their memory; the next request restores what it needs from there. Without an SSD cache (including `--max-cache-disk 0`) the same pass evicts the idle prefixes instead, so memory does not stay at its ceiling. Its own timer, so `--idle-release off` may keep the weights while the cache still spills; `off` keeps the cache in memory. See [SSD cache](#ssd-cache). |
@@ -373,7 +390,11 @@ weights shrink by the routed experts' bytes, and the store counts in their
 place (`target_weights_bytes`). A store holds at least a layer's experts of
 each format mix and every expert of a layer whose mix no other layer shares;
 the engine refuses a SIZE below that, and `--expert-memory off` loads every
-expert, as a SIZE that holds them all does.
+expert, as a SIZE that holds them all does. An automatic store is elastic:
+it starts at that floor, takes another gigabyte of arenas while the host has
+room and no request waits, and gives a gigabyte back, down to the floor, when
+a request waits for memory or macOS warns. It never drops a slot a resident
+expert holds. `--expert-memory SIZE` fixes the store at SIZE.
 
 - Each MoE layer of a command loads the experts its rows route that are not
   resident: after the layer's routing, a host step of the command claims
@@ -651,7 +672,8 @@ what memory holds, as a dense target's is.
   waits while the others' copies land.
 - A spilling request writes each committed page once to the SSD cache. Once
   the copy has landed, the page keeps only its index, 24 KiB of the int8
-  page's 414 KiB. Its first 2,048 tokens, which rows with less history read
+  page's 414 KiB. Alone at the memory wall, it waits while its writes land
+  rather than fail. Its first 2,048 tokens, which rows with less history read
   whole, its last 64 pages and up to two prefill groups' pages still being
   written stay whole. The memory the pages free leaves with the extents they
   empty, all of them once every spilling request decodes, but one while a

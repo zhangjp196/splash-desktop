@@ -88,7 +88,10 @@ void SsdReaders::run(size_t count, const Task &task, Tally *tally) {
 
 std::shared_ptr<SsdReaders::Batch> SsdReaders::runBatch(size_t count, Task task) {
   const std::shared_ptr<Batch> batch(new Batch(count, std::move(task), readers(), {}));
-  if (count) runNow(batch);
+  if (count) {
+    readSerial_.fetch_add(1, std::memory_order_relaxed);
+    runNow(batch);
+  }
   return batch;
 }
 
@@ -101,6 +104,7 @@ std::shared_ptr<SsdReaders::Batch> SsdReaders::start(size_t count, Task task, un
     batch->endedReturned_ = true;
     return batch;
   }
+  readSerial_.fetch_add(1, std::memory_order_relaxed);
   {
     const std::lock_guard lock(mutex_);
     background_.push_back(batch);

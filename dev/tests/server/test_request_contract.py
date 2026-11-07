@@ -34,7 +34,9 @@ from server import documents, json_codec, runtime, schema_validation, tool_schem
 from server import frontend as request_frontend
 from server import protocol as wire
 from server import server as api
-from server.api_shapes import anthropic_to_chat_prompt, normalize_messages
+from server.chat_messages import normalize_messages
+from server.dialects import responses as responses_dialect
+from server.dialects.anthropic import anthropic_to_chat_prompt
 from server.errors import APIError
 
 
@@ -766,7 +768,8 @@ class RequestContractTests(HarnessTestCase):
         for value in ("urgent", 0, None, []):
             with self.assertRaisesRegex(api.APIError, "priority"):
                 harness.app.prepare(chat_body(priority=value), deadline=FOREVER)
-        job = harness.app.prepare_responses(
+        job = responses_dialect.prepare(
+            harness.app,
             responses_body(priority="foreground"),
             deadline=FOREVER,
             reserve_input=reserve_unbounded,

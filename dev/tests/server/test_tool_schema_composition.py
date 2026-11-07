@@ -19,8 +19,14 @@ from dev.tests.tool_output import (
     streamed_arguments,
     tool_policy,
 )
-from server import api_shapes, tool_schema
+from server import tool_schema
 from server.chat_format import QWEN
+from server.dialects import (
+    anthropic as anthropic_dialect,
+)
+from server.dialects import (
+    responses as responses_dialect,
+)
 from server.errors import APIError
 from server.tool_schema import _grammar_compatible_schema
 
@@ -97,11 +103,11 @@ class ToolSchemaCompositionTests(HarnessTestCase):
         }
         function = {"name": "test", "parameters": schema}
         chat = {"tools": [{"type": "function", "function": function}]}
-        responses, _ = api_shapes.responses_to_chat_body(
+        responses, _ = responses_dialect.responses_to_chat_body(
             {"tools": [{"type": "function", **function}]},
             [{"role": "user", "content": "Create a note"}],
         )
-        messages, _ = api_shapes.anthropic_to_chat_body(
+        messages, _ = anthropic_dialect.anthropic_to_chat_body(
             {
                 "model": "test",
                 "max_tokens": 128,

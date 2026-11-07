@@ -192,6 +192,18 @@ bool Engine::flushRestorePoints() {
 }
 
 bool Engine::tick(double now) {
+  // The time since the last tick goes to what held each request then;
+  // however the tick ends, what holds each from now on is as it leaves the
+  // engine.
+  holds(now);
+  struct Holders final {
+    Engine &engine;
+    ~Holders() {
+      for (auto &[_, active] : engine.requests_)
+        if (!active.finalized && !active.firstTokenSent)
+          active.heldBy = engine.holderOf(active);
+    }
+  } const holders{*this};
   model_.checkHealth();
   nextHealthCheckMilliseconds_ = now + kHealthCheckIntervalMilliseconds;
   bool progressed = scheduler_.expireDeadlines(now);
@@ -294,7 +306,7 @@ bool Engine::tick(double now) {
   if (config_.spill.capable) {
     for (const auto &[id, active] : requests_)
       if (active.lane && scheduler_.phase(id) == Phase::Prefill)
-        scheduler_.setStreamsHistory(id, streamsHistory(active));
+        scheduler_.setSpillsHistory(id, spillsHistory(active));
   }
   // Lanes that wait for memory on its way back cannot run before it lands;
   // the command runs the other lanes meanwhile. A plan whose lanes all wait
@@ -325,7 +337,7 @@ bool Engine::tick(double now) {
         throw std::logic_error("model returned an empty command ticket");
       }
       // A prefill lane whose page list names Index pages reads its history
-      // from the SSD cache: alone in its command (streamsHistory).
+      // from the SSD cache: alone in its command (spillsHistory).
       const bool streamed = plan->kind == WorkKind::Prefill && items.front().pageSources;
       scheduler_.commit(*plan, excluded);
       // The command reads the cached pages its lanes' blocks were swapped
@@ -1089,7 +1101,7 @@ std::function<bool(const Engine::Denial &)> Engine::spillFallback(Request &activ
   };
 }
 
-bool Engine::streamsHistory(const Request &active) const {
+bool Engine::spillsHistory(const Request &active) const {
   const SpillGeometry &geometry = config_.spill.geometry;
   return cache_.holdsIndexPages(active.request.id) ||
          (active.kvMode == KvMode::Spill &&
@@ -1231,6 +1243,7 @@ void Engine::deferResourceRetry(Request &active, double now,
   auto &wait = active.resourceWait;
   if (!wait.startedMilliseconds)
     wait.startedMilliseconds = now;
+  active.lastResourceWaitMilliseconds = now;
   // Waiting for a lane is not waiting for memory: the lanes that count are
   // those admitted before the first refusal of memory.
   if (!wait.admittedBefore && reason != StateFailure::ConcurrencyLimit)
@@ -1660,7 +1673,7 @@ Engine::Prepared Engine::prepare(BatchPlan &plan, std::vector<ModelBatchItem> &i
   // pages of lanes admitted before it to the index form too
   // (Cache::convertToSpill), and only for the lanes the command keeps, in
   // the plan's order. A prefill lane that streams its history
-  // (streamsHistory) runs alone and whole, as the scheduler runs one
+  // (spillsHistory) runs alone and whole, as the scheduler runs one
   // (planPrefill, passesFor): kept first, it is the command, in one pass;
   // after a lane kept, it leaves for a command of its own. Admission may
   // have made it stream, converting it at once where its restored chain's
@@ -1673,7 +1686,7 @@ Engine::Prepared Engine::prepare(BatchPlan &plan, std::vector<ModelBatchItem> &i
     for (const BatchItem &scheduled : admitted) {
       Request &active = request(scheduled.requestId);
       const uint64_t id = active.request.id;
-      const bool streams = prefill && streamsHistory(active);
+      const bool streams = prefill && spillsHistory(active);
       if (streams && !kept.empty())
         continue;
       if (cache_.holdsIndexPages(id)) {
@@ -1682,7 +1695,7 @@ Engine::Prepared Engine::prepare(BatchPlan &plan, std::vector<ModelBatchItem> &i
             KvCache::pageTokens);
         const auto memory = allocate(
             [&] {
-              return prefill ? model_.reserveHistoryStaging(id, pages)
+              return prefill ? model_.reserveSpillStaging(id, pages)
                              : model_.reserveSpilledReads(id);
             },
             true, growthClass(active));
@@ -1777,15 +1790,24 @@ Engine::Prepared Engine::prepare(BatchPlan &plan, std::vector<ModelBatchItem> &i
   // can release its lane before completed prefill is discarded.
   if (denied.empty())
     throw std::logic_error("empty resource admission result");
+  ++counters_.replans;
+  // No lane runs: the copies Spill requests owe and have not started, as a
+  // chain a lane restored has before its first command or those the memory
+  // governor's pass left when it collected the ones that landed, start now.
+  // A lane alone waits while they are written (judge).
+  if (spill)
+    static_cast<void>(cache_.writeThrough());
   // Memory on its way back arrives without anyone yielding. The lanes still
   // take a retry deadline: the transfer's completion wakes the engine, and
   // the deadline is what makes the wait end if that wake is ever missed.
-  if (std::any_of(denied.begin(), denied.end(),
-                  [](const Denied &entry) { return entry.denial.pending; })) {
+  const auto wait = [&] {
     for (const Denied &entry : denied)
       deferResourceRetry(request(entry.requestId), now, entry.denial);
     return Prepared::Waiting;
-  }
+  };
+  if (std::any_of(denied.begin(), denied.end(),
+                  [](const Denied &entry) { return entry.denial.pending; }))
+    return wait();
   const Denied &victim = *std::min_element(
       denied.begin(), denied.end(),
       [&](const Denied &left, const Denied &right) {
@@ -1801,12 +1823,20 @@ Engine::Prepared Engine::prepare(BatchPlan &plan, std::vector<ModelBatchItem> &i
   // capacity, not to the blocked lane's requirement.
   const uint64_t resumeTarget =
       own != denied.end() ? own->workEnd : kvCapacity(active.request.id);
-  if (judge(victim.denial, active.request.id) != Verdict::Fail) {
+  switch (judge(victim.denial, active.request.id)) {
+  case Verdict::Wait:
+    // Alone, it waits for the copies owed, retrying as they land, within the
+    // resource wait its first refusal started: copies that never land, or
+    // keep failing, end it there.
+    return wait();
+  case Verdict::Yield:
     suspendForGrowth(active, resumeTarget, victim.denial.allocationFailure, now);
     return Prepared::Yielded;
+  case Verdict::Fail:
+    break;
   }
-  // Alone with nothing left to reclaim. A Spill lane that decodes ends at
-  // its length once the SSD cache can hold no more of its KV.
+  // Alone with nothing left to reclaim or write. A Spill lane that decodes
+  // ends at its length once the SSD cache can hold no more of its KV.
   Request &lone = request(victim.requestId);
   if (!victim.kv)
     settle(lone, capacityExhausted(victim.memory, victim.denial.allocationFailure));
@@ -1968,15 +1998,21 @@ uint32_t Engine::generatedTokens(const Request &active) noexcept {
          (active.sentFirstToken ? 1 : 0);
 }
 
+ClaimRank Engine::claimRank(const Request &active) const {
+  const Phase phase = scheduler_.phase(active.request.id);
+  return ClaimRank{
+      .priority = static_cast<uint8_t>(2 - static_cast<uint8_t>(active.request.priority)),
+      .decoding = phase == Phase::Decode,
+      .completedTokens = completedTokens(active),
+      .earliness = std::numeric_limits<uint64_t>::max() -
+                   scheduler_.submissionOrder(active.request.id),
+  };
+}
+
 bool Engine::yieldsBefore(const Request &a, const Request &b) const {
-  if (a.request.priority != b.request.priority)
-    return a.request.priority > b.request.priority;
-  const Phase aPhase = scheduler_.phase(a.request.id);
-  const Phase bPhase = scheduler_.phase(b.request.id);
-  // At equal priority, prefer uninterrupted streaming over less replay work.
-  if (aPhase != bPhase)
-    return aPhase == Phase::Prefill;
-  return completedTokens(a) < completedTokens(b);
+  // The ledger's rank decides who yields first: the lower priority, a
+  // prefill before a decode, less completed work, then the later arrival.
+  return claimRank(a) < claimRank(b);
 }
 
 Engine::Request *Engine::laneToYield() {
@@ -2020,6 +2056,69 @@ bool Engine::anotherResident(uint64_t requestId) const {
   });
 }
 
+void Engine::holds(double now) noexcept {
+  for (auto &[_, active] : requests_) {
+    if (active.finalized || active.firstTokenSent)
+      continue;
+    if (active.heldSince && active.heldBy != TtftPart::Rest)
+      active.held[static_cast<size_t>(active.heldBy)] += now - *active.heldSince;
+    active.heldSince = now;
+  }
+}
+
+TtftPart Engine::holderOf(const Request &active) const {
+  const bool own = pending_ && std::ranges::any_of(pending_->plan.items, [&](const BatchItem &item) {
+                     return item.requestId == active.request.id;
+                   });
+  if (own && pending_->plan.kind == WorkKind::Prefill)
+    return TtftPart::OwnPrefill;
+  if (active.resourceWait.startedMilliseconds)
+    return TtftPart::ClaimWait;
+  if (pending_)
+    return pending_->plan.kind == WorkKind::Decode ? TtftPart::Decode : TtftPart::OtherPrefill;
+  return TtftPart::Rest;
+}
+
+void Engine::firstTokens(Request &active) {
+  if (std::exchange(active.firstTokenSent, true))
+    return;
+  events_.firstTokenParts(active.request.id, active.held);
+}
+
+void Engine::decodeGap(Request &active, double now) {
+  if (active.lastTokenMilliseconds) {
+    const double gap = now - *active.lastTokenMilliseconds;
+    if (gap > config_.decodeGapMilliseconds) {
+      const double prefill = prefillUnitMilliseconds_ - active.gapPrefillAtLastToken;
+      const bool claimWaited =
+          active.lastResourceWaitMilliseconds &&
+          *active.lastResourceWaitMilliseconds >= *active.lastTokenMilliseconds;
+      const uint64_t ssdRead =
+          config_.ssdReadSerial ? config_.ssdReadSerial() : 0;
+      const uint64_t releases = cache_.poolReleases();
+      const uint64_t replans = counters_.replans;
+      const GapCause cause =
+          prefill > 0.0                                ? GapCause::PrefillUnit
+          : claimWaited                                ? GapCause::ClaimWait
+          : ssdRead != active.gapSsdReadAtLastToken    ? GapCause::SsdRead
+          : releases != active.gapReleasesAtLastToken  ? GapCause::PoolRelease
+          : replans != active.gapReplansAtLastToken    ? GapCause::Replan
+                                                       : GapCause::Other;
+      DecodeGapCausesSnapshot &causes = counters_.decodeGapCauses;
+      ++causes.gaps[static_cast<size_t>(cause)];
+      causes.milliseconds[static_cast<size_t>(cause)] += gap;
+      if (cause == GapCause::PrefillUnit)
+        causes.prefillMilliseconds += prefill;
+    }
+  }
+  active.lastTokenMilliseconds = now;
+  active.gapPrefillAtLastToken = prefillUnitMilliseconds_;
+  active.gapReplansAtLastToken = counters_.replans;
+  active.gapReleasesAtLastToken = cache_.poolReleases();
+  active.gapSsdReadAtLastToken =
+      config_.ssdReadSerial ? config_.ssdReadSerial() : 0;
+}
+
 Engine::Verdict Engine::judge(const Denial &denial, uint64_t requestId) const {
   if (denial.pending)
     return Verdict::Wait;
@@ -2029,6 +2128,10 @@ Engine::Verdict Engine::judge(const Denial &denial, uint64_t requestId) const {
   if (anotherResident(requestId) ||
       denial.allocationFailure == metal::AllocationFailure::HostPressure)
     return Verdict::Yield;
+  // Alone, it waits for the copies Spill requests owe, the slowest memory
+  // to come back: they free its Full pages as the SSD cache writes them.
+  if (cache_.owedCopiesReturn(denial.pages, denial.form))
+    return Verdict::Wait;
   return Verdict::Fail;
 }
 
@@ -2092,6 +2195,10 @@ auto Engine::allocate(Attempt &&attempt, bool inService, ReclaimClass upTo,
   if (!admission.granted()) {
     denial.allocationFailure = admission.allocationFailure;
     denial.pending = denial.pending || transferPending(admission);
+    if constexpr (std::is_same_v<Admission, TokenAdmission>) {
+      denial.pages = admission.additionalPages;
+      denial.form = admission.form;
+    }
     // Memory on its way back ends the shortage without the residents.
     if (memoryDenied(admission) && !denial.pending && !optional)
       allocationFailed_ = true;
@@ -2305,7 +2412,6 @@ MemoryReclaimResult Engine::reclaimMemory(const MemoryReclaimDirective &directiv
     while (const uint64_t idle = model_.reclaimIdleState(keep, model::IdleMemory::Buffers))
       released += idle;
   };
-  releaseIdle();
   // Caches the model can rebuild go only toward a byte target or under
   // critical pressure: an untargeted pass keeps the embedding rows and the
   // vision encoder.
@@ -2318,7 +2424,10 @@ MemoryReclaimResult Engine::reclaimMemory(const MemoryReclaimDirective &directiv
       released += cache;
     }
   };
+  // The ledger's order: what the model rebuilds first, then pooled state a
+  // later request can reuse, then what requests in use hold.
   reclaimModelCaches();
+  releaseIdle();
   if (directive.critical) {
     const CacheReclaimResult evicted = cache_.evictAll();
     reclaimed = evicted.madeProgress;
@@ -2476,7 +2585,9 @@ void Engine::apply(const Pending &command, std::span<const ModelStepResult> resu
           events_.logprobs(
               active.request.id,
               std::span(result.outputLogprobs).subspan(first));
+        firstTokens(active);
         events_.tokens(active.request.id, unsent);
+        decodeGap(active, now);
       }
     }
     if (result.firstToken) {
@@ -2486,7 +2597,9 @@ void Engine::apply(const Pending &command, std::span<const ModelStepResult> resu
       active.sentFirstToken = result.firstToken;
       if (result.firstTokenLogprob)
         events_.logprobs(active.request.id, {&*result.firstTokenLogprob, 1});
+      firstTokens(active);
       events_.tokens(active.request.id, {&*result.firstToken, 1});
+      decodeGap(active, now);
     }
     if (plan.kind == WorkKind::Decode) {
       draftedTokens += result.draftedTokens;
@@ -2547,6 +2660,8 @@ void Engine::apply(const Pending &command, std::span<const ModelStepResult> resu
   if (config_.spill.capable)
     static_cast<void>(cache_.writeThrough());
   const double wallMilliseconds = ticket.wallMilliseconds();
+  if (plan.kind == WorkKind::Prefill)
+    prefillUnitMilliseconds_ += wallMilliseconds;
   scheduler_.complete(plan, schedulerResults, wallMilliseconds,
                       ticket.prefillTimingIsRepresentative(), ticket.hostMilliseconds(),
                       command.streamed ? std::optional(ticket.streamMilliseconds())

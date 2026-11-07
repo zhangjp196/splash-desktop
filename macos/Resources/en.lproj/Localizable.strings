@@ -175,6 +175,7 @@
 "models.add_config" = "Add configuration";
 "models.edit" = "Edit";
 "models.active" = "Running";
+"models.files_missing" = "Files missing";
 "models.start" = "Start";
 "models.remove" = "Remove";
 "models.remove.title" = "Remove configuration?";
@@ -336,6 +337,8 @@
 "palette.run" = "run";
 "palette.close" = "close";
 "palette.shortcut" = "Command palette (⌘K)";
+"terminal.title" = "Terminal (⌘J)";
+"terminal.close" = "Close";
 "palette.goto" = "Go to";
 "palette.server" = "Server";
 "palette.appearance" = "Switch the window theme";
@@ -414,3 +417,47 @@
 "clients.detail" = "PID %d · %d connections";
 "clients.detail.one" = "PID %d · 1 connection";
 "clients.refresh" = "Refresh connected clients";
+
+// The serving options the 1.6 engine added.
+"field.allowed_origins" = "Browser origins";
+"help.allowed_origins" = "Comma-separated origins whose pages may call the API, such as tauri://localhost; * allows any.";
+"field.state_format" = "Recurrent state";
+"help.state_format" = "How a hybrid model keeps its state. 16-bit takes half the memory, so twice as many states fit.";
+"state.fp32" = "32-bit";
+"state.bf16" = "16-bit";
+"field.decode_share" = "Decode share";
+"help.decode_share" = "Seconds of answering for each second spent reading a new prompt; empty uses 0.5, and 0 alternates one command each.";
+"field.cache_idle_spill" = "Spill cached prefixes";
+"help.cache_idle_spill" = "Seconds without a request before cached prefixes go to the SSD and their memory is released; empty uses 30, and off keeps them.";
+"field.cache_dir" = "Cache folder";
+"help.cache_dir" = "Where the persistent SSD cache keeps its files; empty uses ~/Library/Caches/Splash/prefix-cache.";
+"cache_dir.prompt" = "~/Library/Caches/Splash/prefix-cache";
+"field.request_timeout" = "Request timeout";
+"help.request_timeout" = "How long a queued or running request may take before it ends with an error; a duration such as 30m, empty for no limit.";
+"field.max_image_pixels" = "Image pixels";
+"help.max_image_pixels" = "The most pixels an image is resized to, 65,536 to 4,194,304; empty uses the server's 4,194,304.";
+"field.allow_idle_sleep" = "Let the Mac sleep";
+"help.allow_idle_sleep" = "Let the Mac sleep while requests run; off keeps it awake until they finish, though the display may still sleep.";
+"field.thinking_token_budget" = "Thinking tokens";
+"help.thinking_token_budget" = "Thinking tokens of a request that sets no budget, after which its thinking closes; empty for no cap.";
+"field.thinking_end_text" = "Thinking end text";
+"help.thinking_end_text" = "What closes thinking where its budget runs out, such as a sentence that turns to the answer; empty uses the model's own.";
+"thinking_end.prompt" = "Model's default";
+"field.announce_served_name" = "Report served name";
+"help.announce_served_name" = "Replies and the model list give the first served model name rather than the model's own.";
+
+// The three sections the editor's rail now groups the settings into.
+"section.serving" = "Serving";
+"section.serving.help" = "Precision, memory, scheduling and request limits.";
+"section.storage" = "Storage";
+"section.storage.help" = "Idle release, the SSD cache and eviction.";
+
+// The live board's inner tabs.
+"live.tab.overview" = "Overview";
+"live.tab.overview.help" = "The engine's state, throughput, memory and connected clients at a glance.";
+"live.tab.requests" = "Requests";
+"live.tab.requests.help" = "The service, its requests and the latency they see.";
+"live.tab.memory" = "Memory";
+"live.tab.memory.help" = "The memory plan, the engine's hold on it, and the caches.";
+"live.tab.thermal" = "Thermal";
+"live.tab.thermal.help" = "Fans, temperatures and the prefill duty.";

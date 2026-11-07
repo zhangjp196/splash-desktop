@@ -439,8 +439,11 @@ void besideACommand(metal::MetalBackend &backend, engine::MemoryGovernor &govern
   for (uint32_t page = restored - neighbours; page <= restored + neighbours; ++page) {
     if (page != restored) slabs(page, around);
   }
+  // A table of slab addresses names the extent they are in as a page table
+  // of the extent's page does (kv::PageStorage::writeEntries).
   const auto tableOf = [&](const std::vector<uint64_t> &entries) {
     metal::MetalBuffer table = test::sharedBuffer(backend, entries.size() * sizeof(uint64_t));
+    pages.writeEntries(std::array<uint32_t, 1>{0}, 0, table);
     std::memcpy(table.contents(), entries.data(), entries.size() * sizeof(uint64_t));
     return table;
   };

@@ -18,6 +18,7 @@ from server import protocol as native_wire
 from server import server as api
 from server import tool_schema
 from server.chat_format import QWEN
+from server.dialects import responses
 
 
 class StreamKeepaliveTests(HarnessTestCase):
@@ -184,7 +185,7 @@ class StreamKeepaliveTests(HarnessTestCase):
 
         job.events = SimpleNamespace(get=next_event)
         with mock.patch.object(api.time, "monotonic", side_effect=lambda: clock[0]):
-            handler._responses_stream(job)
+            responses.stream(handler, job)
 
         raw = handler.wfile.getvalue()
         stream = io.BytesIO(raw)

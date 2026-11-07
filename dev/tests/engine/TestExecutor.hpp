@@ -624,7 +624,7 @@ public:
   // It stages the history a prefill command streams, as many pages as the
   // command reads, which the fake refuses for the requests in
   // refusedStaging.
-  model::ModelMemoryAdmission reserveHistoryStaging(uint64_t id, uint32_t pages) override {
+  model::ModelMemoryAdmission reserveSpillStaging(uint64_t id, uint32_t pages) override {
     if (refusedStaging.contains(id))
       return {.allocationFailure = metal::AllocationFailure::EngineBudget};
     uint32_t &staged = historyStaging[id];
@@ -891,7 +891,7 @@ public:
   uint32_t providedMasks = 0;
   // Requests whose floor of the hot block cache is refused
   // (reserveSpilledReads), and those whose history's staging is
-  // (reserveHistoryStaging).
+  // (reserveSpillStaging).
   std::unordered_set<uint64_t> refusedSpilledReads;
   std::function<bool(uint64_t)> spilledReadsRoom;
   metal::AllocationFailure spilledReadsRefusal = metal::AllocationFailure::EngineBudget;

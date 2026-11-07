@@ -21,6 +21,7 @@ from dev.tests.server_fixtures import (
     responses_body,
 )
 from server import server as api
+from server.dialects import openai, responses
 
 
 class EndFailTokenizer(FakeTokenizer):
@@ -360,9 +361,7 @@ class RequestFailureTests(HarnessTestCase):
             mock.patch.object(
                 harness.backend, "cancel", wraps=harness.backend.cancel
             ) as cancel,
-            mock.patch.object(
-                api.FrontendHandler, "_complete", side_effect=RuntimeError("boom")
-            ),
+            mock.patch.object(openai, "complete", side_effect=RuntimeError("boom")),
             mock.patch.object(api.sys, "stderr", stderr),
         ):
             status, _, payload = harness.request(
@@ -375,7 +374,7 @@ class RequestFailureTests(HarnessTestCase):
         self.assertRegex(
             stderr.getvalue(),
             r"^\d{2}:\d{2}:\d{2} Error · internal_server_error · RuntimeError · "
-            r"server/server\.py:\d+\n$",
+            r"server/(?:server|output|dialects/\w+)\.py:\d+\n$",
         )
         self.assertNotIn("boom", stderr.getvalue())
 
@@ -393,11 +392,17 @@ class RequestFailureTests(HarnessTestCase):
             for path, body, target, name in (
                 ("/v1/chat/completions", chat_body(), "app", "prepare"),
                 ("/v1/systemone", systemone, "app", "prepare_systemone"),
-                ("/v1/chat/completions", chat_body(), "handler", "_complete"),
+                ("/v1/chat/completions", chat_body(), "openai", "complete"),
             ):
                 with self.subTest(error=type(error).__name__, path=path, name=name):
                     harness = self.harness(FakeRuntime(Plan([[4]], block=True)))
-                    owner = harness.app if target == "app" else api.FrontendHandler
+                    owner = (
+                        harness.app
+                        if target == "app"
+                        else openai
+                        if target == "openai"
+                        else api.FrontendHandler
+                    )
                     with (
                         mock.patch.object(owner, name, side_effect=error),
                         mock.patch.object(
@@ -411,7 +416,7 @@ class RequestFailureTests(HarnessTestCase):
                         json.loads(payload)["error"]["code"], "internal_server_error"
                     )
                     logged.assert_called_once_with(error)
-                    if target == "handler":
+                    if target != "app":
                         cancel.assert_called_once()
                     else:
                         cancel.assert_not_called()
@@ -425,7 +430,9 @@ class RequestFailureTests(HarnessTestCase):
             mock.patch.object(
                 harness.backend, "cancel", wraps=harness.backend.cancel
             ) as cancel,
-            mock.patch.object(api, "responses_item", side_effect=RuntimeError("boom")),
+            mock.patch.object(
+                responses, "responses_item", side_effect=RuntimeError("boom")
+            ),
             mock.patch.object(api.sys, "stderr", stderr),
         ):
             status, _, payload = harness.request(
@@ -444,7 +451,7 @@ class RequestFailureTests(HarnessTestCase):
         self.assertRegex(
             stderr.getvalue(),
             r"^\d{2}:\d{2}:\d{2} Error · internal_server_error · RuntimeError · "
-            r"server/server\.py:\d+\n$",
+            r"server/(?:server|output|dialects/\w+)\.py:\d+\n$",
         )
 
     def test_streamer_end_error_does_not_kill_backend(self):

@@ -222,9 +222,12 @@ class WaitingConnections:
             self._wake()
 
     def close(self, connection):
-        """Close `connection`, answered without its request read, as the
-        class does; one held for its request stops waiting for it."""
+        """Close `connection`, answered, as the class does; one held for its
+        request stops waiting for it."""
         try:
+            # What is read of it then must not wait: with a timeout, a socket
+            # waits for input before each read, MSG_DONTWAIT or not.
+            connection.settimeout(None)
             connection.shutdown(socket.SHUT_WR)
         except OSError:
             pass
@@ -472,6 +475,13 @@ class ConnectionSlots:
             self.holders.pop(connection, None)
             if not self.holders:
                 self.idle.set()
+
+    def close(self, connection):
+        """Give back the slot of `connection`, served, and close it as an
+        answered one: a pipelined request still unread must not reset the
+        answer before its client reads it."""
+        self.release(connection)
+        self.waiting.close(connection)
 
     def stop(self):
         """Close every connection held without a thread, and end each worker

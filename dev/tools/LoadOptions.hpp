@@ -48,7 +48,7 @@ namespace splash::tools {
                                          model::ModelLoadOptions &options) {
   const bool experts = option == "--expert-memory";
   if (!experts && option != "--ple-memory") return false;
-  uint64_t &bytes = experts ? options.expertMemoryBytes : options.streamedTableBytes;
+  uint64_t &bytes = experts ? options.streamedMemoryBytes : options.streamedTableBytes;
   bytes = parseBytes(value);
   if (!bytes) throw std::invalid_argument(std::string(option) + " takes a size such as " + (experts ? "16G" : "2G"));
   return true;
@@ -62,8 +62,8 @@ namespace splash::tools {
                                           const model::ModelLoadOptions &options) {
   const model::StreamableWeights streamable = model::streamableWeights(
       root, descriptor,
-      {.streamExperts = options.expertMemoryBytes != 0, .streamTable = options.streamedTableBytes != 0});
-  return streamable.loadedBytes + std::min(options.expertMemoryBytes, streamable.expertBytes) +
+      {.streamExperts = options.streamedMemoryBytes != 0, .streamTable = options.streamedTableBytes != 0});
+  return streamable.loadedBytes + std::min(options.streamedMemoryBytes, streamable.expertBytes) +
          std::min(options.streamedTableBytes, streamable.tableBytes);
 }
 

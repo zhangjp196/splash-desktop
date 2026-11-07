@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/MemoryLedger.hpp"
 #include "engine/ReclaimClass.hpp"
 #include "metal/MetalBackend.hpp"
 
@@ -111,6 +112,9 @@ struct MemoryGovernorSnapshot {
   // Allocation need not ask: admission names the host as the cause of every
   // refusal the host shares.
   bool hostGrowthAllowed = true;
+  // What the ledger made of each claim class (MemoryLedger): granted,
+  // refused, and still held.
+  std::array<ClaimClassSnapshot, kClaimClasses> claims{};
 };
 
 // Critical pressure evicts every unpinned entry and takes what a request
@@ -222,6 +226,9 @@ public:
   // them like any other. A start marks what it allocates so until serving
   // begins (RuntimeResources::beginServing).
   bool setServing(bool serving) noexcept;
+  // The claim the reservations that follow are made under, until it is
+  // restored; returns the one it replaced.
+  ClaimSpec setClaim(ClaimSpec spec) noexcept;
   // Whether a request cannot proceed for want of memory, as each control pass
   // finds: only then does growth wait for the recovery margin once the host
   // has run short.
@@ -254,11 +261,12 @@ private:
     Reservation(Reservation &&) noexcept;
 
   private:
-    Reservation(MemoryGovernor *owner, uint64_t bytes);
+    Reservation(MemoryGovernor *owner, uint64_t bytes, ClaimId claim);
     void release() noexcept;
 
     MemoryGovernor *owner_ = nullptr;
     uint64_t bytes_ = 0;
+    ClaimId claim_;
 
     friend class MemoryGovernor;
   };
@@ -285,7 +293,8 @@ private:
   // allocationAdmission's reservation, or nothing with the cause of the
   // refusal in failure.
   [[nodiscard]] std::optional<Reservation>
-  tryReserve(uint64_t bytes, metal::AllocationFailure &failure);
+  tryReserve(uint64_t bytes, metal::AllocationFailure &failure,
+             const ClaimSpec &claim);
   [[nodiscard]] uint64_t
   chargedBytes(bool refreshDevice = false) const noexcept;
   [[nodiscard]] std::optional<HostMemory> sampleHost() const noexcept;
@@ -310,6 +319,10 @@ private:
   bool serving_ = false;
   bool requestWaiting_ = false;
   uint64_t deniedReservations_ = 0;
+  // Every granted reservation is a claim, and every refused one is counted
+  // against the class it was made under.
+  ClaimLedger claims_;
+  ClaimSpec claim_;
   MemoryPressure systemPressure_ = MemoryPressure::Normal;
   // As the latest reservation or control pass evaluated it.
   HostState host_;

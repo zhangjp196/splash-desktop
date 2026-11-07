@@ -9,6 +9,7 @@
 #include "engine/ThermalState.hpp"
 #include "model/ExpertStoreStats.hpp"
 #include "model/KvReadStats.hpp"
+#include "model/LatencyHistogram.hpp"
 #include "model/SparseRowStore.hpp"
 
 #include <algorithm>
@@ -58,6 +59,8 @@ struct RuntimeMetricsSnapshot {
   double ttftP50Milliseconds = 0.0;
   double ttftP95Milliseconds = 0.0;
   uint32_t ttftSamples = 0;
+  // Each request's time to its first token by what held it (TtftPart).
+  std::array<model::LatencyStats, kTtftParts> ttftParts{};
   double itlP50Milliseconds = 0.0;
   double itlP95Milliseconds = 0.0;
   uint32_t itlSamples = 0;
@@ -100,6 +103,8 @@ public:
                       uint32_t outputTokens, uint32_t draftedTokens,
                       uint32_t acceptedDraftTokens, double wallMilliseconds,
                       double cycleMilliseconds);
+  // What held one request before its first token, by part, in milliseconds.
+  void ttftParts(const TtftParts &parts);
   void capacityFailed();
   void metalFailed();
 
@@ -111,6 +116,7 @@ private:
 
   uint32_t latencyWindow_ = 0;
   std::deque<double> ttftMilliseconds_;
+  std::array<model::LatencyHistogram, kTtftParts> ttftParts_;
   std::deque<double> itlMilliseconds_;
   uint64_t prefillTokens_ = 0;
   uint64_t decodeTokens_ = 0;
@@ -183,6 +189,15 @@ inline void RuntimeMetrics::batchCompleted(
   }
 }
 
+inline void RuntimeMetrics::ttftParts(const TtftParts &parts) {
+  for (size_t part = 0; part < kTtftParts; ++part) {
+    const double milliseconds = parts[part];
+    if (!std::isfinite(milliseconds) || milliseconds < 0.0)
+      throw std::invalid_argument("invalid TTFT part");
+    ttftParts_[part].add(uint64_t(milliseconds * 1e6));
+  }
+}
+
 inline void RuntimeMetrics::capacityFailed() {
   if (capacityFailures_ != std::numeric_limits<uint64_t>::max())
     ++capacityFailures_;
@@ -198,6 +213,8 @@ inline RuntimeMetricsSnapshot RuntimeMetrics::snapshot() const {
   result.ttftP50Milliseconds = percentile(ttftMilliseconds_, 0.50);
   result.ttftP95Milliseconds = percentile(ttftMilliseconds_, 0.95);
   result.ttftSamples = static_cast<uint32_t>(ttftMilliseconds_.size());
+  for (size_t part = 0; part < kTtftParts; ++part)
+    result.ttftParts[part] = ttftParts_[part].snapshot();
   result.itlP50Milliseconds = percentile(itlMilliseconds_, 0.50);
   result.itlP95Milliseconds = percentile(itlMilliseconds_, 0.95);
   result.itlSamples = static_cast<uint32_t>(itlMilliseconds_.size());

@@ -3372,7 +3372,7 @@ public:
     const uint32_t position = request.committed;
     ensure(request, end);
     if (request.holdsIndexPages())
-      require(runtime_->reserveHistoryStaging(request.id, pagesFor(end)).granted(),
+      require(runtime_->reserveSpillStaging(request.id, pagesFor(end)).granted(),
               "the staging of a spilled history was refused");
     const std::span<const uint32_t> input = std::span(request.prompt).subspan(position, end - position);
     const BatchPlan plan{.kind = WorkKind::Prefill,
@@ -3439,7 +3439,7 @@ public:
   // waited.
   void requireReadsRunAgain(SpillRequest &request, uint32_t end) {
     ensure(request, end);
-    require(runtime_->reserveHistoryStaging(request.id, pagesFor(end)).granted(),
+    require(runtime_->reserveSpillStaging(request.id, pagesFor(end)).granted(),
             "the staging of a spilled history was refused");
     size_t unreadable = request.pages.size() - 1;
     while (!request.copies[unreadable]) --unreadable;

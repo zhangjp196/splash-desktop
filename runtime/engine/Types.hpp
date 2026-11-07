@@ -2,7 +2,9 @@
 
 #include "model/Model.hpp"
 
+#include <array>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -24,6 +26,26 @@ struct StepResult final {
   bool finished = false;
   DecodeStage nextDecodeStage = DecodeStage::Regular;
 };
+
+// What held a request before its first token, by precedence: a prefill
+// command in flight with its rows, its claim waiting, a decode command,
+// another prefill command, or the rest (the host, admission, idleness).
+enum class TtftPart : uint8_t { OwnPrefill, ClaimWait, Decode, OtherPrefill, Rest };
+inline constexpr size_t kTtftParts = 5;
+using TtftParts = std::array<double, kTtftParts>;
+inline constexpr std::string_view kTtftPartNames[] = {"own_prefill", "claim_wait", "decode",
+                                                      "other_prefill", "rest"};
+static_assert(std::size(kTtftPartNames) == kTtftParts);
+
+// The first cause that held a decode gap past the gap target between two of
+// a request's token events: a prefill unit ran, its resource wait started,
+// the decode command read from the SSD, a pool gave memory back, a plan was
+// made again, or none of these.
+enum class GapCause : uint8_t { PrefillUnit, ClaimWait, SsdRead, PoolRelease, Replan, Other };
+inline constexpr size_t kGapCauses = 6;
+inline constexpr std::string_view kGapCauseNames[] = {"prefill_unit", "claim_wait", "ssd_read",
+                                                      "pool_release", "replan", "other"};
+static_assert(std::size(kGapCauseNames) == kGapCauses);
 
 // Where a request's committed KV lives, chosen at admission and kept across
 // suspension: in memory (Resident), or, on a target that can spill, in the
@@ -183,6 +205,13 @@ public:
                               uint32_t, uint32_t, double, double) = 0;
   virtual void started(uint64_t requestId, uint32_t matchedTokens,
                        uint32_t lane) = 0;
+  // What held the request before its first token, as the engine counted it
+  // (Engine::firstTokens). A sink that does not serve the breakdown keeps
+  // the no-op.
+  virtual void firstTokenParts(uint64_t requestId, const TtftParts &parts) {
+    static_cast<void>(requestId);
+    static_cast<void>(parts);
+  }
   virtual void promptProgress(uint64_t, uint32_t) {}
   virtual void tokens(uint64_t requestId, std::span<const uint32_t> tokens) = 0;
   // The log probabilities of the tokens the next tokens() call reports,

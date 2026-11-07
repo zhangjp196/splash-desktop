@@ -75,6 +75,22 @@ class ThinkingTokenBudgetTests(unittest.TestCase):
             )
         self.assertEqual(self.frames(runtime), [budget(5), budget(5), budget(9), None])
 
+    def test_a_budget_shrinks_with_the_context_left_for_the_answer(self):
+        harness, runtime = self.harness()
+        body = fixtures.chat_body(max_tokens=32_768, thinking_token_budget=24_576)
+        # The prompt's tokens, so that the output limit leaves exactly
+        # 20,000: the budget keeps 75% of them, the answer the rest.
+        status, _, payload = harness.request(
+            "POST", "/v1/chat/completions/count_tokens", body
+        )
+        self.assertEqual(status, 200, payload)
+        harness.app.max_context = json.loads(payload)["input_tokens"] + 20_000
+        self.post(harness, "/v1/chat/completions", body)
+        # A budget already below the room stays as it is.
+        small = fixtures.chat_body(max_tokens=32_768, thinking_token_budget=1_000)
+        self.post(harness, "/v1/chat/completions", small)
+        self.assertEqual(self.frames(runtime), [budget(15_000), budget(1_000)])
+
     def test_only_a_budget_below_the_output_limit_of_a_thinking_request_counts(self):
         harness, runtime = self.harness(default_thinking_token_budget=5)
         # Thinking off has no block to close, and a budget the output limit

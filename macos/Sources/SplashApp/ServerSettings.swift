@@ -11,6 +11,8 @@ struct ServerSettings: Codable, Equatable {
         static let modelID = "mlx-community/Qwen3.8-27B-4bit"
         static let port = 8000
         static let kvFormat = "int8"
+        // The recurrent state: fp32 is the server's default; bf16 halves it.
+        static let stateFormat = "fp32"
         // The idle spill is the engine's own timer now and no longer follows
         // the residency below; the residency releases the weights alone.
         static let residencySeconds = "10"
@@ -39,6 +41,7 @@ struct ServerSettings: Codable, Equatable {
     /// default and is not one of them.
     static let reasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
     static let kvFormats = ["int8", "int4", "k8v4", "bf16"]
+    static let stateFormats = ["fp32", "bf16"]
     static let verifyRowsOptions = ["auto", "all"]
     /// The eviction presets by level, and the policies a custom one picks.
     static let cacheEvictionPresets = ["light", "balanced", "strong", "custom"]
@@ -58,8 +61,14 @@ struct ServerSettings: Codable, Equatable {
     /// Extra HTTP Host names to accept (`--allowed-host`), comma-separated:
     /// the Mac's `.local` name, a DNS name, or a tunnel or proxy hostname.
     var allowedHosts = ""
+    /// Extra browser origins whose pages may call the API
+    /// (`--allowed-origin`), comma-separated; `*` allows any.
+    var allowedOrigins = ""
     var languageOnly = false
     var kvFormat = First.kvFormat
+    /// How a hybrid model keeps its recurrent state (`--state-format`): fp32,
+    /// or bf16 for half the memory and twice as many cached states.
+    var stateFormat = First.stateFormat
     var neuralEngine = true
     var maxMemory = First.maxMemory
     var maxContext = First.maxContext
@@ -77,6 +86,13 @@ struct ServerSettings: Codable, Equatable {
     /// faster but its sampled tokens vary between runs.
     var verifyRows = "auto"
     var residencySeconds = First.residencySeconds
+    /// When the engine writes the cached prefixes to disk and releases their
+    /// memory (`--cache-idle-spill`): a duration, empty for the server's 30
+    /// seconds, `off` to keep them. Its own timer, apart from residency.
+    var cacheIdleSpill = ""
+    /// Where the persistent SSD cache keeps its files (`--cache-dir`);
+    /// empty is the server's own location.
+    var cacheDir = ""
     /// Whether the engine may use the SSD for cached KV pages and states at
     /// all. Off keeps every cached prefix in memory and passes
     /// `--max-cache-disk 0`, which turns the disk tier off. On, the tier is
@@ -98,6 +114,25 @@ struct ServerSettings: Codable, Equatable {
     /// disables it).
     var cacheEvictionProtect = First.cacheEvictionProtect
     var maxRequestSize = ""
+    /// How long a queued or in-flight request may run (`--request-timeout`):
+    /// a duration such as `30m`, empty for no limit.
+    var requestTimeout = ""
+    /// The largest resized image (`--max-image-pixels`), 65,536 to 4,194,304.
+    var maxImagePixels = ""
+    /// Decode time owed per unit of prefill time (`--decode-share`), empty
+    /// for the server's 0.5.
+    var decodeShare = ""
+    /// Let the Mac sleep while requests run (`--allow-idle-sleep`).
+    var allowIdleSleep = false
+    /// Thinking tokens a request that sets no budget thinks
+    /// (`--thinking-token-budget`), empty for no cap.
+    var thinkingTokenBudget = ""
+    /// Text that closes thinking where its budget runs out
+    /// (`--thinking-end-text`), empty for the model's own.
+    var thinkingEndText = ""
+    /// Report the first served name in API responses and /v1/models
+    /// (`--announce-served-name`); needs a served name.
+    var announceServedName = false
     var apiKey = ""
     var servedNames = ""
     var reasoningEffort = ""
@@ -135,9 +170,12 @@ struct ServerSettings: Codable, Equatable {
     // failing the whole decode and dropping the user's configurations.
     private enum CodingKeys: String, CodingKey {
         case modelMode, modelID, modelDirectory, draftDirectory, mmproj, port
-        case lanAccess, allowedHosts
-        case languageOnly, kvFormat, neuralEngine, maxMemory, maxContext
-        case residencySeconds, maxRequestSize, apiKey, servedNames
+        case lanAccess, allowedHosts, allowedOrigins
+        case languageOnly, kvFormat, stateFormat, neuralEngine, maxMemory, maxContext
+        case residencySeconds, cacheIdleSpill, cacheDir
+        case maxRequestSize, requestTimeout, maxImagePixels, decodeShare
+        case allowIdleSleep, thinkingTokenBudget, thinkingEndText, announceServedName
+        case apiKey, servedNames
         case reasoningEffort, maxConcurrency
         case diskCache, maxCacheDisk, maxCacheDiskWrites
         case cacheEvictionPreset, cacheEvictionPolicy, cacheEvictionProtect
@@ -167,8 +205,10 @@ struct ServerSettings: Codable, Equatable {
         port = value(Int.self, .port) ?? port
         lanAccess = value(Bool.self, .lanAccess) ?? lanAccess
         allowedHosts = value(String.self, .allowedHosts) ?? allowedHosts
+        allowedOrigins = value(String.self, .allowedOrigins) ?? allowedOrigins
         languageOnly = value(Bool.self, .languageOnly) ?? languageOnly
         kvFormat = value(String.self, .kvFormat) ?? kvFormat
+        stateFormat = value(String.self, .stateFormat) ?? stateFormat
         neuralEngine = value(Bool.self, .neuralEngine) ?? neuralEngine
         maxMemory = value(String.self, .maxMemory) ?? maxMemory
         maxContext = value(String.self, .maxContext) ?? maxContext
@@ -177,6 +217,8 @@ struct ServerSettings: Codable, Equatable {
         sparseKvMemory = value(String.self, .sparseKvMemory) ?? sparseKvMemory
         verifyRows = value(String.self, .verifyRows) ?? verifyRows
         residencySeconds = value(String.self, .residencySeconds) ?? residencySeconds
+        cacheIdleSpill = value(String.self, .cacheIdleSpill) ?? cacheIdleSpill
+        cacheDir = value(String.self, .cacheDir) ?? cacheDir
         // A configuration stored before the switch existed follows its quota:
         // a quota of `0` already meant "no disk cache", and one that named a
         // size meant the cache was on. One that named neither gets the
@@ -201,6 +243,13 @@ struct ServerSettings: Codable, Equatable {
             cacheEvictionProtect = protect
         }
         maxRequestSize = value(String.self, .maxRequestSize) ?? maxRequestSize
+        requestTimeout = value(String.self, .requestTimeout) ?? requestTimeout
+        maxImagePixels = value(String.self, .maxImagePixels) ?? maxImagePixels
+        decodeShare = value(String.self, .decodeShare) ?? decodeShare
+        allowIdleSleep = value(Bool.self, .allowIdleSleep) ?? allowIdleSleep
+        thinkingTokenBudget = value(String.self, .thinkingTokenBudget) ?? thinkingTokenBudget
+        thinkingEndText = value(String.self, .thinkingEndText) ?? thinkingEndText
+        announceServedName = value(Bool.self, .announceServedName) ?? announceServedName
         apiKey = value(String.self, .apiKey) ?? apiKey
         servedNames = value(String.self, .servedNames) ?? servedNames
         reasoningEffort = value(String.self, .reasoningEffort) ?? reasoningEffort
@@ -233,8 +282,10 @@ struct ServerSettings: Codable, Equatable {
             ("port", String(port)),
             ("lanAccess", lanAccess ? "1" : "0"),
             ("allowedHosts", allowedHosts),
+            ("allowedOrigins", allowedOrigins),
             ("languageOnly", languageOnly ? "1" : "0"),
             ("kvFormat", kvFormat),
+            ("stateFormat", stateFormat),
             ("neuralEngine", neuralEngine ? "1" : "0"),
             ("maxMemory", maxMemory),
             ("maxContext", maxContext),
@@ -243,6 +294,8 @@ struct ServerSettings: Codable, Equatable {
             ("sparseKvMemory", sparseKvMemory),
             ("verifyRows", verifyRows),
             ("residencySeconds", residencySeconds),
+            ("cacheIdleSpill", cacheIdleSpill),
+            ("cacheDir", cacheDir),
             ("diskCache", diskCache ? "1" : "0"),
             ("maxCacheDisk", maxCacheDisk),
             ("maxCacheDiskWrites", maxCacheDiskWrites),
@@ -250,6 +303,13 @@ struct ServerSettings: Codable, Equatable {
             ("cacheEvictionPolicy", cacheEvictionPolicy),
             ("cacheEvictionProtect", String(cacheEvictionProtect)),
             ("maxRequestSize", maxRequestSize),
+            ("requestTimeout", requestTimeout),
+            ("maxImagePixels", maxImagePixels),
+            ("decodeShare", decodeShare),
+            ("allowIdleSleep", allowIdleSleep ? "1" : "0"),
+            ("thinkingTokenBudget", thinkingTokenBudget),
+            ("thinkingEndText", thinkingEndText),
+            ("announceServedName", announceServedName ? "1" : "0"),
             ("apiKey", apiKey),
             ("servedNames", servedNames),
             ("reasoningEffort", reasoningEffort),
@@ -274,8 +334,12 @@ struct ServerSettings: Codable, Equatable {
         if let value = Self.number(rows["port"], in: 0...65_535) { port = value }
         if let value = rows["lanAccess"] { lanAccess = value == "1" }
         if let value = rows["allowedHosts"] { allowedHosts = value }
+        if let value = rows["allowedOrigins"] { allowedOrigins = value }
         if let value = rows["languageOnly"] { languageOnly = value == "1" }
         if let value = rows["kvFormat"], Self.kvFormats.contains(value) { kvFormat = value }
+        if let value = rows["stateFormat"], Self.stateFormats.contains(value) {
+            stateFormat = value
+        }
         if let value = rows["neuralEngine"] { neuralEngine = value == "1" }
         if let value = rows["maxMemory"] { maxMemory = value }
         if let value = rows["maxContext"] { maxContext = value }
@@ -299,6 +363,10 @@ struct ServerSettings: Codable, Equatable {
            let value = rows["diskCache"] {
             diskCache = value == "1"
         }
+        if let value = rows["cacheIdleSpill"], Self.duration(value) != nil {
+            cacheIdleSpill = value
+        }
+        if let value = rows["cacheDir"] { cacheDir = value }
         if let value = rows["maxCacheDiskWrites"] { maxCacheDiskWrites = value }
         if let value = rows["cacheEvictionPreset"],
            Self.cacheEvictionPresets.contains(value) {
@@ -312,6 +380,21 @@ struct ServerSettings: Codable, Equatable {
             cacheEvictionProtect = value
         }
         if let value = rows["maxRequestSize"] { maxRequestSize = value }
+        if let value = rows["requestTimeout"], Self.duration(value) != nil {
+            requestTimeout = value
+        }
+        if let value = Self.number(rows["maxImagePixels"], in: 65_536...4_194_304) {
+            maxImagePixels = String(value)
+        }
+        if let value = rows["decodeShare"], Self.decimal(value) != nil {
+            decodeShare = value
+        }
+        if let value = rows["allowIdleSleep"] { allowIdleSleep = value == "1" }
+        if let value = Self.number(rows["thinkingTokenBudget"], in: 0...1_000_000) {
+            thinkingTokenBudget = String(value)
+        }
+        if let value = rows["thinkingEndText"] { thinkingEndText = value }
+        if let value = rows["announceServedName"] { announceServedName = value == "1" }
         if let value = rows["apiKey"] { apiKey = value }
         if let value = rows["servedNames"] { servedNames = value }
         if let value = rows["reasoningEffort"],
@@ -341,6 +424,25 @@ struct ServerSettings: Codable, Equatable {
             number = value.dropLast()
         }
         guard let amount = Double(number), amount > 0 else { return nil }
+        return value
+    }
+
+    /// A duration as the server takes one: seconds, or a number with an s, m
+    /// or h suffix; `off` for no limit.
+    static func duration(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        if value.isEmpty || value == "off" { return value }
+        let digits = value.last.map { "smh".contains($0) } == true ? value.dropLast() : value[...]
+        guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return nil }
+        return value
+    }
+
+    /// A nonnegative decimal, such as the decode share.
+    static func decimal(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespaces)
+        guard let number = Double(value), number.isFinite, number >= 0 else { return nil }
         return value
     }
 

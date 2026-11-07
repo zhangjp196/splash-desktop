@@ -670,8 +670,8 @@ void oneGateUpPass(MetalBackend &backend, const Linear &linear, bool spread) {
 // 168- and 136-row chunks on the 128-row tiles: the second tile holds 40 or 8 rows, so its last two or three 32-row
 // simdgroups skip their matmuls, though not the barriers of the stage they share, and leave the rows from 192 or 160
 // unwritten. Chunks of up to 32 rows run the decode tiles, whose rows equal the 128-row tiles' bitwise without K
-// splits and lie within fp64 with them. Each of `formats` ([1024, K]) at each epilogue, and a fused projection at its
-// segments' column offsets.
+// splits and lie within fp64 with them; chunks of 33-64 rows run the 64-row decode tile, alike. Each of `formats`
+// ([1024, K]) at each epilogue, and a fused projection at its segments' column offsets.
 void prefill(MetalBackend &backend, const Linear &linear, uint32_t K, const std::vector<Fmt> &formats) {
   constexpr uint32_t kChunks[] = {168, 136}, kSimdgroupRows = 32;
   // The split chunks' partitions: the most up to four that take whole 32-input groups.
@@ -705,7 +705,7 @@ void prefill(MetalBackend &backend, const Linear &linear, uint32_t K, const std:
         fail(name + ": simdgroups past the chunk write their rows");
       if (tileOutput.empty()) tileOutput = whole.output;
     }
-    for (const uint32_t rows : {8u, 16u, 24u, 32u})
+    for (const uint32_t rows : {8u, 16u, 24u, 32u, 33u, 40u, 48u, 57u, 64u})
       for (const uint32_t splits : {1u, splitChunk}) {
         const LinearWorkload chunk{{columns, K}, rows, LinearPhase::Prefill, epilogue};
         const LinearPlan plan =
@@ -732,7 +732,7 @@ void prefill(MetalBackend &backend, const Linear &linear, uint32_t K, const std:
   }
   section("prefill: " + std::to_string(formats.size()) + " formats, K " + std::to_string(K) +
           ", plain/residual/up-with-gate and fused segments, 128-row tiles over 168- and 136-row chunks and chunks of "
-          "8-32 rows (S 1 and " + std::to_string(splitChunk) + ") within fp64, equal to the 128-row tiles");
+          "8-64 rows (S 1 and " + std::to_string(splitChunk) + ") within fp64, equal to the 128-row tiles");
 }
 
 // ---------------------------------------------------------------- leading inputs

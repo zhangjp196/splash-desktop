@@ -331,9 +331,14 @@ void testCleanRuntimeStatus(const char *goldenPath) {
                   std::string::npos &&
               tokenMajorStatus.find("\"value_layout\":\"token_major\"") != std::string::npos,
           "token-major values were reported dimension-major");
-  require(json.find("\"schema_version\":7") != std::string::npos &&
+  require(json.find("\"schema_version\":8") != std::string::npos &&
               json.find("\"ready\":true") != std::string::npos,
           "status readiness/schema is wrong");
+  require(json.find("\"accounts\":[{\"name\":\"streamed_table\",\"order\":\"rebuildable\"") !=
+                  std::string::npos &&
+              json.find("\"name\":\"kv\",\"order\":\"in_use\"") != std::string::npos &&
+              json.find("\"name\":\"weights\",\"order\":\"floor\"") != std::string::npos,
+          "memory ledger accounts are not in release order");
   require(json.find("\"ready\":true,\"maximum_context_tokens\":102400,") !=
               std::string::npos,
           "status advertised model capacity instead of the active engine limit");
@@ -409,7 +414,7 @@ void testCleanRuntimeStatus(const char *goldenPath) {
           "status reported a lookup counter twice");
   require(json.find("\"block_tokens\":32") != std::string::npos &&
               json.find("\"decode_batches_by_width\":{\"b1\":1,\"b2\":1,\"b3\":"
-                        "1,\"b4\":1}}") != std::string::npos,
+                        "1,\"b4\":1},\"replans\":0}") != std::string::npos,
           "Page32 or real B3 status is missing");
   require(
       json.find("\"dynamic_budget_bytes\"") != std::string::npos &&
@@ -606,7 +611,7 @@ void testResourceWaitDiagnostics() {
       memoryPlan, {}, {}, {}, {}, {}, {}, {}, {}, true, {}, wait,
       NativeLoopTiming{1843.25}, {}, {}, {}, {});
   require(ticked.find("\"loop\":{\"max_tick_ms\":1843.25}") != std::string::npos &&
-              ticked.find("\"schema_version\":7") != std::string::npos,
+              ticked.find("\"schema_version\":8") != std::string::npos,
           "the loop's longest tick is missing, or changed the status schema");
 }
 
@@ -774,7 +779,7 @@ void testKvSpillStatus() {
       "\"ghost_hits\":512,\"read_bytes\":310000000,\"read_failures\":0,\"resolve_ms\":" +
       none + ",\"read_ms\":" + none + ",\"host_steps\":{\"pickup_ms\":" + none + ",\"work_ms\":" + none +
       ",\"resume_ms\":" + none +
-      "}},\"history_stream\":{\"commands\":2,\"contended_commands\":1,\"layers\":24,\"pages\":750000,"
+      "}},\"history_stream\":{\"commands\":2,\"layers\":24,\"pages\":750000,"
       "\"bytes\":24960000000,\"staging_bytes\":1056440320,\"buffers\":2,\"read_ms\":{\"p50\":262.144,"
       "\"p95\":262.144,\"p99\":262.144,\"max\":250,\"total\":5000,\"samples\":24},\"wait_ms\":" +
       none + ",\"decode_gap_ms\":{\"p50\":40,\"p95\":40,\"p99\":40,\"max\":40,\"total\":40,\"samples\":1}}}";
@@ -838,7 +843,7 @@ void testStreamedTableStatus() {
                         "\"samples\":0},\"prefetch_requested_rows\":32768,") != std::string::npos &&
               json.find("\"prefetch_read_rows\":30000,\"prefetch_dropped_rows\":0,\"poisoned\":true,"
                         "\"failure\":\"injected\"}") != std::string::npos &&
-              json.find("\"schema_version\":7,") != std::string::npos,
+              json.find("\"schema_version\":8,") != std::string::npos,
           "the streamed table's status is missing or inaccurate");
 }
 

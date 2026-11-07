@@ -539,12 +539,29 @@ engine::EngineSnapshot NativeRuntime::statusSnapshot() const {
   return result;
 }
 
+void NativeRuntime::firstTokenParts(uint64_t requestId, const TtftParts &parts) {
+  telemetry_.at(requestId).ttftParts = parts;
+}
+
 void NativeRuntime::tokens(uint64_t requestId,
                            std::span<const uint32_t> values) {
   RequestTelemetry &telemetry = telemetry_.at(requestId);
   double now = config_.monotonicMilliseconds();
   if (!telemetry.firstTokenMilliseconds) {
     telemetry.firstTokenMilliseconds = now;
+    // What held it: the engine's parts, and the rest of its TTFT (the host,
+    // admission, idle).
+    TtftParts &parts = telemetry.ttftParts;
+    const double ttft = now - telemetry.arrivedMilliseconds;
+    double counted = 0.0;
+    for (size_t part = 0; part < kTtftParts; ++part)
+      if (part != static_cast<size_t>(TtftPart::Rest))
+        counted += parts[part];
+    parts[static_cast<size_t>(TtftPart::Rest)] = std::max(0.0, ttft - counted);
+    config_.metrics->ttftParts(parts);
+    logLine("TTFT of request ", requestId, ": ", ttft, " ms: own prefill ",
+            parts[0], ", claim wait ", parts[1], ", decode ", parts[2],
+            ", other prefill ", parts[3], ", rest ", parts[4]);
   }
   uint32_t offset = telemetry.emittedTokens;
   telemetry.emittedTokens += static_cast<uint32_t>(values.size());

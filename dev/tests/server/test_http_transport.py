@@ -514,6 +514,22 @@ class HttpTransportTests(HarnessTestCase):
         self._wait_for_http_active(harness.server.connections, 1)
         upload.close()
 
+    def test_an_answer_survives_a_pipelined_request_left_unread(self):
+        harness = self.harness(FakeRuntime())
+        address = harness.server.server_address
+        client = socket.create_connection(address, timeout=2)
+        self.addCleanup(client.close)
+        request = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        # The second request is never read by the answer's handler: closing
+        # with it unread would reset the connection and could destroy the
+        # first answer before the client reads it.
+        client.sendall(request + request)
+        response = http.client.HTTPResponse(client)
+        response.begin()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.read()), {"status": "ok"})
+        self.assertEqual(client.recv(1), b"")
+
     def test_requests_in_progress_fill_every_connection_slot(self):
         with mock.patch.object(api.FrontendServer, "control_connection_capacity", 0):
             harness = self.harness(FakeRuntime(), queue_size=3)

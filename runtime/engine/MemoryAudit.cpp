@@ -80,8 +80,8 @@ MemoryAuditResult auditActualMemory(const EngineMemoryPlan &plan,
       {"shared prefill", actual.sharedPrefillBytes, budget.sharedPrefillBytes},
       {"shared decode", actual.sharedDecodeBytes, budget.sharedDecodeBytes},
       {"KV", actual.kvAllocatedBytes, budget.kvCapacityBytes},
-      {"hot KV block cache", actual.kvBlockCacheBytes, budget.kvSpill.hotLimitBytes},
-      {"KV history staging", actual.kvHistoryStagingBytes, budget.kvSpill.stagingBytes},
+      {"hot KV block cache", actual.kvHotCacheBytes, budget.kvSpill.hotLimitBytes},
+      {"KV history staging", actual.kvSpillStagingBytes, budget.kvSpill.stagingBytes},
       {"state staging", actual.stateStagingBytes, budget.stateStagingBytes},
       {"Neural Engine split", actual.aneFfnBytes, budget.aneFfnBytes},
   };
@@ -110,8 +110,8 @@ MemoryAuditResult auditActualMemory(const EngineMemoryPlan &plan,
       budget.hardBudgetBytes -
       std::min(budget.hardBudgetBytes, actual.streamedTableBytes);
   uint64_t dynamic = 0;
-  for (const uint64_t bytes : {actual.stateAllocatedBytes, actual.kvAllocatedBytes, actual.kvBlockCacheBytes,
-                               actual.kvHistoryStagingBytes})
+  for (const uint64_t bytes : {actual.stateAllocatedBytes, actual.kvAllocatedBytes, actual.kvHotCacheBytes,
+                               actual.kvSpillStagingBytes})
     if (!checkedAdd(dynamic, bytes, dynamic)) {
       return fail(MemoryAuditError::ArithmeticOverflow,
                   "elastic memory sum overflowed", actual);

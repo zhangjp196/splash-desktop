@@ -175,6 +175,7 @@
 "models.add_config" = "添加配置";
 "models.edit" = "编辑";
 "models.active" = "运行中";
+"models.files_missing" = "文件缺失";
 "models.start" = "启动";
 "models.remove" = "移除";
 "models.remove.title" = "移除配置？";
@@ -335,6 +336,8 @@
 "palette.run" = "运行";
 "palette.close" = "关闭";
 "palette.shortcut" = "命令面板（⌘K）";
+"terminal.title" = "终端（⌘J）";
+"terminal.close" = "关闭";
 "palette.goto" = "前往";
 "palette.server" = "服务器";
 "palette.appearance" = "切换窗口主题";
@@ -411,3 +414,47 @@
 "clients.detail" = "PID %d · %d 个连接";
 "clients.detail.one" = "PID %d · 1 个连接";
 "clients.refresh" = "刷新已连接客户端";
+
+// 1.6 引擎新增的启动选项。
+"field.allowed_origins" = "浏览器来源";
+"help.allowed_origins" = "允许调用 API 的页面来源，逗号分隔，例如 tauri://localhost；* 表示任意来源。";
+"field.state_format" = "循环状态精度";
+"help.state_format" = "混合模型保存循环状态的精度。16 位占用一半内存，可缓存两倍的状态。";
+"state.fp32" = "32 位";
+"state.bf16" = "16 位";
+"field.decode_share" = "解码份额";
+"help.decode_share" = "每花一秒读新提示词，就欠下多少秒继续回答；留空使用 0.5，0 表示每条命令轮流执行。";
+"field.cache_idle_spill" = "缓存前缀落盘";
+"help.cache_idle_spill" = "无请求多少秒后，把缓存前缀写入 SSD 并释放其内存；留空使用 30，off 表示保留。";
+"field.cache_dir" = "缓存目录";
+"help.cache_dir" = "持久化 SSD 缓存保存文件的目录；留空使用 ~/Library/Caches/Splash/prefix-cache。";
+"cache_dir.prompt" = "~/Library/Caches/Splash/prefix-cache";
+"field.request_timeout" = "请求超时";
+"help.request_timeout" = "排队或运行中的请求最多可花多久，超时以错误结束；可写 30m 这样的时长，留空表示不限。";
+"field.max_image_pixels" = "图像像素上限";
+"help.max_image_pixels" = "单张图像缩放后的最大像素数，65,536 到 4,194,304；留空使用服务端的 4,194,304。";
+"field.allow_idle_sleep" = "允许 Mac 睡眠";
+"help.allow_idle_sleep" = "请求运行期间允许 Mac 睡眠；关闭时保持唤醒直到请求结束，显示器仍可睡眠。";
+"field.thinking_token_budget" = "思考 token 预算";
+"help.thinking_token_budget" = "未单独设置预算的请求最多思考多少 token，之后结束思考；留空表示不限。";
+"field.thinking_end_text" = "思考结束文本";
+"help.thinking_end_text" = "思考预算用尽时用来收尾的文本，例如转向答案的一句话；留空使用模型自己的。";
+"thinking_end.prompt" = "模型默认";
+"field.announce_served_name" = "报告服务名";
+"help.announce_served_name" = "回复和模型列表使用第一个服务名，而不是模型自己的 ID。";
+
+// 编辑器侧栏现在把设置归入三个分组。
+"section.serving" = "运行";
+"section.serving.help" = "精度、内存、调度与请求限制。";
+"section.storage" = "存储";
+"section.storage.help" = "空闲释放、SSD 缓存与淘汰。";
+
+// 实时面板的内部标签页。
+"live.tab.overview" = "概览";
+"live.tab.overview.help" = "一眼看到引擎状态、吞吐、内存与已连接客户端。";
+"live.tab.requests" = "请求";
+"live.tab.requests.help" = "服务状态、请求计数与请求看到的延迟。";
+"live.tab.memory" = "内存";
+"live.tab.memory.help" = "内存规划、引擎占用与缓存。";
+"live.tab.thermal" = "散热";
+"live.tab.thermal.help" = "风扇、温度与 prefill 占空比。";

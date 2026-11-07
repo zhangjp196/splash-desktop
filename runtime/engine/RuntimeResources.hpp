@@ -285,6 +285,11 @@ public:
   [[nodiscard]] bool closePersistentCache();
 
   [[nodiscard]] metal::MetalBackend &backend() noexcept { return *backend_; }
+  // The engine's one pool of SSD readers, whose read serial attributes a
+  // decode gap to their reads.
+  [[nodiscard]] const std::shared_ptr<model::SsdReaders> &readers() const noexcept {
+    return readers_;
+  }
   [[nodiscard]] const EngineMemoryPlan &memoryPlan() const noexcept {
     return memoryPlan_;
   }

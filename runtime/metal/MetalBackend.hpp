@@ -88,8 +88,8 @@ public:
   [[nodiscard]] void *contents() const noexcept;
   // GPU address of the view's first byte, for kernels that reach a buffer
   // through an address another buffer holds; zero for released memory. Only
-  // a buffer allocated BufferReach::Addressed has one: no command names the
-  // buffers kernels reach that way, so only that keeps them resident.
+  // a buffer allocated BufferReach::Addressed has one: a table that names it
+  // (MetalBackend::setTableReach) makes it resident for commands.
   [[nodiscard]] uint64_t gpuAddress() const;
   // Allocation identity and exact view range, including Private storage.
   // This compares metadata only; it never maps or reads device contents.
@@ -414,10 +414,11 @@ public:
   // it back. A member is wired from its allocation on until the keep-alive
   // passes without a command, and again from the next command: memory goes
   // back to macOS when the engine releases it, not when macOS chooses. A
-  // Shared buffer that kernels reach only through its GPU address
-  // (BufferReach::Addressed), as they reach KV extents, also belongs to the
-  // set the command queue holds, which makes it resident for every command
-  // buffer though no command names it (Residency).
+  // command makes resident only the memory it uses: the buffers its
+  // dispatches bind, and the Addressed buffers the tables among those reach
+  // (setTableReach), declared on each encoder that uses them. Nothing is
+  // resident for the queue as a whole, so memory no command uses costs no
+  // command buffer anything.
   [[nodiscard]] MetalBuffer
   allocateBuffer(uint64_t bytes, BufferStorage storage,
                  std::string_view label,
@@ -444,6 +445,18 @@ public:
   // until written.
   void releaseMemory(const MetalBuffer &buffer);
   void restoreMemory(const MetalBuffer &buffer);
+
+  // Names the Addressed buffers whose GPU addresses the bytes of `table`, a
+  // view of a Shared buffer, hold: each encoder that uses the table makes
+  // them resident (useResources, for reading and writing) as the command is
+  // encoded. It replaces what the same table named before, so the owner
+  // calls it whenever it rewrites the table's entries, for every buffer they
+  // reach. The table holds them weakly: memory released or freed since is
+  // not declared, as no command may reach it then. MetalBackendError for
+  // another backend's buffers, a table that is not Shared or a reached
+  // buffer that is not Addressed.
+  void setTableReach(const MetalBuffer &table,
+                     std::span<const MetalBuffer> reached);
 
   // Encodes exactly one compute dispatch, commits it, waits for completion,
   // and reports both GPU and end-to-end wall time.

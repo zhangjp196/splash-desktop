@@ -19,7 +19,7 @@ PROTOCOL_VERSION = 13
 # A frame is its header, the magic, the protocol version, the frame type and
 # the payload length, then the payload.
 FRAME_HEADER_BYTES = 16
-STATUS_SCHEMA_VERSION = 7
+STATUS_SCHEMA_VERSION = 8
 # Score-only requests carry 2..255 distinct option token ids and produce no
 # generated tokens; a successful score DoneEvent returns one raw
 # final-position logit per requested token, in request order.

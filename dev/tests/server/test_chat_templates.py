@@ -10,7 +10,7 @@ from tokenizers import AddedToken, Tokenizer, decoders, models, pre_tokenizers, 
 from transformers import PreTrainedTokenizerFast
 
 from dev.tests import server_fixtures as fixtures
-from server import api_shapes, chat_templates
+from server import chat_messages, chat_templates
 from server import frontend as request_frontend
 from server.chat_templates import (
     LATER_SYSTEM_UNSUPPORTED,
@@ -21,6 +21,12 @@ from server.chat_templates import (
     ChatTemplateError,
     ChatTemplates,
     template_options,
+)
+from server.dialects import (
+    anthropic as anthropic_dialect,
+)
+from server.dialects import (
+    responses as responses_dialect,
 )
 from server.errors import APIError
 
@@ -562,7 +568,7 @@ class ChatTemplateFrontendTests(unittest.TestCase):
         chosen_sources = {
             chosen.source,
             chosen.source.replace(
-                api_shapes.IMAGE_PAD_TOKEN, request_frontend.IMAGE_RENDER_MARKER
+                chat_messages.IMAGE_PAD_TOKEN, request_frontend.IMAGE_RENDER_MARKER
             ),
         }
         for path, render in (
@@ -641,7 +647,7 @@ class ChatTemplateFrontendTests(unittest.TestCase):
 
         for name in ("qwen36_gguf", "qwen38_gguf"):
             app = frontend(
-                name, "<|im_start|>", "<|im_end|>", api_shapes.IMAGE_PAD_TOKEN
+                name, "<|im_start|>", "<|im_end|>", chat_messages.IMAGE_PAD_TOKEN
             )
             self.assertTrue(
                 app.chat_templates.describe().endswith("generation prompt 5-7 tokens")
@@ -990,7 +996,7 @@ class ChatTemplateFrontendTests(unittest.TestCase):
                 {"type": "message", "role": "user", "content": "Continue"},
             ],
         }
-        chat, _ = api_shapes.responses_to_chat_body(body, body["input"])
+        chat, _ = responses_dialect.responses_to_chat_body(body, body["input"])
         prompt = harness.app._render_prompt(
             harness.app._prepare_prompt(
                 chat, None, deadline=fixtures.FOREVER, without_slot=nullcontext
@@ -1057,7 +1063,7 @@ class ChatTemplateFrontendTests(unittest.TestCase):
 
 class LeadingSystemMergeTests(unittest.TestCase):
     def test_leading_system_and_developer_messages_merge_into_one(self):
-        merged = api_shapes.normalize_messages(
+        merged = chat_messages.normalize_messages(
             [
                 {"role": "system", "content": "One"},
                 {"role": "developer", "content": [{"type": "text", "text": "Two"}]},
@@ -1081,7 +1087,7 @@ class LeadingSystemMergeTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            api_shapes.normalize_messages(
+            chat_messages.normalize_messages(
                 [
                     {"role": "system", "content": "  Only  "},
                     {"role": "user", "content": "x"},
@@ -1094,14 +1100,14 @@ class LeadingSystemMergeTests(unittest.TestCase):
         )
 
     def test_every_api_shape_leads_with_one_system_message(self):
-        responses = api_shapes.responses_to_chat_body(
+        responses = responses_dialect.responses_to_chat_body(
             {"instructions": "Base"},
             [
                 {"role": "developer", "content": "Developer"},
                 {"role": "user", "content": "Ask"},
             ],
         )[0]["messages"]
-        anthropic = api_shapes.anthropic_to_chat_prompt(
+        anthropic = anthropic_dialect.anthropic_to_chat_prompt(
             {
                 "model": "m",
                 "system": "Base",
@@ -1115,7 +1121,7 @@ class LeadingSystemMergeTests(unittest.TestCase):
         for messages in (responses, anthropic):
             with self.subTest(messages=messages):
                 self.assertEqual(
-                    api_shapes.normalize_messages(
+                    chat_messages.normalize_messages(
                         messages,
                         vision=True,
                         deadline=fixtures.FOREVER,

@@ -889,8 +889,18 @@ class MultiplexedRuntime:
         old_process: ProcessLike | None,
         old_reader: threading.Thread | None,
     ) -> None:
-        if old_process is not None:
-            self._stop_process(old_process, old_reader)
+        if old_process is not None and not self._stop_process(old_process, old_reader):
+            # Spawning now would put a new engine beside one still giving its
+            # memory back, which the GPU may refuse or one of them may see
+            # the other's process.
+            self._complete_startup_attempt(
+                attempt,
+                EngineUnhealthy(
+                    "the previous engine has not exited; Splash waits for it "
+                    "before starting another"
+                ),
+            )
+            return
         with self._state_lock:
             # close() or a newer attempt may have won while the old engine was
             # being stopped; spawning now would orphan a fresh engine.
@@ -1438,7 +1448,13 @@ class MultiplexedRuntime:
                 listener = self.on_engine_failure
                 if served_seconds is not None and listener:
                     # Before the calls end, so their terminals can follow
-                    # what the listener decided about the engine.
+                    # what the listener decided about the engine. The exit
+                    # status lets it decide whether a request the engine ran
+                    # may have caused the failure.
+                    try:
+                        failure.returncode = returncode
+                    except Exception:
+                        pass
                     try:
                         listener(failure, served_seconds)
                     except Exception:
@@ -1481,7 +1497,7 @@ class MultiplexedRuntime:
         self,
         process: ProcessLike,
         reader: threading.Thread | None,
-    ) -> None:
+    ) -> bool:
         try:
             if process.stdin is not None:
                 process.stdin.close()
@@ -1506,3 +1522,4 @@ class MultiplexedRuntime:
                 pass
         if reader and reader is not threading.current_thread():
             reader.join(timeout=1.0)
+        return process.poll() is not None

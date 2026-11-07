@@ -4,6 +4,7 @@
 #include "model/RuntimeInstrumentation.hpp"
 #endif
 #include "AwakeClock.hpp"
+#include "model/ExpertStore.hpp"
 #include "model/KvBlockCache.hpp"
 #include "model/KvHistoryStream.hpp"
 #include "model/LoopGuard.hpp"
@@ -467,7 +468,7 @@ struct Runtime::Impl {
   KvBlockCache *blockCache;
   KvHistoryStream *historyStream;
   // The request the history's staging was last reserved for
-  // (reserveHistoryStaging), whose next prefill command streams into it.
+  // (reserveSpillStaging), whose next prefill command streams into it.
   uint64_t stagingRequest = 0;
 #ifdef SPLASH_RUNTIME_INSTRUMENTATION
   // Whether commands copy the target's logits before their policy
@@ -2761,6 +2762,31 @@ Runtime::~Runtime() = default;
 
 void Runtime::checkHealth() { impl_->backend.checkHealth(); }
 
+uint64_t Runtime::setStreamedMemory(uint64_t bytes) {
+  model::ExpertStore *store = impl_->model.expertStore();
+  return store ? store->setMemoryBytes(bytes) : 0;
+}
+
+uint64_t Runtime::streamedMemoryBytes() const {
+  const model::ExpertStore *store = impl_->model.expertStore();
+  return store ? store->memoryBytes() : 0;
+}
+
+uint64_t Runtime::minimumStreamedMemoryBytes() const {
+  const model::ExpertStore *store = impl_->model.expertStore();
+  return store ? store->minimumMemoryBytes() : 0;
+}
+
+uint64_t Runtime::maximumStreamedMemoryBytes() const {
+  const model::ExpertStore *store = impl_->model.expertStore();
+  return store ? store->maximumMemoryBytes() : 0;
+}
+
+bool Runtime::streamedMemoryElastic() const {
+  const model::ExpertStore *store = impl_->model.expertStore();
+  return store ? store->elastic() : false;
+}
+
 void Runtime::beginColdRequest(const ModelRequest &request,
                                uint32_t stateLane) {
   if (const StateAdmission admission = beginAt(request, stateLane); !admission.granted()) {
@@ -3421,7 +3447,7 @@ ModelMemoryAdmission Runtime::reserveSpilledReads(uint64_t requestId) {
 
 // The staging is the request's from now on, also when its growth is
 // refused: the reclaim that funds a retry spares it (Impl::stagingHeld).
-ModelMemoryAdmission Runtime::reserveHistoryStaging(uint64_t requestId, uint32_t pages) {
+ModelMemoryAdmission Runtime::reserveSpillStaging(uint64_t requestId, uint32_t pages) {
   static_cast<void>(residentLane(requestId));
   if (!impl_->historyStream) return {.ok = true};
   impl_->stagingRequest = requestId;

@@ -59,6 +59,12 @@ struct EngineConfig final {
   // its solo rate through a long prefill, which meanwhile takes 1.5x as long;
   // zero alternates one command of each kind.
   double decodeShare = 0.5;
+  // G: the longest gap between a request's token events that is not counted
+  // by cause (DecodeGapCauses); a gap past it is attributed.
+  double decodeGapMilliseconds = 500.0;
+  // The SSD readers' read serial, which rises when a batch of reads starts:
+  // a gap it moved in counts as one the SSD held.
+  std::function<uint64_t()> ssdReadSerial;
   // The share of wall time a prefill command may keep the GPU busy, in
   // percent (PrefillPacer). At 60 a prompt's prefill takes about 1.7x as
   // long, in gaps between commands that let the Mac cool, while decoding
@@ -202,6 +208,15 @@ struct SpillRequestsSnapshot final {
   uint64_t refusedClosed = 0;
 };
 
+// The decode gaps past the gap target G that lanes saw between two of their
+// token events, each by the first cause that held in it, and of the gaps a
+// prefill unit caused, those units' time.
+struct DecodeGapCausesSnapshot final {
+  std::array<uint64_t, kGapCauses> gaps{};
+  std::array<double, kGapCauses> milliseconds{};
+  double prefillMilliseconds = 0.0;
+};
+
 struct EngineSnapshot final {
   SchedulerSnapshot scheduler;
   // Requests not yet finalized, in submission (id) order.
@@ -231,6 +246,9 @@ struct EngineSnapshot final {
   // boundary before their planned rows: its buffers or the KV past it were
   // refused, or a waiting request starts from its state.
   uint64_t captureCuts = 0;
+  // Plans the engine sent back to the scheduler while preparing them.
+  uint64_t replans = 0;
+  DecodeGapCausesSnapshot decodeGapCauses;
   uint64_t replayStatePublicationFailures = 0;
   uint64_t junctionMaterializations = 0;
   uint64_t junctionMaterializationFailures = 0;
@@ -344,6 +362,13 @@ public:
   // takes what they freed. The result says whether the directive's target is
   // met, waits for transfers in flight, or finds nothing left to reclaim.
   [[nodiscard]] MemoryReclaimResult reclaimMemory(const MemoryReclaimDirective &directive);
+  // The streamed expert store's memory, grown and shrunk between commands
+  // (--expert-memory auto); zero for a model without one or a sized store.
+  uint64_t setStreamedMemory(uint64_t bytes) { return model_.setStreamedMemory(bytes); }
+  [[nodiscard]] uint64_t streamedMemoryBytes() const { return model_.streamedMemoryBytes(); }
+  [[nodiscard]] uint64_t minimumStreamedMemoryBytes() const { return model_.minimumStreamedMemoryBytes(); }
+  [[nodiscard]] uint64_t maximumStreamedMemoryBytes() const { return model_.maximumStreamedMemoryBytes(); }
+  [[nodiscard]] bool streamedMemoryElastic() const { return model_.streamedMemoryElastic(); }
   // At a clean stop, once tick() has stopped: makes every restore point
   // still waiting for its delay durable, the newest first, as the writes it
   // starts land (WriteBehind::flush). True once none is left. The requests
@@ -453,6 +478,23 @@ private:
     // (ModelStepResult::firstToken) and until the first decode cycle commits
     // it: that cycle emits it first, and its event leaves it out.
     std::optional<uint32_t> sentFirstToken;
+    // Until its first tokens go out: what held it since the engine first saw
+    // it (TtftPart, the rest left out), what holds it from `heldSince` on, as
+    // the last tick left the engine (holds, holderOf), and whether they went
+    // out (EngineEventSink::firstTokenParts).
+    TtftParts held{};
+    std::optional<double> heldSince;
+    TtftPart heldBy = TtftPart::Rest;
+    bool firstTokenSent = false;
+    // Its last token event, the prefill units' total then, and when its
+    // resource wait last started: what a decode gap past G is attributed by
+    // (decodeGap).
+    std::optional<double> lastTokenMilliseconds;
+    double gapPrefillAtLastToken = 0.0;
+    uint64_t gapReplansAtLastToken = 0;
+    uint64_t gapReleasesAtLastToken = 0;
+    uint64_t gapSsdReadAtLastToken = 0;
+    std::optional<double> lastResourceWaitMilliseconds;
     // Its model held an anchor when its lane was last suspended: the token
     // it selected last, which the suspension keeps (Model::suspend). A
     // decoding lane holds one once its first token is selected, a
@@ -613,7 +655,7 @@ private:
   // cache: its history holds Index pages (Cache::holdsIndexPages), or, in
   // Spill mode, reaches past its dense history and tail window, where its
   // pages spill as their copies land.
-  [[nodiscard]] bool streamsHistory(const Request &request) const;
+  [[nodiscard]] bool spillsHistory(const Request &request) const;
   // Whether a resident Spill request's prompt goes on: its next commands
   // take Full pages that spill as their copies land.
   [[nodiscard]] bool spillingPrompt() const;
@@ -750,6 +792,10 @@ private:
     bool pending = false;
     // Not memory but the SSD cache's quota of active KV (ResourceWait).
     bool diskQuota = false;
+    // The KV pages a refusal of pages lacked, of their form; none for the
+    // model's memory (Cache::owedCopiesReturn).
+    uint32_t pages = 0;
+    kv::PageForm form = kv::PageForm::Full;
   };
   // An allocation's last attempt, and what the engine knows about the memory
   // it could not get.
@@ -766,14 +812,27 @@ private:
   // running.
   [[nodiscard]] std::function<bool(const Denial &)>
   spillFallback(Request &request, const CacheLookup *restoring = nullptr);
-  // What a lane does about memory it could not get. Pending memory returns
-  // by itself: the lane waits. Otherwise a lane fails only when it is alone
-  // with nothing left to reclaim; while other lanes hold memory or the host
-  // refuses it, a running lane yields its memory and a lane being admitted
-  // waits.
+  // What a lane does about memory it could not get, the sooner way back
+  // first. Pending memory returns by itself: the lane waits. While other
+  // lanes hold memory or the host refuses it, a running lane yields its
+  // memory and a lane being admitted waits. Alone, a lane waits while the
+  // copies Spill requests owe give memory back as the SSD cache writes them,
+  // and fails only once nothing is left to reclaim or write.
   enum class Verdict : uint8_t { Wait, Yield, Fail };
   [[nodiscard]] Verdict judge(const Denial &denial, uint64_t requestId) const;
   [[nodiscard]] bool anotherResident(uint64_t requestId) const;
+  // The time to their first tokens of the requests that have not sent them:
+  // holds(now) counts the time since the last tick to what held each then;
+  // holderOf names what holds one as the engine is now, by precedence: a
+  // prefill command in flight with its rows, its memory wait, a decode
+  // command, another prefill command, the rest. Before a request's first
+  // tokens, firstTokens sends what held it.
+  void holds(double nowMilliseconds) noexcept;
+  [[nodiscard]] TtftPart holderOf(const Request &request) const;
+  void firstTokens(Request &request);
+  // A lane's token event at `now`: a gap past G since its last counts under
+  // the first cause that held in it (DecodeGapCauses).
+  void decodeGap(Request &request, double nowMilliseconds);
   // The prompt rows a lane in prefill has processed, or the tokens a
   // decoding lane holds.
   [[nodiscard]] uint64_t completedTokens(const Request &request) const;
@@ -784,6 +843,7 @@ private:
   // Whether lane a gives up its memory before lane b: the lower priority,
   // then, at equal priority, a lane in prefill before a decoding one, then
   // the one with fewer completed tokens.
+  [[nodiscard]] ClaimRank claimRank(const Request &request) const;
   [[nodiscard]] bool yieldsBefore(const Request &a, const Request &b) const;
   // The resident lane in prefill or decode that yields first when every
   // lane's growth fails (yieldsBefore; on a tie, the later submission), or
@@ -927,6 +987,9 @@ private:
   // When the last idle-offload pass started, so a pass the quota or a busy
   // tier leaves with nothing written does not run on every control tick.
   double lastIdleOffloadMilliseconds_ = 0.0;
+  // The time prefill commands took, totalled for the decode-gap causes
+  // (decodeGap).
+  double prefillUnitMilliseconds_ = 0.0;
   EngineSnapshot counters_;
 };
 

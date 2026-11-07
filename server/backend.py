@@ -2,7 +2,10 @@
 
 import copy
 import functools
+import hashlib
+import math
 import queue
+import signal
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -18,16 +21,79 @@ from .diagnostics import print_status
 from .errors import APIError, ConstraintError
 from .latency import RequestLatency
 from .metrics import metrics_dict
-from .output import hold_partial
+from .output import StopSearch
 from .tool_schema import ToolPolicy
 
 # A failure counts toward a crash loop unless its engine served this long.
 CRASH_LOOP_WINDOW_SECONDS = 60.0
 # Consecutive such failures, failed relaunches included, that stop relaunching.
-CRASH_LOOP_LIMIT = 3
-# The n-th consecutive relaunch waits RESTART_BACKOFF_SECONDS * 2**(n-2); the
-# first waits 0.
+# Six: the first waits 0, then 5 s doubling to the cap at the sixth.
+CRASH_LOOP_LIMIT = 6
+# The n-th consecutive relaunch waits RESTART_BACKOFF_SECONDS * 2**(n-2), up
+# to RESTART_BACKOFF_CAP_SECONDS; the first waits 0.
 RESTART_BACKOFF_SECONDS = 5.0
+RESTART_BACKOFF_CAP_SECONDS = 60.0
+# A start that failed for want of memory is retried for as long as it fails,
+# at most the cap apart, and does not count toward the crash loop: the memory
+# a request or another application frees may let it start.
+MEMORY_START_MARKERS = (
+    "memory",
+    "allocation",
+    "allocate",
+    "budget",
+    "does not fit",
+    "out of memory",
+    "insufficient",
+)
+# The signals an engine that a request crashed may die by.
+FAULT_SIGNALS = frozenset(
+    {
+        signal.SIGABRT,
+        signal.SIGBUS,
+        signal.SIGFPE,
+        signal.SIGILL,
+        signal.SIGSEGV,
+        signal.SIGTRAP,
+    }
+)
+
+
+class Quarantine:
+    """Refuses a request, until the server restarts, whose fingerprint was
+    among the requests the engine had started at each of the last two
+    failures a request may have caused. A failure no request could have
+    caused neither adds to the suspects nor clears them."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._suspects = frozenset()
+        self._refused = frozenset()
+
+    def refuses(self, fingerprint):
+        return fingerprint in self._refused
+
+    def after(self, started):
+        with self._lock:
+            refused = (self._suspects & started) - self._refused
+            self._refused |= refused
+            self._suspects = started
+            return refused
+
+
+def request_fingerprint(job):
+    """A request's identity across retries: its prompt, sampling and seed,
+    so a client that resends the same request can be recognised."""
+    digest = hashlib.sha256()
+    digest.update(repr(job.prompt_tokens).encode())
+    digest.update(repr(job.max_new_tokens).encode())
+    digest.update(repr(job.seed).encode())
+    digest.update(repr(tuple(job.stop_sequences)).encode())
+    digest.update(
+        repr(
+            tuple(getattr(job.sampling, name) for name in wire.SAMPLING_FIELDS)
+        ).encode()
+    )
+    return digest.digest()
 
 
 # Control requests use a short live probe and explicitly label stale snapshots.
@@ -207,7 +273,7 @@ class CallbackStreamer:
     def __init__(self, tokenizer, callback, stop_sequences=(), on_stop=None):
         self.tokenizer = tokenizer
         self.callback = callback
-        self.stop_sequences = tuple(stop_sequences)
+        self.stops = StopSearch(stop_sequences) if stop_sequences else None
         self.on_stop = on_stop
         self.backend = tokenizer.backend_tokenizer
         self.decode_stream = DecodeStream(skip_special_tokens=True)
@@ -224,27 +290,20 @@ class CallbackStreamer:
     def _emit(self, text):
         if not text or self.stop_sequence is not None:
             return
-        if not self.stop_sequences:
+        if self.stops is None:
             self._send(text)
             return
         self.pending_text += text
-        matches = [
-            (self.pending_text.find(stop), stop)
-            for stop in self.stop_sequences
-            if stop in self.pending_text
-        ]
-        if matches:
-            offset, self.stop_sequence = min(matches, key=lambda match: match[0])
-            self._send(self.pending_text[:offset])
+        found = self.stops.search(text)
+        if found is not None:
+            self.stop_sequence, back = found
+            self._send(self.pending_text[: len(self.pending_text) - back])
             self.pending_text = ""
             if self.on_stop is not None:
                 self.on_stop()
             return
 
-        retained = max(
-            len(hold_partial(self.pending_text, stop)[1])
-            for stop in self.stop_sequences
-        )
+        retained = self.stops.held
         ready = self.pending_text[:-retained] if retained else self.pending_text
         self.pending_text = self.pending_text[-retained:] if retained else ""
         self._send(ready)
@@ -336,6 +395,9 @@ class _JobState:
     streamer: CallbackStreamer
     call: object | None = None
     terminal_enqueued: bool = False
+    # Whether the engine has started it, and its identity across retries.
+    started: bool = False
+    fingerprint: bytes = b""
     detached: bool = False
     shutdown_requested: bool = False
     first_token_batch_tokens: int = 0
@@ -393,7 +455,13 @@ class NativeBackend:
         self.restart_due = None
         self.refresh_due = False
         self.failures = 0
+        # Starts that failed for want of memory, in a row, which back off but
+        # never stop relaunching.
+        self.memory_start_failures = 0
         self.fatal_error = None
+        # Requests refused until the server restarts: those the engine had
+        # started at two failures in a row a request may have caused.
+        self.quarantine = Quarantine()
         # Set by close() to cut a relaunch's backoff short.
         self.wakeup = threading.Event()
         # Why the engine cannot serve: its failure, the last failed restart or
@@ -417,9 +485,15 @@ class NativeBackend:
 
     def _failed(self, event, error, served_seconds):
         # Clients get the reason with every refusal until a status succeeds.
+        returncode = getattr(error, "returncode", None)
         with self.lock:
             if self.closing or self.fatal_error is not None:
                 return
+            started = frozenset(
+                state.fingerprint
+                for state in self.active.values()
+                if state.started and state.fingerprint
+            )
             self.engine_error = str(error)
             if self.status_snapshot is not None:
                 # A failed engine's readiness is no longer evidence.
@@ -428,7 +502,11 @@ class NativeBackend:
                 # Changed limits would recur at every relaunch; the error says
                 # how to recover.
                 self._stop_restarting_locked(str(unchangeable))
-            elif (delay := self._restart_delay_locked(served_seconds)) is None:
+            elif (
+                delay := self._restart_delay_locked(
+                    served_seconds, self._wanted_memory(error, served_seconds)
+                )
+            ) is None:
                 # The runtime writes an engine's crash trace before it reports
                 # that engine's failure, to the listener or from wait_ready.
                 trace = self.runtime.last_crash_trace
@@ -447,13 +525,46 @@ class NativeBackend:
                 self.restart_due = time.monotonic() + delay
             stopped = self.fatal_error
             self._ensure_recovery_locked()
+        # A signal a request may have crashed the engine with counts: a
+        # request started at each of two such failures in a row is refused
+        # until the server restarts, rather than crashing it again.
+        if returncode is not None and returncode < 0 and -returncode in FAULT_SIGNALS:
+            refused = self.quarantine.after(started)
+            if refused:
+                print_status(
+                    f"Quarantine · {len(refused)} request"
+                    f"{'' if len(refused) == 1 else 's'} in flight at two engine "
+                    "failures in a row refused until the server restarts",
+                    error=True,
+                )
         print_status(f"{event} · {error}", error=True)
         if stopped is not None:
             print_status(f"Engine stopped · {stopped}", error=True)
 
-    def _restart_delay_locked(self, served_seconds):
+    @staticmethod
+    def _wanted_memory(error, served_seconds):
+        """Whether a start failed for want of memory, which a later one may
+        meet once memory is freed, rather than for a setting or a model file
+        every relaunch would meet again."""
+        if served_seconds > 0.0:
+            return False
+        message = str(error).lower()
+        return any(marker in message for marker in MEMORY_START_MARKERS)
+
+    def _restart_delay_locked(self, served_seconds, wanted_memory=False):
         """Seconds until the relaunch a failure owes; None once a crash loop
-        stops relaunching."""
+        stops relaunching. A start that wanted memory backs off and is
+        retried without limit, and neither counts toward the crash loop nor
+        clears it."""
+        if wanted_memory:
+            self.memory_start_failures += 1
+            if self.memory_start_failures == 1:
+                return 0.0
+            return min(
+                RESTART_BACKOFF_CAP_SECONDS,
+                RESTART_BACKOFF_SECONDS * 2 ** (self.memory_start_failures - 2),
+            )
+        self.memory_start_failures = 0
         if served_seconds >= CRASH_LOOP_WINDOW_SECONDS:
             self.failures = 0
         self.failures += 1
@@ -461,7 +572,10 @@ class NativeBackend:
             return None
         if self.failures == 1:
             return 0.0
-        return RESTART_BACKOFF_SECONDS * 2 ** (self.failures - 2)
+        return min(
+            RESTART_BACKOFF_CAP_SECONDS,
+            RESTART_BACKOFF_SECONDS * 2 ** (self.failures - 2),
+        )
 
     def _stop_restarting_locked(self, message):
         """Stop relaunching for good; there is no way back but a server
@@ -553,11 +667,19 @@ class NativeBackend:
             if self.runtime.ready:
                 return None
             failure = self.engine_error
+            due = self.restart_due
+        # The longest Retry-After every OpenAI and Anthropic SDK follows: the
+        # JavaScript ones follow less than a minute, the Python ones up to a
+        # minute.
+        retry_after = 1
+        if due is not None:
+            retry_after = max(1, min(59, math.ceil(due - time.monotonic())))
         return APIError(
             503,
             "engine is recovering; retry shortly"
             + (f" (last failure: {failure})" if failure else ""),
             "engine_recovering",
+            retry_after,
         )
 
     def is_ready(self):
@@ -828,6 +950,7 @@ class NativeBackend:
             self.tokenizer, emit, job.stop_sequences, stop_matched
         )
         state = _JobState(job, streamer)
+        state.fingerprint = request_fingerprint(job)
         request = self._generation_request(job)
         # The engine copies the pixels at admission; only the frame written
         # below needs them, and the job lives until the response ends.
@@ -864,6 +987,22 @@ class NativeBackend:
                             503,
                             "server is shutting down",
                             "server_shutdown",
+                        ),
+                    )
+                )
+                return
+            if self.quarantine.refuses(state.fingerprint):
+                state.detach()
+                trace = self.runtime.last_crash_trace
+                job.events.put(
+                    (
+                        "error",
+                        APIError(
+                            400,
+                            "this request was in flight at two engine failures in "
+                            "a row; Splash refuses it until the server restarts"
+                            + (f" (crash trace: {trace})" if trace else ""),
+                            "request_quarantined",
                         ),
                     )
                 )
@@ -912,6 +1051,7 @@ class NativeBackend:
                 event.lane,
             )
             with self.lock:
+                state.started = True
                 job.cache = cache
             record = {
                 "outcome": "started",

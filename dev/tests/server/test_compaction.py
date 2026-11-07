@@ -5,7 +5,8 @@ from itertools import count as iter_count
 from pathlib import Path
 
 from dev.tests.server_fixtures import make_job
-from server import api_shapes, compaction
+from server import chat_messages, compaction
+from server.dialects import openai as openai_dialect
 from server.frontend import Frontend, Prompt, RenderedPrompt
 
 
@@ -237,10 +238,10 @@ class CompactionPolicyTests(unittest.TestCase):
 
     def test_the_report_is_a_response_extension(self):
         job = make_job()
-        self.assertIsNone(api_shapes.compaction_dict(job))
+        self.assertIsNone(chat_messages.compaction_dict(job))
         job.compaction = compaction.Compaction("note", 2, 100, 20)
         self.assertEqual(
-            api_shapes.compaction_dict(job),
+            chat_messages.compaction_dict(job),
             {
                 "note": "note",
                 "removed_messages": 2,
@@ -257,10 +258,12 @@ class CompactionPolicyTests(unittest.TestCase):
             "prompt_tokens_after": 3,
         }
         self.assertEqual(
-            api_shapes.stream_chunk("m", "id", 0, {}, compaction=report)["compaction"],
+            openai_dialect.stream_chunk("m", "id", 0, {}, compaction=report)[
+                "compaction"
+            ],
             report,
         )
-        self.assertNotIn("compaction", api_shapes.stream_chunk("m", "id", 0, {}))
+        self.assertNotIn("compaction", openai_dialect.stream_chunk("m", "id", 0, {}))
 
 
 if __name__ == "__main__":

@@ -244,6 +244,14 @@
   .effort-chevron { position: absolute; right: 11px; top: 50%; width: 11px; height: 11px; transform: translateY(-50%); pointer-events: none }
   select { appearance: none; padding: 0; border: 0; outline: 0; background: transparent; cursor: pointer }
   #effort { padding-right: 17px }
+  #context-ring { display: grid; width: 34px; height: 34px; flex: none; place-items: center; border-radius: 9px; color: var(--muted) }
+  #context-ring[hidden] { display: none }
+  #context-ring:hover { background: var(--hover) }
+  #context-ring svg { width: 22px; height: 22px; transform: rotate(-90deg) }
+  #context-ring .track { fill: none; stroke: var(--border); stroke-width: 3 }
+  #context-ring .value { fill: none; stroke: #3a6bff; stroke-width: 3; stroke-linecap: round; transition: stroke-dashoffset .2s, stroke .2s }
+  #context-ring.warn .value { stroke: #d97706 }
+  #context-ring.over .value { stroke: #dc2626 }
   #send { width: 34px; height: 34px; flex: none; border-radius: 10px; color: #fff; background: linear-gradient(135deg, #3a6bff, #12c8c2); font-size: 16px; box-shadow: 0 5px 16px #2f63f655; transition: filter .15s, transform .15s, box-shadow .15s }
   #send:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 22px #2f63f677 }
   #send:hover:not(:disabled) { filter: brightness(1.06) }
@@ -349,6 +357,12 @@
       </select>
       <svg class="effort-chevron" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
     </label>
+    <button id="context-ring" type="button" hidden aria-label="Context use" title="Context use">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle class="track" cx="12" cy="12" r="9"></circle>
+        <circle class="value" cx="12" cy="12" r="9"></circle>
+      </svg>
+    </button>
     <button id="send" aria-label="Send">&#8593;</button>
   </div>
 </form>
@@ -374,6 +388,7 @@
   const apiKey = $('#api-key');
   const credentials = $('#credentials');
   const send = $('#send');
+  const contextRing = $('#context-ring');
   const recents = $('#recents');
   const scrollBottom = $('#scroll-bottom');
   const mobileLayout = window.matchMedia('(max-width: 720px)');
@@ -421,6 +436,14 @@
   let conversations = load();
   let activeId = null;
   let messages = [];
+  // The model's context window, the prompt's share of it, and whether the
+  // prompt the next send would carry cannot fit: the ring beside Send shows
+  // the share, and a prompt past the window is blocked before it is sent.
+  let contextLimit = null;
+  let contextTokens = 0;
+  let contextExceeded = false;
+  let contextRequest = null;
+  let contextTimer = null;
   let attachments = [];
   let controller;
   let followResponse = false;
@@ -467,7 +490,12 @@
       const response = await fetch('/v1/models', {headers: authorization()});
       askForKeyIfUnauthorized(response);
       if (!response.ok) return;
-      const modalities = (await response.json()).data?.[0]?.input_modalities;
+      const model = (await response.json()).data?.[0];
+      const modalities = model?.input_modalities;
+      if (Number.isFinite(model?.context_length) && model.context_length > 0) {
+        contextLimit = model.context_length;
+      }
+      scheduleContextCount();
       if (!Array.isArray(modalities)) return;
       imagesAccepted = modalities.includes('image');
       attach.hidden = !imagesAccepted;
@@ -833,6 +861,7 @@
     updateSidebar();
     renderChat();
     renderRecents();
+    scheduleContextCount();
     input.focus({preventScroll: true});
   }
 
@@ -847,6 +876,7 @@
     updateSidebar();
     renderChat();
     renderRecents();
+    scheduleContextCount();
     input.focus({preventScroll: true});
   }
 
@@ -914,6 +944,7 @@
       attachmentsBox.append(item);
     });
     updateComposer();
+    scheduleContextCount();
   }
 
   function clearAttachments() {
@@ -951,11 +982,83 @@
 
   function canSend() {
     return Boolean(input.value.trim() || attachments.length) &&
-      attachments.every(attachment => attachment.url);
+      attachments.every(attachment => attachment.url) && !contextExceeded;
   }
 
   function updateComposer() {
     send.disabled = !controller && !canSend();
+  }
+
+  // The draft as the next request carries it, text and images alike.
+  function draftContent() {
+    const text = input.value.trim();
+    const images = attachments.filter(attachment => attachment.url)
+      .map(attachment => ({type: 'image_url', image_url: {url: attachment.url}}));
+    if (!images.length) return text || null;
+    return [...(text ? [{type: 'text', text}] : []), ...images];
+  }
+
+  function updateContextRing() {
+    if (!contextLimit) {
+      contextRing.hidden = true;
+      return;
+    }
+    contextRing.hidden = false;
+    const share = Math.min(contextTokens / contextLimit, 1);
+    const circumference = 2 * Math.PI * 9;
+    const ring = contextRing.querySelector('.value');
+    ring.style.strokeDasharray = `${circumference}`;
+    ring.style.strokeDashoffset = `${circumference * (1 - share)}`;
+    contextRing.classList.toggle('warn', share >= 0.75 && !contextExceeded);
+    contextRing.classList.toggle('over', contextExceeded);
+    const title = contextExceeded
+      ? `${contextTokens.toLocaleString()} tokens: this prompt cannot fit in ${contextLimit.toLocaleString()}`
+      : `${contextTokens.toLocaleString()} of ${contextLimit.toLocaleString()} tokens`;
+    contextRing.title = title;
+    contextRing.setAttribute('aria-label', title);
+  }
+
+  function scheduleContextCount() {
+    clearTimeout(contextTimer);
+    contextTimer = setTimeout(countContext, 250);
+    updateContextRing();
+  }
+
+  async function countContext() {
+    if (!contextLimit) return;
+    const content = draftContent();
+    if (!content && !messages.length) {
+      contextTokens = 0;
+      contextExceeded = false;
+      updateComposer();
+      updateContextRing();
+      return;
+    }
+    const body = {
+      messages: [...requestMessages(), ...(content ? [{role: 'user', content}] : [])]
+    };
+    contextRequest?.abort();
+    contextRequest = new AbortController();
+    try {
+      const response = await fetch('/v1/chat/completions/count_tokens', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', ...authorization()},
+        body: JSON.stringify(body),
+        signal: contextRequest.signal
+      });
+      if (!response.ok) {
+        contextRing.hidden = true;
+        return;
+      }
+      const {input_tokens: tokens} = await response.json();
+      if (!Number.isFinite(tokens)) return;
+      contextTokens = tokens;
+      contextExceeded = tokens > contextLimit;
+      updateComposer();
+      updateContextRing();
+    } catch (error) {
+      if (error.name !== 'AbortError') contextRing.hidden = true;
+    }
   }
 
   function setRunning(running) {
@@ -1075,6 +1178,7 @@
       controller = undefined;
       setRunning(false);
       updateScrollState();
+      scheduleContextCount();
       input.focus({preventScroll: true});
     }
   }
@@ -1099,7 +1203,7 @@
     if (!event.clipboardData.getData('text/plain')) event.preventDefault();
     addImages(images).catch(console.error);
   });
-  input.addEventListener('input', () => { resize(); updateComposer(); });
+  input.addEventListener('input', () => { resize(); updateComposer(); scheduleContextCount(); });
   input.addEventListener('keydown', event => {
     // Safari can end composition before the confirming Enter keydown.
     if (event.isComposing || event.keyCode === 229) return;

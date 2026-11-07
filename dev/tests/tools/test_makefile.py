@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from dev.benchmarks import backend_regression, weights
+from dev.benchmarks.serving import run as serving_run
 from dev.tests import agent_real, smoke_real
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -274,6 +275,11 @@ class MakefileTests(unittest.TestCase):
                     "test-performance-real",
                     "dev.benchmarks.backend_regression",
                     backend_regression.parse_args,
+                ),
+                (
+                    "test-pressure-real",
+                    "dev.benchmarks.serving.run",
+                    serving_run.parse_args,
                 ),
             ):
                 with (

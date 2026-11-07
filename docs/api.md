@@ -16,6 +16,7 @@ Messages requires it.
 | Method and path | Purpose |
 | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions |
+| `POST /v1/chat/completions/count_tokens` | A Chat request's prompt tokens, images included, as `{"input_tokens": N}`, without inference |
 | `POST /v1/completions` | OpenAI text completions |
 | `POST /v1/responses` | OpenAI Responses |
 | `GET`, `DELETE /v1/responses/{id}` | A stored response ([Responses state](#responses-state)) |
@@ -159,6 +160,12 @@ tokens' text, and an id outside the vocabulary is a 400.
 raw tokenization does not account for image embeddings (use `count_tokens` for that).
 These endpoints run without inference and share bounded preparation capacity with
 `count_tokens`; they can inspect prompts larger than the serving context limit.
+
+`POST /v1/chat/completions/count_tokens` accepts the same `messages`, images,
+tools and reasoning options as Chat Completions and returns `{"input_tokens": N}`.
+The count includes the chat template and image embeddings, even when the prompt
+exceeds the serving context. It does not generate an answer or reserve output
+tokens.
 
 ## Request limits and timeouts
 
@@ -811,10 +818,17 @@ encoding call, including reuse when available. Histogram buckets are cumulative
 and labeled by upper bound. HTTP TTFT (`http_ttft`) starts before upload and
 ends at the first native token event; native TTFT (`metrics.ttft_ms`,
 per-request `request_latency.ttft_ms`) starts when the engine receives the
-request. Output intervals are between native token events, which can contain
-multiple speculative tokens; they are not per-token latency. Native queue
-timing is recorded from successful completions. These histograms live with the
-HTTP process and survive a native engine restart.
+request. `metrics.ttft_parts_ms` splits that time by what held the request
+before its first token: its own prefill, waiting for memory, decode commands,
+other requests' prefill, and the rest (host, admission, idle), each a latency
+histogram in milliseconds. `metrics.decode_gap_causes` counts decode gaps past
+500 ms by the first cause that held them: a prefill unit, a wait for memory,
+or the rest. `ssd_read`, `pool_release` and `replan` are reported for the
+upstream contract and are not yet attributed by this fork. Output intervals are
+between native token events, which can contain multiple speculative tokens;
+they are not per-token latency.
+Native queue timing is recorded from successful completions. These histograms
+live with the HTTP process and survive a native engine restart.
 
 For slow tool-bearing requests, the `latency` section of `/status` separates
 preparation, tokenization, grammar preparation, native queueing and HTTP TTFT.

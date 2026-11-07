@@ -841,6 +841,63 @@ int streamedSplitArenas(MetalBackend &backend, const MoeShape &shape, const std:
   return failures;
 }
 
+// An elastic store starts at its floor, grows its arenas to their most with
+// the experts it holds, and gives the memory back down to the floor: the
+// experts a decode step loaded before the growth stay bitwise the resident
+// experts' and are not read again.
+int streamedElastic(MetalBackend &backend, const MoeShape &shape,
+                    const std::filesystem::path &directory) {
+  const Model m = makeModel(backend, shape, Q4K, true);
+  ExpertFile file(m, directory / "elastic.bin");
+  ExpertStoreOptions options =
+      storeOptions(arenaBytes(m, shape.experts), file.blocks, shape);
+  options.elastic = true;
+  ExpertStore store(backend, file.blocks, shape, options);
+  const uint64_t floorBytes = store.memoryBytes();
+  const uint32_t floorSlots = static_cast<uint32_t>(store.stats().slots);
+  require(store.elastic() && store.minimumMemoryBytes() <= floorBytes &&
+              store.maximumMemoryBytes() >= floorBytes,
+          "an elastic store's floor and most do not hold its memory");
+  std::array<BlockMoeWeights, 2> streamed{m.weights, m.weights};
+  for (uint32_t block = 0; block < streamed.size(); ++block) {
+    store.bind(block, streamed[block]);
+    store.attach(block, streamed[block]);
+  }
+  Buffers b;
+  const MoePlan decode = MoE::decodePlan(shape, 1, MoeConfig{});
+  freshRows(backend, b, shape);
+  const std::vector<float> input = b.input, residual = b.residual;
+  const std::vector<uint16_t> want = runWeights(backend, m.weights, b, decode);
+  int failures = 0;
+  const auto run = [&](const std::string &label) {
+    b.input = input;
+    b.residual = residual;
+    b.moe.input = bfloatBuffer(backend, b.input, "moe-input");
+    b.moe.residual = bfloatBuffer(backend, b.residual, "moe-residual");
+    if (runWeights(backend, streamed[0], b, decode) != want) {
+      printf("  elastic, %s: output differs from the resident experts' FAIL\n", label.c_str());
+      ++failures;
+    }
+  };
+  run("at the floor");
+  const uint64_t loaded = store.stats().uses[1].read;
+  const uint64_t grown = store.setMemoryBytes(store.maximumMemoryBytes());
+  require(loaded != 0 && grown > floorBytes && store.stats().slots > floorSlots,
+          "an elastic store did not load experts or grow its arenas");
+  run("after growing");
+  require(store.stats().uses[1].read == loaded,
+          "growing the arenas read the resident experts again");
+  const uint64_t back = store.setMemoryBytes(store.minimumMemoryBytes());
+  require(back <= floorBytes && store.stats().slots <= floorSlots,
+          "an elastic store did not give its memory back");
+  run("after shrinking");
+  require(store.stats().uses[1].read == loaded,
+          "shrinking the arenas read the resident experts again");
+  printf("streamed experts: elastic grow and shrink keep %llu experts, %s\n",
+         (unsigned long long)loaded, failures ? "FAIL" : "ok");
+  return failures;
+}
+
 // A source written since it was opened fails the load that reads it, which
 // fails its command, and every later load; the store reports why.
 int streamedSourceChanges(const std::string &metallibPath, const MoeShape &shape,
@@ -906,6 +963,7 @@ int main(int argc, const char *argv[]) {
                     streamedFaultBeforeRound(argv[1], shape, directory.path()) +
                     streamedRefusal(backend, shape, directory.path()) +
                     streamedSplitArenas(backend, shape, directory.path()) +
+                    streamedElastic(backend, shape, directory.path()) +
                     streamedSourceChanges(argv[1], shape, directory.path());
       }
       if (failures) {

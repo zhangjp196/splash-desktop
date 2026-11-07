@@ -26,8 +26,8 @@ from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers
 
 from dev.tests import native_peer
 from install import families, launcher
-from server import api_shapes, documents, images, serve_options
 from server import backend as backend_api
+from server import chat_messages, documents, images, serve_options
 from server import errors as api_errors
 from server import frontend as request_frontend
 from server import protocol as wire
@@ -232,11 +232,11 @@ class ImagePadTokenizer(FakeTokenizer):
 
     # Stands for the template: rendering emits the source per image part,
     # so the frontend's image render marker appears where it replaced it.
-    chat_template = api_shapes.IMAGE_PAD_TOKEN
+    chat_template = chat_messages.IMAGE_PAD_TOKEN
 
     def __call__(self, text, **kwargs):
-        count = text.count(api_shapes.IMAGE_PAD_TOKEN)
-        width = len(api_shapes.IMAGE_PAD_TOKEN)
+        count = text.count(chat_messages.IMAGE_PAD_TOKEN)
+        width = len(chat_messages.IMAGE_PAD_TOKEN)
         return {
             "input_ids": [101, *([50] * count), 102],
             "offset_mapping": [
@@ -253,7 +253,7 @@ class ImagePadTokenizer(FakeTokenizer):
             content = message.get("content")
             if isinstance(content, list):
                 rendered += "".join(
-                    kwargs.get("chat_template", api_shapes.IMAGE_PAD_TOKEN)
+                    kwargs.get("chat_template", chat_messages.IMAGE_PAD_TOKEN)
                     for part in content
                     if part.get("type") == "image_url"
                 )
@@ -267,7 +267,7 @@ class ImagePadTokenizer(FakeTokenizer):
         )
 
     def convert_tokens_to_ids(self, token):
-        if token == api_shapes.IMAGE_PAD_TOKEN:
+        if token == chat_messages.IMAGE_PAD_TOKEN:
             return 50
         return super().convert_tokens_to_ids(token)
 
@@ -838,6 +838,7 @@ def main_args(**overrides):
             "max_request_size": serve_options.DEFAULT_MAX_REQUEST_BYTES,
             "port": 0,
             "binary": "splash",
+            "serve_record": None,
             "ple_memory": None,
             "expert_memory": None,
             "sparse_kv_memory": None,

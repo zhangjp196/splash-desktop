@@ -261,6 +261,31 @@ void testReservationsAndAdmissionClasses() {
           "a backend defect leaked its reservation");
 }
 
+// Every granted reservation is a claim of its class, and every refusal
+// counts against the class it was made under: a start's floor, a request in
+// service's own growth.
+void testClaimsAreGrantedAndRefusedByClass() {
+  test::metalStatistics() = {};
+  metal::MetalBackend backend("unused");
+  const uint64_t limit = 64 * 1024;
+  MemoryGovernor governor(backend, limit, 64 * 1024, 64 * 1024,
+                          [] { return hostMemory(3 * kGiB + 64 * 1024); }, 0);
+  governor.setServing(false);
+  require(static_cast<bool>(admit(governor, limit, [&] {
+            require(!admit(governor, 1), "a refused start's claim was granted");
+          })),
+          "a start's floor claim was refused");
+  const auto start = governor.snapshot().claims[static_cast<size_t>(ClaimClass::Floor)];
+  require(start.granted == 1 && start.grantedBytes == limit && start.refused == 1,
+          "the ledger did not count a start's floor claims");
+  governor.setServing(true);
+  require(static_cast<bool>(admit(governor, 1024)),
+          "a request in service's claim was refused");
+  const auto service = governor.snapshot().claims[static_cast<size_t>(ClaimClass::InService)];
+  require(service.granted == 1 && service.grantedBytes == 1024,
+          "the ledger did not count a request's own claim");
+}
+
 // Host memory the engine holds outside Metal (a streamed table's row cache)
 // is charged in full beside the backend's buffers.
 void testHostHeldBytesAreCharged() {
@@ -802,6 +827,7 @@ int main() {
     testHostAvailabilityCountsReclaimablePages();
     testAdvertisedContextIsGrantable();
     testReservationsAndAdmissionClasses();
+    testClaimsAreGrantedAndRefusedByClass();
     testHostHeldBytesAreCharged();
     testHostHeadroomHysteresis();
     testReclaimablePagesReopenGrowth();

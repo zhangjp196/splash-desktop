@@ -79,12 +79,37 @@ Repack tiledRepack(uint32_t format, uint64_t rows, uint64_t columns, const std::
   return result;
 }
 
+// The tensors a plan refused, and those it read: one no block reads is
+// refused rather than silently dropped (an attention bias would change what
+// the model computes).
+struct PlanProblems final {
+  std::vector<std::string> names;
+  std::set<std::string, std::less<>> read;
+  [[nodiscard]] bool empty() const noexcept { return names.empty(); }
+};
+
+// Whether `name` belongs to a block in [begin, end), as "blk.N." does. A
+// target's extra prediction blocks after its layers are not run, so their
+// tensors are not refused as unused.
+bool inBlocks(std::string_view name, uint32_t begin, uint32_t end) noexcept {
+  if (!name.starts_with("blk.")) return false;
+  const size_t dot = name.find('.', 4);
+  if (dot == std::string_view::npos) return false;
+  uint32_t index = 0;
+  for (size_t at = 4; at < dot; ++at) {
+    if (name[at] < '0' || name[at] > '9') return false;
+    index = index * 10 + static_cast<uint32_t>(name[at] - '0');
+    if (index >= end) return false;
+  }
+  return index >= begin;
+}
+
 // Plans one image. A missing tensor or one of a type this build cannot load
 // is added to `problems` and left out of the image, so the planner can name
 // every such tensor at once; a tensor of the wrong shape throws.
 class Builder {
 public:
-  Builder(const GgufFile &file, const QwenTargetDimensions &geometry, std::vector<std::string> &problems,
+  Builder(const GgufFile &file, const QwenTargetDimensions &geometry, PlanProblems &problems,
           std::string name, uint32_t layer, uint32_t type, PlanOptions options = {})
       : file_(file), geometry_(geometry), problems_(problems),
         image_(std::move(name), layer, type, options.streamExperts) {}
@@ -127,6 +152,7 @@ public:
   void quantizedOrQ8_0(const std::string &name, uint64_t rows, uint64_t columns) {
     const GgufTensor *tensor = file_.find(name);
     if (!tensor || !float16Type(tensor->type)) return quantized(name, rows, columns);
+    problems_.read.insert(name);
     if (tensor->rows() != rows || tensor->columns() != columns) throw GgufError("unexpected shape for " + name);
     Repack repack = image_.planes(GGUF_FMT_Q80, rows, columns, name);
     TensorRows source = tensorRows(*tensor, rows, tensor->bytes / rows);
@@ -325,19 +351,24 @@ public:
   // A tensor the target's blocks would not apply, which changes what the
   // model computes where a GGUF holds it: `what` names it in the error.
   void absent(const std::string &name, std::string_view what) {
-    if (file_.find(name)) problems_.push_back(name + " (" + std::string(what) + ")");
+    if (file_.find(name)) {
+      problems_.names.push_back(name + " (" + std::string(what) + ")");
+      problems_.read.insert(name);
+    }
   }
 
   Image finish() { return image_.finish(); }
 
 private:
   void reject(const std::string &name, const GgufTensor *tensor) {
-    problems_.push_back(name + (tensor ? " (" + ggmlTypeName(tensor->type) + ")" : " (missing)"));
+    problems_.names.push_back(name + (tensor ? " (" + ggmlTypeName(tensor->type) + ")" : " (missing)"));
   }
 
-  // The tensor `name` when it is present and of an accepted type.
+  // The tensor `name` when it is present and of an accepted type. One the
+  // plan reads, of an accepted type or not, is not refused as unused too.
   const GgufTensor *find(const std::string &name, bool (*accepted)(uint32_t type)) {
     const GgufTensor *tensor = file_.find(name);
+    if (tensor) problems_.read.insert(name);
     if (tensor && accepted(tensor->type)) return tensor;
     reject(name, tensor);
     return nullptr;
@@ -359,6 +390,7 @@ private:
   TensorRows tensorRows(const GgufTensor &tensor, uint64_t count, uint64_t rowBytes, RowOrder order = {}) const {
     const std::string stem = tensor.name.ends_with(".weight") ? tensor.name.substr(0, tensor.name.size() - 7) : "";
     const GgufTensor *scale = stem.empty() ? nullptr : file_.find(stem + ".scale");
+    if (scale) problems_.read.insert(scale->name);
     if (tensor.type != ggml::kNVFP4) {
       if (scale)
         throw GgufError(scale->name + " scales a " + ggmlTypeName(tensor.type) +
@@ -405,7 +437,7 @@ private:
 
   const GgufFile &file_;
   const QwenTargetDimensions &geometry_;
-  std::vector<std::string> &problems_;
+  PlanProblems &problems_;
   ImageBuilder image_;
 };
 
@@ -490,7 +522,7 @@ struct HybridGguf final {
     ffnImage(b, g, p, index);
   }
   static void head(Builder &b, const QwenTargetDimensions &g) { b.floatNorm("output_norm.weight", g.hiddenSize); }
-  static void tables(const GgufFile &, const QwenTargetDimensions &, PlanOptions, std::vector<std::string> &,
+  static void tables(const GgufFile &, const QwenTargetDimensions &, PlanOptions, PlanProblems &,
                      std::vector<Image> &) {}
 };
 
@@ -560,7 +592,7 @@ struct Qwen4ExpGguf final {
   // rows stream from the file instead with streamTable once every tensor
   // the plan reads was found (planImages names those it misses first).
   static void tables(const GgufFile &file, const QwenTargetDimensions &g, PlanOptions options,
-                     std::vector<std::string> &problems, std::vector<Image> &images) {
+                     PlanProblems &problems, std::vector<Image> &images) {
     const std::string table = "per_layer_token_embd.weight";
     Builder b(file, g, problems, "ple.bin", g.pleLayer, kTableImageType);
     b.nativeTable(table, g.pleHeadDimension);
@@ -625,11 +657,18 @@ struct FlintGguf final {
     b.floatNorm(p + "ffn_norm.weight", g.hiddenSize);
     ffnImage(b, g, p, index);
     // llama.cpp writes a router's expert bias (Flint's optional expert_bias)
-    // as ffn_exp_probs_b, which the router's selection would add.
+    // as ffn_exp_probs_b, which the router's selection would add. A
+    // converter's attention and FFN biases are tensors no block applies:
+    // they change what the model computes, so the GGUF is refused rather
+    // than served without them.
     b.absent(p + "ffn_exp_probs_b.bias", "a router bias");
+    for (const char *bias : {"attn_q.bias", "attn_k.bias", "attn_v.bias", "attn_output.bias",
+                             "attn_q_norm.bias", "attn_k_norm.bias", "ffn_up.bias", "ffn_down.bias",
+                             "ffn_gate.bias"})
+      b.absent(p + bias, "a bias the target does not apply");
   }
   static void head(Builder &b, const QwenTargetDimensions &g) { b.floatNorm("output_norm.weight", g.hiddenSize); }
-  static void tables(const GgufFile &, const QwenTargetDimensions &, PlanOptions, std::vector<std::string> &,
+  static void tables(const GgufFile &, const QwenTargetDimensions &, PlanOptions, PlanProblems &,
                      std::vector<Image> &) {}
 };
 
@@ -646,7 +685,7 @@ template <class Use> decltype(auto) withFamily(std::string_view architecture, Us
 template <class Family>
 std::vector<Image> familyImages(const GgufFile &file, const QwenTargetDimensions &g, PlanOptions options) {
   Family::arrays(file, g);
-  std::vector<std::string> problems;
+  PlanProblems problems;
   std::vector<Image> images;
   for (uint32_t index = 0; index < g.layers; ++index) {
     Builder layer(file, g, problems, "layer-" + std::to_string(index) + ".bin", index,
@@ -662,9 +701,21 @@ std::vector<Image> familyImages(const GgufFile &file, const QwenTargetDimensions
   embedding.embeddingRows("token_embd.weight");
   images.push_back(embedding.finish());
   Family::tables(file, g, options, problems, images);
+  // A tensor no block reads would change what the model computes, as a
+  // converter's attention bias does; a target's extra prediction blocks
+  // after its layers are not run, so theirs are not refused.
+  const GgufMetadata &metadata = file.metadata();
+  const std::string architecture(metadata.architecture());
+  const uint64_t extraBlocks =
+      metadata.unsignedValue(architecture + ".nextn_predict_layers").value_or(0);
+  for (const GgufTensor &tensor : file.tensors())
+    if (!problems.read.contains(tensor.name) &&
+        !inBlocks(tensor.name, g.layers, g.layers + static_cast<uint32_t>(extraBlocks)))
+      problems.names.push_back(tensor.name + " (unused)");
   if (!problems.empty()) {
     std::string names;
-    for (const std::string &problem : problems) names += (names.empty() ? "" : ", ") + problem;
+    for (const std::string &problem : problems.names)
+      names += (names.empty() ? "" : ", ") + problem;
     throw GgufError("GGUF tensors this build cannot load: " + names);
   }
   return images;

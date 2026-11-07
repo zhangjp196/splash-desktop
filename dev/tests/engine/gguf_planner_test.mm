@@ -994,6 +994,17 @@ void checkFlint(const std::filesystem::path &directory) {
   biased.push_back({"blk.2.ffn_exp_probs_b.bias", {g.experts}, model::ggml::kF32, test_gguf::Bytes(4 * g.experts)});
   check(names(planned(metadata(g), biased), {"blk.2.ffn_exp_probs_b.bias (a router bias)"}),
         "planner refuses a router bias");
+  std::vector<Tensor> attentionBias = tensors;
+  attentionBias.push_back(
+      {"blk.2.attn_q.bias", {g.attentionWidth}, model::ggml::kF32, test_gguf::Bytes(4 * g.attentionWidth)});
+  check(names(planned(metadata(g), attentionBias),
+              {"blk.2.attn_q.bias (a bias the target does not apply)"}),
+        "planner refuses an attention bias");
+  std::vector<Tensor> unread = tensors;
+  unread.push_back({"blk.2.rope_freqs.weight", {g.hiddenSize}, model::ggml::kF32,
+                    test_gguf::Bytes(4 * g.hiddenSize)});
+  check(names(planned(metadata(g), unread), {"blk.2.rope_freqs.weight (unused)"}),
+        "planner refuses a tensor no block reads");
 }
 
 } // namespace

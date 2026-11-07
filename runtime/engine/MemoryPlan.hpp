@@ -65,7 +65,7 @@ struct StreamedSetting final {
 };
 
 // A part of the weights that can stream from the SSD instead of loading: a
-// MoE target's routed experts (model::ExpertStore) or the table its GGUF
+// MoE target's routed routed (model::ExpertStore) or the table its GGUF
 // holds (model::SparseRowStore). allBytes is what it takes loaded whole, zero
 // for a model without it, and floorBytes the smallest store that streams it.
 struct StreamedPart final {
@@ -145,7 +145,7 @@ struct ModelMemoryProfile final {
   // A spill-capable target's (planStreamedMemory); disabled for others.
   KvSpillPlan spill{};
   // The pages one lane's prefill command writes at most: a group's where
-  // its routed experts stream (model::kPrefillGroupChunks chunks), zero for
+  // its routed routed stream (model::kPrefillGroupChunks chunks), zero for
   // a chunk's. A windowed layout's lane keeps them Full (kvWindowFloorPages).
   uint32_t commandPages = 0;
 
@@ -163,13 +163,13 @@ struct StreamedMemoryInputs final {
   // staging and the Neural Engine split.
   uint64_t fixedBytes = 0;
   // The arenas of the model's geometry (model::plannedRuntimeMemory) by what
-  // streams, [experts][table]: a target whose routed experts stream runs its
+  // streams, [routed][table]: a target whose routed routed stream runs its
   // prefill commands as groups, and one whose table streams stages its rows,
   // so streaming only grows them. None before the model loads.
   std::array<std::array<uint64_t, 2>, 2> arenaBytes{};
   // The arenas of the geometry of a runtime whose K/V spills, by whether the
   // table streams (model::StreamedParts::kv): it runs prefill groups whether
-  // the experts stream or not, and holds where its verifies' listed blocks
+  // the routed stream or not, and holds where its verifies' listed blocks
   // are, so they are at least arenaBytes'. A plan that spills takes them.
   std::array<uint64_t, 2> spillArenaBytes{};
   uint64_t laneStateBytes = 0;
@@ -180,7 +180,7 @@ struct StreamedMemoryInputs final {
   uint32_t windowTokens = 0;
   uint32_t requestedContextTokens = 0;
   uint32_t relaunchContextTokens = 0;
-  StreamedPart experts;
+  StreamedPart routed;
   StreamedPart table;
   // --sparse-kv-memory: the hot block cache's target, at least its floor;
   // none keeps it at its floor.
@@ -200,7 +200,7 @@ struct StreamedMemoryInputs final {
 // The stores the plan streams the parts through, zero for a part that loads
 // whole or a model without it, and a spill-capable target's plan.
 struct StreamedMemoryPlan final {
-  uint64_t expertBytes = 0;
+  uint64_t routedBytes = 0;
   uint64_t tableBytes = 0;
   KvSpillPlan spill{};
 };
@@ -217,14 +217,14 @@ struct StreamedMemoryResult final {
 // floors from one budget (docs/server.md, Memory and context). The floors
 // come first: the fixed bytes and the arenas, a lane's state and the KV
 // runway (minimumRequiredBytes), the stores at their floors and the spill
-// floors at the context spilling serves. Then the routed experts load whole
+// floors at the context spilling serves. Then the routed routed load whole
 // where that leaves KV its allowance, and otherwise stream through all that
 // the allowance and the PLE table's share leave; the table loads whole where
 // the rest holds it, and otherwise streams through its share, 512 MiB at most.
 // The allowance is the KV of a context in the fewest pages whose whole
 // extents hold it, as one request's capacity rounds them (kvCapacityPagesFor):
 // a spill-capable target's first 64K tokens; a dense target's --max-context,
-// or none, so that its experts load wherever main loads them, and the first
+// or none, so that its routed load wherever main loads them, and the first
 // 64K tokens once they stream. The arenas are those of the parts that
 // stream: where the plan with the arenas of fewer parts streams more, it
 // plans again with those. An explicit setting replaces its part; one below

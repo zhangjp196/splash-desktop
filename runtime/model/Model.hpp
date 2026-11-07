@@ -768,6 +768,14 @@ class Model {
 public:
   virtual ~Model() = default;
   virtual void checkHealth() {}
+  // The streamed expert store's memory, which an elastic store
+  // (--expert-memory auto) grows and shrinks between commands. Zero for a
+  // model without one.
+  virtual uint64_t setStreamedMemory(uint64_t) { return 0; }
+  [[nodiscard]] virtual uint64_t streamedMemoryBytes() const { return 0; }
+  [[nodiscard]] virtual uint64_t minimumStreamedMemoryBytes() const { return 0; }
+  [[nodiscard]] virtual uint64_t maximumStreamedMemoryBytes() const { return 0; }
+  [[nodiscard]] virtual bool streamedMemoryElastic() const { return false; }
   [[nodiscard]] virtual StateAdmission begin(const ModelRequest &request) = 0;
   // Safe-point preemption returns the request's state buffers, retaining
   // only its host-side sampling/constraint continuation. Resume replays the
@@ -819,7 +827,7 @@ public:
   // extent of the hot block cache toward its planned size
   // (model::KvBlockCache::growTowardTarget).
   [[nodiscard]] virtual ModelMemoryAdmission reserveSpilledReads(uint64_t) { return {.ok = true}; }
-  [[nodiscard]] virtual ModelMemoryAdmission reserveHistoryStaging(uint64_t, uint32_t) { return {.ok = true}; }
+  [[nodiscard]] virtual ModelMemoryAdmission reserveSpillStaging(uint64_t, uint32_t) { return {.ok = true}; }
   [[nodiscard]] virtual ModelMemoryAdmission growSpilledReads() { return {.ok = true}; }
   // Whether the disk tier takes a state written from a lane now, for a
   // state in use or not, as CompositeState::canOffload. Room in the quota is

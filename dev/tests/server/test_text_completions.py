@@ -184,6 +184,15 @@ class TextCompletionTests(unittest.TestCase):
                     "stop must be a string or up to four strings",
                 )
 
+    def test_stop_sequences_are_limited_by_length(self):
+        harness, _ = self.harness()
+        status, response = self.complete(harness, stop=["x" * (16 * 1024 + 1)])
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            response["error"]["message"],
+            "each of stop must be at most 16384 characters",
+        )
+
     def test_unsupported_fields_are_rejected_by_name(self):
         harness, runtime = self.harness()
         cases = (

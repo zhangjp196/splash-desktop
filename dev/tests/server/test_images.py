@@ -29,11 +29,17 @@ from dev.tests.server_fixtures import (
     response_events,
     responses_body,
 )
-from server import api_shapes, documents, images
 from server import backend as backend_api
+from server import chat_messages, documents, images
 from server import frontend as request_frontend
 from server import protocol as native_wire
 from server import server as api
+from server.dialects import (
+    anthropic as anthropic_dialect,
+)
+from server.dialects import (
+    responses as responses_dialect,
+)
 
 
 def png_bytes(width, height, color=(200, 30, 30)):
@@ -329,7 +335,7 @@ class ImageRequestTest(HarnessTestCase):
         tokenizer = PreTrainedTokenizerFast(
             tokenizer_object=backend,
             additional_special_tokens=[
-                api_shapes.IMAGE_PAD_TOKEN,
+                chat_messages.IMAGE_PAD_TOKEN,
                 "<|vision_start|>",
                 "<|vision_end|>",
             ],
@@ -351,7 +357,7 @@ class ImageRequestTest(HarnessTestCase):
         app.max_context = 1024
         quoted = "中文 📷 <|vision_start|><|image_pad|><|vision_end|>"
         messages = [
-            {"role": "system", "content": "Document: " + api_shapes.IMAGE_PAD_TOKEN},
+            {"role": "system", "content": "Document: " + chat_messages.IMAGE_PAD_TOKEN},
             {
                 "role": "user",
                 "content": [
@@ -373,7 +379,7 @@ class ImageRequestTest(HarnessTestCase):
             "chat_template": tokenizer.chat_template,
         }
         baseline = tokenizer.apply_chat_template(messages, **template)
-        pad_id = tokenizer.convert_tokens_to_ids(api_shapes.IMAGE_PAD_TOKEN)
+        pad_id = tokenizer.convert_tokens_to_ids(chat_messages.IMAGE_PAD_TOKEN)
         all_pads = [i for i, token in enumerate(baseline) if token == pad_id]
         self.assertEqual(len(all_pads), 5)
         tokens, positions, rendered = app._render_image_tokens(messages, template)
@@ -439,7 +445,7 @@ class ImageRequestTest(HarnessTestCase):
             digest_lo=0,
             digest_hi=0,
         )
-        pad = app.tokenizer.convert_tokens_to_ids(api_shapes.IMAGE_PAD_TOKEN)
+        pad = app.tokenizer.convert_tokens_to_ids(chat_messages.IMAGE_PAD_TOKEN)
         with self.assertRaisesRegex(api.APIError, "request size limit"):
             app._expand_image_pads([pad], [image], [0])
 
@@ -593,8 +599,8 @@ class ImageRequestTest(HarnessTestCase):
     def test_conversions_leave_media_to_message_normalization(self):
         image = png_data_url()
         document = document_block(title="Report", context="Fixture")
-        anthropic = api_shapes.anthropic_to_chat_prompt
-        responses = api_shapes.responses_to_chat_body
+        anthropic = anthropic_dialect.anthropic_to_chat_prompt
+        responses = responses_dialect.responses_to_chat_body
         with (
             mock.patch.object(images, "decode_data_url", side_effect=AssertionError),
             mock.patch.object(documents, "_render", side_effect=AssertionError),
@@ -641,14 +647,14 @@ class ImageRequestTest(HarnessTestCase):
                 self.assertEqual(kinds[0], "image_url")
                 self.assertEqual(kinds[-1], "file")
                 with self.assertRaisesRegex(api.APIError, "^image input"):
-                    api_shapes.normalize_messages(
+                    chat_messages.normalize_messages(
                         messages,
                         vision=False,
                         deadline=FOREVER,
                         without_slot=nullcontext,
                     )
                 with self.assertRaisesRegex(api.APIError, "^PDF input"):
-                    api_shapes.normalize_messages(
+                    chat_messages.normalize_messages(
                         [{"role": "user", "content": messages[0]["content"][1:]}],
                         vision=False,
                         deadline=FOREVER,
@@ -656,7 +662,7 @@ class ImageRequestTest(HarnessTestCase):
                     )
         # Normalization renders the document's PDF after its title and context.
         self.assertEqual(
-            api_shapes.normalize_messages(
+            chat_messages.normalize_messages(
                 converted["anthropic"],
                 vision=True,
                 deadline=FOREVER,
@@ -697,7 +703,7 @@ class ImageRequestTest(HarnessTestCase):
             digest_lo=0,
             digest_hi=0,
         )
-        pad = app.tokenizer.convert_tokens_to_ids(api_shapes.IMAGE_PAD_TOKEN)
+        pad = app.tokenizer.convert_tokens_to_ids(chat_messages.IMAGE_PAD_TOKEN)
         with self.assertRaisesRegex(api.APIError, "context window"):
             app._expand_image_pads([pad], [image], [0])
 

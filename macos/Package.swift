@@ -12,9 +12,15 @@ import PackageDescription
 let package = Package(
     name: "SplashDesktop",
     platforms: [.macOS(.v14)],
+    dependencies: [
+        // The terminal drawer's view over a pseudo-terminal, MIT licensed,
+        // pinned as the app's other dependencies are.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.20.0"),
+    ],
     targets: [
         .executableTarget(
             name: "SplashDesktop",
+            dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")],
             path: "Sources/SplashApp"
         )
     ]

@@ -268,7 +268,7 @@ void testStreamableWeightsAreWhatLoads(const RuntimeResourcesConfig &config) {
   // Streamed experts read on a pool of SSD readers, as the engine's do.
   const auto readers = std::make_shared<model::SsdReaders>(model::kSsdReaders);
   const model::LoadedModel streamed = model::loadModel(
-      backend, root, config.model, {.expertMemoryBytes = weights.expertFloorBytes, .readers = readers});
+      backend, root, config.model, {.streamedMemoryBytes = weights.expertFloorBytes, .readers = readers});
   require(streamed.expertStore() && streamed.expertStore()->stats().slots == kMoeExperts &&
               allocated(streamed) <= weights.loadedBytes + weights.expertFloorBytes,
           "the smallest store did not hold a layer's experts within its bytes");
@@ -279,7 +279,7 @@ void testStreamableWeightsAreWhatLoads(const RuntimeResourcesConfig &config) {
   rejects([&] {
     static_cast<void>(
         model::loadModel(backend, root, config.model,
-                         {.expertMemoryBytes = weights.expertFloorBytes - 1, .readers = readers}));
+                         {.streamedMemoryBytes = weights.expertFloorBytes - 1, .readers = readers}));
   }, "holds fewer slots", "a store a byte below the smallest loaded");
 }
 

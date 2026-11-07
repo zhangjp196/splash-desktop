@@ -231,6 +231,9 @@ struct ExpertStore::Impl {
     std::vector<uint32_t> slot; // each expert's, kNoSlot when not resident
     // Its router and shared-expert gate (bind), which predict its routes.
     ops::QuantizedSegment router, scalarGate;
+    // The weights bind() filled, which an elastic resize fills again after
+    // its arena moves (ExpertStore::setMemoryBytes).
+    ops::BlockMoeWeights *weights = nullptr;
   };
   // A step's tiles (ops::MoeLoadPart): the grouping's descriptors and count.
   struct PartTiles final {
@@ -339,6 +342,11 @@ struct ExpertStore::Impl {
     ExpertStoreStats::Use *use = nullptr;
   } plan;
   uint64_t arenaTotal = 0;
+  // The staging, tables and other fixed buffers, and each size's least and
+  // most slots, for the elastic store.
+  uint64_t fixedBytes = 0;
+  bool elastic = false;
+  std::vector<uint32_t> minSlots, maxSlots;
 
   // A load and release() or restore(), which never overlap (no command is in
   // flight while the store releases or restores its memory), hand the state
@@ -371,6 +379,70 @@ struct ExpertStore::Impl {
     LatencyHistogram pickup, work, resume;
   };
   std::array<StepTimes, 2> stepTimes;
+
+  // Sizes one arena for `slots` experts: its regions and load parameters.
+  static void configureSize(Size &size, uint32_t slots) {
+    size.slots = slots;
+    uint64_t region = 0;
+    for (size_t z = 0; z < 3; ++z) {
+      const ProjectionLayout &projection = size.layout[z];
+      for (size_t plane = 0; plane < 3; ++plane) {
+        size.regions[z][plane] = region;
+        region += alignWeightOffset(uint64_t{slots} * projection.planes[plane]);
+      }
+      size.load.projections[z] = {projection.format,
+                                  static_cast<uint32_t>(projection.rows),
+                                  static_cast<uint32_t>(projection.columns),
+                                  static_cast<uint32_t>(projection.rowBytes),
+                                  {size.regions[z][0], size.regions[z][1], size.regions[z][2]},
+                                  {projection.planes[0], projection.planes[1], projection.planes[2]}};
+    }
+    size.loadGroups = ops::MoE::expertLoadGroups(size.load);
+  }
+
+  // Grows or shrinks `size` to `slots`, copying the slots it keeps. False
+  // when a resident expert would be dropped; the caller keeps the size then.
+  bool resizeSize(uint32_t index, uint32_t slots) {
+    Size &size = sizes[index];
+    if (slots == size.slots) return true;
+    // A shrink stops above every slot a resident expert holds.
+    for (uint32_t slot = slots; slot < size.slots; ++slot)
+      if (size.ownerBlock[slot] != kNoSlot) return false;
+    const uint32_t wasSlots = size.slots;
+    const auto wasRegions = size.regions;
+    configureSize(size, slots);
+    metal::MetalBuffer next;
+    try {
+      next = backend.allocateBuffer(arenaBytes(size.layout, slots), metal::BufferStorage::Shared,
+                                    "experts/arena-" + std::to_string(index));
+    } catch (const metal::MetalAllocationError &) {
+      // The old arena and its slots stay as they were.
+      configureSize(size, wasSlots);
+      return false;
+    }
+    // A slot's planes sit at its slot index from the plane's region on, so a
+    // slot kept moves as a whole to where the new regions hold it.
+    const uint32_t kept = std::min(wasSlots, slots);
+    for (uint32_t slot = 0; slot < kept; ++slot)
+      for (size_t z = 0; z < 3; ++z)
+        for (size_t plane = 0; plane < 3; ++plane) {
+          const uint64_t bytes = size.layout[z].planes[plane];
+          if (!bytes) continue;
+          std::memcpy(static_cast<uint8_t *>(next.contents()) + size.regions[z][plane] + uint64_t{slot} * bytes,
+                      static_cast<const uint8_t *>(size.arena.contents()) + wasRegions[z][plane] +
+                          uint64_t{slot} * bytes,
+                      bytes);
+        }
+    const uint64_t was = size.arena.sizeBytes();
+    backend.releaseMemory(size.arena);
+    size.arena = std::move(next);
+    size.recycling.resize(slots);
+    size.ownerBlock.resize(slots, kNoSlot);
+    size.ownerExpert.resize(slots, kNoSlot);
+    arenaTotal += arenaBytes(size.layout, slots);
+    arenaTotal -= was;
+    return true;
+  }
 };
 
 // The expert in a slot, if any, is no longer resident.
@@ -947,6 +1019,19 @@ ExpertStore::ExpertStore(metal::MetalBackend &backend, StreamedBlocks streamed, 
   impl.waiting.assign(shape.experts, 0);
   impl.counters.arenaBytes = impl.arenaTotal;
   impl.counters.stagingBytes = impl.staging.sizeBytes();
+  impl.elastic = options.elastic;
+  impl.fixedBytes = fixed;
+  impl.minSlots.reserve(impl.sizes.size());
+  impl.maxSlots.reserve(impl.sizes.size());
+  for (uint32_t index = 0; index < impl.sizes.size(); ++index) {
+    Impl::Size &size = impl.sizes[index];
+    const uint64_t all = uint64_t{size.blocks} * shape.experts;
+    const uint32_t least = static_cast<uint32_t>(slotsAt(index, 0.0));
+    uint32_t most = static_cast<uint32_t>(all);
+    while (most > least && arenaBytes(size.layout, most) > largest) --most;
+    impl.minSlots.push_back(least);
+    impl.maxSlots.push_back(std::max(most, least));
+  }
   for (const Impl::Size &size : impl.sizes) {
     impl.counters.slots += size.slots;
     impl.counters.experts += uint64_t{size.blocks} * shape.experts;
@@ -981,6 +1066,10 @@ void ExpertStore::bind(uint32_t block, ops::BlockMoeWeights &weights) {
   // them.
   weights.stream = impl.streams(block) ? this : nullptr;
   weights.streamBlock = block;
+}
+
+void ExpertStore::attach(uint32_t block, ops::BlockMoeWeights &weights) {
+  impl_->blocks.at(block).weights = &weights;
 }
 
 void ExpertStore::addLoad(metal::CommandGraph &graph, std::span<const ops::MoeLoadPart> parts,
@@ -1061,6 +1150,82 @@ ExpertStoreStats ExpertStore::stats() const {
   }
   return result;
 }
+
+uint64_t ExpertStore::memoryBytes() const noexcept {
+  return impl_->fixedBytes + impl_->arenaTotal;
+}
+
+uint64_t ExpertStore::minimumMemoryBytes() const noexcept {
+  return impl_->fixedBytes + [&] {
+    uint64_t bytes = 0;
+    for (uint32_t index = 0; index < impl_->sizes.size(); ++index)
+      bytes += arenaBytes(impl_->sizes[index].layout, impl_->minSlots[index]);
+    return bytes;
+  }();
+}
+
+uint64_t ExpertStore::maximumMemoryBytes() const noexcept {
+  return impl_->fixedBytes + [&] {
+    uint64_t bytes = 0;
+    for (uint32_t index = 0; index < impl_->sizes.size(); ++index)
+      bytes += arenaBytes(impl_->sizes[index].layout, impl_->maxSlots[index]);
+    return bytes;
+  }();
+}
+
+uint64_t ExpertStore::setMemoryBytes(uint64_t bytes) {
+  std::lock_guard lock(impl_->mutex);
+  Impl &impl = *impl_;
+  if (!impl.elastic || impl.released || impl.backend.commandInFlight()) return memoryBytes();
+  impl.retireAhead();
+  impl.ahead.block = impl.plan.block = kNoSlot;
+  const uint64_t least = minimumMemoryBytes();
+  const uint64_t most = maximumMemoryBytes();
+  const uint64_t target = std::clamp(bytes, least, most);
+  const uint64_t budget = target > impl.fixedBytes ? target - impl.fixedBytes : 0;
+  // The same share of each streamed size, at least a block's experts and at
+  // most what the largest buffer holds.
+  const auto slotsAt = [&](double share, uint32_t index) {
+    const uint64_t leastSlots = impl.minSlots[index];
+    const uint64_t mostSlots = impl.maxSlots[index];
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        mostSlots, leastSlots + static_cast<uint64_t>(share * double(mostSlots - leastSlots))));
+  };
+  const auto bytesAt = [&](double share) {
+    uint64_t held = 0;
+    for (uint32_t index = 0; index < impl.sizes.size(); ++index)
+      held += arenaBytes(impl.sizes[index].layout, slotsAt(share, index));
+    return held;
+  };
+  double low = 0.0, high = 1.0;
+  if (bytesAt(high) <= budget) low = high;
+  else
+    for (int step = 0; step < 64 && low < high; ++step) {
+      const double middle = (low + high) / 2;
+      (bytesAt(middle) <= budget ? low : high) = middle;
+    }
+  for (uint32_t index = 0; index < impl.sizes.size(); ++index) {
+    // A shrink stops at the highest slot a resident expert holds.
+    uint32_t wanted = slotsAt(low, index);
+    for (uint32_t slot = impl.sizes[index].slots; slot > wanted; --slot)
+      if (impl.sizes[index].ownerBlock[slot - 1] != kNoSlot) {
+        wanted = slot;
+        break;
+      }
+    if (!impl.resizeSize(index, wanted)) continue;
+  }
+  // The arenas moved: each block's views of its experts (bind) are made
+  // again from the sizes the store holds now.
+  for (uint32_t index = 0; index < impl.blocks.size(); ++index)
+    if (ops::BlockMoeWeights *weights = impl.blocks[index].weights) bind(index, *weights);
+  impl.counters.arenaBytes = impl.arenaTotal;
+  impl.counters.slots = 0;
+  for (const Impl::Size &size : impl.sizes) impl.counters.slots += size.slots;
+  impl.publish();
+  return memoryBytes();
+}
+
+bool ExpertStore::elastic() const noexcept { return impl_->elastic; }
 
 bool ExpertStore::released() const noexcept { return impl_->released; }
 

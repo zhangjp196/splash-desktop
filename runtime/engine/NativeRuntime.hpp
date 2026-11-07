@@ -147,6 +147,15 @@ public:
   reclaimMemory(const MemoryReclaimDirective &directive) {
     return core_.reclaimMemory(directive);
   }
+  uint64_t setStreamedMemory(uint64_t bytes) { return core_.setStreamedMemory(bytes); }
+  [[nodiscard]] uint64_t streamedMemoryBytes() const { return core_.streamedMemoryBytes(); }
+  [[nodiscard]] bool streamedMemoryElastic() const { return core_.streamedMemoryElastic(); }
+  [[nodiscard]] uint64_t minimumStreamedMemoryBytes() const {
+    return core_.minimumStreamedMemoryBytes();
+  }
+  [[nodiscard]] uint64_t maximumStreamedMemoryBytes() const {
+    return core_.maximumStreamedMemoryBytes();
+  }
 
 private:
   struct RequestTelemetry {
@@ -156,6 +165,9 @@ private:
     std::optional<double> firstTokenMilliseconds;
     std::optional<double> lastTokenMilliseconds;
     uint32_t emittedTokens = 0;
+    // What held it before its first token, as the engine counted it
+    // (EngineEventSink::firstTokenParts).
+    TtftParts ttftParts{};
   };
 
   struct PendingMask {
@@ -192,6 +204,7 @@ private:
                       uint32_t acceptedDraftTokens, double wallMilliseconds,
                       double cycleMilliseconds) override;
   void promptProgress(uint64_t requestId, uint32_t processedTokens) override;
+  void firstTokenParts(uint64_t requestId, const TtftParts &parts) override;
   void tokens(uint64_t requestId, std::span<const uint32_t> values) override;
   void logprobs(uint64_t requestId,
                 std::span<const TokenLogprob> values) override;

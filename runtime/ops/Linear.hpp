@@ -71,8 +71,9 @@ enum class LinearEpilogue : uint8_t { None, Residual, GateUp, UpWithGate };
 // threadgroup of one simdgroup. The staged tiles, GgufStaged and GgufPrefill,
 // dequantize the weights into threadgroup memory for matmul2d.
 // GgufStaged: the two-simdgroup staged tile of 8, 16 or 32 rows (decode, and
-// prefill chunks of up to 32 rows), each simdgroup staging its own columns,
-// with optional K splits. GgufPrefill: the 128-row shared-stage prefill tile.
+// prefill chunks of up to 32 rows, or on Apple10 the 64-row tile up to
+// kMaximumStagedPrefillRows), each simdgroup staging its own columns, with
+// optional K splits. GgufPrefill: the 128-row shared-stage prefill tile.
 // GgufRegister: the exact register tile on bf16 8x8 matrix operations
 // (Apple9), over an activation table, every request lane in one threadgroup,
 // optional K splits.
@@ -80,6 +81,9 @@ enum class LinearTile : uint8_t { GgufStaged, GgufPrefill, GgufRegister };
 // The decode tiles hold at most a full decode batch; prefill chunks of up to
 // this many rows run the staged tile (Linear::ggufBaseline).
 inline constexpr uint32_t kMaximumDecodeTileRows = SPLASH_MAXIMUM_BATCH_WIDTH * SPLASH_TARGET_VERIFY_ROWS;
+// On Apple10, prefill chunks of up to this many rows run the staged tile
+// too, on its 64-row height (Linear::ggufBaseline).
+inline constexpr uint32_t kMaximumStagedPrefillRows = 64;
 // The GGUF formats Apple9's staged tiles decode faster than its register
 // tiles, dense and MoE: IQ3_XXS, the IQ2 formats and IQ1, whose operands the
 // register tiles build from grid lookups beside their matrix operations

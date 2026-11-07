@@ -105,7 +105,8 @@ class ClientTests(unittest.TestCase):
                     self.assertNotIn("test-server-key", self.pi_models.read_text())
                     config = json.loads(self.pi_models.read_text())
                     self.assertEqual(
-                        config["providers"]["splash"]["apiKey"], "$SPLASH_API_KEY"
+                        config["providers"]["splash"]["apiKey"],
+                        "!printenv SPLASH_API_KEY",
                     )
                 else:
                     # Hermes expands the profile's reference from its
@@ -118,6 +119,24 @@ class ClientTests(unittest.TestCase):
                         yaml.safe_load(profile.read_text())["model"]["api_key"],
                         "${SPLASH_API_KEY}",
                     )
+
+    def test_a_proxy_environment_exempts_loopback_without_dropping_hosts(self):
+        argv, env = self.command(
+            "codex",
+            env={"https_proxy": "http://proxy:3128", "NO_PROXY": "example.com"},
+        )
+        self.assertEqual(env["NO_PROXY"], "example.com,127.0.0.1,localhost,::1")
+        self.assertEqual(env["no_proxy"], "example.com,127.0.0.1,localhost,::1")
+        # An environment that names no proxy is left as it is: a client then
+        # takes the macOS system proxy and its own exceptions.
+        _, env = self.command("codex", env={"NO_PROXY": "example.com"})
+        self.assertEqual(env["NO_PROXY"], "example.com")
+        self.assertNotIn("no_proxy", env)
+        # "*" already exempts every host.
+        _, env = self.command(
+            "codex", env={"http_proxy": "http://proxy:3128", "NO_PROXY": "*"}
+        )
+        self.assertNotIn("no_proxy", env)
 
     def test_missing_clients_have_actionable_install_message(self):
         for name in clients.INSTALL_URLS:

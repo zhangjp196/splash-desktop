@@ -52,7 +52,9 @@ SERVER_FILES = (
     "chat_templates.py",
     "judgments.py",
     "diagnostics.py",
-    "api_shapes.py",
+    "chat_messages.py",
+    "routing.py",
+    "request_fields.py",
     "chat_format.py",
     "tool_schema.py",
     "tokenization.py",
@@ -73,8 +75,17 @@ SERVER_FILES = (
     "thinking.py",
     "schema_validation.py",
     "crash_trace.py",
+    "serve_record.py",
     "chat.html",
     "favicon.svg",
+)
+# How each API dialect answers (server/dialects).
+DIALECT_FILES = (
+    "__init__.py",
+    "anthropic.py",
+    "openai.py",
+    "responses.py",
+    "scoring.py",
 )
 CHAT_ASSET_FILES = (
     "markdown-it-15.0.2.min.js",
@@ -133,6 +144,7 @@ def stage_runtime(destination, version):
         ("install", INSTALL_FILES),
         ("install/completions", COMPLETION_FILES),
         ("server", SERVER_FILES),
+        ("server/dialects", DIALECT_FILES),
         ("server/chat-assets", CHAT_ASSET_FILES),
         ("engine", ENGINE_FILES),
     ):

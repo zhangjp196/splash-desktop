@@ -283,6 +283,14 @@ std::unique_ptr<RuntimeBootstrap> RuntimeBootstrap::start(
   } catch (const RuntimeResourcesError &error) {
     throw RuntimeBootstrapError(error);
   }
+  // A decode gap counts the SSD as its cause when the readers moved during
+  // it, whatever they read for.
+  if (!config.nativeLoop.engine.ssdReadSerial) {
+    const std::shared_ptr<model::SsdReaders> readers = resources->readers();
+    config.nativeLoop.engine.ssdReadSerial = [readers] {
+      return readers->readSerial();
+    };
+  }
 
   RuntimeBootstrapReport base = reportForPlan(resources->memoryPlan());
   const uint32_t planContext =

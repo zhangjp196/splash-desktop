@@ -11,6 +11,7 @@ from unittest import mock
 
 from dev.tests import server_fixtures as fixtures
 from server import frontend
+from server.dialects import responses as responses_dialect
 
 
 class ResponseLifecycleTests(unittest.TestCase):
@@ -77,7 +78,8 @@ class ResponseLifecycleTests(unittest.TestCase):
         harness.app.response_store.put(
             {"id": "resp_previous"}, [{"role": "user", "content": "old history"}]
         )
-        job = harness.app.prepare_responses(
+        job = responses_dialect.prepare(
+            harness.app,
             {
                 "input": "continue",
                 "previous_response_id": "resp_previous",
@@ -99,8 +101,11 @@ class ResponseLifecycleTests(unittest.TestCase):
             "content": [{"type": "output_text", "text": "answer"}],
         }
         body = {"input": [dict(question)]}
-        job = harness.app.prepare_responses(
-            body, deadline=fixtures.FOREVER, reserve_input=fixtures.reserve_unbounded
+        job = responses_dialect.prepare(
+            harness.app,
+            body,
+            deadline=fixtures.FOREVER,
+            reserve_input=fixtures.reserve_unbounded,
         )
         output = [copy.deepcopy(answer)]
         harness.app.persist_response(job, {"id": "resp_stored"}, output)

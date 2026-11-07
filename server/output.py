@@ -26,6 +26,10 @@ TOOL_ARGUMENT_DELTA_CHARS = 16 * 1024
 # Responses carry arguments as strings, read on their own.
 MAX_ARGUMENTS_DEPTH = json_codec.MAX_DEPTH - 5
 _SURROGATE = re.compile("[\ud800-\udfff]")
+# The longest stop sequence a request may carry: StopSearch keeps a table entry
+# of about 40 bytes and a match step for every character of each stop, so
+# four stops this long hold about 3 MB.
+MAX_STOP_CHARACTERS = 16 * 1024
 
 
 def hold_partial(text, *markers):
@@ -39,6 +43,59 @@ def hold_partial(text, *markers):
         ):
             return text[:-length], text[-length:]
     return text, ""
+
+
+class StopSearch:
+    """The first of a request's stop sequences that the output contains, as
+    the output arrives, and how much of its end may begin one. Each stop
+    keeps the length of the output's longest end that begins it (a
+    Knuth-Morris-Pratt state), so a character costs the same however long
+    the stops are: rescanning every length of a 50,000-character stop on
+    every token would copy about a gigabyte per token."""
+
+    def __init__(self, stops):
+        self.stops = tuple(stops)
+        self._fallbacks = [_prefix_function(stop) for stop in self.stops]
+        self._states = [0] * len(self.stops)
+
+    def search(self, text):
+        """The stop that the output, `text` appended, contains first, and how
+        many characters before the end of `text` it begins (more than
+        `text` holds where it began earlier); None where it contains none."""
+        first = None
+        for index, (stop, fallback) in enumerate(zip(self.stops, self._fallbacks)):
+            state = self._states[index]
+            for position, character in enumerate(text):
+                while state and stop[state] != character:
+                    state = fallback[state - 1]
+                if stop[state] == character:
+                    state += 1
+                if state == len(stop):
+                    back = len(text) - position - 1 + len(stop)
+                    if first is None or back > first[1]:
+                        first = (stop, back)
+                    break
+            self._states[index] = state
+        return first
+
+    @property
+    def held(self):
+        """The length of the output's longest end that begins a stop."""
+        return max(self._states)
+
+
+def _prefix_function(text):
+    """For each prefix of `text`, the length of its longest proper end that
+    is also a prefix of `text`."""
+    lengths = [0] * len(text)
+    length = 0
+    for index in range(1, len(text)):
+        while length and text[index] != text[length]:
+            length = lengths[length - 1]
+        if text[index] == text[length]:
+            length += 1
+        lengths[index] = length
+    return lengths
 
 
 class ReasoningSplitter:
@@ -188,7 +245,7 @@ class StreamingToolCallProjector:
     any other order. The arguments' close or the call's close ends the call,
     and the </tool_call> after an arguments' close (Qwen's </function>) may
     be left out. Names lose the space around them; a call that names no
-    function is dropped, other text inside a call is dropped, and a repeated
+    function is its text, other text inside a call is dropped, and a repeated
     parameter keeps its first value, which may have streamed. A value whose
     schema gives it no type, or the type string alone, is its text and
     streams as it is written; any other converts at its end by the types its
@@ -275,13 +332,17 @@ class StreamingToolCallProjector:
             )
 
     def _begin_call(self, name, events):
+        if not name.strip(NAME_SPACE):
+            # Nothing of a call has streamed yet: the opening, and the text
+            # after it, are content.
+            self.state = "content"
+            self._emit_content(self.syntax.call_open + name, events)
+            return
         self.state = "arguments"
         self.argument_fragments = []
         self.parameter_count = 0
         self.parameter_names = set()
         name = name.strip(NAME_SPACE)
-        if not name:
-            return
         if not self.streamed_count:
             # Whitespace before the first text only framed the calls.
             self.content_fragments.clear()

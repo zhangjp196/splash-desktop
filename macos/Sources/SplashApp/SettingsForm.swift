@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 /// a short description, so the rail explains the form instead of only naming
 /// it.
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case model, server, schedule, memory, cache, request
+    case model, serving, storage
 
     var id: String { rawValue }
 
@@ -16,22 +16,16 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .model: return "cube.box"
-        case .server: return "network"
-        case .schedule: return "speedometer"
-        case .memory: return "memorychip"
-        case .cache: return "internaldrive"
-        case .request: return "text.bubble"
+        case .serving: return "cpu"
+        case .storage: return "internaldrive"
         }
     }
 
     var tint: Color {
         switch self {
         case .model: return SplashPalette.blue
-        case .server: return SplashPalette.cyan
-        case .schedule: return SplashPalette.amber
-        case .memory: return SplashPalette.mint
-        case .cache: return SplashPalette.violet
-        case .request: return SplashPalette.rose
+        case .serving: return SplashPalette.mint
+        case .storage: return SplashPalette.violet
         }
     }
 }
@@ -43,7 +37,18 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 struct SettingsEditor: View {
     @Binding var settings: ServerSettings
     let baseline: ServerSettings
-    @State private var section: SettingsSection = .model
+    @State private var section: SettingsSection
+
+    init(settings: Binding<ServerSettings>, baseline: ServerSettings, section: SettingsSection = .model) {
+        self._settings = settings
+        self.baseline = baseline
+        self._section = State(initialValue: section)
+    }
+
+    /// What the picked model can use, so the form shows only those options.
+    private var profile: ModelProfile {
+        ModelProfile.of(modelID: settings.modelID, directory: settings.modelDirectory)
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -109,27 +114,33 @@ struct SettingsEditor: View {
             return s.modelMode != b.modelMode || s.modelID != b.modelID
                 || s.modelDirectory != b.modelDirectory
                 || s.draftDirectory != b.draftDirectory || s.mmproj != b.mmproj
-        case .server:
-            return s.port != b.port || s.lanAccess != b.lanAccess
-                || s.allowedHosts != b.allowedHosts || s.kvFormat != b.kvFormat
+                || s.port != b.port || s.lanAccess != b.lanAccess
+                || s.allowedHosts != b.allowedHosts || s.allowedOrigins != b.allowedOrigins
+                || s.apiKey != b.apiKey || s.servedNames != b.servedNames
+                || s.announceServedName != b.announceServedName
+        case .serving:
+            return s.kvFormat != b.kvFormat || s.stateFormat != b.stateFormat
                 || s.neuralEngine != b.neuralEngine || s.languageOnly != b.languageOnly
-        case .schedule:
-            return s.maxConcurrency != b.maxConcurrency || s.verifyRows != b.verifyRows
-        case .memory:
-            return s.maxMemory != b.maxMemory || s.maxContext != b.maxContext
+                || s.maxMemory != b.maxMemory || s.maxContext != b.maxContext
                 || s.expertMemory != b.expertMemory || s.pleMemory != b.pleMemory
                 || s.sparseKvMemory != b.sparseKvMemory
-        case .cache:
+                || s.maxConcurrency != b.maxConcurrency || s.verifyRows != b.verifyRows
+                || s.decodeShare != b.decodeShare
+                || s.maxRequestSize != b.maxRequestSize
+                || s.requestTimeout != b.requestTimeout
+                || s.maxImagePixels != b.maxImagePixels
+                || s.allowIdleSleep != b.allowIdleSleep
+                || s.thinkingTokenBudget != b.thinkingTokenBudget
+                || s.thinkingEndText != b.thinkingEndText
+                || s.reasoningEffort != b.reasoningEffort
+        case .storage:
             return s.residencySeconds != b.residencySeconds || s.diskCache != b.diskCache
+                || s.cacheIdleSpill != b.cacheIdleSpill || s.cacheDir != b.cacheDir
                 || s.maxCacheDisk != b.maxCacheDisk
                 || s.maxCacheDiskWrites != b.maxCacheDiskWrites
                 || s.cacheEvictionPreset != b.cacheEvictionPreset
                 || s.cacheEvictionPolicy != b.cacheEvictionPolicy
                 || s.cacheEvictionProtect != b.cacheEvictionProtect
-        case .request:
-            return s.apiKey != b.apiKey || s.servedNames != b.servedNames
-                || s.maxRequestSize != b.maxRequestSize
-                || s.reasoningEffort != b.reasoningEffort
         }
     }
 
@@ -165,12 +176,15 @@ struct SettingsEditor: View {
 
     @ViewBuilder private var page: some View {
         switch section {
-        case .model: modelPage
-        case .server: serverPage
-        case .schedule: schedulePage
-        case .memory: memoryPage
-        case .cache: cachePage
-        case .request: requestPage
+        case .model:
+            VStack(alignment: .leading, spacing: 14) {
+                modelPage
+                endpointCard
+                endpointNote
+                accessCard
+            }
+        case .serving: servingPage
+        case .storage: storagePage
         }
     }
 
@@ -263,22 +277,24 @@ struct SettingsEditor: View {
                         prompt: L10n.string("field.draft.prompt")
                     )
                 }
-                rowDivider
-                SettingRow(
-                    title: L10n.string("field.mmproj"),
-                    help: L10n.string("field.mmproj.prompt"),
-                    controlWidth: 300
-                ) {
-                    DirectoryPicker(
-                        path: $settings.mmproj,
-                        prompt: L10n.string("field.mmproj.prompt"),
-                        files: true
-                    )
+                if profile.vision {
+                    rowDivider
+                    SettingRow(
+                        title: L10n.string("field.mmproj"),
+                        help: L10n.string("field.mmproj.prompt"),
+                        controlWidth: 300
+                    ) {
+                        DirectoryPicker(
+                            path: $settings.mmproj,
+                            prompt: L10n.string("field.mmproj.prompt"),
+                            files: true
+                        )
+                    }
+                    .disabled(settings.languageOnly)
+                    .opacity(settings.languageOnly ? 0.55 : 1)
                 }
-                .disabled(settings.languageOnly)
-                .opacity(settings.languageOnly ? 0.55 : 1)
             }
-            if settings.languageOnly {
+            if profile.vision && settings.languageOnly {
                 EditorNote(
                     text: L10n.string("help.mmproj.text_only"),
                     tone: SplashPalette.muted,
@@ -288,219 +304,310 @@ struct SettingsEditor: View {
         }
     }
 
-    // MARK: Server
+    // MARK: Endpoint and access
 
-    @ViewBuilder private var serverPage: some View {
+    private var endpointCard: some View {
         EditorCard(
             title: L10n.string("config.group.endpoint"),
             systemImage: "network",
             tint: SplashPalette.cyan
         ) {
-            SettingRow(
-                title: L10n.string("field.port"),
-                help: L10n.string("help.port")
-            ) {
-                EditorNumberField(value: $settings.port, range: 1...65535, width: 92)
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.port"), help: L10n.string("help.port")) {
+                    EditorNumberField(value: $settings.port, range: 1...65535, width: 88)
+                }
+                FieldColumn(title: L10n.string("field.lan_access"), help: L10n.string("help.lan_access")) {
+                    Toggle("", isOn: $settings.lanAccess)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.cyan)
+                }
             }
             rowDivider
-            SettingRow(
-                title: L10n.string("field.lan_access"),
-                help: L10n.string("help.lan_access")
-            ) {
-                Toggle("", isOn: $settings.lanAccess)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .tint(SplashPalette.cyan)
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.allowed_hosts"), help: L10n.string("help.allowed_hosts")) {
+                    EditorField(text: $settings.allowedHosts, prompt: "studio.local, proxy.example")
+                }
+                FieldColumn(title: L10n.string("field.allowed_origins"), help: L10n.string("help.allowed_origins")) {
+                    EditorField(text: $settings.allowedOrigins, prompt: "tauri://localhost")
+                }
             }
-            rowDivider
+        }
+    }
+
+    private var endpointNote: some View {
+        Group {
+            if settings.lanAccess && settings.apiKey.isEmpty {
+                EditorNote(text: L10n.string("help.lan_access.no_key"))
+            }
+        }
+    }
+
+    private var accessCard: some View {
+        EditorCard(
+            title: L10n.string("config.group.access"),
+            systemImage: "key",
+            tint: SplashPalette.rose
+        ) {
             SettingRow(
-                title: L10n.string("field.allowed_hosts"),
-                help: L10n.string("help.allowed_hosts"),
+                title: L10n.string("field.api_key"),
+                help: L10n.string("help.api_key"),
                 controlWidth: 300
             ) {
-                EditorField(text: $settings.allowedHosts, prompt: "studio.local, proxy.example")
+                SecretField(text: $settings.apiKey)
+            }
+            rowDivider
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.served_names"), help: L10n.string("help.served_names")) {
+                    EditorField(text: $settings.servedNames, prompt: "alias-a, alias-b")
+                }
+                FieldColumn(title: L10n.string("field.announce_served_name"), help: L10n.string("help.announce_served_name")) {
+                    Toggle("", isOn: $settings.announceServedName)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.rose)
+                        .disabled(settings.servedNames.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
             }
         }
+    }
 
-        if settings.lanAccess && settings.apiKey.isEmpty {
-            EditorNote(text: L10n.string("help.lan_access.no_key"))
-        }
+    // MARK: Runtime
 
+    private var runtimeCard: some View {
         EditorCard(
             title: L10n.string("config.group.runtime"),
             systemImage: "cpu",
             tint: SplashPalette.mint
         ) {
-            SettingRow(
-                title: L10n.string("field.kv"),
-                help: L10n.string("help.kv"),
-                controlWidth: 286
-            ) {
-                Picker("", selection: $settings.kvFormat) {
-                    Text(verbatim: L10n.string("kv.int8")).tag("int8")
-                    Text(verbatim: L10n.string("kv.int4")).tag("int4")
-                    Text(verbatim: L10n.string("kv.k8v4")).tag("k8v4")
-                    Text(verbatim: L10n.string("kv.bf16")).tag("bf16")
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.kv"), help: L10n.string("help.kv")) {
+                    Picker("", selection: $settings.kvFormat) {
+                        Text(verbatim: L10n.string("kv.int8")).tag("int8")
+                        Text(verbatim: L10n.string("kv.int4")).tag("int4")
+                        Text(verbatim: L10n.string("kv.k8v4")).tag("k8v4")
+                        Text(verbatim: L10n.string("kv.bf16")).tag("bf16")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                FieldColumn(title: L10n.string("field.state_format"), help: L10n.string("help.state_format")) {
+                    Picker("", selection: $settings.stateFormat) {
+                        Text(verbatim: L10n.string("state.fp32")).tag("fp32")
+                        Text(verbatim: L10n.string("state.bf16")).tag("bf16")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
             }
             rowDivider
-            SettingRow(
-                title: L10n.string("field.neural_engine"),
-                help: L10n.string("help.neural_engine")
-            ) {
-                Toggle("", isOn: $settings.neuralEngine)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .tint(SplashPalette.mint)
-            }
-            rowDivider
-            SettingRow(
-                title: L10n.string("field.language_only"),
-                help: L10n.string("help.language_only")
-            ) {
-                Toggle("", isOn: $settings.languageOnly)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .tint(SplashPalette.mint)
-            }
-        }
-    }
-
-    // MARK: Schedule
-
-    private var schedulePage: some View {
-        EditorCard(
-            title: L10n.string("config.group.pacing"),
-            systemImage: "speedometer",
-            tint: SplashPalette.amber
-        ) {
-            SettingRow(
-                title: L10n.string("field.max_concurrency"),
-                help: L10n.string("help.max_concurrency")
-            ) {
-                HStack(spacing: 7) {
-                    EditorNumberField(value: $settings.maxConcurrency, range: 1...4096, width: 82)
-                    Stepper("", value: $settings.maxConcurrency, in: 1...4096)
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.neural_engine"), help: L10n.string("help.neural_engine")) {
+                    Toggle("", isOn: $settings.neuralEngine)
                         .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.mint)
                 }
-            }
-            rowDivider
-            SettingRow(
-                title: L10n.string("field.verify_rows"),
-                help: L10n.string("help.verify_rows"),
-                controlWidth: 270
-            ) {
-                Picker("", selection: $settings.verifyRows) {
-                    Text(verbatim: L10n.string("verify.auto")).tag("auto")
-                    Text(verbatim: L10n.string("verify.all")).tag("all")
+                if profile.vision {
+                    FieldColumn(title: L10n.string("field.language_only"), help: L10n.string("help.language_only")) {
+                        Toggle("", isOn: $settings.languageOnly)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .tint(SplashPalette.mint)
+                    }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
             }
         }
     }
 
-    // MARK: Memory
+    // MARK: Serving
 
-    @ViewBuilder private var memoryPage: some View {
+    private var servingPage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            runtimeCard
+            budgetCard
+            if profile.experts || profile.ple || profile.sparseKv {
+                streamedCard
+            }
+            scheduleCard
+            payloadCard
+        }
+    }
+
+    private var budgetCard: some View {
         EditorCard(
             title: L10n.string("config.group.budget"),
             systemImage: "memorychip",
             tint: SplashPalette.mint
         ) {
-            SettingRow(
-                title: L10n.string("field.max_memory"),
-                help: L10n.string("help.max_memory")
-            ) {
-                SizeField(text: $settings.maxMemory, prompt: "28G")
-            }
-            rowDivider
-            SettingRow(
-                title: L10n.string("field.max_context"),
-                help: L10n.string("help.max_context")
-            ) {
-                EditorField(text: $settings.maxContext, prompt: "204800", monospaced: true)
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.max_memory"), help: L10n.string("help.max_memory")) {
+                    SizeField(text: $settings.maxMemory, prompt: "28G")
+                }
+                FieldColumn(title: L10n.string("field.max_context"), help: L10n.string("help.max_context")) {
+                    EditorField(text: $settings.maxContext, prompt: "204800", monospaced: true)
+                }
             }
         }
+    }
 
+    private var streamedCard: some View {
         EditorCard(
             title: L10n.string("config.group.streamed"),
             systemImage: "square.stack.3d.down.right",
             tint: SplashPalette.violet
         ) {
-            SettingRow(
-                title: L10n.string("field.expert_memory"),
-                help: L10n.string("help.expert_memory")
-            ) {
-                SizeField(text: $settings.expertMemory, prompt: L10n.string("size.auto"))
-            }
-            rowDivider
-            SettingRow(
-                title: L10n.string("field.ple_memory"),
-                help: L10n.string("help.ple_memory")
-            ) {
-                SizeField(text: $settings.pleMemory, prompt: L10n.string("size.auto"))
-            }
-            rowDivider
-            SettingRow(
-                title: L10n.string("field.sparse_kv_memory"),
-                help: L10n.string("help.sparse_kv_memory")
-            ) {
-                SizeField(text: $settings.sparseKvMemory, prompt: L10n.string("size.auto"))
+            SettingColumns {
+                if profile.experts {
+                    FieldColumn(title: L10n.string("field.expert_memory"), help: L10n.string("help.expert_memory")) {
+                        SizeField(text: $settings.expertMemory, prompt: L10n.string("size.auto"))
+                    }
+                }
+                if profile.ple {
+                    FieldColumn(title: L10n.string("field.ple_memory"), help: L10n.string("help.ple_memory")) {
+                        SizeField(text: $settings.pleMemory, prompt: L10n.string("size.auto"))
+                    }
+                }
+                if profile.sparseKv {
+                    FieldColumn(title: L10n.string("field.sparse_kv_memory"), help: L10n.string("help.sparse_kv_memory")) {
+                        SizeField(text: $settings.sparseKvMemory, prompt: L10n.string("size.auto"))
+                    }
+                }
             }
         }
     }
 
-    // MARK: Cache
+    private var scheduleCard: some View {
+        EditorCard(
+            title: L10n.string("config.group.pacing"),
+            systemImage: "speedometer",
+            tint: SplashPalette.amber
+        ) {
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.max_concurrency"), help: L10n.string("help.max_concurrency")) {
+                    HStack(spacing: 7) {
+                        EditorNumberField(value: $settings.maxConcurrency, range: 1...4096, width: 72)
+                        Stepper("", value: $settings.maxConcurrency, in: 1...4096)
+                            .labelsHidden()
+                    }
+                }
+                FieldColumn(title: L10n.string("field.verify_rows"), help: L10n.string("help.verify_rows")) {
+                    Picker("", selection: $settings.verifyRows) {
+                        Text(verbatim: L10n.string("verify.auto")).tag("auto")
+                        Text(verbatim: L10n.string("verify.all")).tag("all")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                FieldColumn(title: L10n.string("field.decode_share"), help: L10n.string("help.decode_share")) {
+                    EditorField(text: $settings.decodeShare, prompt: "0.5", monospaced: true)
+                }
+            }
+        }
+    }
 
-    @ViewBuilder private var cachePage: some View {
+    private var payloadCard: some View {
+        EditorCard(
+            title: L10n.string("config.group.payload"),
+            systemImage: "doc.text",
+            tint: SplashPalette.cyan
+        ) {
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.max_request_size"), help: L10n.string("help.max_request_size")) {
+                    SizeField(text: $settings.maxRequestSize, prompt: "128M")
+                }
+                FieldColumn(title: L10n.string("field.request_timeout"), help: L10n.string("help.request_timeout")) {
+                    EditorField(text: $settings.requestTimeout, prompt: "30m", monospaced: true)
+                }
+                if profile.vision {
+                    FieldColumn(title: L10n.string("field.max_image_pixels"), help: L10n.string("help.max_image_pixels")) {
+                        EditorField(text: $settings.maxImagePixels, prompt: "4194304", monospaced: true)
+                    }
+                }
+            }
+            rowDivider
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.allow_idle_sleep"), help: L10n.string("help.allow_idle_sleep")) {
+                    Toggle("", isOn: $settings.allowIdleSleep)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.cyan)
+                }
+                if profile.thinking {
+                    FieldColumn(title: L10n.string("field.reasoning_effort"), help: L10n.string("help.reasoning_effort")) {
+                        Picker("", selection: $settings.reasoningEffort) {
+                            Text(verbatim: L10n.string("reasoning.default")).tag("")
+                            ForEach(ServerSettings.reasoningEfforts, id: \.self) { effort in
+                                Text(verbatim: effort).tag(effort)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                    }
+                }
+            }
+            if profile.thinking {
+                rowDivider
+                SettingColumns {
+                    FieldColumn(title: L10n.string("field.thinking_token_budget"), help: L10n.string("help.thinking_token_budget")) {
+                        EditorField(text: $settings.thinkingTokenBudget, prompt: "4096", monospaced: true)
+                    }
+                    FieldColumn(title: L10n.string("field.thinking_end_text"), help: L10n.string("help.thinking_end_text")) {
+                        EditorField(text: $settings.thinkingEndText, prompt: L10n.string("thinking_end.prompt"))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Storage
+
+    private var storagePage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            idleCard
+            diskCard
+        }
+    }
+
+    private var idleCard: some View {
         EditorCard(
             title: L10n.string("config.group.idle"),
             systemImage: "moon.zzz",
             tint: SplashPalette.violet
         ) {
-            SettingRow(
-                title: L10n.string("field.residency"),
-                help: L10n.string("help.residency")
-            ) {
-                EditorField(
-                    text: $settings.residencySeconds,
-                    prompt: "10",
-                    monospaced: true,
-                    suffix: L10n.string("unit.seconds")
-                )
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.residency"), help: L10n.string("help.residency")) {
+                    EditorField(
+                        text: $settings.residencySeconds,
+                        prompt: "10",
+                        monospaced: true,
+                        suffix: L10n.string("unit.seconds")
+                    )
+                }
+                FieldColumn(title: L10n.string("field.cache_idle_spill"), help: L10n.string("help.cache_idle_spill")) {
+                    EditorField(text: $settings.cacheIdleSpill, prompt: "30", monospaced: true)
+                }
             }
         }
+    }
 
+    private var diskCard: some View {
         EditorCard(
             title: L10n.string("config.group.disk"),
             systemImage: "internaldrive",
             tint: SplashPalette.violet
         ) {
-            SettingRow(
-                title: L10n.string("field.disk_cache"),
-                help: L10n.string("help.disk_cache")
-            ) {
-                Toggle("", isOn: $settings.diskCache)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .tint(SplashPalette.violet)
-            }
-            if settings.diskCache {
-                rowDivider
-                SettingRow(
-                    title: L10n.string("field.cache_quota"),
-                    help: L10n.string("help.cache_quota")
-                ) {
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.disk_cache"), help: L10n.string("help.disk_cache")) {
+                    Toggle("", isOn: $settings.diskCache)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.violet)
+                }
+                FieldColumn(title: L10n.string("field.cache_quota"), help: L10n.string("help.cache_quota")) {
                     SizeField(text: $settings.maxCacheDisk, prompt: "16G")
                 }
-                rowDivider
-                SettingRow(
-                    title: L10n.string("field.cache_writes"),
-                    help: L10n.string("help.cache_writes")
-                ) {
+                FieldColumn(title: L10n.string("field.cache_writes"), help: L10n.string("help.cache_writes")) {
                     SizeField(text: $settings.maxCacheDiskWrites, prompt: "32G")
                 }
             }
@@ -517,90 +624,42 @@ struct SettingsEditor: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(maxWidth: .infinity, alignment: .trailing)
             }
             if settings.cacheEvictionPreset == "custom" {
                 rowDivider
-                SettingRow(title: L10n.string("field.cache_policy")) {
-                    Picker("", selection: $settings.cacheEvictionPolicy) {
-                        Text(verbatim: L10n.string("eviction.policy.lru")).tag("lru")
-                        Text(verbatim: L10n.string("eviction.policy.fifo")).tag("fifo")
-                        Text(verbatim: L10n.string("eviction.policy.lfu")).tag("lfu")
-                        Text(verbatim: L10n.string("eviction.policy.largest")).tag("largest")
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-                rowDivider
-                SettingRow(title: L10n.string("field.cache_protect")) {
-                    Picker("", selection: $settings.cacheEvictionProtect) {
-                        ForEach(0...8, id: \.self) { count in
-                            Text(verbatim: count == 0
-                                ? L10n.string("eviction.protect.off")
-                                : String(count))
-                                .tag(count)
+                SettingColumns {
+                    FieldColumn(title: L10n.string("field.cache_policy")) {
+                        Picker("", selection: $settings.cacheEvictionPolicy) {
+                            Text(verbatim: L10n.string("eviction.policy.lru")).tag("lru")
+                            Text(verbatim: L10n.string("eviction.policy.fifo")).tag("fifo")
+                            Text(verbatim: L10n.string("eviction.policy.lfu")).tag("lfu")
+                            Text(verbatim: L10n.string("eviction.policy.largest")).tag("largest")
                         }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    FieldColumn(title: L10n.string("field.cache_protect")) {
+                        Picker("", selection: $settings.cacheEvictionProtect) {
+                            ForEach(0...8, id: \.self) { count in
+                                Text(verbatim: count == 0
+                                    ? L10n.string("eviction.protect.off")
+                                    : String(count))
+                                    .tag(count)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                    }
                 }
             }
-        }
-    }
-
-    // MARK: Requests
-
-    private var requestPage: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            EditorCard(
-                title: L10n.string("config.group.access"),
-                systemImage: "key",
-                tint: SplashPalette.rose
-            ) {
-                SettingRow(
-                    title: L10n.string("field.api_key"),
-                    help: L10n.string("help.api_key"),
-                    controlWidth: 300
-                ) {
-                    SecretField(text: $settings.apiKey)
-                }
+            if settings.diskCache {
                 rowDivider
                 SettingRow(
-                    title: L10n.string("field.served_names"),
-                    help: L10n.string("help.served_names"),
+                    title: L10n.string("field.cache_dir"),
+                    help: L10n.string("help.cache_dir"),
                     controlWidth: 300
                 ) {
-                    EditorField(text: $settings.servedNames, prompt: "alias-a, alias-b")
-                }
-            }
-
-            EditorCard(
-                title: L10n.string("config.group.payload"),
-                systemImage: "doc.text",
-                tint: SplashPalette.cyan
-            ) {
-                SettingRow(
-                    title: L10n.string("field.max_request_size"),
-                    help: L10n.string("help.max_request_size")
-                ) {
-                    SizeField(text: $settings.maxRequestSize, prompt: "128M")
-                }
-                rowDivider
-                SettingRow(
-                    title: L10n.string("field.reasoning_effort"),
-                    help: L10n.string("help.reasoning_effort")
-                ) {
-                    Picker("", selection: $settings.reasoningEffort) {
-                        Text(verbatim: L10n.string("reasoning.default")).tag("")
-                        ForEach(ServerSettings.reasoningEfforts, id: \.self) { effort in
-                            Text(verbatim: effort).tag(effort)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    EditorField(text: $settings.cacheDir, prompt: L10n.string("cache_dir.prompt"))
                 }
             }
         }
@@ -787,6 +846,47 @@ private struct EditorCard<Content: View>: View {
     }
 }
 
+/// A row of two or three controls, each labelled above its value: the form
+/// uses these where a single setting's own row would waste the width.
+private struct SettingColumns<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            content
+        }
+        .padding(.vertical, 9)
+    }
+}
+
+/// One labelled control in a SettingColumns row. Its title and explanation
+/// sit above the control, so several read as one band rather than a form.
+private struct FieldColumn<Control: View>: View {
+    let title: String
+    var help: String?
+    @ViewBuilder var control: Control
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 4) {
+                Text(title)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(SplashPalette.muted)
+                    .lineLimit(1)
+                if let help, !help.isEmpty {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 9))
+                        .foregroundStyle(SplashPalette.faint)
+                        .help(help)
+                }
+            }
+            control
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// A labelled row: the name and its explanation on the left, the control on
 /// the right at a shared width so the form scans as a column.
 private struct SettingRow<Control: View>: View {
@@ -798,8 +898,16 @@ private struct SettingRow<Control: View>: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 12.5, weight: .medium))
+                HStack(spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: .medium))
+                    if let help, !help.isEmpty {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(SplashPalette.faint)
+                            .help(help)
+                    }
+                }
                 if let help, !help.isEmpty {
                     Text(help)
                         .font(.system(size: 10.5))

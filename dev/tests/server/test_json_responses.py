@@ -27,6 +27,7 @@ from dev.tests.server_fixtures import (
 )
 from server import frontend, json_codec
 from server import server as api
+from server.dialects import anthropic, openai, responses
 
 TEXT = '中文 café e\u0301 🌍 "quoted" C:\\Users\\file\n\r\t\x00 NEL\x85 LS\u2028 PS\u2029 end'
 
@@ -254,8 +255,9 @@ class JsonResponseTests(unittest.TestCase):
 
     def test_nonfinite_response_failure_is_request_scoped(self):
         harness = self.harness()
+        dialects = (openai, responses, anthropic)
         functions = ("completion_response", "responses_response", "anthropic_response")
-        for path, function in zip(PATHS, functions, strict=True):
+        for path, dialect, function in zip(PATHS, dialects, functions, strict=True):
             for stream in (False, True):
                 with (
                     self.subTest(path=path, stream=stream),
@@ -278,7 +280,7 @@ class JsonResponseTests(unittest.TestCase):
                         )
                     else:
                         context = mock.patch.object(
-                            api, function, return_value={"value": math.nan}
+                            dialect, function, return_value={"value": math.nan}
                         )
                     with context:
                         status, _, payload = harness.request(

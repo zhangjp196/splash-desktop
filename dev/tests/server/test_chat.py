@@ -68,8 +68,8 @@ function createChat(storage = new Map(), writable = true, models = null,
   let scrolls = 0;
   let scrollBehavior;
   for (const id of ['chat', 'form', 'input', 'attachments', 'image-input',
-                   'attach', 'effort', 'api-key', 'send', 'recents', 'new-chat',
-                   'mobile-new', 'menu', 'scrim', 'scroll-bottom', 'sidebar',
+                   'attach', 'effort', 'api-key', 'send', 'context-ring', 'recents',
+                   'new-chat', 'mobile-new', 'menu', 'scrim', 'scroll-bottom', 'sidebar',
                    'sidebar-close', 'sidebar-open', 'credentials']) elements[id] = new Element();
   // Elements the markup hides start hidden, as in a browser.
   for (const [, id] of html.matchAll(/<\w+ id="([^"]+)"[^>]* hidden[ >]/g)) elements[id].hidden = true;
@@ -112,6 +112,7 @@ function createChat(storage = new Map(), writable = true, models = null,
     navigator: {clipboard},
     confirm(message) { dialog.messages.push(message); return dialog.accept; },
     setTimeout: callback => { timers.push(callback); },
+    clearTimeout() {},
     atob: value => Buffer.from(value, 'base64').toString('binary'),
     crypto,
     fetch(url, options) {
@@ -120,6 +121,10 @@ function createChat(storage = new Map(), writable = true, models = null,
         // models answers from the request headers; without it the server is offline.
         return models ? Promise.resolve(models(options.headers))
           : Promise.reject(new Error('offline'));
+      }
+      if (url === '/v1/chat/completions/count_tokens') {
+        // The page counts a draft before sending; the test need not.
+        return Promise.resolve({ok: true, json: async () => ({input_tokens: 1})});
       }
       return new Promise((resolve, reject) => {
         requests.push({url, headers: options.headers, body: JSON.parse(options.body), resolve, reject});

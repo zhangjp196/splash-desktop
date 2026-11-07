@@ -23,7 +23,7 @@ if __name__ == "__main__" and not __package__:
 
 # The options serve shares with the server, in modules of the standard
 # library alone: the launcher runs before .venv exists.
-from server import serve_options
+from server import serve_options, serve_record
 
 from . import clients, paths
 from . import models as model_artifacts
@@ -39,7 +39,11 @@ STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 class LauncherError(RuntimeError):
-    pass
+    """A refusal of the launcher's, of a serve_record kind the app words."""
+
+    def __init__(self, message, kind=serve_record.INTERNAL):
+        super().__init__(message)
+        self.kind = kind
 
 
 class StopSignal(KeyboardInterrupt):
@@ -227,64 +231,90 @@ def serve(args):
                 f"Splash is already serving{_serve_lock_owner(lock)}; "
                 "stop it with Ctrl+C first"
             ) from None
-        selection = model_artifacts.Selection.of(
-            paths.MODELS,
-            args.model,
-            directory=args.model_dir,
-            revision=args.revision,
-            language_only=args.language_only,
-            draft_model=args.draft_model,
-            mmproj=args.mmproj,
-        )
-        lock.seek(0)
-        lock.truncate()
-        json.dump(
-            {"pid": os.getpid(), "model": selection.model, "port": args.port}, lock
-        )
-        lock.flush()
-        # Fail before downloads/builds if another service owns the selected port.
-        # The HTTP server also binds before loading weights, closing the race.
+        record = RUNTIME_DIR / f"serve-{args.port}.json"
         try:
-            _check_port(args.host, args.port)
-        except OSError as error:
-            raise LauncherError(
-                f"cannot bind {args.host}:{args.port}: {error}"
-            ) from None
+            serve_record.starting(record)
+        except serve_record.NotRecorded as error:
+            raise LauncherError(str(error)) from None
+        try:
+            selection = model_artifacts.Selection.of(
+                paths.MODELS,
+                args.model,
+                directory=args.model_dir,
+                revision=args.revision,
+                language_only=args.language_only,
+                draft_model=args.draft_model,
+                mmproj=args.mmproj,
+            )
+            lock.seek(0)
+            lock.truncate()
+            json.dump(
+                {"pid": os.getpid(), "model": selection.model, "port": args.port}, lock
+            )
+            lock.flush()
+            _serve(args, selection, installation, lock, record)
+        except model_artifacts.ModelError as error:
+            serve_record.failed(
+                record, serve_record.failure(serve_record.MODEL, str(error))
+            )
+            raise LauncherError(str(error), serve_record.MODEL) from None
+        except LauncherError as error:
+            serve_record.failed(record, serve_record.failure(error.kind, str(error)))
+            raise
+
+
+def _serve(args, selection, installation, lock, record):
+    """The rest of the launcher's start, once it holds both locks and has
+    recorded that it began: the port, the installation and the exec."""
+    # Fail before downloads/builds if another service owns the selected port.
+    # The HTTP server also binds before loading weights, closing the race.
+    try:
+        _check_port(args.host, args.port)
+    except OSError as error:
+        raise LauncherError(
+            f"cannot bind {args.host}:{args.port}: {error}", serve_record.PORT
+        ) from None
+    try:
         _ensure_installed(selection)
-        # The server package of this installation, from any working
-        # directory: -P keeps the directory, which may hold a package of the
-        # same name, off sys.path, and PYTHONPATH names the root. The server
-        # holds the assembly the selection link names when it starts, and
-        # serves from it until it exits, however an installation advances the
-        # link meanwhile.
-        command = [
-            str(paths.PYTHON),
-            "-u",
-            "-P",
-            "-m",
-            "server.server",
-            str(selection.link),
-            "--model",
-            selection.model,
-            "--binary",
-            str(paths.BINARY),
-            "--port",
-            str(args.port),
-            *serve_options.serve_argv(args),
-        ]
-        environment = dict(
-            os.environ,
-            PYTHONUNBUFFERED="1",
-            TRANSFORMERS_VERBOSITY="error",
-            PYTHONPATH=str(ROOT),
-            **serve_options.serve_environment(args),
-        )
-        os.set_inheritable(installation.fileno(), True)
-        os.set_inheritable(lock.fileno(), True)
-        # The exec resets the handlers; the server unblocks the signals once
-        # its own are in place, past its imports.
-        signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
-        os.execve(command[0], command, environment)
+    except LauncherError as error:
+        error.kind = serve_record.INSTALL
+        raise
+    # The server package of this installation, from any working
+    # directory: -P keeps the directory, which may hold a package of the
+    # same name, off sys.path, and PYTHONPATH names the root. The server
+    # holds the assembly the selection link names when it starts, and
+    # serves from it until it exits, however an installation advances the
+    # link meanwhile.
+    command = [
+        str(paths.PYTHON),
+        "-u",
+        "-P",
+        "-m",
+        "server.server",
+        str(selection.link),
+        "--model",
+        selection.model,
+        "--binary",
+        str(paths.BINARY),
+        "--port",
+        str(args.port),
+        "--serve-record",
+        str(record),
+        *serve_options.serve_argv(args),
+    ]
+    environment = dict(
+        os.environ,
+        PYTHONUNBUFFERED="1",
+        TRANSFORMERS_VERBOSITY="error",
+        PYTHONPATH=str(ROOT),
+        **serve_options.serve_environment(args),
+    )
+    os.set_inheritable(installation.fileno(), True)
+    os.set_inheritable(lock.fileno(), True)
+    # The exec resets the handlers; the server unblocks the signals once
+    # its own are in place, past its imports.
+    signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+    os.execve(command[0], command, environment)
 
 
 def _renders_later_system(port):

@@ -102,6 +102,9 @@ struct ExpertStoreOptions final {
   // The most bytes one arena takes: the device's largest buffer
   // (maxBufferLength) when zero or more.
   uint64_t bufferBytes = 0;
+  // Whether the store may grow and shrink with memory after it is built
+  // (--expert-memory auto). A sized store keeps what it was given.
+  bool elastic = false;
 };
 
 class ExpertStore final : public ops::MoeExpertStream, public WeightMemory {
@@ -123,6 +126,24 @@ public:
   void bind(uint32_t block, ops::BlockMoeWeights &weights);
   void addLoad(metal::CommandGraph &graph, std::span<const ops::MoeLoadPart> parts, uint32_t block) const override;
   [[nodiscard]] ExpertStoreStats stats() const;
+  // The bytes the store holds now, and the least and most it may hold: its
+  // fixed staging and tables plus its arenas at one block's experts or at
+  // every expert the largest buffer takes. An elastic store grows and
+  // shrinks its arenas between those, between commands.
+  [[nodiscard]] uint64_t memoryBytes() const noexcept;
+  [[nodiscard]] uint64_t minimumMemoryBytes() const noexcept;
+  [[nodiscard]] uint64_t maximumMemoryBytes() const noexcept;
+  [[nodiscard]] bool elastic() const noexcept;
+  // Grows or shrinks the arenas toward `bytes`, keeping each size between
+  // its floor and the slots the largest buffer holds, and never dropping a
+  // resident expert: a shrink stops at the highest used slot. Returns the
+  // bytes the store holds after it. False without an elastic store, or while
+  // a command or read-ahead is in flight.
+  uint64_t setMemoryBytes(uint64_t bytes);
+  // Keeps `weights`, which bind() filled, to fill again after an elastic
+  // resize moves the arenas (setMemoryBytes). Call once the weights rest
+  // where the model keeps them, after bind().
+  void attach(uint32_t block, ops::BlockMoeWeights &weights);
   // The arena and the staging, while no command is in flight; restore()
   // takes both back in one part and reads the experts of the sizes of one
   // block again.

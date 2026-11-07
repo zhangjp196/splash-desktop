@@ -14,3 +14,8 @@ app/.build/
 install/download-token
 
 .idea/
+.atlas/
+.codegraph/
+.dsh-tmp/
+.openchamber/
+.cursor/

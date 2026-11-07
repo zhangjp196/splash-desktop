@@ -200,6 +200,11 @@ Qwen4ExpWeights loadQwen4ExpWeights(metal::MetalBackend &backend, Qwen4ExpLayout
           file.finish();
           result.files.push_back(file.record());
         }
+        // The store keeps the blocks' weights to fill again when an elastic
+        // resize moves its arenas.
+        if (experts.store)
+          for (uint32_t index = 0; index < result.layers.size(); ++index)
+            experts.store->attach(index, result.layers[index].ffn);
         return result;
       });
   if (const auto *gguf = std::get_if<std::reference_wrapper<GgufTargetLoader>>(&files))

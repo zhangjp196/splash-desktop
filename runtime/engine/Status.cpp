@@ -1,6 +1,7 @@
 #include "engine/Status.hpp"
 
 #include "engine/Json.hpp"
+#include "engine/MemoryLedger.hpp"
 #include "engine/Protocol.hpp"
 #include "engine/RuntimeResources.hpp"
 #include "metal/abi/ExecutionGeometry.h"
@@ -311,7 +312,6 @@ void appendKvSpill(std::ostringstream &out, const KvSpillStatus &spill, uint64_t
   out << ",\"history_stream\":";
   if (const std::optional<model::KvHistoryStreamStats> &stream = spill.historyStream) {
     out << "{\"commands\":" << stream->commands
-        << ",\"contended_commands\":" << core.scheduler.contendedStreamingPrefillBatches
         << ",\"layers\":" << stream->layers << ",\"pages\":" << stream->pages << ",\"bytes\":" << stream->bytes
         << ",\"staging_bytes\":" << stream->stagingBytes << ",\"buffers\":" << stream->buffers
         << ",\"read_ms\":";
@@ -429,8 +429,35 @@ std::string runtimeStatusJson(
       // bytes above; the pair is what an idle engine's release shows up in.
       << ",\"physical_bytes\":" << metalMemory.hostPhysicalBytes
       << ",\"peak_physical_bytes\":" << metalMemory.peakHostPhysicalBytes
-      << "}"
-      << ",\"memory_governor\":{\"limit_bytes\":" << memoryGovernor.limitBytes
+      << "}";
+  // The ledger's accounts, in the order a reclaim frees them: what the
+  // model rebuilds first, then what can be reused, then requests in use,
+  // and last the floor a start built.
+  MemoryLedger ledger;
+  const uint64_t tableBytes = streamedTable ? streamedTable->cacheBytes : 0;
+  const uint64_t expertsBytes = streamedExperts ? streamedExperts->arenaBytes : 0;
+  const uint64_t blockCacheBytes =
+      kvSpill && kvSpill->blockCache ? kvSpill->blockCache->bytes : 0;
+  const uint64_t imageBytes =
+      executorTelemetry.visionArenaBytes + executorTelemetry.embeddingCacheBytes;
+  const uint64_t kvBytes = core.resources.pool.allocatedBytes;
+  const uint64_t stateBytes = executorTelemetry.stateAllocatedBytes;
+  const auto &budget = plan.breakdown();
+  const uint64_t weightsBytes =
+      budget.targetWeightsBytes + budget.draftWeightsBytes + budget.visionWeightsBytes;
+  const uint64_t known = tableBytes + expertsBytes + blockCacheBytes + imageBytes +
+                         kvBytes + stateBytes + weightsBytes;
+  const uint64_t scratchBytes =
+      metalMemory.allocatedBytes > known ? metalMemory.allocatedBytes - known : 0;
+  ledger.add("streamed_table", MemoryLedgerOrder::Rebuildable, 0, tableBytes);
+  ledger.add("streamed_experts", MemoryLedgerOrder::Rebuildable, 0, expertsBytes);
+  ledger.add("kv_block_cache", MemoryLedgerOrder::Rebuildable, 0, blockCacheBytes);
+  ledger.add("images", MemoryLedgerOrder::Rebuildable, 0, imageBytes);
+  ledger.add("kv", MemoryLedgerOrder::InUse, 0, kvBytes);
+  ledger.add("state", MemoryLedgerOrder::InUse, 0, stateBytes);
+  ledger.add("weights", MemoryLedgerOrder::Floor, weightsBytes, weightsBytes);
+  ledger.add("scratch", MemoryLedgerOrder::Floor, scratchBytes, scratchBytes);
+  out << ",\"memory_governor\":{\"limit_bytes\":" << memoryGovernor.limitBytes
       << ",\"charged_bytes\":" << memoryGovernor.chargedBytes
       << ",\"headroom_bytes\":" << memoryGovernor.headroomBytes
       << ",\"growth_allowed\":" << boolean(memoryGovernor.hostGrowthAllowed)
@@ -443,7 +470,24 @@ std::string runtimeStatusJson(
       << ",\"host_reserve_bytes\":" << memoryGovernor.hostReserveBytes
       << ",\"host_spare_bytes\":" << memoryGovernor.hostSpareBytes
       << ",\"host_spare_reserve_bytes\":" << memoryGovernor.hostSpareReserveBytes
-      << ",\"host_headroom_bytes\":" << memoryGovernor.hostHeadroomBytes << "}"
+      << ",\"host_headroom_bytes\":" << memoryGovernor.hostHeadroomBytes
+      << ",\"accounts\":[";
+  for (size_t index = 0; index < ledger.accounts().size(); ++index) {
+    const MemoryLedgerAccount &account = ledger.accounts()[index];
+    out << (index ? ",{\"name\":\"" : "{\"name\":\"") << account.name << "\"";
+    out << ",\"order\":" << json::quote(memoryLedgerOrderName(account.order))
+        << ",\"floor_bytes\":" << account.floorBytes
+        << ",\"current_bytes\":" << account.currentBytes << '}';
+  }
+  out << "],\"claims\":{";
+  for (size_t cls = 0; cls < kClaimClasses; ++cls) {
+    const ClaimClassSnapshot &claims = memoryGovernor.claims[cls];
+    out << (cls ? ",\"" : "\"") << kClaimClassNames[cls] << "\":{\"granted\":"
+        << claims.granted << ",\"granted_bytes\":" << claims.grantedBytes
+        << ",\"refused\":" << claims.refused << ",\"held\":" << claims.held
+        << ",\"held_bytes\":" << claims.heldBytes << '}';
+  }
+  out << "}}"
       << ",\"memory_audit\":" << memoryAudit.toStatusJson()
       << ",\"weights\":";
   appendWeights(out, weights);
@@ -617,7 +661,8 @@ std::string runtimeStatusJson(
       << scheduler.decodeBatchesByWidth[0]
       << ",\"b2\":" << scheduler.decodeBatchesByWidth[1]
       << ",\"b3\":" << scheduler.decodeBatchesByWidth[2]
-      << ",\"b4\":" << scheduler.decodeBatchesByWidth[3] << "}}";
+      << ",\"b4\":" << scheduler.decodeBatchesByWidth[3]
+      << "},\"replans\":" << core.replans << "}";
   out << ",\"active_requests\":[";
   for (size_t index = 0; index < core.activeRequests.size(); ++index) {
     const engine::ActiveRequestSnapshot &request = core.activeRequests[index];
@@ -641,10 +686,24 @@ std::string runtimeStatusJson(
       << ",\"metrics\":{\"ttft_ms\":{\"p50\":" << metrics.ttftP50Milliseconds
       << ",\"p95\":" << metrics.ttftP95Milliseconds
       << ",\"samples\":" << metrics.ttftSamples
-      << "},\"itl_ms\":{\"p50\":" << metrics.itlP50Milliseconds
+      << "},\"ttft_parts_ms\":{";
+  for (size_t part = 0; part < kTtftParts; ++part) {
+    out << (part ? ",\"" : "\"") << kTtftPartNames[part] << "\":";
+    appendLatency(out, metrics.ttftParts[part]);
+  }
+  out << "},\"itl_ms\":{\"p50\":" << metrics.itlP50Milliseconds
       << ",\"p95\":" << metrics.itlP95Milliseconds
       << ",\"samples\":" << metrics.itlSamples
-      << "},\"prefill_input_tokens\":" << metrics.prefillInputTokens
+      << "},\"decode_gap_ms\":";
+  appendLatency(out, core.scheduler.decodeGap);
+  out << ",\"decode_gap_causes\":{";
+  for (size_t cause = 0; cause < kGapCauses; ++cause) {
+    out << (cause ? ",\"" : "\"") << kGapCauseNames[cause] << "\":{\"gaps\":"
+        << core.decodeGapCauses.gaps[cause] << ",\"ms\":"
+        << core.decodeGapCauses.milliseconds[cause] << '}';
+  }
+  out << ",\"prefill_ms\":" << core.decodeGapCauses.prefillMilliseconds << '}'
+      << ",\"prefill_input_tokens\":" << metrics.prefillInputTokens
       << ",\"prefill_wall_ms\":" << metrics.prefillWallMilliseconds
       << ",\"prefill_tokens_per_second\":" << metrics.prefillTokensPerSecond
       << ",\"decode_output_tokens\":" << metrics.decodeOutputTokens

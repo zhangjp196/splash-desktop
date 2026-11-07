@@ -224,6 +224,11 @@ class DownloadTest(unittest.TestCase):
         self.assertEqual(self.events(), [])
         self.assertIn("Fetching 2 file(s)", self.stdout.getvalue())
 
+    def test_a_download_without_room_on_its_volume_is_refused(self):
+        with mock.patch.object(hub, "_available_bytes", return_value=1):
+            with self.assertRaisesRegex(hub.models.ModelError, "not enough disk space"):
+                self.download()
+
     def test_a_download_of_cached_blobs_reports_nothing(self):
         self.download({"config.json"})
         self.assertEqual(self.stdout.getvalue(), "")

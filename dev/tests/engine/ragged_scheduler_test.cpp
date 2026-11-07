@@ -425,7 +425,7 @@ void testPrefillPassesBoundCommands() {
           "the last pass did not consume the command's rows, or the estimate learned from each pass alone");
   require(scheduler.snapshot().prefillBatches == 1 && scheduler.snapshot().prefillRows == 8192,
           "a command in passes counted more than once");
-  scheduler.setStreamsHistory(1, true);
+  scheduler.setSpillsHistory(1, true);
   plan = *scheduler.next({});
   require(plan.items[0].requestId == 1 && plan.passes == 1, "a lane that streams its history ran passes");
 
@@ -499,12 +499,12 @@ void testStreamingLaneRunsAlone() {
   scheduler.submit(request(3, 500));
   for (uint64_t id = 1; id <= 3; ++id)
     scheduler.resourcesReady(id, 0);
-  scheduler.setStreamsHistory(1, true);
+  scheduler.setSpillsHistory(1, true);
   BatchPlan plan = *scheduler.next({});
   require(plan.width() == 1 && plan.items[0].requestId == 1 && plan.items[0].tokenCount == 100,
           "a streaming leader shared its command");
-  scheduler.setStreamsHistory(1, false);
-  scheduler.setStreamsHistory(2, true);
+  scheduler.setSpillsHistory(1, false);
+  scheduler.setSpillsHistory(2, true);
   plan = *scheduler.next({});
   require(plan.width() == 2 && plan.items[0].requestId == 1 && plan.items[1].requestId == 3,
           "a streaming lane joined a command it did not lead");
@@ -512,7 +512,7 @@ void testStreamingLaneRunsAlone() {
   Scheduler overtaken(0.0);
   overtaken.submit(request(1, 4000));
   overtaken.resourcesReady(1, 0);
-  overtaken.setStreamsHistory(1, true);
+  overtaken.setSpillsHistory(1, true);
   uint64_t id = 2;
   for (; id <= model::ExecutionLimits::maximumBatchWidth; ++id) {
     overtaken.submit(request(id, 100));
@@ -544,7 +544,7 @@ void testContendedStreamingLaneHalvesFromItsGroup() {
     spec.prefillGroupRows = 4 * model::ExecutionLimits::prefillTokenBudget;
     scheduler.submit(spec);
     scheduler.resourcesReady(1, 0);
-    scheduler.setStreamsHistory(1, true);
+    scheduler.setSpillsHistory(1, true);
     if (streamMilliseconds) {
       const BatchPlan streamed = *scheduler.next({});
       completeStreamedPrefill(scheduler, streamed,
@@ -580,7 +580,7 @@ void testStreamEstimateIgnoresCommandsThatReadNothing() {
   spec.prefillGroupRows = 4 * model::ExecutionLimits::prefillTokenBudget;
   scheduler.submit(spec);
   scheduler.resourcesReady(1, 0);
-  scheduler.setStreamsHistory(1, true);
+  scheduler.setSpillsHistory(1, true);
   const BatchPlan unread = *scheduler.next({});
   completePrefill(scheduler, unread, unread.items[0].tokenCount * 0.5);
   const BatchPlan streamed = *scheduler.next({});
@@ -603,10 +603,10 @@ void testStreamWaitStaysOutOfTheCommandEstimate() {
   scheduler.observePrefill(2048, 1024.0);
   scheduler.submit(request(1, 4096));
   scheduler.resourcesReady(1, 0);
-  scheduler.setStreamsHistory(1, true);
+  scheduler.setSpillsHistory(1, true);
   // 3 s of reads beside 2048 rows at 0.5 ms each.
   completeStreamedPrefill(scheduler, *scheduler.next({}), 4024.0, 3000.0, 3000.0);
-  scheduler.setStreamsHistory(1, false);
+  scheduler.setSpillsHistory(1, false);
   scheduler.submit(request(2, 1));
   scheduler.resourcesReady(2, 1);
   completeDecode(scheduler);
@@ -691,7 +691,7 @@ void testDecodeGapAcrossStreamingPrefill() {
   require(scheduler.snapshot().decodeGap.count == 0 &&
               scheduler.snapshot().contendedStreamingPrefillBatches == 0,
           "a gap across an ordinary prefill was recorded");
-  scheduler.setStreamsHistory(2, true);
+  scheduler.setSpillsHistory(2, true);
   completeStreamedPrefill(scheduler, *scheduler.next({}), 3000.0, 2500.0, 2500.0);
   completeDecode(scheduler, false, 40.0);
   const SchedulerSnapshot counts = scheduler.snapshot();

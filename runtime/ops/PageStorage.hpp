@@ -28,9 +28,12 @@ namespace splash::kv {
 // layer's region sits at one offset in every extent that holds it, so its
 // SplashKvLayer serves a Full page and a Slim one alike. Kernels reach a
 // page through its entries in a request's GPU tables, so extents are
-// allocated metal::BufferReach::Addressed: the command queue's residency set
-// keeps them resident for every command buffer. The host reaches the same
-// bytes through the page's spans(). Active requests may overwrite slots at
+// allocated metal::BufferReach::Addressed, and each table names the extents
+// its entries reach as it is written (metal::MetalBackend::setTableReach): a
+// command makes resident only the extents its tables reach, on the encoders
+// that read them, so an extent only the cache holds costs commands nothing.
+// The host reaches the same bytes through the page's spans(). Active
+// requests may overwrite slots at
 // or beyond their logical commit index. Cached KV blocks reference only
 // fully committed pages, which are immutable while shared.
 class PageStorage final : public ExtentStorage {

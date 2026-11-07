@@ -371,7 +371,7 @@ Case makeCase(metal::MetalBackend &backend, uint32_t queryHeads,
                             ids.begin() + firstPage + pageCounts[lane]);
     firstPage += pageCounts[lane];
     data.tables[lane] = allocate(backend, uint64_t{pageCounts[lane]} * sizeof(SplashKvPage));
-    data.pool.writeTable(data.pages[lane], data.tables[lane].contents());
+    data.pool.writeTable(data.pages[lane], data.tables[lane]);
     data.stores[lane] =
         verify ? ops::PagedAttention::verifyParams(historyLengths[lane], pageCounts[lane])
                : ops::PagedAttention::prefillParams(historyLengths[lane], rows, data.stride,
@@ -821,7 +821,7 @@ void checkStagedPrefill(metal::MetalBackend &backend, uint32_t heads, kv::Layout
   for (uint32_t page = 0; page < pages; ++page) stagedPages[page] = staging.pageCount() - 1 - page;
   const metal::MetalBuffer stagedTable = allocate(backend, pages * sizeof(SplashKvPage)),
                            poolTable = allocate(backend, pages * sizeof(SplashKvPage));
-  staging.writeTable(stagedPages, stagedTable.contents());
+  staging.writeTable(stagedPages, stagedTable);
   std::memcpy(poolTable.contents(), data.tables[0].contents(), poolTable.sizeBytes());
   for (uint32_t page = 0; page < chunkFirst; page += 3) {
     static_cast<SplashKvPage *>(poolTable.contents())[page] = SPLASH_KV_PAGE_ABSENT;
@@ -884,7 +884,7 @@ void checkVerifyLocations(metal::MetalBackend &backend, uint32_t heads, kv::Layo
     std::vector<uint32_t> cachePages(cache->pageCount());
     std::iota(cachePages.begin(), cachePages.end(), 0U);
     cacheTable = allocate(backend, cachePages.size() * sizeof(SplashKvPage));
-    cache->writeTable(cachePages, cacheTable.contents());
+    cache->writeTable(cachePages, cacheTable);
     slots.resize(cachePages.size() * kPageBlocks);
     std::iota(slots.begin(), slots.end(), 0U);
     std::shuffle(slots.begin(), slots.end(), std::mt19937(7));

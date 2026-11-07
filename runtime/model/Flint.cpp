@@ -33,6 +33,12 @@ FlintWeights loadFlintWeights(metal::MetalBackend &backend, FlintLayout layout, 
           file.finish();
           result.files.push_back(file.record());
         }
+        // The store keeps the blocks' weights to fill again when an elastic
+        // resize moves its arenas.
+        if (experts.store)
+          for (uint32_t index = 0; index < result.layers.size(); ++index)
+            if (auto *ffn = std::get_if<ops::BlockMoeWeights>(&result.layers[index].ffn))
+              experts.store->attach(layout.moeBlock(index), *ffn);
         readQwenTargetHead(result, layout, gguf, format);
         return result;
       });

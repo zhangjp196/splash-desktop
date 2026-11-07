@@ -198,6 +198,7 @@ public:
   AttentionFixture(metal::MetalBackend &backend, AttentionFixturePlan plan,
                    std::string_view label)
       : plan_(std::move(plan)),
+        backend_(backend),
         base_(backend.allocateBuffer(plan_.bytes, metal::BufferStorage::Shared, label,
                                      metal::BufferReach::Addressed)),
         pages_(HostKvExtents::contiguous(plan_.poolLayout(), plan_.geometry.extentPages,
@@ -233,6 +234,8 @@ public:
     const uint32_t dimensions = plan_.shape.headDimension;
     for (uint32_t lane = 0; lane < plan_.lanes; ++lane) {
       pages_.writeTable(pageIds_[lane], tables_[lane].contents());
+      // The table's entries reach the one allocation all extents share.
+      backend_.setTableReach(tables_[lane], std::array{base_});
       for (uint32_t token = 0; token < plan_.histories[lane]; ++token) {
         if (token % 256 == 0 && stop && stop()) return false;
         for (uint32_t head = 0; head < plan_.shape.kvHeads; ++head) {
@@ -359,6 +362,7 @@ private:
   }
 
   AttentionFixturePlan plan_;
+  metal::MetalBackend &backend_;
   metal::MetalBuffer base_;
   HostKvExtents pages_;
   SplashKvLayer layer_;

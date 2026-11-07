@@ -256,6 +256,7 @@ final class AppModel: ObservableObject {
     @Published var port = ServerSettings.First.port
     @Published var lanAccess = false
     @Published var allowedHosts = ""
+    @Published var allowedOrigins = ""
     @Published var languageOnly = false
     @Published var maxMemory = ServerSettings.First.maxMemory
     @Published var maxContext = ServerSettings.First.maxContext
@@ -264,10 +265,13 @@ final class AppModel: ObservableObject {
     @Published var sparseKvMemory = ""
     @Published var verifyRows = "auto"
     @Published var kvFormat = ServerSettings.First.kvFormat
+    @Published var stateFormat = ServerSettings.First.stateFormat
     @Published var neuralEngine = true
     @Published var apiKey = ""
     @Published var servedNames = ""
     @Published var residencySeconds = ServerSettings.First.residencySeconds
+    @Published var cacheIdleSpill = ""
+    @Published var cacheDir = ""
     @Published var diskCache = ServerSettings.First.diskCache
     @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
     @Published var maxCacheDiskWrites = ServerSettings.First.maxCacheDiskWrites
@@ -275,6 +279,13 @@ final class AppModel: ObservableObject {
     @Published var cacheEvictionPolicy = ServerSettings.First.cacheEvictionPolicy
     @Published var cacheEvictionProtect = ServerSettings.First.cacheEvictionProtect
     @Published var maxRequestSize = ""
+    @Published var requestTimeout = ""
+    @Published var maxImagePixels = ""
+    @Published var decodeShare = ""
+    @Published var allowIdleSleep = false
+    @Published var thinkingTokenBudget = ""
+    @Published var thinkingEndText = ""
+    @Published var announceServedName = false
     @Published var reasoningEffort = ""
     @Published var maxConcurrency = ServerSettings.First.maxConcurrency
 
@@ -418,8 +429,10 @@ final class AppModel: ObservableObject {
         settings.port = port
         settings.lanAccess = lanAccess
         settings.allowedHosts = allowedHosts
+        settings.allowedOrigins = allowedOrigins
         settings.languageOnly = languageOnly
         settings.kvFormat = kvFormat
+        settings.stateFormat = stateFormat
         settings.neuralEngine = neuralEngine
         settings.maxMemory = maxMemory
         settings.maxContext = maxContext
@@ -428,6 +441,8 @@ final class AppModel: ObservableObject {
         settings.sparseKvMemory = sparseKvMemory
         settings.verifyRows = verifyRows
         settings.residencySeconds = residencySeconds
+        settings.cacheIdleSpill = cacheIdleSpill
+        settings.cacheDir = cacheDir
         settings.diskCache = diskCache
         settings.maxCacheDisk = maxCacheDisk
         settings.maxCacheDiskWrites = maxCacheDiskWrites
@@ -435,6 +450,13 @@ final class AppModel: ObservableObject {
         settings.cacheEvictionPolicy = cacheEvictionPolicy
         settings.cacheEvictionProtect = cacheEvictionProtect
         settings.maxRequestSize = maxRequestSize
+        settings.requestTimeout = requestTimeout
+        settings.maxImagePixels = maxImagePixels
+        settings.decodeShare = decodeShare
+        settings.allowIdleSleep = allowIdleSleep
+        settings.thinkingTokenBudget = thinkingTokenBudget
+        settings.thinkingEndText = thinkingEndText
+        settings.announceServedName = announceServedName
         settings.apiKey = apiKey
         settings.servedNames = servedNames
         settings.reasoningEffort = reasoningEffort
@@ -485,8 +507,10 @@ final class AppModel: ObservableObject {
         port = settings.port
         lanAccess = settings.lanAccess
         allowedHosts = settings.allowedHosts
+        allowedOrigins = settings.allowedOrigins
         languageOnly = settings.languageOnly
         kvFormat = settings.kvFormat
+        stateFormat = settings.stateFormat
         neuralEngine = settings.neuralEngine
         maxMemory = settings.maxMemory
         maxContext = settings.maxContext
@@ -495,6 +519,8 @@ final class AppModel: ObservableObject {
         sparseKvMemory = settings.sparseKvMemory
         verifyRows = settings.verifyRows
         residencySeconds = settings.residencySeconds
+        cacheIdleSpill = settings.cacheIdleSpill
+        cacheDir = settings.cacheDir
         diskCache = settings.diskCache
         maxCacheDisk = settings.maxCacheDisk
         maxCacheDiskWrites = settings.maxCacheDiskWrites
@@ -502,6 +528,13 @@ final class AppModel: ObservableObject {
         cacheEvictionPolicy = settings.cacheEvictionPolicy
         cacheEvictionProtect = settings.cacheEvictionProtect
         maxRequestSize = settings.maxRequestSize
+        requestTimeout = settings.requestTimeout
+        maxImagePixels = settings.maxImagePixels
+        decodeShare = settings.decodeShare
+        allowIdleSleep = settings.allowIdleSleep
+        thinkingTokenBudget = settings.thinkingTokenBudget
+        thinkingEndText = settings.thinkingEndText
+        announceServedName = settings.announceServedName
         apiKey = settings.apiKey
         servedNames = settings.servedNames
         reasoningEffort = settings.reasoningEffort
@@ -780,6 +813,7 @@ final class AppModel: ObservableObject {
     /// headless selfcheck reads it too, so a setting the panel added is also
     /// one the command carries.
     func launchArguments(launcherPath: String) -> [String] {
+        let profile = ModelProfile.of(modelID: modelID, directory: modelDirectory)
         var arguments = [launcherPath, "serve"]
         switch modelMode {
         case .upstream:
@@ -792,7 +826,7 @@ final class AppModel: ObservableObject {
             // refuses the two together, and the form keeps the path for the
             // configuration that turns vision back on.
             let projector = mmproj.trimmingCharacters(in: .whitespaces)
-            if !projector.isEmpty && !languageOnly {
+            if !projector.isEmpty && !languageOnly && profile.vision {
                 arguments += ["--mmproj", projector]
             }
         }
@@ -805,20 +839,25 @@ final class AppModel: ObservableObject {
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += ["--allowed-host", trimmed] }
         }
+        for origin in allowedOrigins.split(separator: ",") {
+            let trimmed = origin.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { arguments += ["--allowed-origin", trimmed] }
+        }
         // The panel owns the admission limit: it equals the server's own
         // default until edited, so passing it keeps the two in step.
         arguments += ["--queue-size", String(maxConcurrency)]
-        if languageOnly { arguments.append("--language-only") }
+        if languageOnly && profile.vision { arguments.append("--language-only") }
         if !maxMemory.isEmpty { arguments += ["--max-memory", maxMemory] }
         if !maxContext.isEmpty { arguments += ["--max-context", maxContext] }
         // The stores the merge added: a MoE target's routed experts, a
         // Flash-Next target's PLE table, and the KV blocks read back from the
-        // SSD. Empty leaves each to the server's automatic plan.
-        for (flag, value) in [
-            ("--expert-memory", expertMemory),
-            ("--ple-memory", pleMemory),
-            ("--sparse-kv-memory", sparseKvMemory),
-        ] {
+        // SSD. Empty leaves each to the server's automatic plan, and a model
+        // that cannot use one passes nothing even if another model set it.
+        for (flag, value, supported) in [
+            ("--expert-memory", expertMemory, profile.experts),
+            ("--ple-memory", pleMemory, profile.ple),
+            ("--sparse-kv-memory", sparseKvMemory, profile.sparseKv),
+        ] where supported {
             let trimmed = value.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += [flag, trimmed] }
         }
@@ -826,6 +865,7 @@ final class AppModel: ObservableObject {
         // seeded outputs repeat.
         if verifyRows != "auto" { arguments += ["--verify-rows", verifyRows] }
         if kvFormat != "int8" { arguments += ["--kv-format", kvFormat] }
+        if stateFormat != "fp32" { arguments += ["--state-format", stateFormat] }
         if !neuralEngine { arguments.append("--disable-ane") }
         if !apiKey.isEmpty { arguments += ["--api-key", apiKey] }
         for name in servedNames.split(separator: ",") {
@@ -842,9 +882,13 @@ final class AppModel: ObservableObject {
         // its own timer and needs no argument. A quota of `0` still means off.
         let cacheQuota = maxCacheDisk.trimmingCharacters(in: .whitespaces)
         let cacheOn = diskCache && cacheQuota != "0"
+        let idleSpill = cacheIdleSpill.trimmingCharacters(in: .whitespaces)
+        if !idleSpill.isEmpty { arguments += ["--cache-idle-spill", idleSpill] }
         if cacheOn {
             arguments.append("--persistent-cache")
             if !cacheQuota.isEmpty { arguments += ["--max-cache-disk", cacheQuota] }
+            let directory = cacheDir.trimmingCharacters(in: .whitespaces)
+            if !directory.isEmpty { arguments += ["--cache-dir", directory] }
             let cacheWrites = maxCacheDiskWrites.trimmingCharacters(in: .whitespaces)
             if !cacheWrites.isEmpty {
                 arguments += ["--max-cache-disk-writes", cacheWrites]
@@ -868,8 +912,28 @@ final class AppModel: ObservableObject {
             arguments += ["--idle-release", String(seconds)]
         }
         if !maxRequestSize.isEmpty { arguments += ["--max-request-size", maxRequestSize] }
-        if !reasoningEffort.isEmpty {
+        let timeout = requestTimeout.trimmingCharacters(in: .whitespaces)
+        if !timeout.isEmpty { arguments += ["--request-timeout", timeout] }
+        let pixels = maxImagePixels.trimmingCharacters(in: .whitespaces)
+        if !pixels.isEmpty && profile.vision {
+            arguments += ["--max-image-pixels", pixels]
+        }
+        let share = decodeShare.trimmingCharacters(in: .whitespaces)
+        if !share.isEmpty { arguments += ["--decode-share", share] }
+        if allowIdleSleep { arguments.append("--allow-idle-sleep") }
+        if !reasoningEffort.isEmpty && profile.thinking {
             arguments += ["--default-reasoning-effort", reasoningEffort]
+        }
+        let budget = thinkingTokenBudget.trimmingCharacters(in: .whitespaces)
+        if !budget.isEmpty && profile.thinking {
+            arguments += ["--thinking-token-budget", budget]
+        }
+        let endText = thinkingEndText.trimmingCharacters(in: .whitespaces)
+        if !endText.isEmpty && profile.thinking {
+            arguments += ["--thinking-end-text", endText]
+        }
+        if announceServedName && !servedNames.trimmingCharacters(in: .whitespaces).isEmpty {
+            arguments.append("--announce-served-name")
         }
         // How loud the Mac may get: the system default passes nothing, leaving
         // the Mac's own thermal management in charge, which is the server's
@@ -1087,6 +1151,12 @@ final class AppModel: ObservableObject {
         let status = finished.terminationStatus
         if status == 0 {
             phase = .idle
+        } else if let record = Runtime.serveRecord(port: port),
+                  record.pid == finished.processIdentifier,
+                  let failure = record.failure {
+            // The launcher or the server wrote why this start failed; the
+            // record is fresher than the log's last line.
+            phase = .failed(failure.message)
         } else {
             phase = .failed(L10n.format("error.exited", status))
         }

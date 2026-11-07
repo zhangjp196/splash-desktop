@@ -458,7 +458,7 @@ struct Target final {
             .laneStateBytes = chunk.laneStatePlannedAllocatedBytes,
             .kvLayout = layout,
             .windowTokens = window,
-            .experts = experts,
+            .routed = experts,
             .table = table,
             .sparseKv = sparseKv,
             .tierWritable = true,
@@ -548,14 +548,14 @@ void testFlashNextOnTheThreeMacs() {
     // and their speculative rows (2,049 pages), in the fewest pages whose
     // extents hold them as one request's capacity, the runway among them,
     // fill the budget, or leave the KV more where the experts load whole.
-    const uint64_t charged = inputs.fixedBytes + inputs.arenaBytes[plan.expertBytes != 0][1] + inputs.laneStateBytes +
+    const uint64_t charged = inputs.fixedBytes + inputs.arenaBytes[plan.routedBytes != 0][1] + inputs.laneStateBytes +
                              spill.floorBytes +
-                             (plan.expertBytes ? plan.expertBytes : kFlashNext.experts.allBytes) + plan.tableBytes +
+                             (plan.routedBytes ? plan.routedBytes : kFlashNext.experts.allBytes) + plan.tableBytes +
                              budgetPagesHolding(test::sparseKvLayout(), 2'049) * page;
     if (mac.workingSet == kM5Pro.workingSet)
-      require(!plan.expertBytes && charged < hardBudget(mac), "the M5 Pro does not load Flash-Next's experts whole");
+      require(!plan.routedBytes && charged < hardBudget(mac), "the M5 Pro does not load Flash-Next's experts whole");
     else
-      require(plan.expertBytes > kFlashNext.experts.floorBytes && charged == hardBudget(mac),
+      require(plan.routedBytes > kFlashNext.experts.floorBytes && charged == hardBudget(mac),
               std::string("Flash-Next's experts on the ") + mac.name + " do not take what the floors leave");
     const uint32_t disk = static_cast<uint32_t>(
         std::min<uint64_t>(1'010'000, (mac.activeLimit - 4 * inputs.stateSlotBytes) / inputs.kvSlotBytes * 32));
@@ -567,8 +567,8 @@ void testFlashNextOnTheThreeMacs() {
                 spill.stagingBytes == 2 * stagedPages * test::sparseKvLayout().bytesPerLayerPage(),
             std::string("Flash-Next on the ") + mac.name + " does not stage in two buffers");
   }
-  require(requirePlan(kFlashNext.inputs(kM6)).expertBytes <
-              requirePlan(kFlashNext.inputs(kStudio)).expertBytes,
+  require(requirePlan(kFlashNext.inputs(kM6)).routedBytes <
+              requirePlan(kFlashNext.inputs(kStudio)).routedBytes,
           "a larger Mac did not stream more experts");
 }
 
@@ -580,7 +580,7 @@ void testDense35BKeepsMainsPlan() {
       {kM6, k35BQ2, 229'369, 229'376}, {kStudio, k35BQ4, 262'144, 352'256}, {kM5Pro, k35BQ4, 262'144, 2'801'664}};
   for (const auto &[mac, target, context, capacityTokens] : pinned) {
     const StreamedMemoryPlan plan = requirePlan(target.inputs(mac));
-    require(!plan.expertBytes && !plan.tableBytes && !plan.spill.enabled,
+    require(!plan.routedBytes && !plan.tableBytes && !plan.spill.enabled,
             std::string("the 35B streams its experts on the ") + mac.name + " where main loads them");
     const EngineMemoryPlan mains = test::requireMemoryPlan(deviceOf(mac), target.profile());
     require(mains.maximumContextTokens() == context && mains.breakdown().kvCapacityTokens == capacityTokens &&
@@ -606,7 +606,7 @@ void testDenseExplicitContextKeepsMainsExperts() {
   StreamedMemoryInputs inputs = k35BQ2.inputs(kM6);
   const auto streams = [&](uint32_t context) {
     inputs.requestedContextTokens = context;
-    return requirePlan(inputs).expertBytes != 0;
+    return requirePlan(inputs).routedBytes != 0;
   };
   require(!streams(225'000) && !streams(beside) && streams(beside + 1) && streams(233'000),
           "the 35B beside the SSD cache's staging did not stream its experts exactly past main's context");
@@ -621,7 +621,7 @@ void testDenseExplicitContextStreamsExperts() {
   StreamedMemoryInputs inputs = k35BQ2.inputs(kM6);
   inputs.requestedContextTokens = 262'144;
   const StreamedMemoryPlan plan = requirePlan(inputs);
-  require(plan.expertBytes && plan.expertBytes < k35BQ2.experts.allBytes,
+  require(plan.routedBytes && plan.routedBytes < k35BQ2.experts.allBytes,
           "the 35B did not stream experts for a 256K context on the M6");
   // The experts take all the context leaves: a page more of them and the
   // plan would not hold it.
@@ -630,16 +630,16 @@ void testDenseExplicitContextStreamsExperts() {
     return test::requireMemoryPlan(deviceOf(kM6), k35BQ2.profile(expertBytes), maximumMemoryBytes)
         .maximumContextTokens();
   };
-  require(context(plan.expertBytes, 0) == 262'144 && context(plan.expertBytes + page, 0) < 262'144,
+  require(context(plan.routedBytes, 0) == 262'144 && context(plan.routedBytes + page, 0) < 262'144,
           "the streamed plan does not hold the context it was sized for, or holds more");
   // Without one, the experts that do not fit stream and the KV keeps the
   // first 64K tokens: the M6 with --max-memory 12G.
   StreamedMemoryInputs tight = k35BQ2.inputs(kM6);
   tight.hardBudgetBytes = 12 * kGiB;
   const StreamedMemoryPlan streamed = requirePlan(tight);
-  require(streamed.expertBytes, "the 35B loaded whole beyond its budget");
-  require(context(streamed.expertBytes, 12 * kGiB) >= 65'536 &&
-              context(streamed.expertBytes + page, 12 * kGiB) < 65'536,
+  require(streamed.routedBytes, "the 35B loaded whole beyond its budget");
+  require(context(streamed.routedBytes, 12 * kGiB) >= 65'536 &&
+              context(streamed.routedBytes + page, 12 * kGiB) < 65'536,
           "streaming experts did not keep exactly the first 64K tokens resident");
 }
 
@@ -651,7 +651,7 @@ void testDenseExplicitContextStreamsExperts() {
 // to one that streams them.
 void testArenasFollowWhatStreams() {
   const auto same = [](const StreamedMemoryPlan &plan, const StreamedMemoryPlan &other) {
-    return plan.expertBytes == other.expertBytes && plan.tableBytes == other.tableBytes &&
+    return plan.routedBytes == other.routedBytes && plan.tableBytes == other.tableBytes &&
            plan.spill.floorBytes == other.spill.floorBytes;
   };
   const auto planned = [](StreamedMemoryInputs inputs, uint64_t arenaBytes) {
@@ -659,7 +659,7 @@ void testArenasFollowWhatStreams() {
     return requirePlan(inputs);
   };
   StreamedMemoryInputs inputs = kFlashNext.inputs(kM5Pro);
-  inputs.experts.setting = {StreamedSetting::Mode::Size, 12 * kGiB};
+  inputs.routed.setting = {StreamedSetting::Mode::Size, 12 * kGiB};
   const uint64_t group = arenaBytes(kFlashNext.group), staged = group + 512 * kMiB;
   inputs.arenaBytes[1] = {group, staged};
   bool whole = false, streams = false;
@@ -670,14 +670,14 @@ void testArenasFollowWhatStreams() {
     (plan.tableBytes ? streams : whole) = true;
   }
   inputs = kFlashNext.inputs(kM5Pro);
-  bool expertsWhole = false, expertsStream = false;
+  bool expertsWhole = false, routedStream = false;
   for (inputs.hardBudgetBytes = 40 * kGiB; inputs.hardBudgetBytes < 72 * kGiB; inputs.hardBudgetBytes += kGiB / 4) {
     const StreamedMemoryPlan plan = requirePlan(inputs);
-    require(same(plan, planned(inputs, arenaBytes(plan.expertBytes ? kFlashNext.group : kFlashNext.chunk))),
+    require(same(plan, planned(inputs, arenaBytes(plan.routedBytes ? kFlashNext.group : kFlashNext.chunk))),
             "a plan's experts were sized beside the arenas of another");
-    (plan.expertBytes ? expertsStream : expertsWhole) = true;
+    (plan.routedBytes ? routedStream : expertsWhole) = true;
   }
-  require(whole && streams && expertsWhole && expertsStream, "the budgets did not span both plans of each part");
+  require(whole && streams && expertsWhole && routedStream, "the budgets did not span both plans of each part");
 }
 
 // An explicit setting replaces its part: a size streams through that store,
@@ -687,13 +687,13 @@ void testArenasFollowWhatStreams() {
 // takes all it would loads whole.
 void testOverridesAndRefusals() {
   StreamedMemoryInputs inputs = kFlashNext.inputs(kStudio);
-  inputs.experts.setting = {StreamedSetting::Mode::Size, 12 * kGiB};
+  inputs.routed.setting = {StreamedSetting::Mode::Size, 12 * kGiB};
   const StreamedMemoryPlan explicitExperts = requirePlan(inputs);
-  require(explicitExperts.expertBytes == 12 * kGiB && explicitExperts.tableBytes == 512 * kMiB,
+  require(explicitExperts.routedBytes == 12 * kGiB && explicitExperts.tableBytes == 512 * kMiB,
           "an explicit --expert-memory was not its store");
-  inputs.experts.setting = {StreamedSetting::Mode::Size, kFlashNext.experts.allBytes};
+  inputs.routed.setting = {StreamedSetting::Mode::Size, kFlashNext.experts.allBytes};
   require(!planStreamedMemory(inputs).plan, "experts that do not fit loaded whole");
-  inputs.experts.setting = {StreamedSetting::Mode::Size, kGiB};
+  inputs.routed.setting = {StreamedSetting::Mode::Size, kGiB};
   const StreamedMemoryResult below = planStreamedMemory(inputs);
   require(!below.plan && below.error.find("--expert-memory of 1024 MiB is less than its smallest store, 2560 MiB") !=
                              std::string::npos,
@@ -702,12 +702,12 @@ void testOverridesAndRefusals() {
   StreamedMemoryInputs dense = k35BQ2.inputs(kM5Pro);
   for (const StreamedSetting setting :
        {StreamedSetting{StreamedSetting::Mode::Off, 0}, StreamedSetting{StreamedSetting::Mode::Size, 20 * kGiB}}) {
-    dense.experts.setting = setting;
-    require(!requirePlan(dense).expertBytes, "off, or a store that holds every expert, did not load them whole");
+    dense.routed.setting = setting;
+    require(!requirePlan(dense).routedBytes, "off, or a store that holds every expert, did not load them whole");
   }
   StreamedMemoryInputs tight = k35BQ2.inputs(kM6);
   tight.hardBudgetBytes = 12 * kGiB;
-  tight.experts.floorBytes = tight.experts.allBytes;
+  tight.routed.floorBytes = tight.routed.allBytes;
   const StreamedMemoryResult whole = planStreamedMemory(tight);
   require(!whole.plan && whole.requiredBytes > 12 * kGiB,
           "experts whose smallest store takes all they would streamed instead of loading whole");
@@ -717,7 +717,7 @@ void testOverridesAndRefusals() {
   inputs.hotCacheBytes = 1'200 * kMiB;
   const StreamedMemoryPlan raised = requirePlan(inputs);
   require(raised.spill.hotTargetBytes == 1'200 * kMiB && raised.spill.hotFloorBytes == automatic.spill.hotFloorBytes &&
-              automatic.expertBytes - raised.expertBytes == 1'200 * kMiB - automatic.spill.hotFloorBytes,
+              automatic.routedBytes - raised.routedBytes == 1'200 * kMiB - automatic.spill.hotFloorBytes,
           "--sparse-kv-memory did not take its target from the experts");
   // Below its floor, or beyond what the floors leave, it is refused by name
   // as a setting, never as floors the budget cannot hold.
@@ -761,7 +761,7 @@ void testSpillNeedsATierAndRoom() {
   require(!requirePlan(inputs).spill.enabled, "a layout that cannot spill spilled");
   // A budget whose floors hold the model but not the hot cache's floor.
   inputs = kFlashNext.inputs(kM6);
-  inputs.experts.setting = inputs.table.setting = {StreamedSetting::Mode::Off, 0};
+  inputs.routed.setting = inputs.table.setting = {StreamedSetting::Mode::Off, 0};
   inputs.hardBudgetBytes = inputs.fixedBytes + inputs.arenaBytes[0][0] + inputs.laneStateBytes +
                            256 * test::sparseKvLayout().bytesPerModelPage() +
                            kFlashNext.experts.allBytes + kFlashNext.table.allBytes + 200 * kMiB;
@@ -780,11 +780,11 @@ void testSpillHoldsTheArenasOfASpillingRuntime() {
   const uint64_t group = arenaBytes(kFlashNext.group);
   inputs.spillArenaBytes = {group + kExtra, group + kExtra};
   const StreamedMemoryPlan spilling = requirePlan(inputs);
-  require(resident.spill.enabled && spilling.spill.enabled && resident.expertBytes - spilling.expertBytes == kExtra,
+  require(resident.spill.enabled && spilling.spill.enabled && resident.routedBytes - spilling.routedBytes == kExtra,
           "a plan that spills did not hold the arenas of a runtime whose K/V spills");
 
   inputs = kFlashNext.inputs(kM6);
-  inputs.experts.setting = inputs.table.setting = {StreamedSetting::Mode::Off, 0};
+  inputs.routed.setting = inputs.table.setting = {StreamedSetting::Mode::Off, 0};
   const uint64_t chunk = arenaBytes(kFlashNext.chunk);
   inputs.spillArenaBytes = {chunk, chunk};
   const uint64_t base = inputs.fixedBytes + chunk + inputs.laneStateBytes +
@@ -830,7 +830,7 @@ void testOneStagingBufferWhenTight() {
   StreamedMemoryInputs inputs = kFlashNext.inputs(kM6);
   inputs.hardBudgetBytes = 14 * kGiB;
   const StreamedMemoryPlan plan = requirePlan(inputs);
-  require(plan.spill.stagingBuffers == 1 && plan.expertBytes >= kFlashNext.experts.floorBytes,
+  require(plan.spill.stagingBuffers == 1 && plan.routedBytes >= kFlashNext.experts.floorBytes,
           "a tight budget staged in two buffers");
 }
 
@@ -840,7 +840,7 @@ void testEnginePlanServesTheSpilledContext() {
   for (const Mac &mac : kMacs) {
     const StreamedMemoryPlan streamed = requirePlan(kFlashNext.inputs(mac));
     const EngineMemoryPlan plan = test::requireMemoryPlan(
-        deviceOf(mac), kFlashNext.profile(streamed.expertBytes, streamed.tableBytes, streamed.spill));
+        deviceOf(mac), kFlashNext.profile(streamed.routedBytes, streamed.tableBytes, streamed.spill));
     const ContextBounds &bounds = plan.breakdown().contextBounds;
     require(bounds.window == 1'010'000 && bounds.spilled == 1'010'000 && bounds.disk == streamed.spill.diskTokens &&
                 bounds.resident >= 65'536 && bounds.resident < bounds.disk &&

@@ -8,6 +8,7 @@ from unittest import mock
 from dev.tests import server_fixtures as fixtures
 from install import launcher
 from server import server as api
+from server.dialects import responses as responses_dialect
 
 SERVER_ARGS = ["model", "--model", "owner/repo"]
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
@@ -130,7 +131,8 @@ class DefaultReasoningTests(unittest.TestCase):
             harness = self.harness(tokenizer=tokenizer)
             job = harness.app.prepare(fixtures.chat_body(), deadline=fixtures.FOREVER)
             self.assertEqual(job.thinking, default)
-            job = harness.app.prepare_responses(
+            job = responses_dialect.prepare(
+                harness.app,
                 fixtures.responses_body(),
                 deadline=fixtures.FOREVER,
                 reserve_input=fixtures.reserve_unbounded,

@@ -205,6 +205,9 @@ private struct ConfigRow: View {
                     if isServing {
                         Pill(text: L10n.string("models.active"), tint: SplashPalette.mint)
                     }
+                    if config.missingFiles {
+                        Pill(text: L10n.string("models.files_missing"), tint: SplashPalette.rose)
+                    }
                 }
                 HStack(spacing: 5) {
                     ForEach(chips, id: \.self) { chip in
@@ -230,7 +233,7 @@ private struct ConfigRow: View {
             .buttonStyle(.borderedProminent)
             .tint(isServing ? SplashPalette.mint : SplashPalette.blue)
             .controlSize(.regular)
-            .disabled(model.isRunning || model.isBusy)
+            .disabled(model.isRunning || model.isBusy || config.missingFiles)
 
             Menu {
                 Button(L10n.string("models.edit")) { onEdit() }
@@ -362,7 +365,7 @@ private struct ConfigEditor: View {
                 footer
             }
         }
-        .frame(width: 900, height: 680)
+        .frame(width: 840, height: 620)
         .onExitCommand(perform: onCancel)
         .onAppear {
             guard isNew else { return }

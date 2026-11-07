@@ -135,7 +135,14 @@ struct MenuBarView: View {
             UserDefaults.standard.set(section.rawValue, forKey: "sidebar.selection")
         }
         NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "main")
+        if let window = NSApp.windows.first(where: {
+            $0.canBecomeMain && !($0 is NSPanel) && ($0.isVisible || $0.isMiniaturized)
+        }) {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            openWindow(id: "main")
+        }
     }
 
     private func metric(_ title: String, _ value: String, _ unit: String, _ tint: Color) -> some View {
@@ -215,6 +222,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let hintShown = "splash.background-hint-shown"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A checkout from before 1.8.0 saved a 1320×880 window; the default is
+        // 25% smaller now, so shrink that saved frame once. A later resize is
+        // the user's and stays.
+        let sizeKey = "window.default-size-1.8.0"
+        if !UserDefaults.standard.bool(forKey: sizeKey) {
+            UserDefaults.standard.set(true, forKey: sizeKey)
+            DispatchQueue.main.async {
+                guard let window = NSApp.windows.first(where: {
+                    $0.canBecomeMain && !($0 is NSPanel)
+                }) else { return }
+                let target = NSSize(width: 990, height: 660)
+                var frame = window.frame
+                if frame.width > target.width || frame.height > target.height {
+                    frame.size.width = min(frame.width, target.width)
+                    frame.size.height = min(frame.height, target.height)
+                    window.setFrame(frame, display: true)
+                }
+            }
+        }
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(windowWillClose(_:)),
@@ -228,9 +254,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
-    /// Clicking the dock icon after the window closed brings it back.
+    /// Clicking the dock icon brings the window back, including one that was
+    /// minimized: AppKit's default reopen does not deminiaturize it, so the
+    /// app stayed in the Dock with no interface.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        true
+        sender.activate(ignoringOtherApps: true)
+        if let window = sender.windows.first(where: {
+            $0.canBecomeMain && !($0 is NSPanel) && ($0.isVisible || $0.isMiniaturized)
+        }) {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+            return false
+        }
+        // A closed window is SwiftUI's to reopen; its WindowGroup does so when
+        // the delegate returns true.
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -275,9 +313,9 @@ struct SplashApp: App {
         WindowGroup("Splash Desktop", id: "main") {
             RootView()
                 .environmentObject(model)
-                .frame(minWidth: 1080, minHeight: 720)
+                .frame(minWidth: 810, minHeight: 540)
         }
-        .defaultSize(width: 1320, height: 880)
+        .defaultSize(width: 990, height: 660)
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .newItem) {}

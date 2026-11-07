@@ -4,6 +4,7 @@ import http.client
 import io
 import json
 import queue
+import signal
 import threading
 import time
 import unittest
@@ -132,15 +133,15 @@ class ServerRecoveryTests(HarnessTestCase):
             ),
             mock.patch.object(backend_api, "print_status") as console,
         ):
-            for delay in (0.0, 0.01):
+            for delay in (0.0, 0.01, 0.02, 0.04, 0.08):
                 runtime.fail(backend, served=1.0)
                 self.assertAlmostEqual(backend.restart_due - clock[0], delay)
                 self.relaunched(runtime, backend)
             runtime.fail(backend, served=1.0)
-        self.assertEqual(runtime.startup_calls, 2)
+        self.assertEqual(runtime.startup_calls, 5)
         refusal = backend.refusal()
         self.assertEqual((refusal.status, refusal.code), (500, "engine_failed"))
-        self.assertIn("failed 3 times in a row", refusal.message)
+        self.assertIn("failed 6 times in a row", refusal.message)
         self.assertRegex(refusal.message, "Crash trace|SPLASH_CRASH_TRACE")
         self.assertEqual(
             console.call_args_list[-1].args[0], f"Engine stopped · {refusal.message}"
@@ -155,7 +156,27 @@ class ServerRecoveryTests(HarnessTestCase):
         )
         self.assertEqual(status, 500)
         self.assertEqual(json.loads(payload)["error"]["code"], "engine_failed")
-        self.assertEqual(runtime.startup_calls, 2)
+        self.assertEqual(runtime.startup_calls, 5)
+
+    def test_a_start_that_wanted_memory_keeps_relaunching(self):
+        runtime = RecoveringRuntime()
+        backend = self.backend(runtime)
+        failure = engine_runtime.EngineUnhealthy(
+            "the memory plan does not fit: required memory does not fit"
+        )
+        with (
+            mock.patch.object(backend_api, "RESTART_BACKOFF_SECONDS", 0.001),
+            mock.patch.object(backend_api, "print_status"),
+        ):
+            for _ in range(10):
+                runtime.outcomes.put(failure)
+            runtime.fail(backend, error=failure, served=0.0)
+            self.wait_until(lambda: runtime.startup_calls >= 10, 5)
+            # Ten short-lived starts that wanted memory do not stop the
+            # relaunches or count toward the crash loop.
+            self.assertIsNone(backend.fatal_error)
+            self.assertEqual(backend.failures, 0)
+            self.relaunched(runtime, backend)
 
     def test_full_window_of_service_resets_the_crash_count(self):
         runtime = RecoveringRuntime()
@@ -196,7 +217,7 @@ class ServerRecoveryTests(HarnessTestCase):
 
     def test_failed_relaunch_counts_toward_the_crash_loop(self):
         runtime = RecoveringRuntime()
-        for reason in ("a", "b"):
+        for reason in ("a", "b", "c", "d", "e"):
             runtime.outcomes.put(engine_runtime.EngineUnhealthy(reason))
         backend = self.backend(runtime)
         with (
@@ -205,15 +226,14 @@ class ServerRecoveryTests(HarnessTestCase):
         ):
             runtime.fail(backend, served=1.0)
             self.wait_until(lambda: backend.fatal_error is not None)
-        self.assertEqual(runtime.startup_calls, 2)
-        self.assertIn("failed 3 times in a row", backend.fatal_error)
-        self.assertIn("(b)", backend.fatal_error)
+        self.assertEqual(runtime.startup_calls, 5)
+        self.assertIn("failed 6 times in a row", backend.fatal_error)
+        self.assertIn("(e)", backend.fatal_error)
         self.assertEqual(
             [call.args[0] for call in console.call_args_list],
             [
                 "Engine failed · native protocol reached EOF",
-                "Engine restart failed · a",
-                "Engine restart failed · b",
+                *[f"Engine restart failed · {reason}" for reason in "abcde"],
                 f"Engine stopped · {backend.fatal_error}",
             ],
         )
@@ -347,8 +367,8 @@ class ServerRecoveryTests(HarnessTestCase):
         ):
             factory.processes[0].kill()
             self.wait_until(lambda: backend.fatal_error is not None, 2)
-        self.assertEqual(len(factory.processes), 3)
-        self.assertIn("Crash trace: /traces/g3.json.", backend.fatal_error)
+        self.assertEqual(len(factory.processes), 6)
+        self.assertIn("Crash trace: /traces/g6.json.", backend.fatal_error)
 
     def test_failure_right_after_a_relaunch_ready_is_counted_once(self):
         factory = FakeFactory()
@@ -408,7 +428,7 @@ class ServerRecoveryTests(HarnessTestCase):
             mock.patch.object(runtime._crash_trace, "dump"),
             mock.patch.object(backend_api, "print_status"),
         ):
-            for launched in (2, 3):
+            for launched in (2, 3, 4, 5, 6):
                 factory.processes[-1].kill()
                 self.wait_until(
                     lambda: len(factory.processes) == launched and runtime.ready, 2
@@ -420,8 +440,38 @@ class ServerRecoveryTests(HarnessTestCase):
         self.assertEqual(
             (kind, error.status, error.code), ("error", 500, "engine_failed")
         )
-        self.assertIn("failed 3 times in a row", error.message)
-        self.assertEqual(len(factory.processes), 3)
+        self.assertIn("failed 6 times in a row", error.message)
+        self.assertEqual(len(factory.processes), 6)
+
+    def test_a_request_started_at_two_faults_is_quarantined(self):
+        runtime = RecoveringRuntime()
+        backend = self.backend(runtime)
+        failure = engine_runtime.EngineUnhealthy("the engine died by SIGSEGV")
+        failure.returncode = -signal.SIGSEGV
+        with mock.patch.object(backend_api, "print_status") as console:
+            first = Plan([], block=True)
+            runtime.plans.append(first)
+            backend.submit(make_job(request_id=1))
+            self.wait_until(first.started.is_set)
+            runtime.fail(backend, error=failure)
+            self.relaunched(runtime, backend)
+
+            second = Plan([], block=True)
+            runtime.plans.append(second)
+            backend.submit(make_job(request_id=2))
+            self.wait_until(second.started.is_set)
+            runtime.fail(backend, error=failure)
+
+            refused = make_job(request_id=3)
+            backend.submit(refused)
+            kind, error = refused.events.get(timeout=1)
+        self.assertEqual(
+            (kind, error.status, error.code),
+            ("error", 400, "request_quarantined"),
+        )
+        self.assertTrue(
+            any("Quarantine" in call.args[0] for call in console.call_args_list)
+        )
 
     def test_generation_recovery_rejects_before_body_or_ingress_and_advertises_retry(
         self,
@@ -679,15 +729,15 @@ class ServerRecoveryTests(HarnessTestCase):
             mock.patch.object(backend_api, "print_status") as console,
         ):
             factory.processes[0].kill()
-            self.wait_until(lambda: console.call_count >= 4)
+            self.wait_until(lambda: backend.fatal_error is not None)
         lines = [call.args[0] for call in console.call_args_list]
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(len(lines), 7)
         self.assertEqual(lines[0], "Engine failed · native protocol reached EOF")
-        for line in lines[1:3]:
+        for line in lines[1:6]:
             self.assertRegex(
                 line, "^Engine restart failed · native engine executable is missing"
             )
-        self.assertEqual(lines[3], f"Engine stopped · {backend.fatal_error}")
+        self.assertEqual(lines[6], f"Engine stopped · {backend.fatal_error}")
         transport = backend.status()["transport"]
         self.assertTrue(transport["stopped"])
         self.assertFalse(transport["recovering"])

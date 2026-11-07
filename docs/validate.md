@@ -7,15 +7,14 @@ make install test-real test-http-real MODEL=mlx-community/Qwen3.8-27B-4bit
 
 `make check` needs no model weights, but it runs the Metal tests, so it needs a
 Mac that Splash supports: it runs the source checks, `check-native-cpu`,
-`check-native-metal`, `check-native-build`, the Python checks and `check-app`,
-the desktop app's tests (`swift test --package-path app`). `make
+`check-native-metal`, `check-native-build` and the Python checks. `make
 check-native-cpu` builds production and runs native CPU tests without a GPU;
 `make check-native-metal` requires a supported Metal device and runs the kernel
 tests under shader validation, and the Linear pipeline resource check without
 it. They include loading small synthetic MLX, GGUF and vision sources and the
 GGUF kernels on synthetic tensors. `make check-native-build` builds every
 native test, benchmark and tool and runs none. Hosted CI runs the CPU checks,
-`check-native-build`, the sanitizers and `check-app`. `make
+`check-native-build`, the sanitizers and the Python tests. `make
 test-sanitizers-metal` runs the Metal tests of the components whose host steps
 share their state with the engine thread and the SSD readers (the hot block
 cache of spilled KV and the history stream) under ThreadSanitizer, built with
@@ -24,8 +23,8 @@ also fails when a workflow under `.github/workflows` names a Hugging Face token
 (`HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` or a `secrets.HF_*` secret): CI installs
 public models alone and never receives one.
 
-The native tests are in `dev/tests/engine` and the desktop app's in
-`app/Tests`; each Python test is in the directory of what it tests:
+The native tests are in `dev/tests/engine`; each Python test is in the
+directory of what it tests:
 `dev/tests/server`, `dev/tests/install` (launcher, client configuration and
 model installation) or `dev/tests/tools` (`dev/tools`, `dev/benchmarks`, the
 Makefiles and the real-model harnesses).
@@ -44,6 +43,7 @@ does, and `REVISION`, `DRAFT_MODEL` and `LANGUAGE_ONLY=1` as its `--revision`,
 | `test-agent-real` | the five official clients through `splash serve` (`dev/tests/agent_real.py`), in `AGENT_SCENARIO` `complete` (the default) or `smoke` |
 | `test-release-real` | the HTTP smoke and all five clients on one `splash serve` |
 | `test-performance-real` | the native decode, partial-prefix and short-prompt benchmark, or with `BASELINE` its ABBA comparison with that build, in which both builds' `weight-digests` take `WEIGHT_DIGESTS_ARGS` (`dev/benchmarks/backend_regression.py`) |
+| `test-pressure-real` | the installation on this checkout's own server under `PRESSURE_ARGS` (default `--max-memory 18G`), which must make it stream its routed experts, with the [serving benchmark](#serving-benchmark)'s three churn clients for `PRESSURE_MINUTES` (default 5), checked on its own by [`check.py run`](#serving-benchmark) on G4, G8, G9, Store, Churn (its load window and every client served) and First token; results in `build/release/<model>/pressure` |
 | `release-check` | one model on this Mac ([Release check](#release-check)) |
 
 `test-agent-real` and `test-release-real` first run the tests
@@ -123,6 +123,7 @@ make install release-check MODEL=mlx-community/Qwen3.8-27B-4bit REVISION=<commit
 make install release-check MODEL=unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M LANGUAGE_ONLY=1 REVISION=<commit> BASELINE=...
 make install release-check MODEL=mlx-community/Qwen3.6-35B-A3B-4bit REVISION=<commit> BASELINE=...
 make install release-check MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M REVISION=<commit> BASELINE=...
+make install test-pressure-real MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M REVISION=<commit> PRESSURE_ARGS="--max-memory 18G"
 make install verify-models MODEL=mlx-community/Qwen3.6-35B-A3B-4bit
 make test-agent-real MODEL=mlx-community/Qwen3.6-35B-A3B-4bit REVISION=<commit> AGENT_SCENARIO=smoke AGENT_CLIENTS=...
 ```
@@ -285,42 +286,104 @@ report. Its cache checks reuse each context's cached prefix, so they need that
 memory free: when other programs leave too little, the engine evicts cached
 prefixes and the checks fail, naming what each lookup found.
 
-For a same-machine HTTP regression check, retain a `splash` binary **and its
-adjacent `splash.metallib`** built from a checkout with the same native wire
-version and status schema as this one (the server refuses any other), with
-`engine-tests/weight-digests` beside them, then run from the candidate
-checkout, after
-`make build/engine-tests/weight-digests`:
+## Serving benchmark
+
+`dev/benchmarks/serving` measures a server under concurrent requests and
+compares builds of different trees, such as a release candidate with the last
+release, on one Mac. Each run starts the tree's own server, so every tree is
+measured through the same OpenAI API whatever its native wire and status
+schema, and the client times what a user sees.
+
+| Scenario | Requests |
+| --- | --- |
+| `churn` | three clients, each sending 1500-token answers to prompts that grow every round (about 16K tokens, then more; `CHURN_BASE`/`CHURN_STEP` words), every fourth round resending its conversation, the first requests in a fixed arrival order (`--order 2,0,1` or `0,1,2`, 0.6 s apart), for `--minutes`; `/status` every 2 s |
+| `ttft` | for each N of `--n`, on a fresh server: N conversations cache an ~8K-token prefix one at a time, then send it with distinct ~300-token suffixes at the same instant, `--rounds` times, each round recording its `/status` counters' changes and the largest `memory_governor.claims` its samples showed; `/status` every 0.5 s |
+| `serve1` | one request at a time on an idle server, cold prompts of about `--sizes` tokens (300, 2K and 14K): time to first token and decode milliseconds per token; the `/status` each request waited idle for, and one after the last |
+| `warm` | per cached depth of `--sizes`, a fresh cold prefix, then 2 discarded and 8 measured ~300-token suffixes after it: the server's prompt time of each (`--trial` picks the texts, the same for every tree); `/status` as `serve1` |
+
+Every request timestamps each content chunk of its stream; its gaps are the
+intervals between consecutive chunks after the first. Each request may take
+`--request-seconds` from its send (by default twice the longest request
+measured on any Mac). A request the client gets no whole answer to is
+unanswered, the server's failure: one the server keeps streaming past that
+time, though its keepalives hold the connection open, or one whose connection
+fails or closes before the stream's `data: [DONE]`. It ends `serve1` and
+`warm`, ends `ttft` as one of its warm-ups and fails its round otherwise; in
+`churn` its client records it, with its chunk times and why, and stops.
 
 ```sh
-.venv/bin/python -m dev.benchmarks.http_regression \
-  --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M \
-  --baseline-binary /path/to/baseline/build/splash \
-  --contexts 2048,10000 --samples 5
+.venv/bin/python -m dev.benchmarks.serving.run --tree TREE --machine m6 \
+  --model ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:Q2_0 --revision <commit> \
+  --draft-model DRAFT --scenario churn --order 2,0,1 --minutes 15 --label LABEL --out RESULTS
 ```
 
-It takes any installed model and, for an upstream one, holds its assembly for
-the whole run, so every round serves the same model. For a MoE target, pass
-`--verify-rows all`: the check requires the two builds' transcripts to match,
-and by default the verify budget chooses a MoE target's rows from cycle wall
-times, so its greedy output can differ between runs (see [drafts](models.md#drafts)).
-Both rounds pass the option to their engine, so a MoE comparison needs a
-baseline built from a checkout that takes it; an older baseline cannot run one.
-It starts isolated servers in ABBA order, compares matched cold, exact-prefix
-and decode requests by the release check's speed rule and weight bytes (decode
-by `metrics.decode_cycle_ms` per output token, so host work between commands
-counts), and saves
-`build/release/http-regression.json`. With `--burst N` it sends N requests of
-each context at once instead, 16 output tokens each, and reports each build's
-replay points lost to the burst (`replay_state_publication_failures`), its
-decode rate and advertised context. `--follow-up`, which needs `--burst`, then
-sends each conversation's next turn and compares their time to first token and
-how many resumed at their replay point; a burst run passes only with it. It does
-not contact your running server. Use the same power mode and charger, stop other
-GPU workloads, and report chip/GPU cores, memory, Splash version, model
-revision, actual input/output token counts, and cache hits with results. Keep
-cold prefill, cached TTFT and sustained decode separate; a UI token rate alone
-does not measure end-to-end agent performance.
+`run.py` installs the model with the tree's own installer, offline, or takes
+`--model-root`; refuses a port that already answers; checks that `/status`
+names the server it started (`instance.pid`) and the build of the tree's
+sources (`identity.cache.build_id` against the tree's own
+`dev/tools/build_identity.py check` with its Makefile's constants); runs the
+scenario; and stops the server with SIGINT, or, when it outlasts that, SIGTERM
+after 60 s and SIGKILL after 30 s more. Beside the client's
+`LABEL.events.jsonl` and `LABEL.status.jsonl` it writes `LABEL.out`, whose last
+line is `DONE` only once everything completed, `LABEL.meta.json` (binary
+SHA-256, build id, model, spawn-to-ready seconds and whether the binary had
+started on that Mac before, host memory and pressure, process snapshots at
+the start, middle and end of the scenario while the server serves, the pids
+the run started, each server's stop, the signals it took and its exit code,
+and for a run that did not complete why and whose failure
+that was: the server's, which exited, was not ready in time, failed a
+request or, once ready, did not let the scenario end, a client's, which
+raised an exception of its own, or `run.py`'s refusal to measure) and on the
+M5 Pro
+`LABEL.idle.jsonl`, its idle time and sleep assertions every 10 s. It refuses any output directory that resolves,
+through whatever symlinks, into `~/.cache/huggingface` or an `install/models`
+directory.
+
+`check.py` judges runs:
+
+- `run RESULTS LABEL [--minutes N] [--streamed] [--build BUILD_ID]` checks one
+  run on its own and exits 1 on any failure; `test-pressure-real` runs it on
+  its churn run.
+- `compare A1 B1 B2 A2`, each run as `RESULTS/LABEL`, compares two builds on
+  four runs in ABBA order on one Mac: each run must pass its own check on a
+  quiet machine, the two A runs and the two B runs must each be one build,
+  and every per-request metric the four share (churn's TTFT, completion latency and
+  decode milliseconds per token, ttft's TTFT per concurrency, serve1's TTFT
+  and decode per size, warm's prompt time per depth) must pass the release check's speed rule
+  (`dev/benchmarks/abba.py`).
+
+A run measured nothing and is to be repeated when it did not end with `DONE`
+for a reason other than the server's, served a build other than `--build`,
+or, with `--streamed`, did not start with its routed experts streamed. Only a
+timed comparison needs a quiet machine: `compare` also fails a run that saw a
+`serious` or `critical` thermal sample, found the GPU still busy after its wait
+for idle (`--gpu-idle-percent`), on the M5 Pro was touched within a 10 s
+sampling period or saw a sleep assertion held by a process it did not start
+other than `powerd`, or had a process it did not start among the top five by
+CPU at 24 % or more. `run`, whose gates judge freezes and correctness, which
+these do not excuse, notes them.
+
+| Gate | Rule |
+| --- | --- |
+| G4 | the client gaps between token events (chunks less than half the shortest decode command apart are one event's; an unanswered request counts its open gap, up to when the client stopped waiting): the largest at most 10 s, the p99 at most 5 s; every gap past 2.5 s is listed |
+| G8 | no engine restart, failed request (an HTTP error but `context_length_exceeded`, an error event in a stream the server had begun, a request of a failed TTFT round, or one `/status` counts in `requests.failed`), unanswered request, Metal failure or loop tick of 5 s or more, no exit, late start or failed request that ended the run, and every server stopped by SIGINT alone with exit 0, the engine it started gone within SIGINT's grace too |
+| G9 | the memory accounts sum to `charged_bytes` in every sample, no claim waits 30 s, nothing is owed at the end |
+| Store | a regrown expert unit taken back within 60 s of its regrow is counted; a second such take back within 60 s of the one before is an oscillation and fails |
+| Churn | the run lasted its load window (`--minutes`) and every client completed a request |
+| First token | no answered request (G8 judges unanswered ones) waited for its first token more than twice the prefill time, at the run's own rate (the tokens its answered requests prefilled over the time from the first send to the last answer), of the work the scheduler may put ahead of it: the requests in flight at its send, 24,576 rows of later arrivals (three prefill commands of at most 8,192 rows, the most that may pass over it in a row) and its own prompt, each less its cached tokens; a starvation guard, not a speed check |
+
+G8 applies to every scenario, the others to churn runs. The check also counts
+the client gaps past the decode gap target of 500 ms by cause, each taking the
+first of these that the `/status` samples from 2 s before it to 2 s after it
+show: a claim waiting for memory, the experts' size changing, a compaction, a
+replan, a history-stream wait, a committed prefill command; else it is
+unattributed.
+
+Copy a tree to another Mac by content (`rsync --checksum`): `git archive`
+leaves `dev/tests` and `dev/benchmarks` out (`.gitattributes`), and a copy
+that keeps the files' old times leaves make running stale binaries. For a
+gate, delete the test binary before building it and record the commit, an
+empty `git status --porcelain`, the binary's SHA-256 and its test count.
 
 For how one running server scales under concurrent chat requests, with the
 fans and hot sensors it reports, connect the benchmark to that server:

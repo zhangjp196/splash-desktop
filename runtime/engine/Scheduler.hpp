@@ -109,7 +109,7 @@ public:
   // Whether the resident lane's prefill commands read its history from the
   // SSD cache (KvHistoryStream), which a command does for one lane alone and
   // whatever its rows; the engine says so before it plans.
-  void setStreamsHistory(uint64_t requestId, bool streams);
+  void setSpillsHistory(uint64_t requestId, bool streams);
   void setPrefillGroupRows(uint64_t requestId, uint32_t rows);
   void cancel(uint64_t requestId);
   // Ends a request outside a command's completion, as at its length.
@@ -172,11 +172,11 @@ private:
     // Consecutive prefill commands that served a later arrival while this
     // lane received no rows. Reset whenever the lane is served.
     uint32_t overtaken = 0;
-    // Its prefill commands stream its history (setStreamsHistory), and the
+    // Its prefill commands stream its history (setSpillsHistory), and the
     // running estimate of how long one waits on the reads; none before the
     // first that read any. The command estimate leaves that wait out: it is
     // this lane's own cost, which grows with its history.
-    bool streamsHistory = false;
+    bool spillsHistory = false;
     std::optional<double> streamMilliseconds;
     // While it decodes, where its gap since its last decode command began
     // (startDecodeGap): the command time and streaming prefill commands

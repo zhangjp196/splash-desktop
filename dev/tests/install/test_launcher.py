@@ -171,6 +171,10 @@ class LauncherTests(unittest.TestCase):
             self.assertIn("cannot bind http://127.0.0.1:", error.getvalue())
             install.assert_not_called()
             execute.assert_not_called()
+            # The app reads why the start failed from the port's record.
+            record = json.loads((Path(temporary) / "serve-8000.json").read_text())
+            self.assertEqual(record["phase"], "failed")
+            self.assertEqual(record["failure"]["kind"], "port")
 
     def test_foreground_exec_preserves_terminal_and_holds_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -258,7 +262,8 @@ class LauncherTests(unittest.TestCase):
             install.assert_called_once_with(selection(launcher.paths.MODELS))
             execute.assert_called_once()
             self.assertEqual(
-                {p.name for p in runtime.iterdir()}, {"serve.lock", "serve-8000.lock"}
+                {p.name for p in runtime.iterdir()},
+                {"serve.lock", "serve-8000.lock", "serve-8000.json"},
             )
             with (runtime / "serve-8000.lock").open("a+") as released:
                 fcntl.flock(released, fcntl.LOCK_EX | fcntl.LOCK_NB)

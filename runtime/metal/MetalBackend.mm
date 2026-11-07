@@ -301,6 +301,21 @@ struct AllocationAccounting {
     std::atomic<uint64_t> peakAllocatedBytes{0};
 };
 
+// A view of an Addressed buffer whose GPU address a table's bytes hold
+// (MetalBackend::setTableReach): each encoder that uses the table makes it
+// resident.
+struct ReachedView final {
+    std::weak_ptr<struct MetalAllocation> allocation;
+    uint64_t offsetBytes = 0;
+    uint64_t lengthBytes = 0;
+};
+
+// The views of Addressed buffers whose addresses a table's bytes hold
+// (MetalBackend::setTableReach).
+struct TableReach final {
+    std::shared_ptr<const std::vector<ReachedView>> reached;
+};
+
 struct MetalAllocation {
     // Nil while the memory is released (MetalBackend::releaseMemory).
     __strong id<MTLBuffer> buffer = nil;
@@ -321,12 +336,19 @@ struct MetalAllocation {
     // may outlive the backend. The set retains the buffer, and with it its
     // memory, so the last view takes it out.
     std::weak_ptr<Residency> residency;
+    // A table's: the views of Addressed buffers its bytes hold the addresses
+    // of (MetalBackend::setTableReach), which each encoder that uses the
+    // table declares for reading and writing.
+    std::vector<TableReach> reaches;
+    // The last encoder that declared the buffer for reading and writing
+    // (MetalBackend::Impl::useReached, its only writer).
+    uint64_t declaredIn = 0;
 
     // Takes the buffer, which joins the residency set and the accounting.
     void attach(id<MTLBuffer> allocated) {
         buffer = allocated;
         bytes = allocated.allocatedSize;
-        if (auto kept = residency.lock()) kept->add(buffer, reach);
+        if (auto kept = residency.lock()) kept->add(buffer);
         raisePeak(accounting->peakAllocatedBytes,
                   accounting->allocatedBytes.fetch_add(
                       bytes, std::memory_order_relaxed) + bytes);
@@ -334,7 +356,7 @@ struct MetalAllocation {
     // Lets the buffer go: it leaves the residency set and the accounting.
     void detach() noexcept {
         if (!buffer) return;
-        if (auto kept = residency.lock()) kept->remove(buffer, reach);
+        if (auto kept = residency.lock()) kept->remove(buffer);
         accounting->allocatedBytes.fetch_sub(bytes, std::memory_order_relaxed);
         buffer = nil;
         bytes = 0;
@@ -964,6 +986,24 @@ struct MetalBackend::Impl {
     __strong MTLSharedEventListener *eventListener = nil;
     // Allocations hold it weakly: they may outlive the backend.
     std::shared_ptr<Residency> residency;
+    // Counts the backend's encoders, so each declares a reached buffer once
+    // (MetalAllocation::declaredIn). Used only by the submitting thread.
+    uint64_t encoderStamp = 0;
+
+    // Declares for `encoder` the Addressed buffers `tableOrBound`'s bytes
+    // reach (MetalBackend::setTableReach), collecting them to make resident
+    // in one call per dispatch.
+    void useReached(MetalAllocation &tableOrBound, uint64_t stamp,
+                    std::vector<__unsafe_unretained id<MTLResource>> &pending) {
+        for (const TableReach &reach : tableOrBound.reaches) {
+            for (const ReachedView &view : *reach.reached) {
+                const std::shared_ptr<MetalAllocation> kept = view.allocation.lock();
+                if (!kept || !kept->buffer || kept->declaredIn == stamp) continue;
+                kept->declaredIn = stamp;
+                pending.push_back(kept->buffer);
+            }
+        }
+    }
     __strong id<MTLLibrary> library = nil;
     // Looked up for every dispatch when its command is prepared, which the
     // GPU may be waiting for; a hit allocates nothing. Used only by the
@@ -1351,8 +1391,8 @@ struct MetalBackend::Impl {
         // Metal may autorelease the command and its encoder, and the serving
         // loop's pool never drains, so their temporary ownership ends with
         // this submission (under the validation layer an autoreleased
-        // command holds every member of its queue's residency set). The
-        // command retains everything the GPU still needs.
+        // command retains what its encoders declared). The command retains
+        // everything the GPU still needs.
         @autoreleasepool {
             // The buffers before `command`, each ended by an event signal or
             // a host step.
@@ -1412,6 +1452,9 @@ struct MetalBackend::Impl {
                 // keep the buffers alive.
                 __unsafe_unretained id<MTLBuffer> buffers[kBufferArgumentEntries];
                 NSUInteger offsets[kBufferArgumentEntries];
+                // The Addressed buffers a dispatch's tables reach, made
+                // resident for this encoder before it dispatches.
+                std::vector<__unsafe_unretained id<MTLResource>> reached;
                 for (size_t index = 0; index < dispatches.size(); ++index) {
                     encodeSteps(index);
                     const PreparedDispatch &item = dispatches[index];
@@ -1421,12 +1464,24 @@ struct MetalBackend::Impl {
                         if (!encoder) {
                             failEncoding("unable to create Metal compute encoder");
                         }
+                        ++encoderStamp;
                     }
                     [encoder setComputePipelineState:item.pipeline];
                     for (const BufferBinding &binding : dispatch.buffers) {
                         const MetalBuffer::Impl &buffer = *binding.buffer.impl_;
                         buffers[binding.index] = buffer.allocation->buffer;
                         offsets[binding.index] = buffer.offsetBytes;
+                    }
+                    reached.clear();
+                    for (const BufferBinding &binding : dispatch.buffers) {
+                        MetalAllocation &allocation = *binding.buffer.impl_->allocation;
+                        if (!allocation.reaches.empty())
+                            useReached(allocation, encoderStamp, reached);
+                    }
+                    if (!reached.empty()) {
+                        [encoder useResources:reached.data()
+                                        count:reached.size()
+                                        usage:MTLResourceUsageRead | MTLResourceUsageWrite];
                     }
                     // One call per run of consecutive entries: a command graph's
                     // dispatch binds a single run.
@@ -1725,7 +1780,7 @@ MetalBackend::MetalBackend(std::string metallibPath, double residencyKeepAliveSe
         // Ending residency dispatches a kernel built here, so no pipeline or
         // driver program is compiled when a keep-alive lapses.
         impl_->residency = std::make_shared<Residency>(
-            impl_->device, impl_->queue,
+            impl_->device,
             impl_->newPipeline(impl_->library, Residency::kKickPipeline), residencyKeepAliveSeconds);
     }
     impl_->sampleDeviceMemory();
@@ -1850,6 +1905,37 @@ void MetalBackend::restoreMemory(const MetalBuffer &buffer) {
     allocation.attach(impl_->newBuffer(allocation.length, allocation.storage,
                                        allocation.label));
     impl_->sampleDeviceMemory();
+}
+
+void MetalBackend::setTableReach(const MetalBuffer &table,
+                                 std::span<const MetalBuffer> reached) {
+    checkOperation();
+    const auto owned = [&](const MetalBuffer &buffer) {
+        return buffer.impl_ &&
+               buffer.impl_->allocation->accounting.get() == impl_->accounting.get();
+    };
+    if (!owned(table)) throw MetalBackendError("Metal buffer is not a buffer of this backend");
+    MetalAllocation &tableAllocation = *table.impl_->allocation;
+    if (!tableAllocation.buffer)
+        throw MetalBackendError("cannot name the reach of released memory");
+    if (tableAllocation.storage != BufferStorage::Shared)
+        throw MetalBackendError(
+            "only a Shared buffer names the buffers its addresses reach");
+    auto views = std::make_shared<std::vector<ReachedView>>();
+    views->reserve(reached.size());
+    for (const MetalBuffer &buffer : reached) {
+        if (!owned(buffer))
+            throw MetalBackendError("Metal buffer is not a buffer of this backend");
+        MetalAllocation &allocation = *buffer.impl_->allocation;
+        if (allocation.reach != BufferReach::Addressed)
+            throw MetalBackendError("a table reaches only Addressed buffers");
+        if (!allocation.buffer) continue;
+        views->push_back({buffer.impl_->allocation, buffer.impl_->offsetBytes,
+                          buffer.impl_->lengthBytes});
+    }
+    tableAllocation.reaches.clear();
+    if (!views->empty())
+        tableAllocation.reaches.push_back({std::move(views)});
 }
 
 MetalBuffer MetalBackend::view(const MetalBuffer &base,

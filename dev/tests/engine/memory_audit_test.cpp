@@ -218,8 +218,8 @@ void testSpilledKvReadersHaveTheirBounds() {
   ActualMemoryReport actual = report(memoryPlan);
   const auto withReaders = [&](uint64_t hot, uint64_t staging) {
     ActualMemoryReport result = actual;
-    result.kvBlockCacheBytes = hot;
-    result.kvHistoryStagingBytes = staging;
+    result.kvHotCacheBytes = hot;
+    result.kvSpillStagingBytes = staging;
     for (uint64_t *bytes : {&result.backendAllocatedBytes, &result.deviceCurrentAllocatedBytes,
                             &result.devicePeakAllocatedBytes, &result.backendPeakAllocatedBytes})
       *bytes += hot + staging;

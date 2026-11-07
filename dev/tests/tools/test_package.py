@@ -32,6 +32,7 @@ def write_source(root):
         ("install", package.INSTALL_FILES),
         ("install/completions", package.COMPLETION_FILES),
         ("server", package.SERVER_FILES),
+        ("server/dialects", package.DIALECT_FILES),
         ("server/chat-assets", package.CHAT_ASSET_FILES),
         ("build", package.ENGINE_FILES),
     ):
@@ -50,6 +51,7 @@ class PackageTests(unittest.TestCase):
                 ("install", package.INSTALL_FILES),
                 ("install/completions", package.COMPLETION_FILES),
                 ("server", package.SERVER_FILES),
+                ("server/dialects", package.DIALECT_FILES),
                 ("server/chat-assets", package.CHAT_ASSET_FILES),
                 ("build", ("splash", "splash.metallib")),
             ):
@@ -103,6 +105,7 @@ class PackageTests(unittest.TestCase):
             for folder, names in (
                 ("install", package.INSTALL_FILES),
                 ("server", package.SERVER_FILES),
+                ("server/dialects", package.DIALECT_FILES),
                 ("server/chat-assets", package.CHAT_ASSET_FILES),
                 ("build", (*package.ENGINE_FILES, *package.OPTIONAL_ENGINE_FILES)),
             ):
@@ -154,12 +157,21 @@ class PackageTests(unittest.TestCase):
                 )
             self.assertEqual(
                 {p.name for p in (stage / "server").iterdir()},
-                {*package.SERVER_FILES, "chat-assets"},
+                {*package.SERVER_FILES, "dialects", "chat-assets"},
             )
             self.assertEqual(
                 {p.name for p in (stage / "engine").iterdir()},
                 {*package.ENGINE_FILES, *package.OPTIONAL_ENGINE_FILES},
             )
+            dialects = stage / "server/dialects"
+            self.assertEqual(
+                {p.name for p in dialects.iterdir()}, set(package.DIALECT_FILES)
+            )
+            for name in package.DIALECT_FILES:
+                self.assertEqual(
+                    (dialects / name).read_bytes(),
+                    (root / "server/dialects" / name).read_bytes(),
+                )
             assets = stage / "server/chat-assets"
             self.assertEqual(
                 {p.name for p in assets.iterdir()}, set(package.CHAT_ASSET_FILES)

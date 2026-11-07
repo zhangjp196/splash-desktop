@@ -184,9 +184,9 @@ LinearScratchSize Linear::decodeScratchSize(ProjectionShape shape) const {
 
 LinearScratchSize Linear::prefillScratchSize(ProjectionShape shape) const {
   LinearScratchSize bound;
-  // Prefill plans take split scratch only in chunks of up to a decode batch,
-  // which run the staged tile (LinearGguf.cpp).
-  for (uint32_t rows = 1; rows <= kMaximumDecodeTileRows; ++rows)
+  // Prefill plans take split scratch only in chunks that run the staged tile,
+  // of up to kMaximumStagedPrefillRows rows (LinearGguf.cpp).
+  for (uint32_t rows = 1; rows <= kMaximumStagedPrefillRows; ++rows)
     for (const auto epilogue : {LinearEpilogue::None, LinearEpilogue::Residual, LinearEpilogue::UpWithGate})
       bound.include(plan({{shape.outputSize, shape.inputSize}, rows, LinearPhase::Prefill, epilogue}).scratchSize());
   // Every prefill plan stores at most the token budget.

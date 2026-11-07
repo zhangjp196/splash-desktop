@@ -383,7 +383,7 @@ void reportIgnoredSetting(std::string_view option, const StreamedSetting &settin
 // What `plan` streams that `other` loads whole, the routed experts before
 // the PLE table, and that it does; empty for neither.
 std::string_view streamedOnlyIn(const StreamedMemoryPlan &plan, const StreamedMemoryPlan &other) {
-  if (plan.expertBytes && !other.expertBytes)
+  if (plan.routedBytes && !other.routedBytes)
     return "routed experts, which load whole without it";
   if (plan.tableBytes && !other.tableBytes)
     return "PLE table, which loads whole without it";
@@ -781,7 +781,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
          .windowTokens = config.model.capabilities.maximumContextTokens,
          .requestedContextTokens = requestedContextTokens,
          .relaunchContextTokens = relaunchContext,
-         .experts = {streamable.expertBytes, streamable.expertFloorBytes, experts},
+         .routed = {streamable.expertBytes, streamable.expertFloorBytes, experts},
          .table = {streamable.tableBytes, streamable.tableFloorBytes, table},
          .hotCacheBytes = config.sparseKvMemory,
          .sparseKv = config.model.capabilities.sparseKv,
@@ -825,9 +825,11 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   // plan streams load at their floor while `floors`: until the loaded model
   // gives the arenas, which take from all that the experts stream through.
   const auto storesOf = [&](const StreamedMemoryPlan &plan, bool floors) {
-    const bool experts = floors && plan.expertBytes && config.expertMemory.mode == StreamedSetting::Mode::Auto;
+    const bool experts = floors && plan.routedBytes && config.expertMemory.mode == StreamedSetting::Mode::Auto;
     return model::ModelLoadOptions{.streamedTableBytes = plan.tableBytes,
-                                   .expertMemoryBytes = experts ? streamable.expertFloorBytes : plan.expertBytes,
+                                   .streamedMemoryBytes = experts ? streamable.expertFloorBytes : plan.routedBytes,
+                                   .streamedMemoryElastic = config.expertMemory.mode ==
+                                                          StreamedSetting::Mode::Auto,
                                    .readers = readers};
   };
   model::ModelLoadOptions loadOptions;
@@ -975,7 +977,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
                         : StreamedSetting{StreamedSetting::Mode::Off, 0};
     };
     const StreamedMemoryResult streamed = streamedPlan(
-        asLoaded(loadOptions.expertMemoryBytes), asLoaded(loadOptions.streamedTableBytes), stagingBytes,
+        asLoaded(loadOptions.streamedMemoryBytes), asLoaded(loadOptions.streamedTableBytes), stagingBytes,
         aneFfnBytes + mixerBytes);
     ModelMemoryFootprint footprint{
         loaded.targetActualAllocatedBytes(),
@@ -988,7 +990,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     };
     // A lane's prefill command writes a group of chunks where the routed
     // experts stream (model::RuntimeGeometry::prefillChunks).
-    const uint32_t commandPages = loadOptions.expertMemoryBytes ? groupPages : 0;
+    const uint32_t commandPages = loadOptions.streamedMemoryBytes ? groupPages : 0;
     ModelMemoryProfile modelProfile{
         loaded.name(), loaded.maximumContextTokens(), loaded.targetKvLayout(config.kvStorage), footprint,
         config.stateFormat, streamed.plan ? streamed.plan->spill : KvSpillPlan{}, commandPages};
@@ -1019,7 +1021,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     throw planRefusal(planned, hardBudgetBytes, streamable, config.model);
   if (planned.plan) {
     const model::ModelLoadOptions next = storesOf(*planned.plan, false);
-    if (next.expertMemoryBytes != loadOptions.expertMemoryBytes ||
+    if (next.streamedMemoryBytes != loadOptions.streamedMemoryBytes ||
         next.streamedTableBytes != loadOptions.streamedTableBytes) {
       loadOptions = next;
       load(true);
@@ -1530,9 +1532,9 @@ ActualMemoryReport RuntimeResources::actualMemoryReport(
   }
   report.kvAllocatedBytes = kvPool_->allocatedBytes();
   if (blockCache_)
-    report.kvBlockCacheBytes = blockCache_->stats().bytes;
+    report.kvHotCacheBytes = blockCache_->stats().bytes;
   if (historyStream_)
-    report.kvHistoryStagingBytes = historyStream_->stats().stagingBytes;
+    report.kvSpillStagingBytes = historyStream_->stats().stagingBytes;
   report.stateStagingBytes = modelMemory.stateStagingBytes;
   report.aneFfnBytes = (aneFfn_ ? aneFfn_->allocatedBytes() : 0) +
                          (aneMixerQkv_ ? aneMixerQkv_->allocatedBytes() : 0) +

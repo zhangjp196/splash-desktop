@@ -15,6 +15,11 @@ public:
   explicit Runtime(RuntimeContext context);
   ~Runtime() override;
   void checkHealth() override;
+  uint64_t setStreamedMemory(uint64_t bytes) override;
+  [[nodiscard]] uint64_t streamedMemoryBytes() const override;
+  [[nodiscard]] uint64_t minimumStreamedMemoryBytes() const override;
+  [[nodiscard]] uint64_t maximumStreamedMemoryBytes() const override;
+  [[nodiscard]] bool streamedMemoryElastic() const override;
   [[nodiscard]] uint32_t statesToActivate() const noexcept override;
   [[nodiscard]] uint32_t prefillGroupRows(bool spills) const noexcept override;
   [[nodiscard]] uint32_t prefillPasses() const noexcept override;
@@ -51,7 +56,7 @@ public:
   [[nodiscard]] std::unique_ptr<StateOffload>
   snapshotToDisk(uint64_t requestId, std::function<void()> completion) override;
   [[nodiscard]] ModelMemoryAdmission reserveSpilledReads(uint64_t requestId) override;
-  [[nodiscard]] ModelMemoryAdmission reserveHistoryStaging(uint64_t requestId, uint32_t pages) override;
+  [[nodiscard]] ModelMemoryAdmission reserveSpillStaging(uint64_t requestId, uint32_t pages) override;
   [[nodiscard]] ModelMemoryAdmission growSpilledReads() override;
   [[nodiscard]] uint64_t reclaimIdleState(bool keepLane,
                                           IdleMemory scope) noexcept override;

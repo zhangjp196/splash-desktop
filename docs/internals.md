@@ -16,7 +16,15 @@
 Within `server/`, `server.py` owns HTTP routing and startup,
 `connections.py` the HTTP ingress bounds and `errors.py` each API's error
 shape; `frontend.py` prepares
-requests and history; `backend.py` owns native request lifecycles. `judgments.py`
+requests and history; `backend.py` owns native request lifecycles. Each API
+has one module in `dialects/` for its routes' handlers, how its requests
+convert to Chat and its complete and streamed answers: `openai.py` for Chat
+and text completions, `anthropic.py` for Messages, and `responses.py` for
+Responses and the responses it stores, and `scoring.py` for /v1/judgments and
+/v1/systemone. `routing.py` names a POST route;
+`request_fields.py` reads the fields every generation API reads alike, and
+`chat_messages.py` normalizes the Chat messages every API's request reaches;
+no dialect imports another. `judgments.py`
 owns finite-choice prompts, validation and typed answer math. `output.py` parses
 generated text as it arrives, one parser serving streamed and complete
 responses alike, in the family's chat format (`chat_format.py`), and
@@ -1013,13 +1021,12 @@ Every buffer the backend allocates belongs to one residency set
 (`MetalBackend::allocateBuffer`, `metal/Residency.hpp`): weights, KV extents,
 state buffers and scratch alike stay wired between requests until the idle
 release (`--idle-release`, 10 minutes by default) passes without a command, and
-the next command wires them again. The command queue holds only a set of the KV
-extents, which kernels reach by address: Metal makes them resident for every
-command buffer, as it does each buffer a dispatch binds. A queue that held every
-buffer would have each command buffer wait for all of them before it starts,
-which with memory nearly full takes 100-170 ms for 1-2% of them; a streamed
-decode command, whose host steps start about a hundred a cycle, would wait at
-nearly every cycle. `--idle-release off` keeps every buffer wired, and the
+the next command wires them again. Nothing is resident for the command queue as
+a whole: an attached set would make every command buffer wait for all of it
+before it starts, which with memory nearly full took 100-170 ms for 1-2% of
+them, and idle KV slowed each command. A command makes resident only what its
+encoders use: the buffers its dispatches bind and the KV extents its page
+tables reach. `--idle-release off` keeps every buffer wired, and the
 weight images allocated unless an [explicit release](#explicit-weights-release)
 gives them back, while the engine runs; KV extents return only through the
 reclaims below, memory pressure among them. Memory returns to macOS when the
@@ -1055,8 +1062,11 @@ last page is free stays allocated until a reclaim releases it, at once and only
 between commands: memory pressure, an admission the budget denies, the
 publication of a replay point in use or a junction, or startup cleanup. Kernels
 reach a page through the GPU address in its request's page table, so no command
-binds KV; the command queue's residency set makes extents resident for every
-command buffer. The host reaches the same memory (`PageStorage::spans`), which
+binds KV. A table names the extents its entries reach as it is written
+(`MetalBackend::setTableReach`), and each encoder that uses the table makes them
+resident for its dispatches, so a command's own KV costs it and an idle extent
+that no table names costs nothing. The host reaches the same memory
+(`PageStorage::spans`), which
 is how the disk tier moves pages. A reclaim returns free pages before it evicts
 anything: an empty extent as it is, and the free pages scattered over the others
 of its form as soon as they cover the extent of that form that holds the fewest
@@ -1109,7 +1119,18 @@ in use unless a request waits, and keeps the state a follow-up resumes from,
 even while a request waits, whose growth the warning refuses as well (`/status`:
 `memory_governor.system_pressure`, and `growth_allowed` is false meanwhile). A
 pass counts only memory that leaves the engine; a cached state it evicts first
-refills the lane's state buffers it keeps. A start needs only what macOS can
+refills the lane's state buffers it keeps. `/status.memory_governor.accounts`
+is the ledger the pass reads: each account's `order` — `rebuildable`
+(streamed table, expert arena, KV block cache, images), `reusable`, `in_use`
+(KV, lane state) or `floor` (weights, scratch) — and its floor and current
+bytes, listed in the order a reclaim frees them. An elastic expert arena
+(`--expert-memory auto`) is the first rebuildable account a pass takes from,
+before it counts a reclaim's target: a gigabyte of slots at a time, down to
+its floor, while a request waits or growth is refused, and a gigabyte back
+while headroom is ample and no request waits. `memory_governor.claims`
+counts every reservation the governor granted or refused by its class —
+`floor` while a start builds, `in_service` for a request's own growth — with
+its bytes and how many it still holds. A start needs only what macOS can
 hand out at all beyond a reserve of a tenth of a small Mac's memory and 2 GiB of
 a larger one, counting what compressing the anonymous pages would free at the
 compressor's present ratio, at most half of them, short of critical pressure:

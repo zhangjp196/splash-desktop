@@ -479,7 +479,7 @@ def run_images(port: int, model: str, nonce: str) -> None:
 
 
 # What a server without vision answers an image or PDF with
-# (server/api_shapes.py, VISION_UNAVAILABLE).
+# (server/chat_messages.py, VISION_UNAVAILABLE).
 VISION_UNAVAILABLE = "this model is serving without vision"
 LATER_SYSTEM_UNSUPPORTED = "does not accept system messages after the first message"
 # Where the chat template probe of /status says later system messages go.
@@ -1787,7 +1787,9 @@ def add_server_arguments(parser):
         "--verify-rows); a MoE model's greedy output repeats only with all",
     )
     parser.add_argument("--max-image-pixels", type=int)
-    parser.add_argument("--kv-format", choices=("int8", "int4", "k8v4", "bf16"), default="int8")
+    parser.add_argument(
+        "--kv-format", choices=("int8", "int4", "k8v4", "bf16"), default="int8"
+    )
     parser.add_argument("--startup-timeout", type=float, default=1800)
 
 

@@ -44,13 +44,40 @@ bool MemoryControl::run(MemoryPressure pressure) {
   const std::string diagnostic = reporter_.update(wait, memory.hostGrowthAllowed);
   if (!diagnostic.empty())
     logLine(diagnostic);
+  // An elastic expert store is the first cache a short host and a waiting
+  // request take from, a chunk at a time down to its floor.
+  constexpr uint64_t kRoutedChunkBytes = 1ULL << 30;
+  if (loop_.streamedMemoryElastic() &&
+      (requestWaiting || !memory.hostGrowthAllowed)) {
+    const uint64_t held = loop_.streamedMemoryBytes();
+    const uint64_t least = loop_.minimumStreamedMemoryBytes();
+    if (held > least)
+      static_cast<void>(loop_.setStreamedMemory(
+          held - least > kRoutedChunkBytes ? held - kRoutedChunkBytes : least));
+  }
   const std::optional<MemoryReclaimDirective> directive =
       policy_.update(memory, now, requestWaiting);
-  if (!directive)
+  // With no request waiting and room to grow, the store takes a chunk back.
+  const auto grow = [&] {
+    if (!loop_.streamedMemoryElastic() || requestWaiting ||
+        !memory.hostGrowthAllowed ||
+        memory.hostHeadroomBytes <= 2 * kRoutedChunkBytes)
+      return;
+    const uint64_t held = loop_.streamedMemoryBytes();
+    const uint64_t most = loop_.maximumStreamedMemoryBytes();
+    if (held < most)
+      static_cast<void>(loop_.setStreamedMemory(
+          most - held > kRoutedChunkBytes ? held + kRoutedChunkBytes : most));
+  };
+  if (!directive) {
+    grow();
+    static_cast<void>(backend_.refreshMemoryStats());
     return false;
+  }
   const MemoryReclaimResult reclaim = loop_.reclaimMemory(*directive);
   policy_.reclaimed(*directive, reclaim);
   governor_.reclaimed(reclaim.outcome);
+  grow();
   static_cast<void>(backend_.refreshMemoryStats());
   // What transfers held back continues at the next command-free point.
   return reclaim.outcome == ReclaimOutcome::Pending;

@@ -401,6 +401,7 @@ class Repository:
         total = sum(size for size, _ in fetch)
         if fetch:
             _remove_abandoned_downloads(blobs)
+            _require_room(self.name, blobs, total)
             print(
                 f"Fetching {len(fetch)} file(s), {total / 1e9:.2f} GB, "
                 f"from {self.name}@{self.revision[:12]}; cached files are reused.",
@@ -566,6 +567,72 @@ def _interruptible(call, *args, **kwargs):
     if "error" in outcome:
         raise outcome["error"]
     return outcome["result"]
+
+
+def _require_room(repo_id, blobs, needed):
+    """Refuse a download of needed bytes into the blobs folder that its volume
+    has no room for, before it fills the disk: the Hub cache can be on
+    another volume (HF_HOME, HF_HUB_CACHE) than the home folder."""
+    existing = next(p for p in (blobs, *blobs.parents) if p.exists())
+    available = _available_bytes(existing)
+    if needed > available:
+        raise models.ModelError(
+            f"not enough disk space for {repo_id}: the download needs "
+            f"{needed / 1e9:.2f} GB and {available / 1e9:.2f} GB is available "
+            f"in {blobs.parent.parent}"
+        )
+
+
+def _available_bytes(path):
+    """The bytes the volume of path takes for a download the user asked for,
+    as Finder counts them: with the purgeable space macOS frees as it is
+    needed, which statvfs leaves out. That count reads 0 off volumes Finder
+    does not show (mounted nobrowse), so the larger of it and statvfs's free
+    bytes decides."""
+    import ctypes
+    import shutil
+
+    cf = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    )
+    cf.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+    cf.CFURLCreateFromFileSystemRepresentation.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_long,
+        ctypes.c_bool,
+    )
+    cf.CFURLCopyResourcePropertyForKey.restype = ctypes.c_bool
+    cf.CFURLCopyResourcePropertyForKey.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    )
+    cf.CFNumberGetValue.restype = ctypes.c_bool
+    cf.CFNumberGetValue.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_long,
+        ctypes.POINTER(ctypes.c_int64),
+    )
+    cf.CFRelease.argtypes = (ctypes.c_void_p,)
+    key = ctypes.c_void_p.in_dll(
+        cf, "kCFURLVolumeAvailableCapacityForImportantUsageKey"
+    )
+    important = ctypes.c_int64()
+    name = os.fsencode(path)
+    url = cf.CFURLCreateFromFileSystemRepresentation(None, name, len(name), True)
+    if url:
+        value = ctypes.c_void_p()
+        if (
+            cf.CFURLCopyResourcePropertyForKey(url, key, ctypes.byref(value), None)
+            and value
+        ):
+            sint64 = 4  # kCFNumberSInt64Type
+            cf.CFNumberGetValue(value, sint64, ctypes.byref(important))
+            cf.CFRelease(value)
+        cf.CFRelease(url)
+    return max(important.value, shutil.disk_usage(path).free)
 
 
 @contextmanager

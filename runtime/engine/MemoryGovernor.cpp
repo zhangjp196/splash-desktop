@@ -83,22 +83,26 @@ std::optional<MemoryPressure> querySystemMemoryPressure() noexcept {
   }
 }
 
-MemoryGovernor::Reservation::Reservation(MemoryGovernor *owner, uint64_t bytes)
-    : owner_(owner), bytes_(bytes) {}
+MemoryGovernor::Reservation::Reservation(MemoryGovernor *owner, uint64_t bytes,
+                                         ClaimId claim)
+    : owner_(owner), bytes_(bytes), claim_(claim) {}
 
 MemoryGovernor::Reservation::~Reservation() { release(); }
 
 MemoryGovernor::Reservation::Reservation(Reservation &&other) noexcept
-    : owner_(other.owner_), bytes_(other.bytes_) {
+    : owner_(other.owner_), bytes_(other.bytes_), claim_(other.claim_) {
   other.owner_ = nullptr;
   other.bytes_ = 0;
+  other.claim_ = {};
 }
 
 void MemoryGovernor::Reservation::release() noexcept {
   if (owner_ && bytes_)
     owner_->release(bytes_);
+  if (owner_ && claim_) owner_->claims_.release(claim_);
   owner_ = nullptr;
   bytes_ = 0;
+  claim_ = {};
 }
 
 MemoryGovernor::MemoryGovernor(metal::MetalBackend &backend, uint64_t limitBytes,
@@ -168,7 +172,8 @@ uint64_t MemoryGovernor::hostHeadroomBytes(const std::optional<HostMemory> &host
 }
 
 std::optional<MemoryGovernor::Reservation>
-MemoryGovernor::tryReserve(uint64_t bytes, metal::AllocationFailure &failure) {
+MemoryGovernor::tryReserve(uint64_t bytes, metal::AllocationFailure &failure,
+                           const ClaimSpec &claim) {
   if (!bytes) {
     throw std::invalid_argument("memory reservation must be positive");
   }
@@ -207,17 +212,23 @@ MemoryGovernor::tryReserve(uint64_t bytes, metal::AllocationFailure &failure) {
     if (deniedReservations_ != std::numeric_limits<uint64_t>::max()) {
       ++deniedReservations_;
     }
+    claims_.refused(claim.cls);
     return std::nullopt;
   }
   reservedBytes_ = requested;
-  return Reservation(this, bytes);
+  return Reservation(this, bytes, claims_.add(claim, bytes));
 }
 
 metal::AllocationAdmission MemoryGovernor::allocationAdmission() noexcept {
   return [this](uint64_t bytes, const std::function<void()> &allocate)
              -> metal::AllocationResult {
     metal::AllocationFailure failure;
-    auto reservation = tryReserve(bytes, failure);
+    // The reservations a start makes before serving builds the floor; those
+    // a request in service makes are its own growth.
+    ClaimSpec claim = claim_;
+    if (!serving_ && claim.cls == ClaimClass::InService)
+      claim.cls = ClaimClass::Floor;
+    auto reservation = tryReserve(bytes, failure, claim);
     if (!reservation)
       return failure;
     try {
@@ -232,6 +243,10 @@ metal::AllocationAdmission MemoryGovernor::allocationAdmission() noexcept {
 
 bool MemoryGovernor::setServing(bool serving) noexcept {
   return std::exchange(serving_, serving);
+}
+
+ClaimSpec MemoryGovernor::setClaim(ClaimSpec spec) noexcept {
+  return std::exchange(claim_, spec);
 }
 
 void MemoryGovernor::setRequestWaiting(bool waiting) noexcept {
@@ -287,6 +302,7 @@ MemoryGovernor::snapshot(const std::optional<HostMemory> &hostMemory,
       hostHeadroom,
       systemPressure_,
       hostGrowthAllowed,
+      claims_.classes(),
   };
 }
 

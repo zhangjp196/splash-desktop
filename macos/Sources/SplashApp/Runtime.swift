@@ -43,6 +43,27 @@ enum Runtime {
         root?.appendingPathComponent("install/launcher.py")
     }
 
+    /// Where the launcher writes `serve-PORT.lock` and `serve-PORT.json`
+    /// (`install/paths.py`): the app's Application Support when packaged,
+    /// the checkout's build directory in development.
+    static var serveDirectory: URL? {
+        guard let root else { return nil }
+        if FileManager.default.fileExists(atPath: root.appendingPathComponent("release.json").path) {
+            return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Splash/runtime", isDirectory: true)
+        }
+        return root.appendingPathComponent("build/runtime", isDirectory: true)
+    }
+
+    /// What the launcher or the server last wrote of a start on `port`
+    /// (`server/serve_record.py`), nil before one has.
+    static func serveRecord(port: Int) -> ServeRecord? {
+        guard let directory = serveDirectory else { return nil }
+        let file = directory.appendingPathComponent("serve-\(port).json")
+        guard let data = try? Data(contentsOf: file) else { return nil }
+        return try? JSONDecoder().decode(ServeRecord.self, from: data)
+    }
+
     /// The model IDs the suggested list bundles, for the picker: the first
     /// column of `install/suggested-models.tsv`, comments and layout aside.
     static var catalog: [String] {
@@ -60,4 +81,22 @@ enum Runtime {
         }
         return identifiers
     }
+}
+
+/// What the launcher or the server writes of a start, as `server/serve_record.py`
+/// lays it out: the process, the phase of its start, and, for a start that
+/// failed, why.
+struct ServeRecord: Decodable, Equatable {
+    enum Phase: String, Decodable {
+        case starting, loading, ready, failed
+    }
+
+    struct Failure: Decodable, Equatable {
+        let kind: String
+        let message: String
+    }
+
+    let pid: Int32
+    let phase: Phase
+    let failure: Failure?
 }

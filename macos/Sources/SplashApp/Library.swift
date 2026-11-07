@@ -9,6 +9,14 @@ struct ModelConfig: Codable, Identifiable, Equatable {
 
     init(settings: ServerSettings) { self.settings = settings }
 
+    /// Whether a local target's folder is gone: a configuration is kept, as
+    /// the user may point it at the model again, but it cannot start.
+    var missingFiles: Bool {
+        guard settings.modelMode == AppModel.ModelMode.local else { return false }
+        let directory = settings.modelDirectory.trimmingCharacters(in: .whitespaces)
+        return !directory.isEmpty && !FileManager.default.fileExists(atPath: directory)
+    }
+
     /// The name, or one derived from the model it serves.
     var displayName: String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)

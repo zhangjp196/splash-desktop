@@ -16,15 +16,13 @@ from jinja2 import TemplateError
 from . import compaction, json_codec, judgments
 from . import images as image_input
 from . import protocol as wire
-from .api_shapes import (
-    IMAGE_PAD_TOKEN,
-    canonical_responses_input,
-    normalize_messages,
-    responses_to_chat_body,
-    template_messages,
-)
 from .backend import Job, ReasoningRequest, remaining_request_time
 from .chat_format import THINK_END, THINK_START, TOOL_CALL_OPEN
+from .chat_messages import (
+    IMAGE_PAD_TOKEN,
+    normalize_messages,
+    template_messages,
+)
 from .chat_templates import (
     LATER_SYSTEM_UNSUPPORTED,
     RESERVED_TEMPLATE_KWARGS,
@@ -42,6 +40,7 @@ from .errors import (
 from .latency import LatencyMetrics
 from .lru import LRUCache
 from .metrics import is_finite_number
+from .output import MAX_STOP_CHARACTERS
 from .serve_options import REASONING_EFFORTS, parse_served_model_name
 from .tokenization import PromptTokenizer, tokenizable
 from .tool_schema import (
@@ -575,6 +574,30 @@ class Frontend:
                 output_field=output_field,
                 thinking_display=thinking_display,
             )
+
+    def preparation(self, deadline):
+        """The preparation slot a dialect prepares under (prepare)."""
+        return self._preparation(deadline)
+
+    def chat_job(
+        self,
+        body,
+        tool_namespaces,
+        deadline,
+        without_slot,
+        *,
+        output_field,
+        thinking_display,
+    ):
+        """The generation job of a Chat-shaped body a dialect has read."""
+        return self._prepare(
+            body,
+            tool_namespaces,
+            deadline,
+            without_slot,
+            output_field=output_field,
+            thinking_display=thinking_display,
+        )
 
     def prepare_completion(self, body, *, deadline):
         """A text completion: the prompt generates as given, with no chat
@@ -1264,8 +1287,18 @@ class Frontend:
             )
         remaining_request_time(deadline)
         max_new = self._output_budget(requested, prompt_tokens, output_field)
-        # A budget the output limit reaches first closes nothing.
+        # A budget the output limit reaches first closes nothing. Where the
+        # context leaves less room than the output limit, a budget larger
+        # than that room keeps its share of it, and the answer keeps the
+        # rest: 24,576 of 32,768 with 20,000 tokens left ends thinking at
+        # 15,000 rather than taking all of it.
         budget = options.thinking_token_budget
+        if not thinking or budget is None:
+            budget = None
+        elif requested is not None and max_new < requested and budget > max_new:
+            budget = max(1, budget * max_new // requested)
+        if budget is not None and budget >= max_new:
+            budget = None
         job = self._generation_job(
             options,
             prompt_tokens,
@@ -1276,9 +1309,7 @@ class Frontend:
                 prompt.sent_effort, prompt.reasoning_effort, prompt.enable_thinking
             ),
             chat_format=self.chat_format,
-            thinking_token_budget=(
-                budget if thinking and budget is not None and budget < max_new else None
-            ),
+            thinking_token_budget=budget,
             thinking_display=thinking_display,
             tool_policy=tool_policy,
             response_validator=response_validator,
@@ -1348,6 +1379,13 @@ class Frontend:
             stop_sequences = tuple(stop)
         else:
             raise APIError(400, "stop must be a string or up to four strings")
+        if len(stop_sequences) > 4:
+            raise APIError(400, "stop must be a string or up to four strings")
+        if any(len(value) > MAX_STOP_CHARACTERS for value in stop_sequences):
+            raise APIError(
+                400,
+                f"each of stop must be at most {MAX_STOP_CHARACTERS} characters",
+            )
         raw_bias = body.get("logit_bias")
         logit_bias = []
         if raw_bias is not None:
@@ -1603,47 +1641,6 @@ class Frontend:
             public_id=secrets.token_hex(16),
             **fields,
         )
-
-    def prepare_responses(self, body, *, deadline, reserve_input):
-        store = body.get("store")
-        if store is not None and not isinstance(store, bool):
-            raise APIError(400, "store must be a boolean")
-        store = True if store is None else store
-        previous_id = body.get("previous_response_id")
-        if previous_id is not None and (
-            not isinstance(previous_id, str) or not previous_id
-        ):
-            raise APIError(400, "previous_response_id must be a non-empty string")
-        with self._preparation(deadline) as without_slot:
-            previous_items = []
-            if previous_id is not None:
-                previous = self.response_store.get(previous_id)
-                if previous is None:
-                    # Clients key on this code to resend the full history.
-                    raise APIError(
-                        404,
-                        "previous response not found",
-                        "previous_response_not_found",
-                    )
-                # The immutable record remains valid if the store evicts it.
-                # Reserve its input bytes before materializing the history.
-                reserve_input(len(previous.history_json))
-                previous_items = json_codec.loads(previous.history_json)
-            items = [*previous_items, *canonical_responses_input(body.get("input"))]
-            chat, namespaces = responses_to_chat_body(body, items)
-            job = self._prepare(
-                chat,
-                namespaces,
-                deadline,
-                without_slot,
-                output_field="max_output_tokens",
-                thinking_display="summarized",
-            )
-            job.response_store = store
-            job.response_previous_id = previous_id
-            if store:
-                job.response_history_items = items
-            return job
 
     def persist_response(self, job, response, output):
         if not job.response_store:

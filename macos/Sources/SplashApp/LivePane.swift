@@ -8,138 +8,226 @@ import SwiftUI
 /// right now rather than leaving it to a caption.
 struct LivePane: View {
     @EnvironmentObject private var model: AppModel
+    @State private var tab: LiveTab = .overview
 
     var body: some View {
-        ScrollView {
-            let live = model.live
-            VStack(alignment: .leading, spacing: 20) {
+        let live = model.live
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 14) {
                 header(live)
-                if !live.updated {
-                    PaneEmpty(
-                        title: L10n.string("live.empty.title"),
-                        message: L10n.string("live.empty.description"),
-                        systemImage: "waveform.path.ecg",
-                        actionTitle: model.canStart ? L10n.string("start") : nil,
-                        action: model.canStart ? { model.start() } : nil
-                    )
-                    .frame(minHeight: 380)
-                } else {
-                    LifecycleCard(
-                        live: live,
-                        stage: model.stage,
-                        updated: model.statusUpdatedAt
-                    )
+                if live.updated { tabBar }
+            }
+            .frame(maxWidth: Theme.contentWidth, alignment: .leading)
 
-                    HStack(spacing: 12) {
-                        HeroCard(
-                            title: L10n.string("live.decode"),
-                            value: rate(live.decodeTokensPerSecond),
-                            unit: L10n.string("live.caption.tokens_per_second"),
-                            systemImage: "bolt.fill",
-                            tint: SplashPalette.mint,
-                            note: peakNote(
-                                "live.caption.peak_output",
-                                live.peakDecodeTokensPerSecond
-                            ),
-                            history: model.decodeHistory
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    if !live.updated {
+                        PaneEmpty(
+                            title: L10n.string("live.empty.title"),
+                            message: L10n.string("live.empty.description"),
+                            systemImage: "waveform.path.ecg",
+                            actionTitle: model.canStart ? L10n.string("start") : nil,
+                            action: model.canStart ? { model.start() } : nil
                         )
-                        HeroCard(
-                            title: L10n.string("live.prefill"),
-                            value: rate(live.prefillTokensPerSecond),
-                            unit: L10n.string("live.caption.tokens_per_second"),
-                            systemImage: "arrow.down.to.line",
-                            tint: SplashPalette.cyan,
-                            note: peakNote(
-                                "live.caption.peak_input",
-                                live.peakPrefillTokensPerSecond
-                            ),
-                            history: model.prefillHistory
-                        )
-                        HeroCard(
-                            title: L10n.string("live.draft_acceptance"),
-                            value: percent(live.draftAcceptanceRate),
-                            unit: L10n.string("live.caption.draft_acceptance"),
-                            systemImage: "checkmark.seal.fill",
-                            tint: SplashPalette.violet,
-                            progress: live.draftAcceptanceRate,
-                            note: peakNote(
-                                "live.caption.peak_acceptance",
-                                live.peakDraftAcceptanceRate,
-                                percent: true
-                            ),
-                            history: model.acceptanceHistory,
-                            chartMax: 100
-                        )
-                    }
-
-                    HStack(spacing: 12) {
-                        MemoryPanel(live: live, history: model.memoryHistory)
-                        RateChartPanel(
-                            decode: model.decodeHistory,
-                            prefill: model.prefillHistory
-                        )
-                    }
-                    .frame(height: 212)
-
-                    ClientsPanel(
-                        clients: model.connectedClients,
-                        endpoint: model.apiBaseURL
-                    ) {
-                        model.refreshConnectedClients()
-                    }
-
-                    ActivityPanel(
-                        events: model.recentEvents,
-                        completed: live.completed,
-                        uptime: model.uptimeText
-                    )
-
-                    VStack(alignment: .leading, spacing: 20) {
-                        MetricSection(
-                            title: L10n.string("live.serving"),
-                            systemImage: "power",
-                            cards: serving(live),
-                            tint: SplashPalette.blue
-                        )
-                        MetricSection(
-                            title: L10n.string("live.requests"),
-                            systemImage: "tray.full.fill",
-                            cards: requests(live),
-                            tint: SplashPalette.violet
-                        )
-                        MetricSection(
-                            title: L10n.string("live.latency"),
-                            systemImage: "timer",
-                            cards: latency(live),
-                            tint: SplashPalette.violet
-                        )
-                        MetricSection(
-                            title: L10n.string("live.memory"),
-                            systemImage: "memorychip.fill",
-                            cards: memory(live),
-                            tint: SplashPalette.mint
-                        )
-                        MetricSection(
-                            title: L10n.string("live.caches"),
-                            systemImage: "externaldrive.fill",
-                            cards: caches(live),
-                            tint: SplashPalette.cyan
-                        )
-                        MetricSection(
-                            title: L10n.string("live.thermal"),
-                            systemImage: "fan.fill",
-                            cards: thermal(live),
-                            tint: SplashPalette.amber
-                        )
+                        .frame(minHeight: 380)
+                    } else {
+                        tabContent(live)
+                            .id(tab)
+                            .transition(.opacity.combined(with: .offset(y: 4)))
                     }
                 }
+                .padding(.bottom, Theme.pagePadding)
+                .frame(maxWidth: Theme.contentWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .padding(Theme.pagePadding)
-            .frame(maxWidth: Theme.contentWidth, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .padding(.horizontal, Theme.pagePadding)
+        .padding(.top, Theme.pagePadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.stage)
+        .animation(.easeOut(duration: 0.16), value: tab)
+    }
+
+    /// The board's inner tabs: one glance at everything, then the requests,
+    /// the memory and storage, and the heat, each with the panels that belong
+    /// to it rather than one long page.
+    private enum LiveTab: String, CaseIterable, Identifiable {
+        case overview, requests, memory, thermal
+
+        var id: String { rawValue }
+        var title: String { L10n.string("live.tab.\(rawValue)") }
+        var summary: String { L10n.string("live.tab.\(rawValue).help") }
+
+        var systemImage: String {
+            switch self {
+            case .overview: return "rectangle.grid.2x2.fill"
+            case .requests: return "tray.full.fill"
+            case .memory: return "memorychip.fill"
+            case .thermal: return "fan.fill"
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .overview: return SplashPalette.mint
+            case .requests: return SplashPalette.violet
+            case .memory: return SplashPalette.blue
+            case .thermal: return SplashPalette.amber
+            }
+        }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 6) {
+            ForEach(LiveTab.allCases) { item in
+                LiveTabButton(
+                    title: item.title,
+                    systemImage: item.systemImage,
+                    tint: item.tint,
+                    selected: tab == item,
+                    badge: item == .requests && model.live.pending > 0
+                        ? model.live.pending : nil
+                ) {
+                    withAnimation(.easeOut(duration: 0.16)) { tab = item }
+                }
+                .help(item.summary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(5)
+        .glassPanel(radius: 14)
+    }
+
+    @ViewBuilder
+    private func tabContent(_ live: LiveStatus) -> some View {
+        switch tab {
+        case .overview:
+            VStack(alignment: .leading, spacing: 20) {
+                LifecycleCard(
+                    live: live,
+                    stage: model.stage,
+                    updated: model.statusUpdatedAt
+                )
+                heroes(live)
+                HStack(spacing: 12) {
+                    MemoryPanel(live: live, history: model.memoryHistory)
+                    RateChartPanel(
+                        decode: model.decodeHistory,
+                        prefill: model.prefillHistory
+                    )
+                }
+                .frame(height: 212)
+                ClientsPanel(
+                    clients: model.connectedClients,
+                    endpoint: model.apiBaseURL
+                ) {
+                    model.refreshConnectedClients()
+                }
+            }
+        case .requests:
+            VStack(alignment: .leading, spacing: 20) {
+                ActivityPanel(
+                    events: model.recentEvents,
+                    completed: live.completed,
+                    uptime: model.uptimeText
+                )
+                MetricSection(
+                    title: L10n.string("live.serving"),
+                    systemImage: "power",
+                    cards: serving(live),
+                    tint: SplashPalette.blue
+                )
+                MetricSection(
+                    title: L10n.string("live.requests"),
+                    systemImage: "tray.full.fill",
+                    cards: requests(live),
+                    tint: SplashPalette.violet
+                )
+                MetricSection(
+                    title: L10n.string("live.latency"),
+                    systemImage: "timer",
+                    cards: latency(live),
+                    tint: SplashPalette.violet
+                )
+            }
+        case .memory:
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(spacing: 12) {
+                    MemoryPanel(live: live, history: model.memoryHistory)
+                    RateChartPanel(
+                        decode: model.decodeHistory,
+                        prefill: model.prefillHistory
+                    )
+                }
+                .frame(height: 212)
+                MetricSection(
+                    title: L10n.string("live.memory"),
+                    systemImage: "memorychip.fill",
+                    cards: memory(live),
+                    tint: SplashPalette.mint
+                )
+                MetricSection(
+                    title: L10n.string("live.caches"),
+                    systemImage: "externaldrive.fill",
+                    cards: caches(live),
+                    tint: SplashPalette.cyan
+                )
+            }
+        case .thermal:
+            VStack(alignment: .leading, spacing: 20) {
+                MetricSection(
+                    title: L10n.string("live.thermal"),
+                    systemImage: "fan.fill",
+                    cards: thermal(live),
+                    tint: SplashPalette.amber
+                )
+            }
+        }
+    }
+
+    private func heroes(_ live: LiveStatus) -> some View {
+        HStack(spacing: 12) {
+            HeroCard(
+                title: L10n.string("live.decode"),
+                value: rate(live.decodeTokensPerSecond),
+                unit: L10n.string("live.caption.tokens_per_second"),
+                systemImage: "bolt.fill",
+                tint: SplashPalette.mint,
+                note: peakNote(
+                    "live.caption.peak_output",
+                    live.peakDecodeTokensPerSecond
+                ),
+                history: model.decodeHistory
+            )
+            HeroCard(
+                title: L10n.string("live.prefill"),
+                value: rate(live.prefillTokensPerSecond),
+                unit: L10n.string("live.caption.tokens_per_second"),
+                systemImage: "arrow.down.to.line",
+                tint: SplashPalette.cyan,
+                note: peakNote(
+                    "live.caption.peak_input",
+                    live.peakPrefillTokensPerSecond
+                ),
+                history: model.prefillHistory
+            )
+            HeroCard(
+                title: L10n.string("live.draft_acceptance"),
+                value: percent(live.draftAcceptanceRate),
+                unit: L10n.string("live.caption.draft_acceptance"),
+                systemImage: "checkmark.seal.fill",
+                tint: SplashPalette.violet,
+                progress: live.draftAcceptanceRate,
+                note: peakNote(
+                    "live.caption.peak_acceptance",
+                    live.peakDraftAcceptanceRate,
+                    percent: true
+                ),
+                history: model.acceptanceHistory,
+                chartMax: 100
+            )
+        }
     }
 
     /// The title and the one live badge: what the engine is doing, and when the
@@ -1220,5 +1308,73 @@ private struct RateChart: View {
             )
         }
         .animation(.easeOut(duration: 0.3), value: decode.last)
+    }
+}
+
+/// One tab of the live board: its icon, its name, and the queue's count while
+/// requests wait, with the hover and selection chrome the rest of the app uses.
+private struct LiveTabButton: View {
+    let title: String
+    let systemImage: String
+    let tint: Color
+    let selected: Bool
+    var badge: Int?
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 11.5, weight: selected ? .semibold : .medium))
+                if let badge {
+                    Text("\(badge)")
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(
+                            selected ? Color.white.opacity(0.22) : tint.opacity(0.16),
+                            in: Capsule()
+                        )
+                        .foregroundStyle(selected ? .white : tint)
+                }
+                if selected {
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 4, height: 4)
+                }
+            }
+            .foregroundStyle(selected ? .white : SplashPalette.muted)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 8)
+            .background(
+                selected
+                    ? AnyShapeStyle(
+                        LinearGradient(
+                            colors: [tint, tint.opacity(0.72)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    : AnyShapeStyle(hovering ? SplashPalette.surface.opacity(0.45) : Color.clear),
+                in: Capsule()
+            )
+            .overlay(
+                Capsule().strokeBorder(
+                    selected ? tint.opacity(0.5) : SplashPalette.border.opacity(0.45),
+                    lineWidth: 0.8
+                )
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

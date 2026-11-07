@@ -183,7 +183,7 @@ Case makeCase(metal::MetalBackend &backend, kv::Format format, ops::AttentionVar
         ++data.poisoned;
       }
     data.tables[lane] = zeroed(backend, table.size() * sizeof(SplashKvPage));
-    data.pool.writeTable(table, data.tables[lane].contents());
+    data.pool.writeTable(table, data.tables[lane]);
     for (uint32_t token = 0; token < histories[lane]; ++token)
       for (uint32_t head = 0; head < kKvHeads; ++head) {
         const uint32_t id = data.page(lane, token), place = token % kPageTokens;
