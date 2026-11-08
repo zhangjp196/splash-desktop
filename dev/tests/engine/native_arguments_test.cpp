@@ -151,6 +151,19 @@ void testServerCommandLines(const char *path) {
        [](NativeArguments &read) {
          read.cacheIdleSpillSeconds = std::numeric_limits<double>::infinity();
        }},
+      {"cache_idle_evict_off",
+       [](NativeArguments &read) { read.cacheIdleEvict = false; }},
+      {"expert_memory_grow",
+       [](NativeArguments &read) {
+         read.expertMemory = {StreamedSetting::Mode::Size, 16 * kGiB};
+         read.expertMemoryGrow = true;
+       }},
+      {"residency_keepalive",
+       [](NativeArguments &read) { read.residencyKeepAliveSeconds = 120.0; }},
+      {"residency_keepalive_off",
+       [](NativeArguments &read) {
+         read.residencyKeepAliveSeconds = std::numeric_limits<double>::infinity();
+       }},
       {"decode_share",
        [](NativeArguments &read) {
          read.maxCacheDisk = {.bytes = 5 * kGiB};
@@ -229,6 +242,9 @@ void testServerCommandLines(const char *path) {
            read.prefillDutyPercent == meant.prefillDutyPercent &&
            read.prefillSliceMilliseconds == meant.prefillSliceMilliseconds &&
            read.maxImagePatches == meant.maxImagePatches &&
+           read.cacheIdleEvict == meant.cacheIdleEvict &&
+           read.residencyKeepAliveSeconds == meant.residencyKeepAliveSeconds &&
+           read.expertMemoryGrow == meant.expertMemoryGrow &&
            read.idleReleaseSeconds == meant.idleReleaseSeconds &&
            read.cacheIdleSpillSeconds == meant.cacheIdleSpillSeconds &&
            read.preventIdleSleep == meant.preventIdleSleep &&
@@ -334,6 +350,13 @@ void testRefusals() {
             "an idle release or spill requires off or a positive number of seconds");
   for (const char *spill : {"0", "-1", "2m", "inf"})
     refuses({"auto", "auto", "--cache-idle-spill", spill},
+            "an idle release or spill requires off or a positive number of seconds");
+  refuses({"auto", "auto", "--cache-idle-evict", "maybe"},
+          "--cache-idle-evict requires on or off");
+  refuses({"auto", "auto", "--expert-memory-grow", "maybe"},
+          "--expert-memory-grow requires on or off");
+  for (const char *keepAlive : {"0", "-1", "2m", "inf"})
+    refuses({"auto", "auto", "--residency-keepalive", keepAlive},
             "an idle release or spill requires off or a positive number of seconds");
   refuses({"auto", "auto", "--idle-sleep", "never"},
           "--idle-sleep requires prevent or allow");

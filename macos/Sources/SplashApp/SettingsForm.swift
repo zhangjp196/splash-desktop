@@ -132,12 +132,15 @@ struct SettingsEditor: View {
                 || s.prefillSliceMilliseconds != b.prefillSliceMilliseconds
         case .memory:
             return s.maxMemory != b.maxMemory || s.maxContext != b.maxContext
-                || s.expertMemory != b.expertMemory || s.pleMemory != b.pleMemory
+                || s.expertMemory != b.expertMemory
+                || s.expertMemoryGrow != b.expertMemoryGrow
+                || s.pleMemory != b.pleMemory
                 || s.sparseKvMemory != b.sparseKvMemory
         case .cache:
             return s.unloadIdleWeights != b.unloadIdleWeights
                 || s.residencySeconds != b.residencySeconds || s.diskCache != b.diskCache
-                || s.cacheIdleSpill != b.cacheIdleSpill || s.cacheDir != b.cacheDir
+                || s.cacheIdleSpill != b.cacheIdleSpill || s.cacheIdleEvict != b.cacheIdleEvict
+                || s.residencyKeepAlive != b.residencyKeepAlive || s.cacheDir != b.cacheDir
                 || s.maxCacheDisk != b.maxCacheDisk
                 || s.maxCacheDiskWrites != b.maxCacheDiskWrites
                 || s.cacheEvictionPreset != b.cacheEvictionPreset
@@ -221,114 +224,89 @@ struct SettingsEditor: View {
     // MARK: Model
 
     @ViewBuilder private var modelPage: some View {
-        EditorCard(
-            title: L10n.string("config.group.mode"),
-            systemImage: "switch.2",
-            tint: SplashPalette.blue
-        ) {
-            HStack(spacing: 10) {
-                ForEach(AppModel.ModelMode.allCases) { mode in
-                    ModeChoice(mode: mode, selected: settings.modelMode == mode) {
-                        settings.modelMode = mode
-                    }
-                }
-            }
-            .padding(.top, 10)
+        // Local models only: an online model is fetched by the downloader
+        // beside the configurations, and then chosen here as a local target.
+        // A configuration saved by the older online mode keeps its repository
+        // ID and still starts, and editing it here moves it to local.
+        if settings.modelMode == .upstream {
+            EditorNote(
+                text: L10n.string("help.legacy_upstream"),
+                tone: SplashPalette.amber,
+                systemImage: "exclamationmark.triangle"
+            )
         }
 
-        if settings.modelMode == .upstream {
-            EditorCard(
-                title: L10n.string("config.group.source"),
-                systemImage: "shippingbox",
-                tint: SplashPalette.cyan
+        EditorCard(
+            title: L10n.string("config.group.files"),
+            systemImage: "folder",
+            tint: SplashPalette.cyan
+        ) {
+            // A GGUF target is a file (the first of several: its shards lie
+            // beside it), an MLX target a model directory.
+            SettingRow(
+                title: L10n.string("field.local_kind"),
+                help: L10n.string("help.local_kind"),
+                controlWidth: 300
             ) {
-                SettingRow(
-                    title: L10n.string("field.model_id"),
-                    help: L10n.string("help.model_id"),
-                    controlWidth: 300
-                ) {
-                    HStack(spacing: 6) {
-                        EditorField(
-                            text: $settings.modelID,
-                            prompt: "owner/repo[:variant]",
-                            monospaced: true
-                        )
-                        if !Runtime.catalog.isEmpty {
-                            Menu {
-                                ForEach(Runtime.catalog, id: \.self) { identifier in
-                                    Button(identifier) { settings.modelID = identifier }
-                                }
-                            } label: {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(SplashPalette.cyan)
-                                    .frame(width: 28, height: 28)
-                                    .background(
-                                        SplashPalette.cyan.opacity(0.13),
-                                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    )
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .strokeBorder(SplashPalette.cyan.opacity(0.25), lineWidth: 0.7)
-                                    )
-                            }
-                            .menuStyle(.borderlessButton)
-                            .menuIndicator(.hidden)
-                            .fixedSize()
-                            .help(L10n.string("examples"))
-                        }
-                    }
+                Picker("", selection: $settings.localKind) {
+                    Text(L10n.string("models.kind.gguf")).tag("gguf")
+                    Text(L10n.string("models.kind.mlx")).tag("mlx")
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
-        } else {
-            EditorCard(
-                title: L10n.string("config.group.files"),
-                systemImage: "folder",
-                tint: SplashPalette.cyan
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.target"),
+                help: L10n.string("field.target.prompt"),
+                controlWidth: 300
             ) {
-                SettingRow(
-                    title: L10n.string("field.target"),
-                    help: L10n.string("field.target.prompt"),
-                    controlWidth: 300
-                ) {
-                    DirectoryPicker(
-                        path: $settings.modelDirectory,
-                        prompt: L10n.string("field.target.prompt")
-                    )
-                }
+                DirectoryPicker(
+                    path: $settings.modelDirectory,
+                    prompt: L10n.string("field.target.prompt")
+                )
+            }
+            if settings.localKind == "gguf" && profile.vision {
                 rowDivider
                 SettingRow(
-                    title: L10n.string("field.draft"),
-                    help: L10n.string("field.draft.prompt"),
+                    title: L10n.string("field.mmproj"),
+                    help: L10n.string("field.mmproj.prompt"),
                     controlWidth: 300
                 ) {
                     DirectoryPicker(
-                        path: $settings.draftDirectory,
-                        prompt: L10n.string("field.draft.prompt")
+                        path: $settings.mmproj,
+                        prompt: L10n.string("field.mmproj.prompt"),
+                        files: true
                     )
                 }
-                if profile.vision {
-                    rowDivider
-                    SettingRow(
-                        title: L10n.string("field.mmproj"),
-                        help: L10n.string("field.mmproj.prompt"),
-                        controlWidth: 300
-                    ) {
-                        DirectoryPicker(
-                            path: $settings.mmproj,
-                            prompt: L10n.string("field.mmproj.prompt"),
-                            files: true
-                        )
-                    }
-                    .disabled(settings.languageOnly)
-                    .opacity(settings.languageOnly ? 0.55 : 1)
-                }
+                .disabled(settings.languageOnly)
+                .opacity(settings.languageOnly ? 0.55 : 1)
             }
-            if profile.vision && settings.languageOnly {
-                EditorNote(
-                    text: L10n.string("help.mmproj.text_only"),
-                    tone: SplashPalette.muted,
-                    systemImage: "info.circle"
+        }
+        if settings.localKind == "gguf" && profile.vision && settings.languageOnly {
+            EditorNote(
+                text: L10n.string("help.mmproj.text_only"),
+                tone: SplashPalette.muted,
+                systemImage: "info.circle"
+            )
+        }
+
+        // DFlash2 is its own choice: a local draft folder, like any other
+        // model the panel serves — a Hub one is fetched by the downloader and
+        // then chosen here.
+        EditorCard(
+            title: L10n.string("config.group.draft"),
+            systemImage: "bolt.badge.clock",
+            tint: SplashPalette.violet
+        ) {
+            SettingRow(
+                title: L10n.string("field.draft"),
+                help: L10n.string("help.draft_folder"),
+                controlWidth: 300
+            ) {
+                DirectoryPicker(
+                    path: $settings.draftDirectory,
+                    prompt: L10n.string("field.draft.prompt")
                 )
             }
         }
@@ -492,6 +470,19 @@ struct SettingsEditor: View {
                     }
                 }
             }
+            if profile.experts {
+                rowDivider
+                SettingRow(
+                    title: L10n.string("field.expert_memory_grow"),
+                    help: L10n.string("help.expert_memory_grow"),
+                    controlWidth: 300
+                ) {
+                    Toggle("", isOn: $settings.expertMemoryGrow)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.violet)
+                }
+            }
         }
     }
 
@@ -634,8 +625,22 @@ struct SettingsEditor: View {
                     .opacity(settings.unloadIdleWeights ? 1 : 0.45)
                 }
                 FieldColumn(title: L10n.string("field.cache_idle_spill"), help: L10n.string("help.cache_idle_spill")) {
-                    EditorField(text: $settings.cacheIdleSpill, prompt: "30", monospaced: true)
+                    EditorField(text: $settings.cacheIdleSpill, prompt: "5m", monospaced: true)
                 }
+                FieldColumn(title: L10n.string("field.residency_keepalive"), help: L10n.string("help.residency_keepalive")) {
+                    EditorField(text: $settings.residencyKeepAlive, prompt: "follows idle release", monospaced: true)
+                }
+            }
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.cache_idle_evict"),
+                help: L10n.string("help.cache_idle_evict"),
+                controlWidth: 300
+            ) {
+                Toggle("", isOn: $settings.cacheIdleEvict)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(SplashPalette.violet)
             }
         }
     }
@@ -1000,68 +1005,6 @@ private struct EditorNote: View {
 
 /// The two mode choices, as cards rather than a menu: the difference between
 /// downloading a model and serving a folder is worth a sentence.
-private struct ModeChoice: View {
-    let mode: AppModel.ModelMode
-    let selected: Bool
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 7) {
-                    Image(systemName: mode == .upstream ? "cloud.fill" : "folder.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(selected ? SplashPalette.blue : SplashPalette.muted)
-                    Text(mode == .upstream
-                        ? L10n.string("mode.upstream")
-                        : L10n.string("mode.local"))
-                        .font(.system(size: 12.5, weight: .semibold))
-                    Spacer(minLength: 0)
-                    if selected {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 12))
-                            .foregroundStyle(SplashPalette.blue)
-                    }
-                }
-                Text(mode == .upstream
-                    ? L10n.string("config.mode.upstream.help")
-                    : L10n.string("config.mode.local.help"))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(SplashPalette.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(10)
-            .background(
-                selected
-                    ? AnyShapeStyle(SplashPalette.blue.opacity(0.13))
-                    : AnyShapeStyle(
-                        SplashPalette.canvas.opacity(hovering ? 0.52 : 0.30)
-                    ),
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(
-                        selected
-                            ? SplashPalette.blue.opacity(0.55)
-                            : SplashPalette.border.opacity(0.45),
-                        lineWidth: selected ? 1.1 : 0.8
-                    )
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
-    }
-}
-
-// MARK: - Fields
-
 /// The rounded field chrome every editor text field shares, including the
 /// focus edge the plain text style otherwise hides.
 private struct EditorFieldShell: ViewModifier {
@@ -1091,7 +1034,9 @@ private struct EditorFieldShell: ViewModifier {
     }
 }
 
-private struct EditorField: View {
+/// A monospaced single-line field the settings form and the downloader
+/// sheet share.
+struct EditorField: View {
     @Binding var text: String
     var prompt = ""
     var monospaced = false
@@ -1193,7 +1138,8 @@ private struct SecretField: View {
 private struct DirectoryPicker: View {
     @Binding var path: String
     let prompt: String
-    /// Choose a GGUF file rather than a directory.
+    /// Choose a GGUF file rather than a directory: only a vision projector
+    /// does, since a target is a folder.
     var files = false
 
     var body: some View {
@@ -1229,7 +1175,7 @@ private struct DirectoryPicker: View {
             panel.allowedContentTypes = [UTType(filenameExtension: "gguf")].compactMap { $0 }
         }
         panel.prompt = L10n.string("field.browse")
-        if panel.runModal() == .OK, let url = panel.url {
+        if panel.runModal() == .OK, let url = panel.urls.first {
             path = url.path
         }
     }

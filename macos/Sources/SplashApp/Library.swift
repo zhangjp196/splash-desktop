@@ -17,18 +17,25 @@ struct ModelConfig: Codable, Identifiable, Equatable {
         return !directory.isEmpty && !FileManager.default.fileExists(atPath: directory)
     }
 
+    /// The name derived from the model it serves, when it serves one: what the
+    /// editor opens an unnamed configuration on, and what an empty name falls
+    /// back to.
+    var derivedName: String? {
+        switch settings.modelMode {
+        case .upstream:
+            let identifier = settings.modelID.trimmingCharacters(in: .whitespaces)
+            return identifier.isEmpty ? nil : identifier
+        case .local:
+            let directory = settings.modelDirectory.trimmingCharacters(in: .whitespaces)
+            return directory.isEmpty ? nil : (directory as NSString).lastPathComponent
+        }
+    }
+
     /// The name, or one derived from the model it serves.
     var displayName: String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty { return trimmed }
-        switch settings.modelMode {
-        case .upstream:
-            return settings.modelID.isEmpty ? L10n.string("config.untitled") : settings.modelID
-        case .local:
-            return settings.modelDirectory.isEmpty
-                ? L10n.string("config.untitled")
-                : (settings.modelDirectory as NSString).lastPathComponent
-        }
+        return derivedName ?? L10n.string("config.untitled")
     }
 }
 

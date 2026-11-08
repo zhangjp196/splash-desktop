@@ -60,6 +60,15 @@ struct NativeArguments final {
   // --loop-guard on|off: whether a thinking block that repeats a short token
   // cycle is ended early.
   bool loopGuard = false;
+  // --cache-idle-evict on|off: whether an idle pass without a writable disk
+  // tier evicts the cached prefixes instead of leaving them.
+  bool cacheIdleEvict = EngineConfig{}.cacheIdleEvict;
+  // --residency-keepalive SECONDS|off, unset follows --idle-release: how long
+  // every buffer stays wired after the last command.
+  std::optional<double> residencyKeepAliveSeconds;
+  // --expert-memory-grow on|off: a sized expert store may grow into spare
+  // memory, with the size it was given as its floor.
+  bool expertMemoryGrow = false;
   uint32_t maxImagePatches = ops::kMaximumImagePatches;
   // --idle-release SECONDS|off, infinite for off.
   double idleReleaseSeconds = RuntimeResourcesConfig{}.idleReleaseSeconds;

@@ -9,6 +9,8 @@ struct ServerSettings: Codable, Equatable {
     /// selfcheck all read them instead of repeating the literals.
     enum First {
         static let modelID = "mlx-community/Qwen3.8-27B-4bit"
+        static let localKind = "gguf"
+        static let draftMode = "none"
         static let port = 8000
         static let kvFormat = "int8"
         // The recurrent state: fp32 is the server's default; bf16 halves it.
@@ -19,20 +21,34 @@ struct ServerSettings: Codable, Equatable {
         // beside it can keep the weights resident instead.
         static let residencySeconds = "600"
         static let unloadIdleWeights = true
+        // Empty follows --idle-release; a duration such as 5m, or off, sets
+        // how long the buffers stay wired on their own, apart from the
+        // weights' release.
+        static let residencyKeepAlive = ""
         // Slice an unopposed prefill command at about a second: the GPU gets
-        // gaps between commands, and the measured prefill cost is about 4%,
-        // against 13% at half a second. The CLI and server keep the engine's
-        // chunk size unless --prefill-slice-ms is passed.
-        static let responsivePrefill = true
+        // gaps between commands, at a measured prefill cost of about 4%, and
+        // 13% at half a second. That buys responsiveness rather than
+        // throughput, so it is off by default, as the CLI and server keep it,
+        // and the panel's switch turns it on. The slice time stands ready for
+        // that switch.
+        static let responsivePrefill = false
         static let prefillSliceMilliseconds = "1000"
         // The SSD cache: off by default; the user turns it on in the panel.
         // When on, within a 16 GiB quota and a 32 GiB a day write budget.
         static let diskCache = false
         static let maxCacheDisk = "16G"
         static let maxCacheDiskWrites = "32G"
+        // Whether an idle pass with no writable disk tier evicts the cached
+        // prefixes. On is the behavior serving without a disk cache has always
+        // had; off keeps them, so the next request's prompt is not computed
+        // again, and the memory they hold is the price.
+        static let cacheIdleEvict = true
         // The engine's memory and context defaults, shown in the panel.
         static let maxMemory = "28G"
         static let maxContext = "204800"
+        // A size fixes an expert store; on, it may still grow into spare
+        // memory with that size as its floor.
+        static let expertMemoryGrow = false
         // The admission limit: requests running and waiting at once. The
         // server's own default, so the panel and the engine open on the same
         // number.
@@ -50,16 +66,34 @@ struct ServerSettings: Codable, Equatable {
     /// default and is not one of them.
     static let reasoningEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
     static let kvFormats = ["int8", "int4", "k8v4", "bf16"]
+    /// What a local target is picked as: a GGUF file (its shards beside it)
+    /// with an optional vision projector, or an MLX model directory.
+    static let localKinds = ["gguf", "mlx"]
+    /// Where the DFlash2 draft comes from: nothing, a local draft directory,
+    /// or a Hugging Face repository ID.
+    static let draftModes = ["none", "folder", "hub"]
     static let stateFormats = ["fp32", "bf16"]
     static let verifyRowsOptions = ["auto", "all"]
     /// The eviction presets by level, and the policies a custom one picks.
     static let cacheEvictionPresets = ["light", "balanced", "strong", "custom"]
     static let cacheEvictionPolicies = ["lru", "fifo", "lfu", "largest"]
 
-    var modelMode = AppModel.ModelMode.upstream
+    /// Local models are the panel's own: an online model is fetched by the
+    /// downloader first, and then chosen as a local target. The upstream case
+    /// stays readable so a configuration the older online mode saved keeps its
+    /// repository ID and still starts.
+    var modelMode = AppModel.ModelMode.local
     var modelID = First.modelID
     var modelDirectory = ""
+    /// Which local target the panel asks for (`localKinds`): `gguf` picks a
+    /// file, the first of several, whose shards and projector lie beside it;
+    /// `mlx` picks a model directory.
+    var localKind = First.localKind
     var draftDirectory = ""
+    /// Where the DFlash2 draft comes from (`draftModes`), and the repository
+    /// ID it names when the mode is `hub`.
+    var draftMode = First.draftMode
+    var draftID = ""
     /// A local GGUF target's vision projector (`--mmproj`): a GGUF file
     /// wherever it lies, or empty for the one beside the target.
     var mmproj = ""
@@ -88,6 +122,9 @@ struct ServerSettings: Codable, Equatable {
     /// automatic plan, `off` loads the store whole, and a size such as `16G`
     /// caps it.
     var expertMemory = ""
+    /// Whether a sized expert store may still grow into spare memory
+    /// (`--expert-memory-grow`), with the size it was given as its floor.
+    var expertMemoryGrow = First.expertMemoryGrow
     var pleMemory = ""
     var sparseKvMemory = ""
     /// Whether a draft's decode cycles verify every row (`all`) or let the
@@ -101,6 +138,10 @@ struct ServerSettings: Codable, Equatable {
     /// Seconds without a request before the engine releases the weights
     /// (`--idle-release`), when `unloadIdleWeights` is on.
     var residencySeconds = First.residencySeconds
+    /// How long the buffers stay wired without work (`--residency-keepalive`),
+    /// apart from the weights' release: a duration, empty to follow
+    /// `--idle-release`, or `off` to keep them wired while the engine runs.
+    var residencyKeepAlive = First.residencyKeepAlive
     /// Whether long prefill commands are sliced (`--prefill-slice-ms`) so the
     /// GPU is free between them for other work and the system.
     var responsivePrefill = First.responsivePrefill
@@ -111,6 +152,9 @@ struct ServerSettings: Codable, Equatable {
     /// memory (`--cache-idle-spill`): a duration, empty for the server's 30
     /// seconds, `off` to keep them. Its own timer, apart from residency.
     var cacheIdleSpill = ""
+    /// Whether a pass that finds no writable disk tier evicts the cached
+    /// prefixes (`--cache-idle-evict off` keeps them in memory).
+    var cacheIdleEvict = First.cacheIdleEvict
     /// Where the persistent SSD cache keeps its files (`--cache-dir`);
     /// empty is the server's own location.
     var cacheDir = ""
@@ -190,19 +234,20 @@ struct ServerSettings: Codable, Equatable {
     // or one a hand edit corrupted, keeps its first-launch default instead of
     // failing the whole decode and dropping the user's configurations.
     private enum CodingKeys: String, CodingKey {
-        case modelMode, modelID, modelDirectory, draftDirectory, mmproj, port
+        case modelMode, modelID, modelDirectory, localKind
+        case draftMode, draftDirectory, draftID, mmproj, port
         case lanAccess, allowedHosts, allowedOrigins
         case languageOnly, kvFormat, stateFormat, neuralEngine, maxMemory, maxContext
-        case unloadIdleWeights, residencySeconds, responsivePrefill
+        case unloadIdleWeights, residencySeconds, residencyKeepAlive, responsivePrefill
         case prefillSliceMilliseconds
-        case cacheIdleSpill, cacheDir
+        case cacheIdleSpill, cacheIdleEvict, cacheDir
         case maxRequestSize, requestTimeout, maxImagePixels, decodeShare
         case allowIdleSleep, thinkingTokenBudget, thinkingEndText, announceServedName
         case apiKey, servedNames
         case reasoningEffort, maxConcurrency
         case diskCache, maxCacheDisk, maxCacheDiskWrites
         case cacheEvictionPreset, cacheEvictionPolicy, cacheEvictionProtect
-        case expertMemory, pleMemory, sparseKvMemory, verifyRows
+        case expertMemory, expertMemoryGrow, pleMemory, sparseKvMemory, verifyRows
         case settingsVersion
     }
 
@@ -246,7 +291,10 @@ struct ServerSettings: Codable, Equatable {
         modelMode = value(AppModel.ModelMode.self, .modelMode) ?? modelMode
         modelID = value(String.self, .modelID) ?? modelID
         modelDirectory = value(String.self, .modelDirectory) ?? modelDirectory
+        localKind = value(String.self, .localKind) ?? localKind
         draftDirectory = value(String.self, .draftDirectory) ?? draftDirectory
+        draftMode = value(String.self, .draftMode) ?? draftMode
+        draftID = value(String.self, .draftID) ?? draftID
         mmproj = value(String.self, .mmproj) ?? mmproj
         port = value(Int.self, .port) ?? port
         lanAccess = value(Bool.self, .lanAccess) ?? lanAccess
@@ -259,15 +307,18 @@ struct ServerSettings: Codable, Equatable {
         maxMemory = value(String.self, .maxMemory) ?? maxMemory
         maxContext = value(String.self, .maxContext) ?? maxContext
         expertMemory = value(String.self, .expertMemory) ?? expertMemory
+        expertMemoryGrow = value(Bool.self, .expertMemoryGrow) ?? expertMemoryGrow
         pleMemory = value(String.self, .pleMemory) ?? pleMemory
         sparseKvMemory = value(String.self, .sparseKvMemory) ?? sparseKvMemory
         verifyRows = value(String.self, .verifyRows) ?? verifyRows
         unloadIdleWeights = value(Bool.self, .unloadIdleWeights) ?? unloadIdleWeights
         residencySeconds = value(String.self, .residencySeconds) ?? residencySeconds
+        residencyKeepAlive = value(String.self, .residencyKeepAlive) ?? residencyKeepAlive
         responsivePrefill = value(Bool.self, .responsivePrefill) ?? responsivePrefill
         prefillSliceMilliseconds =
             value(String.self, .prefillSliceMilliseconds) ?? prefillSliceMilliseconds
         cacheIdleSpill = value(String.self, .cacheIdleSpill) ?? cacheIdleSpill
+        cacheIdleEvict = value(Bool.self, .cacheIdleEvict) ?? cacheIdleEvict
         cacheDir = value(String.self, .cacheDir) ?? cacheDir
         // A configuration stored before the switch existed follows its quota:
         // a quota of `0` already meant "no disk cache", and one that named a
@@ -327,7 +378,10 @@ struct ServerSettings: Codable, Equatable {
             ("modelMode", modelMode.rawValue),
             ("modelID", modelID),
             ("modelDirectory", modelDirectory),
+            ("localKind", localKind),
             ("draftDirectory", draftDirectory),
+            ("draftMode", draftMode),
+            ("draftID", draftID),
             ("mmproj", mmproj),
             ("port", String(port)),
             ("lanAccess", lanAccess ? "1" : "0"),
@@ -340,14 +394,17 @@ struct ServerSettings: Codable, Equatable {
             ("maxMemory", maxMemory),
             ("maxContext", maxContext),
             ("expertMemory", expertMemory),
+            ("expertMemoryGrow", expertMemoryGrow ? "1" : "0"),
             ("pleMemory", pleMemory),
             ("sparseKvMemory", sparseKvMemory),
             ("verifyRows", verifyRows),
             ("unloadIdleWeights", unloadIdleWeights ? "1" : "0"),
             ("residencySeconds", residencySeconds),
+            ("residencyKeepAlive", residencyKeepAlive),
             ("responsivePrefill", responsivePrefill ? "1" : "0"),
             ("prefillSliceMilliseconds", prefillSliceMilliseconds),
             ("cacheIdleSpill", cacheIdleSpill),
+            ("cacheIdleEvict", cacheIdleEvict ? "1" : "0"),
             ("cacheDir", cacheDir),
             ("diskCache", diskCache ? "1" : "0"),
             ("maxCacheDisk", maxCacheDisk),
@@ -382,7 +439,10 @@ struct ServerSettings: Codable, Equatable {
         }
         if let value = rows["modelID"] { modelID = value }
         if let value = rows["modelDirectory"] { modelDirectory = value }
+        if let value = rows["localKind"], Self.localKinds.contains(value) { localKind = value }
         if let value = rows["draftDirectory"] { draftDirectory = value }
+        if let value = rows["draftMode"], Self.draftModes.contains(value) { draftMode = value }
+        if let value = rows["draftID"] { draftID = value }
         if let value = rows["mmproj"] { mmproj = value }
         if let value = Self.number(rows["port"], in: 0...65_535) { port = value }
         if let value = rows["lanAccess"] { lanAccess = value == "1" }
@@ -403,17 +463,27 @@ struct ServerSettings: Codable, Equatable {
             verifyRows = value
         }
         if let value = rows["unloadIdleWeights"] { unloadIdleWeights = value == "1" }
+        if let value = rows["residencyKeepAlive"] { residencyKeepAlive = value }
+        if let value = rows["expertMemoryGrow"] { expertMemoryGrow = value == "1" }
         if let value = rows["residencySeconds"],
            Self.number(value, in: 1...86_400) != nil {
             residencySeconds = value
         }
+        // The slice's switch arrived with row set 4. A row set from before it
+        // carries no row, and the value nobody chose must not turn the slice
+        // on behind the user's back, as the SSD cache's row does not: it reads
+        // as off. A row set this build writes carries its version, so a choice
+        // made from then on is kept.
         if let value = rows["responsivePrefill"] {
             responsivePrefill = value == "1"
+        } else if rows["settingsVersion"] != Self.currentVersion {
+            responsivePrefill = false
         }
         if let value = Self.number(rows["prefillSliceMilliseconds"], in: 1...10_000) {
             prefillSliceMilliseconds = String(value)
         }
         if let value = rows["maxCacheDisk"] { maxCacheDisk = value }
+        if let value = rows["cacheIdleEvict"] { cacheIdleEvict = value == "1" }
         // The switch's own row is a choice only once a build that knew it wrote
         // the rows with a version. A row set from before that carries the old
         // default (on) for every install, which is not a choice anyone made, so

@@ -1321,6 +1321,17 @@ def _native_command(args, model_root, relaunch_context=None):
                 serve_options.idle_release_text(args.cache_idle_spill),
             )
         )
+    if args.cache_idle_evict is not None:
+        command.extend(("--cache-idle-evict", args.cache_idle_evict))
+    if args.residency_keepalive is not None:
+        command.extend(
+            (
+                "--residency-keepalive",
+                serve_options.idle_release_text(args.residency_keepalive),
+            )
+        )
+    if args.expert_memory_grow is not None:
+        command.extend(("--expert-memory-grow", args.expert_memory_grow))
     if args.disable_ane:
         command.extend(("--ane", "off"))
     if args.disable_ane_mixer:

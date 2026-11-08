@@ -2285,7 +2285,11 @@ bool Engine::offloadIdleCache(double now) {
   // idle cache would hold memory at its ceiling for as long as the server
   // runs. Drop what no request holds instead: the next request computes its
   // prompt again, which is what serving without a disk cache costs.
+  // `--cache-idle-evict off` keeps them instead, and the pass then has
+  // nothing to do at all.
   if (!cache_.diskTierWritable()) {
+    if (!config_.cacheIdleEvict)
+      return false;
     const CacheReclaimResult evicted = cache_.evictAll();
     if (!evicted.madeProgress)
       return false;

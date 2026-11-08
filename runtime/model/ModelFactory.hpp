@@ -46,6 +46,9 @@ struct ModelLoadOptions final {
   // Whether the expert store may grow and shrink with memory
   // (--expert-memory auto).
   bool streamedMemoryElastic = false;
+  // Whether a sized expert store may still grow into spare memory
+  // (--expert-memory-grow): the size it was given becomes its floor.
+  bool streamedMemoryGrow = false;
   std::shared_ptr<SsdReaders> readers;
 };
 

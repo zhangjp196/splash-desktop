@@ -168,6 +168,16 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       if (value != "on" && value != "off")
         throw UsageError("--loop-guard requires on or off");
       result.loopGuard = value == "on";
+    } else if (option == "--cache-idle-evict") {
+      if (value != "on" && value != "off")
+        throw UsageError("--cache-idle-evict requires on or off");
+      result.cacheIdleEvict = value == "on";
+    } else if (option == "--residency-keepalive") {
+      result.residencyKeepAliveSeconds = parseIdleRelease(value);
+    } else if (option == "--expert-memory-grow") {
+      if (value != "on" && value != "off")
+        throw UsageError("--expert-memory-grow requires on or off");
+      result.expertMemoryGrow = value == "on";
     } else if (option == "--max-image-patches") {
       result.maxImagePatches = parseMaxImagePatches(value);
     } else if (option == "--persistent-cache") {

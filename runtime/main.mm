@@ -154,6 +154,8 @@ void printUsage(std::string_view executable) {
       " [--idle-release SECONDS|off]"
       " [--idle-sleep prevent|allow] [--ane on|off]"
       " [--loop-guard on|off]"
+      " [--cache-idle-evict on|off]"
+      " [--residency-keepalive SECONDS|off] [--expert-memory-grow on|off]"
       " [--relaunch-context TOKENS] [--ple-memory BYTES] [--expert-memory BYTES]"
       " [--verify-rows auto|all]");
   writeStderrLine("       " + command + " model-check mlx-affine none|safetensors CONFIG [DRAFT_CONFIG]");
@@ -207,6 +209,8 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.resources.stateFormat = arguments.stateFormat;
   config.resources.maximumImagePatches = arguments.maxImagePatches;
   config.resources.idleReleaseSeconds = arguments.idleReleaseSeconds;
+  config.resources.residencyKeepAliveSeconds = arguments.residencyKeepAliveSeconds;
+  config.resources.expertMemoryGrow = arguments.expertMemoryGrow;
   config.resources.aneFfn.enabled = arguments.neuralEngine;
   config.resources.aneMixer.enabled = arguments.neuralEngine && arguments.neuralEngineMixer;
   if (arguments.aneShare)
@@ -225,6 +229,7 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.nativeLoop.engine.prefillSliceMilliseconds =
       arguments.prefillSliceMilliseconds;
   config.nativeLoop.engine.loopGuard = arguments.loopGuard;
+  config.nativeLoop.engine.cacheIdleEvict = arguments.cacheIdleEvict;
   return config;
 }
 

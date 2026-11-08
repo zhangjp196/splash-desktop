@@ -123,7 +123,7 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     var passed = store.load() == ServerSettings.default
         && ServerSettings.default.unloadIdleWeights
         && ServerSettings.default.residencySeconds == "600"
-        && ServerSettings.default.responsivePrefill
+        && !ServerSettings.default.responsivePrefill
         && ServerSettings.default.prefillSliceMilliseconds == "1000"
 
     // Every setting must survive a round trip, and a second save replaces the
@@ -133,6 +133,7 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.modelID = "selfcheck/model"
     edited.modelDirectory = "/tmp/selfcheck"
     edited.draftDirectory = "/tmp/selfcheck-draft"
+    edited.draftMode = "folder"
     edited.mmproj = "/tmp/selfcheck-mmproj.gguf"
     edited.port = 9123
     edited.lanAccess = true
@@ -145,12 +146,16 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.maxMemory = "28G"
     edited.maxContext = "100K"
     edited.expertMemory = "16G"
+    edited.expertMemoryGrow = true
     edited.pleMemory = "2G"
     edited.sparseKvMemory = "1200M"
     edited.verifyRows = "all"
     edited.residencySeconds = "45"
+    edited.residencyKeepAlive = "5m"
+    edited.responsivePrefill = true
     edited.prefillSliceMilliseconds = "750"
     edited.cacheIdleSpill = "2m"
+    edited.cacheIdleEvict = false
     edited.cacheDir = "/tmp/splash-cache"
     edited.diskCache = false
     edited.maxCacheDisk = "64G"
@@ -267,6 +272,41 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             &chosenResidency, storedVersion: ServerSettings.currentVersion)
         && chosenResidency.residencySeconds == ServerSettings.legacyResidencySeconds
 
+    // A row set from before the slice's switch carries no row, so the value
+    // nobody chose reads as off rather than as this build's first-launch
+    // default: an update cannot turn slicing on behind the user's back.
+    var preSliceRows = ServerSettings.default.rows.filter { $0.key != "responsivePrefill" }
+    preSliceRows.removeAll { $0.key == "settingsVersion" }
+    preSliceRows.append((key: "settingsVersion", value: "3"))
+    passed = passed
+        && ServerSettings(rows: Dictionary(uniqueKeysWithValues: preSliceRows))
+            .responsivePrefill == false
+
+    // The download source is the app's own setting, and the selfcheck's suite
+    // keeps it out of the user's real preferences.
+    var source = SourceSettings()
+    source.baseDirectory = "/tmp/hub-cache"
+    source.hubEndpoint = "https://mirror.example/v1"
+    source.save()
+    passed = passed
+        && SourceSettings.load() == source
+        && source.environment == ["HF_HUB_CACHE": "/tmp/hub-cache",
+                                  "HF_ENDPOINT": "https://mirror.example/v1"]
+
+    // An unnamed configuration still names itself after the model it serves,
+    // which is what the editor opens on and what its cleared field falls back
+    // to; one with no model at all reads as untitled.
+    var unnamed = ModelConfig(settings: ServerSettings.default)
+    unnamed.settings.modelMode = .local
+    unnamed.settings.modelDirectory = "/tmp/models/Qwen3.8-27B-GSQ-RCO-GGUF"
+    var untitled = ModelConfig(settings: ServerSettings.default)
+    untitled.settings.modelDirectory = ""
+    passed = passed
+        && unnamed.derivedName == "Qwen3.8-27B-GSQ-RCO-GGUF"
+        && unnamed.displayName == "Qwen3.8-27B-GSQ-RCO-GGUF"
+        && untitled.derivedName == nil
+        && untitled.displayName == L10n.string("config.untitled")
+
     // The configuration library the models pane lists: a saved configuration
     // and the active one come back the next launch, so the pane opens on what
     // it showed. The library follows SPLASH_SETTINGS_DB into a suite of its
@@ -318,11 +358,13 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries("--model-dir", "/tmp/selfcheck")
             && carries("--draft-model", "/tmp/selfcheck-draft")
             && carries("--expert-memory", "16G")
+            && carries("--expert-memory-grow", "on")
             && carries("--ple-memory", "2G")
             && carries("--sparse-kv-memory", "1200M")
             && carries("--verify-rows", "all")
             && carries("--max-context", "100K")
             && carries("--idle-release", "45")
+            && carries("--residency-keepalive", "5m")
             && carries("--prefill-slice-ms", "750")
             // Text only loads no tower, so this configuration names no
             // projector even though the form still holds one; turning vision
@@ -335,6 +377,10 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries("--max-cache-disk", "0")
             && !launch.contains("--persistent-cache")
             && !launch.contains("--max-cache-disk-writes")
+            // The eviction of an idle cache with no disk tier to spill to is
+            // the engine's default; only the switch that turns it off is
+            // passed.
+            && carries("--cache-idle-evict", "off")
         // Turning the idle unload off keeps the weights resident.
         reloaded.unloadIdleWeights = false
         let resident = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
@@ -351,6 +397,22 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && vision.contains("--mmproj")
             && vision.contains("/tmp/selfcheck-mmproj.gguf")
             && !vision.contains("--language-only")
+        // An MLX target has no projector row of its own: the command carries
+        // none for one, whatever the form still holds.
+        reloaded.localKind = "mlx"
+        let mlx = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed && !mlx.contains("--mmproj")
+        reloaded.localKind = "gguf"
+        // A Hub draft is named by its repository ID instead of a directory,
+        // on either kind of target.
+        reloaded.draftMode = "hub"
+        reloaded.draftID = "org/dfash2-draft"
+        // A folder outranks the stored ID, so the ID's own step clears it.
+        reloaded.draftDirectory = ""
+        let hubDraft = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed && carries(hubDraft, "--draft-model", "org/dfash2-draft")
+        reloaded.draftMode = "folder"
+        reloaded.draftDirectory = "/tmp/selfcheck-draft"
         // An upstream target is the model ID the panel holds, and its draft is
         // the installer's choice.
         reloaded.modelMode = .upstream

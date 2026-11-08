@@ -256,10 +256,17 @@ final class AppModel: ObservableObject {
 
     // The first-launch values live in ServerSettings; the store replaces them
     // below before the window is shown.
+    @Published var source = SourceSettings.load()
+    /// The download source is the app's own, so an edit stores it here rather
+    /// than in a configuration.
+    func saveSource() { source.save() }
     @Published var modelMode: ModelMode = .upstream
     @Published var modelID = ServerSettings.First.modelID
     @Published var modelDirectory = ""
+    @Published var localKind = ServerSettings.First.localKind
     @Published var draftDirectory = ""
+    @Published var draftMode = ServerSettings.First.draftMode
+    @Published var draftID = ""
     @Published var mmproj = ""
     @Published var port = ServerSettings.First.port
     @Published var lanAccess = false
@@ -279,9 +286,12 @@ final class AppModel: ObservableObject {
     @Published var servedNames = ""
     @Published var unloadIdleWeights = ServerSettings.First.unloadIdleWeights
     @Published var residencySeconds = ServerSettings.First.residencySeconds
+    @Published var residencyKeepAlive = ServerSettings.First.residencyKeepAlive
+    @Published var expertMemoryGrow = ServerSettings.First.expertMemoryGrow
     @Published var responsivePrefill = ServerSettings.First.responsivePrefill
     @Published var prefillSliceMilliseconds = ServerSettings.First.prefillSliceMilliseconds
     @Published var cacheIdleSpill = ""
+    @Published var cacheIdleEvict = ServerSettings.First.cacheIdleEvict
     @Published var cacheDir = ""
     @Published var diskCache = ServerSettings.First.diskCache
     @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
@@ -452,7 +462,10 @@ final class AppModel: ObservableObject {
         settings.modelMode = modelMode
         settings.modelID = modelID
         settings.modelDirectory = modelDirectory
+        settings.localKind = localKind
         settings.draftDirectory = draftDirectory
+        settings.draftMode = draftMode
+        settings.draftID = draftID
         settings.mmproj = mmproj
         settings.port = port
         settings.lanAccess = lanAccess
@@ -470,9 +483,12 @@ final class AppModel: ObservableObject {
         settings.verifyRows = verifyRows
         settings.unloadIdleWeights = unloadIdleWeights
         settings.residencySeconds = residencySeconds
+        settings.residencyKeepAlive = residencyKeepAlive
+        settings.expertMemoryGrow = expertMemoryGrow
         settings.responsivePrefill = responsivePrefill
         settings.prefillSliceMilliseconds = prefillSliceMilliseconds
         settings.cacheIdleSpill = cacheIdleSpill
+        settings.cacheIdleEvict = cacheIdleEvict
         settings.cacheDir = cacheDir
         settings.diskCache = diskCache
         settings.maxCacheDisk = maxCacheDisk
@@ -533,7 +549,10 @@ final class AppModel: ObservableObject {
         modelMode = settings.modelMode
         modelID = settings.modelID
         modelDirectory = settings.modelDirectory
+        localKind = settings.localKind
         draftDirectory = settings.draftDirectory
+        draftMode = settings.draftMode
+        draftID = settings.draftID
         mmproj = settings.mmproj
         port = settings.port
         lanAccess = settings.lanAccess
@@ -551,9 +570,12 @@ final class AppModel: ObservableObject {
         verifyRows = settings.verifyRows
         unloadIdleWeights = settings.unloadIdleWeights
         residencySeconds = settings.residencySeconds
+        residencyKeepAlive = settings.residencyKeepAlive
+        expertMemoryGrow = settings.expertMemoryGrow
         responsivePrefill = settings.responsivePrefill
         prefillSliceMilliseconds = settings.prefillSliceMilliseconds
         cacheIdleSpill = settings.cacheIdleSpill
+        cacheIdleEvict = settings.cacheIdleEvict
         cacheDir = settings.cacheDir
         diskCache = settings.diskCache
         maxCacheDisk = settings.maxCacheDisk
@@ -854,15 +876,24 @@ final class AppModel: ObservableObject {
             arguments += ["--model", modelID.trimmingCharacters(in: .whitespaces)]
         case .local:
             arguments += ["--model-dir", modelDirectory]
-            let draft = draftDirectory.trimmingCharacters(in: .whitespaces)
-            if !draft.isEmpty { arguments += ["--draft-model", draft] }
             // Text only loads no tower, so it names no projector: the launcher
             // refuses the two together, and the form keeps the path for the
-            // configuration that turns vision back on.
+            // configuration that turns vision back on. Only a GGUF target has
+            // one; an MLX target is vision or text as its own files say.
             let projector = mmproj.trimmingCharacters(in: .whitespaces)
-            if !projector.isEmpty && !languageOnly && profile.vision {
+            if localKind == "gguf" && !projector.isEmpty && !languageOnly && profile.vision {
                 arguments += ["--mmproj", projector]
             }
+        }
+        // The DFlash2 draft is a local folder, like any other model the panel
+        // serves. A repository ID an older configuration saved still names
+        // its own download until an edit moves it to a folder.
+        let draft = draftDirectory.trimmingCharacters(in: .whitespaces)
+        if !draft.isEmpty {
+            arguments += ["--draft-model", draft]
+        } else if draftMode == "hub" {
+            let stored = draftID.trimmingCharacters(in: .whitespaces)
+            if !stored.isEmpty { arguments += ["--draft-model", stored] }
         }
         arguments += ["--port", String(port)]
         // Loopback unless the configuration asks for the LAN; the extra Host
@@ -895,6 +926,11 @@ final class AppModel: ObservableObject {
             let trimmed = value.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += [flag, trimmed] }
         }
+        // A sized store keeps exactly its size unless this asks it to grow
+        // into spare memory, with that size as its floor.
+        if expertMemoryGrow && profile.experts {
+            arguments += ["--expert-memory-grow", "on"]
+        }
         // `auto` is the server's own default; `all` makes a draft's greedy and
         // seeded outputs repeat.
         if verifyRows != "auto" { arguments += ["--verify-rows", verifyRows] }
@@ -918,6 +954,10 @@ final class AppModel: ObservableObject {
         let cacheOn = diskCache && cacheQuota != "0"
         let idleSpill = cacheIdleSpill.trimmingCharacters(in: .whitespaces)
         if !idleSpill.isEmpty { arguments += ["--cache-idle-spill", idleSpill] }
+        // A disk tier that is off leaves the pass nothing to spill to; the
+        // switch says whether it evicts the idle prefixes instead. On, the
+        // engine's own default, passes nothing.
+        if !cacheIdleEvict { arguments += ["--cache-idle-evict", "off"] }
         if cacheOn {
             arguments.append("--persistent-cache")
             if !cacheQuota.isEmpty { arguments += ["--max-cache-disk", cacheQuota] }
@@ -953,6 +993,11 @@ final class AppModel: ObservableObject {
         } else {
             arguments += ["--idle-release", "off"]
         }
+        // The buffers' own keep-alive, apart from the weights' release:
+        // empty follows --idle-release, the engine's behavior without the
+        // option.
+        let keepAlive = residencyKeepAlive.trimmingCharacters(in: .whitespaces)
+        if !keepAlive.isEmpty { arguments += ["--residency-keepalive", keepAlive] }
         if !maxRequestSize.isEmpty { arguments += ["--max-request-size", maxRequestSize] }
         let timeout = requestTimeout.trimmingCharacters(in: .whitespaces)
         if !timeout.isEmpty { arguments += ["--request-timeout", timeout] }
@@ -1039,6 +1084,9 @@ final class AppModel: ObservableObject {
         // it would add files the signature does not cover.
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["TRANSFORMERS_VERBOSITY"] = "error"
+        // The download source: where a Hub download lands and which Hub it
+        // asks, for a launcher that has to fetch a model or a draft.
+        environment.merge(source.environment) { _, source in source }
         process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe

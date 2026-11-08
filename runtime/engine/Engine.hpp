@@ -81,6 +81,12 @@ struct EngineConfig final {
   // `--loop-guard`: end a thinking block that repeats a short token cycle.
   // Off keeps every reply exactly as it is without the flag.
   bool loopGuard = false;
+  // `--cache-idle-evict`: an idle pass that finds no writable disk tier evicts
+  // the cached prefixes rather than leaving them, so memory does not stay at
+  // its ceiling while nothing is asked of the server. Off keeps them, and the
+  // next request's prompt is not computed again; the memory they hold is the
+  // price. On is the behavior serving without a disk cache has always had.
+  bool cacheIdleEvict = true;
   // The query-key pairs a prefill command's attention may compute
   // (Scheduler::attentionPairs): the bootstrap sets those of a full chunk at
   // the end of the model's native window, so that a command past it, which

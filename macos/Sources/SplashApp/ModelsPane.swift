@@ -7,6 +7,8 @@ struct ModelsPane: View {
     @Environment(\.openChat) private var openChat
     @State private var editing: EditingConfig?
     @State private var pendingRemoval: ModelConfig?
+    @State private var downloading = false
+    @StateObject private var downloader = Downloader()
 
     var body: some View {
         ScrollView {
@@ -16,6 +18,14 @@ struct ModelsPane: View {
                     subtitle: subtitle,
                     eyebrow: L10n.string("models.eyebrow")
                 ) {
+                    Button {
+                        downloader.reset()
+                        downloading = true
+                    } label: {
+                        Label(L10n.string("download.title"), systemImage: "arrow.down.circle")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.bordered)
                     Button {
                         editing = EditingConfig(config: model.newConfig(), isNew: true)
                     } label: {
@@ -31,9 +41,14 @@ struct ModelsPane: View {
                 if model.configs.isEmpty {
                     EmptyHint(L10n.string("models.empty.configs"))
                 } else {
-                    LazyVStack(spacing: Theme.cardSpacing) {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 164, maximum: 196),
+                                           spacing: 16, alignment: .top)],
+                        alignment: .leading,
+                        spacing: 20
+                    ) {
                         ForEach(model.configs) { config in
-                            ConfigRow(
+                            ConfigTile(
                                 config: config,
                                 onEdit: { editing = EditingConfig(config: config, isNew: false) },
                                 onRemove: { pendingRemoval = config }
@@ -50,6 +65,13 @@ struct ModelsPane: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .background(Color.clear)
+        .sheet(isPresented: $downloading) {
+            DownloadSheet(
+                downloader: downloader,
+                onClose: { downloading = false }
+            )
+            .environmentObject(model)
+        }
         .sheet(item: $editing) { session in
             ConfigEditor(
                 config: session.config,
@@ -166,11 +188,12 @@ struct ModelsPane: View {
     }
 }
 
-/// A saved configuration, as a card: what it serves and how the server runs
-/// it. Start is the only way to make one the configuration the server runs —
-/// it applies the configuration and starts the server — and the menu holds
-/// edit and remove.
-private struct ConfigRow: View {
+/// A saved configuration, as a rectangle: the icon and the kind inside, the
+/// name and the state outside it, so a row of several reads across the desk.
+/// Clicking the tile starts it — applying the configuration and starting the
+/// server is the one way to make it the configuration the server runs — and
+/// the menu holds edit and remove.
+private struct ConfigTile: View {
     @EnvironmentObject private var model: AppModel
     let config: ModelConfig
     var onEdit: () -> Void
@@ -184,125 +207,163 @@ private struct ConfigRow: View {
         model.isRunning && model.runningConfigID == config.id
     }
 
+    private var canStart: Bool {
+        !model.isRunning && !model.isBusy && !config.missingFiles
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: config.settings.modelMode == .local ? "folder.fill" : "shippingbox.fill")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(isServing ? .white : Color.accentColor)
-                .frame(width: 30, height: 30)
-                .background(
-                    isServing
-                        ? AnyShapeStyle(Color.accentColor)
-                        : AnyShapeStyle(Color.accentColor.opacity(0.12)),
-                    in: RoundedRectangle(cornerRadius: 8)
-                )
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(config.displayName)
-                        .font(.body.weight(.medium))
-                        .lineLimit(1)
-                    if isServing {
-                        Pill(text: L10n.string("models.active"), tint: SplashPalette.mint)
-                    }
-                    if config.missingFiles {
-                        Pill(text: L10n.string("models.files_missing"), tint: SplashPalette.rose)
-                    }
-                }
-                HStack(spacing: 5) {
-                    ForEach(chips, id: \.self) { chip in
-                        Pill(text: chip)
-                    }
-                }
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .clipped()
-            }
-
-            Spacer(minLength: 10)
-
-            Button {
-                model.apply(config)
-                model.start()
-            } label: {
-                Label(
-                    isServing ? L10n.string("models.active") : L10n.string("models.start"),
-                    systemImage: isServing ? "checkmark.circle.fill" : "play.fill"
-                )
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(isServing ? SplashPalette.mint : SplashPalette.blue)
-            .controlSize(.regular)
-            .disabled(model.isRunning || model.isBusy || config.missingFiles)
-
-            Menu {
-                Button(L10n.string("models.edit")) { onEdit() }
-                Divider()
-                Button(L10n.string("models.remove"), role: .destructive) { onRemove() }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 24, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
+        VStack(spacing: 7) {
+            block
+            label
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 10)
-        .background {
-            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                .fill(
-                    isServing
-                        ? AnyShapeStyle(
-                            LinearGradient(
-                                colors: [SplashPalette.mint.opacity(0.14), SplashPalette.cyan.opacity(0.04)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        : AnyShapeStyle(SplashPalette.surface.opacity(hovering ? 0.58 : 0.40))
-                )
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                .strokeBorder(
-                    isServing
-                        ? SplashPalette.mint.opacity(0.45)
-                        : SplashPalette.border.opacity(0.5),
-                    lineWidth: isServing ? 1 : 0.8
-                )
-        }
+        .frame(width: 172)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
+        .onTapGesture { if canStart { start() } }
         .contextMenu {
+            Button(L10n.string("models.start")) { start() }.disabled(!canStart)
             Button(L10n.string("models.edit")) { onEdit() }
+            Divider()
             Button(L10n.string("models.remove"), role: .destructive) { onRemove() }
         }
     }
 
-    /// One short capsule per characteristic, so the row reads at a glance
+    /// The rectangle itself: an icon, the kind, the serving mark, and — on a
+    /// tile that can start — the play affordance the click means.
+    private var block: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(fill)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(
+                    isServing ? SplashPalette.mint.opacity(0.55) : SplashPalette.border.opacity(hovering ? 0.75 : 0.5),
+                    lineWidth: isServing ? 1.2 : 0.8
+                )
+
+            VStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(isServing ? SplashPalette.mint : SplashPalette.cyan)
+                Pill(text: kindTag, tint: kindTint)
+            }
+
+            if canStart && hovering {
+                VStack {
+                    Spacer(minLength: 0)
+                    Label(L10n.string("models.start"), systemImage: "play.fill")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(SplashPalette.blue, in: Capsule())
+                }
+                .padding(.bottom, 8)
+                .transition(.opacity)
+            }
+
+            VStack {
+                HStack {
+                    Spacer(minLength: 0)
+                    if isServing {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(SplashPalette.mint)
+                    } else if hovering {
+                        Button(action: onEdit) {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(SplashPalette.muted)
+                                .frame(width: 20, height: 18)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.string("models.edit"))
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(8)
+        }
+        .frame(height: 104)
+    }
+
+    /// Outside the rectangle: the name, and what the tile is serving with.
+    private var label: some View {
+        VStack(spacing: 3) {
+            Text(config.displayName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(isServing ? SplashPalette.mint : Color.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            HStack(spacing: 4) {
+                if config.missingFiles {
+                    Pill(text: L10n.string("models.files_missing"), tint: SplashPalette.rose)
+                } else {
+                    ForEach(chips.prefix(2), id: \.self) { chip in
+                        Pill(text: chip)
+                    }
+                }
+            }
+            .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .help(config.settings.modelMode == .local
+              ? config.settings.modelDirectory
+              : config.settings.modelID)
+    }
+
+    private var fill: AnyShapeStyle {
+        if isServing {
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [SplashPalette.mint.opacity(0.16), SplashPalette.cyan.opacity(0.05)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
+        return AnyShapeStyle(SplashPalette.surface.opacity(hovering ? 0.62 : 0.42))
+    }
+
+    private var icon: String {
+        switch config.settings.modelMode {
+        case .upstream: return "shippingbox.fill"
+        case .local: return config.settings.localKind == "mlx" ? "cube.fill" : "doc.fill"
+        }
+    }
+
+    private var kindTag: String {
+        switch config.settings.modelMode {
+        case .upstream: return L10n.string("models.kind.hub")
+        case .local: return L10n.string(config.settings.localKind == "mlx" ? "models.kind.mlx" : "models.kind.gguf")
+        }
+    }
+
+    private var kindTint: Color {
+        config.settings.modelMode == .upstream ? SplashPalette.violet : SplashPalette.cyan
+    }
+
+    private func start() {
+        model.apply(config)
+        model.start()
+    }
+
+    /// One short capsule per characteristic, so the tile reads at a glance
     /// rather than as a run-on subtitle.
     private var chips: [String] {
         var parts: [String] = []
         switch config.settings.modelMode {
         case .upstream:
-            parts.append(L10n.string("mode.upstream.short"))
-            if !config.settings.modelID.isEmpty { parts.append(short(config.settings.modelID, 30)) }
+            if !config.settings.modelID.isEmpty { parts.append(short(config.settings.modelID, 22)) }
         case .local:
-            parts.append(L10n.string("mode.local.short"))
             if !config.settings.modelDirectory.isEmpty {
-                parts.append(short((config.settings.modelDirectory as NSString).lastPathComponent, 26))
+                parts.append(short((config.settings.modelDirectory as NSString).lastPathComponent, 22))
             }
         }
         parts.append(config.settings.kvFormat.uppercased())
         parts.append(L10n.format("models.concurrency", config.settings.maxConcurrency))
-        if !config.settings.neuralEngine { parts.append(L10n.string("models.ane_off")) }
-        if config.settings.languageOnly { parts.append(L10n.string("models.text_only")) }
-        if !config.settings.diskCache { parts.append(L10n.string("models.disk_cache_off")) }
-        return Array(parts.prefix(4))
+        return parts
     }
 
     private func short(_ value: String, _ limit: Int) -> String {
@@ -328,19 +389,22 @@ private struct ConfigEditor: View {
         self.isNew = isNew
         self.onSave = onSave
         self.onCancel = onCancel
-        self.original = config
-        _draft = State(initialValue: config)
+        // An unnamed configuration opens on the name its model gives it, so
+        // the header never reads as an untitled blank: the value is the
+        // default, and it is the user's to change or clear.
+        var opened = config
+        if opened.name.trimmingCharacters(in: .whitespaces).isEmpty,
+           let derived = opened.derivedName {
+            opened.name = derived
+        }
+        self.original = opened
+        _draft = State(initialValue: opened)
     }
 
     /// A configuration with nothing to serve would save and then fail to
     /// start, so the editor asks for the model before it lets go.
     private var canSave: Bool {
-        switch draft.settings.modelMode {
-        case .upstream:
-            return !draft.settings.modelID.trimmingCharacters(in: .whitespaces).isEmpty
-        case .local:
-            return !draft.settings.modelDirectory.trimmingCharacters(in: .whitespaces).isEmpty
-        }
+        !draft.settings.modelDirectory.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     private var hasChanges: Bool { draft != original }
@@ -385,7 +449,9 @@ private struct ConfigEditor: View {
                 TextField(
                     "",
                     text: $draft.name,
-                    prompt: Text(L10n.string("config.name.placeholder"))
+                    // With the field cleared, the header still names the
+                    // configuration the way the models pane will.
+                    prompt: Text(draft.derivedName ?? L10n.string("config.name.placeholder"))
                 )
                 .textFieldStyle(.plain)
                 .font(.system(size: 21, weight: .bold, design: .rounded))
@@ -495,6 +561,13 @@ private struct ConfigEditor: View {
         guard canSave else { return }
         var saved = draft
         saved.name = saved.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The panel's model is a local one: an edit of a configuration the
+        // older online mode saved moves it here, where the downloader puts
+        // what it fetches. A draft is a folder now, not a repository ID.
+        saved.settings.modelMode = .local
+        saved.settings.draftMode =
+            saved.settings.draftDirectory.trimmingCharacters(in: .whitespaces).isEmpty
+                ? "none" : "folder"
         onSave(saved)
     }
 }

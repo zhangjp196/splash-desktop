@@ -346,6 +346,9 @@ struct ExpertStore::Impl {
   // most slots, for the elastic store.
   uint64_t fixedBytes = 0;
   bool elastic = false;
+  // A grow-only store's floor (--expert-memory-grow): the memory it was built
+  // with, below which memory control may not take it. Zero for the others.
+  uint64_t floorBytes = 0;
   std::vector<uint32_t> minSlots, maxSlots;
 
   // A load and release() or restore(), which never overlap (no command is in
@@ -1019,8 +1022,11 @@ ExpertStore::ExpertStore(metal::MetalBackend &backend, StreamedBlocks streamed, 
   impl.waiting.assign(shape.experts, 0);
   impl.counters.arenaBytes = impl.arenaTotal;
   impl.counters.stagingBytes = impl.staging.sizeBytes();
-  impl.elastic = options.elastic;
+  impl.elastic = options.elastic || options.grow;
   impl.fixedBytes = fixed;
+  // A grow-only store starts at the size it was given and that size is its
+  // floor: memory control takes it above, never below.
+  impl.floorBytes = options.grow ? impl.fixedBytes + impl.arenaTotal : 0;
   impl.minSlots.reserve(impl.sizes.size());
   impl.maxSlots.reserve(impl.sizes.size());
   for (uint32_t index = 0; index < impl.sizes.size(); ++index) {
@@ -1156,12 +1162,14 @@ uint64_t ExpertStore::memoryBytes() const noexcept {
 }
 
 uint64_t ExpertStore::minimumMemoryBytes() const noexcept {
-  return impl_->fixedBytes + [&] {
+  const uint64_t least = impl_->fixedBytes + [&] {
     uint64_t bytes = 0;
     for (uint32_t index = 0; index < impl_->sizes.size(); ++index)
       bytes += arenaBytes(impl_->sizes[index].layout, impl_->minSlots[index]);
     return bytes;
   }();
+  // A grow-only store never shrinks below the size it was built with.
+  return std::max(least, impl_->floorBytes);
 }
 
 uint64_t ExpertStore::maximumMemoryBytes() const noexcept {

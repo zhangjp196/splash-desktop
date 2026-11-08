@@ -27,6 +27,7 @@ idle_release | --idle-release 30m | auto auto --idle-release 1800.0
 idle_release_off | --idle-release off | auto auto --idle-release off
 cache_idle_spill | --cache-idle-spill 90 | auto auto --cache-idle-spill 90.0
 cache_idle_spill_off | --cache-idle-spill off | auto auto --cache-idle-spill off
+cache_idle_evict_off | --cache-idle-evict off | auto auto --cache-idle-evict off
 decode_share | --max-cache-disk 5G --decode-share 0 | auto auto 5368709120 --decode-share 0.0
 prefill_auto | --thermal-policy auto | auto auto
 prefill_balanced | --thermal-policy balanced | auto auto --prefill-duty 68.0
@@ -51,4 +52,7 @@ ple_memory_off | --ple-memory off | auto auto --ple-memory off
 expert_memory | --expert-memory 16G | auto auto --expert-memory 17179869184
 expert_memory_off | --expert-memory off | auto auto --expert-memory off
 expert_memory_auto | --expert-memory auto --ple-memory auto | auto auto
+expert_memory_grow | --expert-memory 16G --expert-memory-grow on | auto auto --expert-memory-grow on --expert-memory 17179869184
+residency_keepalive | --residency-keepalive 120 | auto auto --residency-keepalive 120.0
+residency_keepalive_off | --residency-keepalive off | auto auto --residency-keepalive off
 sparse_kv_memory | --sparse-kv-memory 1200M | auto auto --sparse-kv-memory 1258291200

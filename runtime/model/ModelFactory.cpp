@@ -89,7 +89,8 @@ LoadedModel loadModel(metal::MetalBackend &backend,
   // The weights that stream from their files read on the engine's readers.
   const ExpertStoreOptions experts{.memoryBytes = options.streamedMemoryBytes,
                                    .readers = options.readers,
-                                   .elastic = options.streamedMemoryElastic};
+                                   .elastic = options.streamedMemoryElastic,
+                                   .grow = options.streamedMemoryGrow};
   result.target = std::visit(
       [&](const auto &layout) -> TargetWeights {
         const std::filesystem::path directory = root / "target";

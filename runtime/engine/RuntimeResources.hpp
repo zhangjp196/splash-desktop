@@ -138,6 +138,11 @@ struct RuntimeResourcesConfig {
   // passes without a request (NativeRuntime::releaseIdleWeights). Infinite
   // keeps the weights while the engine runs.
   double idleReleaseSeconds = metal::kResidencyKeepAliveSeconds;
+  // `--residency-keepalive`: how long every buffer stays wired after the last
+  // command, apart from --idle-release, which frees the weights. Unset follows
+  // the idle release, the behavior without the flag; `off` (infinite) keeps
+  // them wired while the engine runs even as the weights are released.
+  std::optional<double> residencyKeepAliveSeconds;
   // How long the engine keeps its cache without work (--cache-idle-spill):
   // the cached prefixes of an engine that has held no request that long are
   // written to the disk tier and their Metal backing released
@@ -161,6 +166,10 @@ struct RuntimeResourcesConfig {
   // warning, for a dense target, and a size that holds every routed expert
   // loads them.
   StreamedSetting expertMemory;
+  // `--expert-memory-grow`: a sized expert store may still grow into spare
+  // memory, with the size it was given as its floor. Without it a size fixes
+  // the store, as it always has.
+  bool expertMemoryGrow = false;
   // --sparse-kv-memory: the target of a spill-capable target's hot block
   // cache, at least its floor; none (auto) keeps its floor.
   std::optional<uint64_t> sparseKvMemory;

@@ -645,8 +645,9 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   }
   std::unique_ptr<metal::MetalBackend> backend;
   try {
-    backend = std::make_unique<metal::MetalBackend>(config.metallibPath.string(),
-                                                    config.idleReleaseSeconds);
+    backend = std::make_unique<metal::MetalBackend>(
+        config.metallibPath.string(),
+        config.residencyKeepAliveSeconds.value_or(config.idleReleaseSeconds));
   } catch (const metal::MetalAllocationError &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::BackendCreation,
                                 error.what(), {},
@@ -826,10 +827,13 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   // gives the arenas, which take from all that the experts stream through.
   const auto storesOf = [&](const StreamedMemoryPlan &plan, bool floors) {
     const bool experts = floors && plan.routedBytes && config.expertMemory.mode == StreamedSetting::Mode::Auto;
+    const bool sizedGrow =
+        config.expertMemory.mode == StreamedSetting::Mode::Size && config.expertMemoryGrow;
     return model::ModelLoadOptions{.streamedTableBytes = plan.tableBytes,
                                    .streamedMemoryBytes = experts ? streamable.expertFloorBytes : plan.routedBytes,
                                    .streamedMemoryElastic = config.expertMemory.mode ==
                                                           StreamedSetting::Mode::Auto,
+                                   .streamedMemoryGrow = sizedGrow,
                                    .readers = readers};
   };
   model::ModelLoadOptions loadOptions;

@@ -841,6 +841,41 @@ int streamedSplitArenas(MetalBackend &backend, const MoeShape &shape, const std:
   return failures;
 }
 
+// A sized store with --expert-memory-grow keeps the size it was given as its
+// floor: memory control may take it above, never below, while the same store
+// without the switch has only the plan's own floor.
+int streamedGrowOnly(MetalBackend &backend, const MoeShape &shape,
+                     const std::filesystem::path &directory) {
+  const Model m = makeModel(backend, shape, Q4K, true);
+  ExpertFile file(m, directory / "grow.bin");
+  // Half a block's experts above the plan's floor, so the size given is
+  // strictly between what the store may shrink to and its most.
+  ExpertStoreOptions sized =
+      storeOptions(arenaBytes(m, shape.experts + shape.experts / 2), file.blocks, shape);
+  ExpertStore plain(backend, file.blocks, shape, sized);
+  require(!plain.elastic() && plain.minimumMemoryBytes() < plain.memoryBytes(),
+          "a sized store without --expert-memory-grow no longer has the plan's floor");
+  ExpertStoreOptions growing = sized;
+  growing.grow = true;
+  ExpertStore store(backend, file.blocks, shape, growing);
+  const uint64_t floorBytes = store.memoryBytes();
+  require(store.elastic(), "--expert-memory-grow did not make the store elastic");
+  require(store.minimumMemoryBytes() == floorBytes,
+          "--expert-memory-grow did not keep the given size as the floor");
+  require(store.maximumMemoryBytes() > floorBytes,
+          "--expert-memory-grow left no room above the given size");
+  const uint64_t shrunk = store.setMemoryBytes(0);
+  require(shrunk == floorBytes && store.stats().slots == plain.stats().slots,
+          "--expert-memory-grow shrank the store below the size it was given");
+  const uint64_t grown = store.setMemoryBytes(store.maximumMemoryBytes());
+  require(grown > floorBytes && store.stats().slots > plain.stats().slots,
+          "--expert-memory-grow did not grow the store into spare memory");
+  printf("streamed experts: a sized store grows into spare memory and keeps its %llu bytes as its "
+         "floor, ok\n",
+         (unsigned long long)floorBytes);
+  return 0;
+}
+
 // An elastic store starts at its floor, grows its arenas to their most with
 // the experts it holds, and gives the memory back down to the floor: the
 // experts a decode step loaded before the growth stay bitwise the resident
@@ -964,6 +999,7 @@ int main(int argc, const char *argv[]) {
                     streamedRefusal(backend, shape, directory.path()) +
                     streamedSplitArenas(backend, shape, directory.path()) +
                     streamedElastic(backend, shape, directory.path()) +
+                    streamedGrowOnly(backend, shape, directory.path()) +
                     streamedSourceChanges(argv[1], shape, directory.path());
       }
       if (failures) {

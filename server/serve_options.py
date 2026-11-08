@@ -612,6 +612,17 @@ SERVE_OPTIONS = (
         ),
     ),
     ServeOption(
+        "--expert-memory-grow",
+        "memory",
+        dict(
+            choices=("on", "off"),
+            default=None,
+            help="a sized --expert-memory may still grow into spare memory, "
+            "with the size it was given as its floor, instead of keeping "
+            "exactly that (default: off, a size fixes the store)",
+        ),
+    ),
+    ServeOption(
         "--expert-memory",
         "memory",
         dict(
@@ -674,6 +685,20 @@ SERVE_OPTIONS = (
         text=idle_release_text,
     ),
     ServeOption(
+        "--residency-keepalive",
+        "memory",
+        dict(
+            type=parse_idle_release,
+            default=None,
+            metavar="DURATION",
+            help="how long every buffer stays wired after the last command, "
+            "apart from --idle-release, which frees the weights: seconds, or "
+            "with an s, m or h suffix; off keeps them wired while the engine "
+            "runs (default: follow --idle-release)",
+        ),
+        text=idle_release_text,
+    ),
+    ServeOption(
         "--cache-idle-spill",
         "cache",
         dict(
@@ -683,10 +708,24 @@ SERVE_OPTIONS = (
             help="time without a request before the engine writes the cached "
             "prefixes to disk and releases their memory, or evicts them when "
             "the SSD cache is off: seconds, or with an s, m or h suffix, e.g. "
-            "2m (default: 30); off keeps them. Its own "
+            "2m (default: 5m); off keeps them. Its own "
             "timer, apart from --idle-release's, which moves only the weights",
         ),
         text=idle_release_text,
+    ),
+    ServeOption(
+        "--cache-idle-evict",
+        "cache",
+        dict(
+            choices=("on", "off"),
+            default=None,
+            help="an idle pass that finds no writable disk tier evicts the "
+            "cached prefixes rather than leaving them, so memory does not stay "
+            "at its ceiling while nothing is asked of the server, at the cost "
+            "of computing the next request's prompt again; off keeps them in "
+            "memory (default: on, the behavior serving without a disk cache "
+            "has always had)",
+        ),
     ),
     ServeOption(
         "--max-cache-disk",

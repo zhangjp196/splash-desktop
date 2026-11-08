@@ -105,6 +105,10 @@ struct ExpertStoreOptions final {
   // Whether the store may grow and shrink with memory after it is built
   // (--expert-memory auto). A sized store keeps what it was given.
   bool elastic = false;
+  // Whether a sized store may still grow into spare memory after it is built
+  // (--expert-memory-grow): the size it was given becomes its floor, which
+  // memory control may take it above and never below.
+  bool grow = false;
 };
 
 class ExpertStore final : public ops::MoeExpertStream, public WeightMemory {
