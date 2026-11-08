@@ -86,6 +86,14 @@ double parsePrefillDuty(std::string_view value) {
   return result;
 }
 
+double parsePrefillSlice(std::string_view value) {
+  double result = 0.0;
+  if (!parseFinite(value, result) || result <= 0.0 || result > 10'000.0)
+    throw UsageError("--prefill-slice-ms requires a positive number of "
+                     "milliseconds up to 10000");
+  return result;
+}
+
 // BYTES|auto|off, as the server writes the memory of a store of streamed
 // weights (--expert-memory, --ple-memory).
 StreamedSetting parseStreamedSetting(std::string_view option, std::string_view value) {
@@ -154,6 +162,8 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       result.decodeShare = parseDecodeShare(value);
     } else if (option == "--prefill-duty") {
       result.prefillDutyPercent = parsePrefillDuty(value);
+    } else if (option == "--prefill-slice-ms") {
+      result.prefillSliceMilliseconds = parsePrefillSlice(value);
     } else if (option == "--loop-guard") {
       if (value != "on" && value != "off")
         throw UsageError("--loop-guard requires on or off");

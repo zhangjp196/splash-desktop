@@ -82,9 +82,13 @@ public:
   // equal or higher priority decode; zero alternates one command of each kind.
   // A prefill command's attention computes at most maximumAttentionPairs
   // query-key pairs (attentionPairs): its lanes' rows halve until they fit.
+  // A positive prefillSliceMilliseconds also bounds commands no other lane
+  // contends with, so a long prompt does not pin the GPU for seconds.
   explicit Scheduler(double decodeShare,
-                     uint64_t maximumAttentionPairs = std::numeric_limits<uint64_t>::max()) noexcept
-      : decodeShare_(decodeShare), maximumAttentionPairs_(maximumAttentionPairs) {}
+                     uint64_t maximumAttentionPairs = std::numeric_limits<uint64_t>::max(),
+                     double prefillSliceMilliseconds = 0.0) noexcept
+      : decodeShare_(decodeShare), maximumAttentionPairs_(maximumAttentionPairs),
+        prefillSliceMilliseconds_(prefillSliceMilliseconds) {}
 
   // The query-key pairs the attention of `rows` prompt rows from `position`
   // computes: each row attends to its history and itself, so the pairs, and
@@ -246,6 +250,9 @@ private:
   double prefillMillisecondsPerToken_ = 0.0;
   double decodeShare_;
   uint64_t maximumAttentionPairs_;
+  // Zero keeps unopposed prefill commands at their chunk size; positive
+  // bounds each to about this wall time.
+  double prefillSliceMilliseconds_;
   // Decode time that prefill still owes the lanes that decoded beside it
   // (not those waiting for a mask): equal-priority decode runs until its
   // commands' wall time has worked it off.

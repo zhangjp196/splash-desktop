@@ -148,6 +148,7 @@ void printUsage(std::string_view executable) {
       " serve-native MODEL_DIRECTORY"
       " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto [MAX_CACHE_DISK_BYTES]"
       " [--kv-format int8|bf16|int4|k8v4] [--state-format fp32|bf16] [--decode-share SHARE]"
+      " [--prefill-slice-ms MS]"
       " [--max-image-patches PATCHES] [--persistent-cache on|off] [--cache-dir DIRECTORY]"
       " [--max-cache-disk-writes BYTES]"
       " [--idle-release SECONDS|off]"
@@ -221,6 +222,8 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engine.decodeShare = arguments.decodeShare;
   config.nativeLoop.engine.prefillDutyPercent = arguments.prefillDutyPercent;
+  config.nativeLoop.engine.prefillSliceMilliseconds =
+      arguments.prefillSliceMilliseconds;
   config.nativeLoop.engine.loopGuard = arguments.loopGuard;
   return config;
 }

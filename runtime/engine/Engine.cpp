@@ -72,7 +72,9 @@ std::string resourceTimeoutMessage(metal::AllocationFailure failure) {
 Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
                EngineEventSink &events)
     : config_(config), cache_(cache), writeBehind_(cache), model_(model),
-      events_(events), scheduler_(config_.decodeShare, config_.maximumPrefillAttentionPairs) {
+      events_(events),
+      scheduler_(config_.decodeShare, config_.maximumPrefillAttentionPairs,
+                 config_.prefillSliceMilliseconds) {
   if (!config_.maxContext || !config_.vocabularySize) {
     throw std::invalid_argument("context and vocabulary sizes must be positive");
   }
@@ -83,6 +85,9 @@ Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
   if (!std::isfinite(config_.prefillDutyPercent) ||
       config_.prefillDutyPercent < 0.0 || config_.prefillDutyPercent > 100.0)
     throw std::invalid_argument("prefill duty must be a percentage");
+  if (!std::isfinite(config_.prefillSliceMilliseconds) ||
+      config_.prefillSliceMilliseconds < 0.0)
+    throw std::invalid_argument("prefill slice must be nonnegative and finite");
   prefillPacer_.configure(config_.prefillDutyPercent);
   if (config_.spill.capable &&
       (!config_.spill.geometry.fullPageBytes || !config_.spill.geometry.slotBytes))

@@ -54,6 +54,9 @@ struct NativeArguments final {
   // --prefill-duty PERCENT: the share of wall time prefill may keep the GPU
   // busy, 100 for no pacing at all.
   double prefillDutyPercent = EngineConfig{}.prefillDutyPercent;
+  // --prefill-slice-ms MS: the longest one unopposed prefill command may aim
+  // for; zero, the default, keeps the engine's chunk behavior.
+  double prefillSliceMilliseconds = EngineConfig{}.prefillSliceMilliseconds;
   // --loop-guard on|off: whether a thinking block that repeats a short token
   // cycle is ended early.
   bool loopGuard = false;

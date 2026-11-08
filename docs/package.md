@@ -155,7 +155,8 @@ per setting, `SPLASH_SETTINGS_DB` points it elsewhere): the panel saves each
 edit after a short pause, the next launch opens on what the last one saved, and
 Restore Defaults returns the form to the values the first launch opened with
 (upstream model, port 8000, 8-bit KV, a 28 GiB memory ceiling, a 204800 token
-context, an 8-request admission limit, a 10 second residency, and the SSD cache
+context, an 8-request admission limit, a 10 minute idle release (with a switch
+to keep the weights resident), responsive prefill, and the SSD cache
 off — turning it on gives it a 16 GiB quota and a 32 GiB a day write budget). A
 stored value the launcher would reject falls
 back to its first-launch default rather than starting a server that refuses to

@@ -118,8 +118,13 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     setenv("SPLASH_SETTINGS_DB", path, 1)
     let store = SettingsStore()
 
-    // A fresh store answers with the values the app opens with.
+    // A fresh store answers with the values the app opens with: the idle
+    // unload is on for ten minutes.
     var passed = store.load() == ServerSettings.default
+        && ServerSettings.default.unloadIdleWeights
+        && ServerSettings.default.residencySeconds == "600"
+        && ServerSettings.default.responsivePrefill
+        && ServerSettings.default.prefillSliceMilliseconds == "1000"
 
     // Every setting must survive a round trip, and a second save replaces the
     // first instead of leaving it behind.
@@ -144,6 +149,7 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.sparseKvMemory = "1200M"
     edited.verifyRows = "all"
     edited.residencySeconds = "45"
+    edited.prefillSliceMilliseconds = "750"
     edited.cacheIdleSpill = "2m"
     edited.cacheDir = "/tmp/splash-cache"
     edited.diskCache = false
@@ -242,6 +248,25 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && migrated.diskCache == false
         && migrated.settingsVersion == ServerSettings.currentVersion
 
+    // The old ten-second residency was the app's default, not a choice: it
+    // moves to this build's ten minutes, with the idle unload on. A value this
+    // build wrote is the user's own and is kept.
+    var legacyResidency = ServerSettings.default
+    legacyResidency.settingsVersion = "3"
+    legacyResidency.residencySeconds = ServerSettings.legacyResidencySeconds
+    passed = passed
+        && ServerSettings.migrateLegacyResidency(&legacyResidency, storedVersion: "3")
+        && legacyResidency.residencySeconds == ServerSettings.First.residencySeconds
+        && legacyResidency.unloadIdleWeights == ServerSettings.First.unloadIdleWeights
+        && legacyResidency.settingsVersion == ServerSettings.currentVersion
+    var chosenResidency = ServerSettings.default
+    chosenResidency.settingsVersion = ServerSettings.currentVersion
+    chosenResidency.residencySeconds = ServerSettings.legacyResidencySeconds
+    passed = passed
+        && !ServerSettings.migrateLegacyResidency(
+            &chosenResidency, storedVersion: ServerSettings.currentVersion)
+        && chosenResidency.residencySeconds == ServerSettings.legacyResidencySeconds
+
     // The configuration library the models pane lists: a saved configuration
     // and the active one come back the next launch, so the pane opens on what
     // it showed. The library follows SPLASH_SETTINGS_DB into a suite of its
@@ -257,6 +282,16 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && loadedConfigs.map(\.id) == [named.id, spare.id]
         && loadedConfigs.first?.displayName == "Selfcheck"
         && library.loadActive() == spare.id
+    // A saved configuration from before the switch still opens on this
+    // build's idle defaults instead of reloading the weights after 10 s.
+    var legacyConfig = ServerSettings.default
+    legacyConfig.settingsVersion = "3"
+    legacyConfig.residencySeconds = ServerSettings.legacyResidencySeconds
+    library.saveConfigs([ModelConfig(settings: legacyConfig)])
+    let migratedConfig = library.loadConfigs().first?.settings
+    passed = passed
+        && migratedConfig?.residencySeconds == ServerSettings.First.residencySeconds
+        && migratedConfig?.unloadIdleWeights == ServerSettings.First.unloadIdleWeights
     library.saveConfigs([])
     library.saveActive(nil)
 
@@ -287,6 +322,8 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries("--sparse-kv-memory", "1200M")
             && carries("--verify-rows", "all")
             && carries("--max-context", "100K")
+            && carries("--idle-release", "45")
+            && carries("--prefill-slice-ms", "750")
             // Text only loads no tower, so this configuration names no
             // projector even though the form still holds one; turning vision
             // back on puts the same path back on the command.
@@ -298,6 +335,16 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries("--max-cache-disk", "0")
             && !launch.contains("--persistent-cache")
             && !launch.contains("--max-cache-disk-writes")
+        // Turning the idle unload off keeps the weights resident.
+        reloaded.unloadIdleWeights = false
+        let resident = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed && carries(resident, "--idle-release", "off")
+        reloaded.unloadIdleWeights = true
+        // Turning responsive prefill off leaves the engine's chunk size.
+        reloaded.responsivePrefill = false
+        let chunked = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed && !chunked.contains("--prefill-slice-ms")
+        reloaded.responsivePrefill = true
         reloaded.languageOnly = false
         let vision = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
         passed = passed

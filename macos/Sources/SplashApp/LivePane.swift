@@ -363,6 +363,13 @@ struct LivePane: View {
             MetricCard(title: L10n.string("live.current_memory"), value: bytes(live.currentBytes),
                        caption: L10n.string("live.current_memory_caption"),
                        systemImage: "square.stack.3d.up.fill", tint: SplashPalette.violet),
+            MetricCard(title: L10n.string("live.weights"),
+                       value: weightsState(live),
+                       caption: weightsCaption(live),
+                       systemImage: live.weightsRestoring ? "arrow.down.circle.fill"
+                           : (live.weightsReleased ? "moon.zzz.fill" : "lock.fill"),
+                       tint: live.weightsRestoring ? SplashPalette.blue
+                           : (live.weightsReleased ? SplashPalette.amber : SplashPalette.mint)),
             MetricCard(title: L10n.string("live.disk_cache"),
                        value: disk(live.diskUsedBytes, live.diskCapacityBytes),
                        caption: diskCacheCaption(live),
@@ -378,6 +385,27 @@ struct LivePane: View {
         if !model.diskCache { return L10n.string("live.caption.disk_cache_off") }
         let offload = idleOffloadCaption(live)
         return offload.isEmpty ? L10n.string("live.caption.disk_cache_on") : offload
+    }
+
+    /// The weights' idle release as one card, beside the memory they hold:
+    /// resident, released (the next request pays to take them back), or
+    /// restoring now. The caption names the timer and how many restores the
+    /// engine has made, so a released value does not look like a fault.
+    private func weightsState(_ live: LiveStatus) -> String {
+        guard live.weightsKnown else { return "—" }
+        if live.weightsRestoring { return L10n.string("live.weights.restoring") }
+        if live.weightsReleased { return L10n.string("live.weights.released") }
+        return L10n.string("live.weights.resident")
+    }
+
+    private func weightsCaption(_ live: LiveStatus) -> String {
+        guard live.weightsKnown else { return "" }
+        guard let idle = live.idleReleaseSeconds else {
+            return L10n.string("live.weights.caption_off")
+        }
+        let release = L10n.format("live.weights.caption", Int(idle.rounded()))
+        guard live.weightsRestores > 0 else { return release }
+        return L10n.format("live.weights.caption_restores", release, live.weightsRestores)
     }
 
     private func caches(_ live: LiveStatus) -> [MetricCard] {
@@ -777,6 +805,9 @@ private struct MemoryPanel: View {
                             tint: SplashPalette.violet
                         )
                     }
+                    if live.weightsKnown {
+                        Pill(text: weightsPill.text, tint: weightsPill.tint)
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -784,6 +815,18 @@ private struct MemoryPanel: View {
         .padding(17)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .glassPanel(tint: tint, raised: true)
+    }
+
+    /// The weights' idle state, so the overview shows a released or
+    /// restoring model without opening the memory tab.
+    private var weightsPill: (text: String, tint: Color) {
+        if live.weightsRestoring {
+            return (L10n.string("live.weights.restoring"), SplashPalette.blue)
+        }
+        if live.weightsReleased {
+            return (L10n.string("live.weights.released"), SplashPalette.amber)
+        }
+        return (L10n.string("live.weights.resident"), SplashPalette.mint)
     }
 
     private func fraction(_ used: UInt64?, of total: UInt64?) -> Double {

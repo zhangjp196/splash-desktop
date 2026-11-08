@@ -1340,6 +1340,8 @@ def _native_command(args, model_root, relaunch_context=None):
         command.extend(("--verify-rows", args.verify_rows))
     if args.decode_share is not None:
         command.extend(("--decode-share", str(args.decode_share)))
+    if args.prefill_slice_ms is not None:
+        command.extend(("--prefill-slice-ms", str(args.prefill_slice_ms)))
     if policy.prefill_duty != serve_options.DEFAULT_PREFILL_DUTY:
         command.extend(("--prefill-duty", str(policy.prefill_duty)))
     if args.max_image_pixels != image_input.MAX_PIXELS:

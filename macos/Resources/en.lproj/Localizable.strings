@@ -53,8 +53,14 @@
 "verify.all" = "Every row";
 "field.max_concurrency" = "Max concurrency";
 "help.max_concurrency" = "Requests running or waiting at once. The server admits up to this many.";
-"field.residency" = "Release weights after idle";
-"help.residency" = "Seconds before idle weights are released. The next request pays to load them again.";
+"field.responsive_prefill" = "Responsive prefill";
+"help.responsive_prefill" = "Slice a long prompt's prefill into shorter commands, leaving the GPU between them for other work. Prefill is a few percent slower.";
+"field.prefill_slice" = "Prefill slice";
+"help.prefill_slice" = "The longest one prefill command aims for, 1 to 10000 ms. Smaller leaves the GPU more often and makes prefill slower.";
+"field.idle_unload" = "Unload idle weights";
+"help.idle_unload" = "On: release the weights after the idle time below, so the next request reloads them. Off: keep them resident. Default on, ten minutes.";
+"field.residency" = "Idle time before release";
+"help.residency" = "Seconds before idle weights are released. The next request pays to load them again; 600 seconds is ten minutes.";
 "field.disk_cache" = "Use the SSD cache";
 "help.disk_cache" = "Keep cached prefixes on disk so they survive a restart.";
 "field.cache_quota" = "Cache quota";
@@ -154,6 +160,13 @@
 "live.physical_memory" = "Physical memory";
 "live.physical_memory_caption" = "Held now / the budget";
 "live.memory_limit" = "Memory budget";
+"live.weights" = "Model weights";
+"live.weights.resident" = "Resident";
+"live.weights.released" = "Released";
+"live.weights.restoring" = "Restoring…";
+"live.weights.caption" = "idle release %d s";
+"live.weights.caption_off" = "idle unload off";
+"live.weights.caption_restores" = "%@ · %d restores";
 "live.disk_cache" = "Disk cache";
 "live.caption.idle_offload" = "%d idle offloads · %@";
 "live.caption.disk_cache_off" = "off: prefixes stay in memory";
@@ -200,6 +213,7 @@
 "field.hide_key" = "Hide API key";
 "size.auto" = "auto";
 "unit.seconds" = "s";
+"unit.milliseconds" = "ms";
 
 // The configuration editor: a rail of sections beside card-style rows.
 "config.eyebrow.new" = "New configuration";
@@ -320,6 +334,7 @@
 
 "view.chat" = "Chat";
 "chat.clear" = "Clear history";
+"chat.restoring" = "Restoring model…";
 "chat.cleared" = "History cleared";
 "chat.undo" = "Undo";
 

@@ -352,6 +352,24 @@ def parse_prefill_duty(value):
         raise argparse.ArgumentTypeError(str(error)) from error
 
 
+def parse_prefill_slice(value):
+    """The longest one unopposed prefill command may aim for, in milliseconds.
+
+    A positive value slices long prefill commands so other GPU work and the
+    system can run between them; leaving the option off keeps the engine's
+    chunk behavior.
+    """
+    try:
+        milliseconds = float(value)
+    except ValueError:
+        milliseconds = math.nan
+    if not math.isfinite(milliseconds) or not 1 <= milliseconds <= 10_000:
+        raise argparse.ArgumentTypeError(
+            "must be a number of milliseconds from 1 to 10000"
+        )
+    return milliseconds
+
+
 def parse_thermal_policy(value):
     if value not in THERMAL_POLICIES:
         raise argparse.ArgumentTypeError("must be " + ", ".join(THERMAL_POLICIES))
@@ -895,6 +913,18 @@ SERVE_OPTIONS = (
             metavar="SHARE",
             help="decode time owed per unit of prefill time while other requests "
             "decode (default: 0.5; 0 alternates one command each)",
+        ),
+    ),
+    ServeOption(
+        "--prefill-slice-ms",
+        "requests",
+        dict(
+            type=parse_prefill_slice,
+            default=None,
+            metavar="MS",
+            help="the longest one unopposed prefill command may aim for, in "
+            "milliseconds; it leaves the GPU between commands for other work, "
+            "at a small prefill cost (default: the engine's chunk size)",
         ),
     ),
     ServeOption(

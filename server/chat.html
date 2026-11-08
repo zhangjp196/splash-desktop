@@ -617,8 +617,16 @@
     return content.replace(/^(?:[ \t]*\r?\n)+|(?:\r?\n[ \t]*)+$/g, '');
   }
 
-  function renderMarkdown(element, content) {
-    element.innerHTML = markdown.render(displayContent(content));
+  // While a reply streams, code highlighting is deferred: it is the most
+  // expensive part of a render, and the final flush does it once.
+  function renderMarkdown(element, content, highlight = true) {
+    const previous = markdown.options.highlight;
+    if (!highlight) markdown.options.highlight = null;
+    try {
+      element.innerHTML = markdown.render(displayContent(content));
+    } finally {
+      markdown.options.highlight = previous;
+    }
   }
 
   async function copyText(button, text, label) {
@@ -667,6 +675,67 @@
   function updateResponseScroll() {
     if (controller && followResponse) scrollToLatest();
     else updateScrollState();
+  }
+
+  // A streaming reply arrives many times a second, often one token at a time.
+  // Re-rendering the whole message (and re-highlighting every code block) on
+  // each delta keeps the page's main thread busy and drops frames. Collect
+  // deltas and render at most every 50 ms; the final flush renders once more
+  // with syntax highlighting.
+  const assistantRenders = new WeakMap();
+  function assistantRenderState(box, assistant) {
+    let state = assistantRenders.get(box);
+    if (!state) {
+      state = {assistant, timer: 0, content: false, reasoning: false};
+      assistantRenders.set(box, state);
+    }
+    state.assistant = assistant;
+    return state;
+  }
+  function scheduleAssistantRender(box, assistant, kind) {
+    const state = assistantRenderState(box, assistant);
+    if (kind === 'reasoning') state.reasoning = true;
+    else state.content = true;
+    if (state.timer) return;
+    state.timer = setTimeout(() => {
+      state.timer = 0;
+      flushAssistantRender(box, state, false);
+    }, 50);
+  }
+  function flushAssistantRender(box, state, final) {
+    if (!state.assistant) return;
+    const details = box.querySelector('details');
+    const reasoning = details?.querySelector('.reasoning');
+    if (reasoning && (state.reasoning || final)) {
+      // Thinking follows new text unless the reader scrolled up inside it.
+      const atEnd = reasoning.scrollHeight - reasoning.clientHeight - reasoning.scrollTop <= 1;
+      reasoning.textContent = state.assistant.reasoning_content || '';
+      if (atEnd) reasoning.scrollTop = reasoning.scrollHeight;
+      updateReasoningFade(reasoning);
+      state.reasoning = false;
+    }
+    if (state.content || final) {
+      const content = box.querySelector('.content');
+      if (content) renderMarkdown(content, state.assistant.content || '', final);
+      state.content = false;
+    }
+    updateResponseScroll();
+  }
+  function finishAssistantRender(box, assistant) {
+    const state = assistantRenderState(box, assistant);
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = 0;
+    }
+    state.content = true;
+    state.reasoning = true;
+    flushAssistantRender(box, state, true);
+    assistantRenders.delete(box);
+  }
+  function cancelAssistantRender(box) {
+    const state = assistantRenders.get(box);
+    if (state?.timer) clearTimeout(state.timer);
+    assistantRenders.delete(box);
   }
 
   function onPageScroll() {
@@ -1093,20 +1162,14 @@
       assistant.reasoning_content += delta.reasoning_content;
       const details = box.querySelector('details');
       details.hidden = false;
-      const reasoning = details.querySelector('.reasoning');
-      // Thinking follows new text unless the reader scrolled up inside it.
-      const atEnd = reasoning.scrollHeight - reasoning.clientHeight - reasoning.scrollTop <= 1;
-      reasoning.textContent = assistant.reasoning_content;
-      if (atEnd) reasoning.scrollTop = reasoning.scrollHeight;
-      updateReasoningFade(reasoning);
+      scheduleAssistantRender(box, assistant, 'reasoning');
     }
     if (delta.content) {
       assistant.content += delta.content;
-      renderMarkdown(box.querySelector('.content'), assistant.content);
       box.querySelector('.copy-markdown').hidden = false;
       box.querySelector('.message-footer').hidden = false;
+      scheduleAssistantRender(box, assistant, 'content');
     }
-    updateResponseScroll();
     return false;
   }
 
@@ -1155,10 +1218,14 @@
       }
       if (buffer) doneEvent ||= consume(buffer, assistant, box);
       if (!doneEvent) throw new Error('Connection closed early');
+      // One final render with syntax highlighting, however the 50 ms timer
+      // left the message.
+      finishAssistantRender(box, assistant);
       box.querySelector('.waiting').hidden = true;
       messages.push(assistant);
       persist(text || pendingAttachments[0]?.name || 'Image');
     } catch (error) {
+      cancelAssistantRender(box);
       messages.pop();
       userBox.remove();
       box.remove();

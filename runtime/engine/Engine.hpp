@@ -72,6 +72,12 @@ struct EngineConfig final {
   // value a Mac that must be quiet only as far as its own thermal state
   // says gets left with whatever the state scales it to.
   double prefillDutyPercent = 100.0;
+  // The longest wall time one unopposed prefill command may aim for, in
+  // milliseconds. Zero keeps the engine's chunk behavior: a long prompt runs
+  // commands of up to prefillTokenBudget rows, which on a large target pins
+  // the GPU for seconds. A positive value slices those commands so other GPU
+  // work and the system can run between them, at a small prefill cost.
+  double prefillSliceMilliseconds = 0.0;
   // `--loop-guard`: end a thinking block that repeats a short token cycle.
   // Off keeps every reply exactly as it is without the flag.
   bool loopGuard = false;

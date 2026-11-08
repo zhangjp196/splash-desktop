@@ -1221,6 +1221,26 @@ void testMeasuredBudgetPreservesPurePrefillThroughput() {
           "pure prefill contention lost throughput");
 }
 
+void testUnopposedPrefillSlice() {
+  // The engine's default keeps the full chunk for an unopposed prompt.
+  engine::Scheduler chunked(0.0);
+  chunked.submit(request(1, 20'000));
+  chunked.resourcesReady(1, 0);
+  completePrefill(chunked, *chunked.next({}), 6144.0);
+  require(chunked.next({})->items[0].tokenCount ==
+              model::ExecutionLimits::prefillTokenBudget,
+          "the default unopposed prefill lost its chunk");
+
+  // A configured slice bounds it to roughly the target time: 3 ms a row
+  // puts 128 rows at 384 ms, the largest halving below 500 ms.
+  engine::Scheduler sliced(0.0, std::numeric_limits<uint64_t>::max(), 500.0);
+  sliced.submit(request(1, 20'000));
+  sliced.resourcesReady(1, 0);
+  completePrefill(sliced, *sliced.next({}), 6144.0);
+  require(sliced.next({})->items[0].tokenCount == 128,
+          "a configured slice did not bound an unopposed command");
+}
+
 void testTinyTailDoesNotDistortPrefillThroughput() {
   engine::Scheduler scheduler(0.0);
   scheduler.submit(request(1, 2056));
@@ -1626,6 +1646,7 @@ int main() {
     testUnavailableTimingAndMinimumBudget();
     testMeasuredBudgetDoesNotCountBlockedPeers();
     testMeasuredBudgetPreservesPurePrefillThroughput();
+    testUnopposedPrefillSlice();
     testTinyTailDoesNotDistortPrefillThroughput();
     testMeasuredBudgetFinishesShortPrefillPromptly();
     testShortArrivalBesideLongPrefillEndsAtItsLastRow();

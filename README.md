@@ -68,8 +68,10 @@ toolbar. Closing the window keeps a miniature live dashboard in the menu bar.
   high, medium or low level), and **Fixed**, which runs steady at a level —
   **Balanced 68**, **Moderate 48** or **Quiet 33** percent of the wall time —
   applied to a running server at once, above the fans and the CPU, GPU, IO and
-  disk temperatures the engine reads from the SMC. The choice is the app's own
-  preference, not part of the model settings.
+  disk temperatures the engine reads from the SMC. A fresh installation opens
+  on **Smart/High** (full speed while cool, backing off as the Mac heats); an
+  existing installation keeps the mode it already had. The choice is the app's
+  own preference, not part of the model settings.
 - **Log** — the server's log.
 
 Closing the window leaves the app and a running server in the menu bar;

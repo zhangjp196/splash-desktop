@@ -15,7 +15,16 @@ struct ServerSettings: Codable, Equatable {
         static let stateFormat = "fp32"
         // The idle spill is the engine's own timer now and no longer follows
         // the residency below; the residency releases the weights alone.
-        static let residencySeconds = "10"
+        // Ten minutes keeps a chat responsive between pauses; the switch
+        // beside it can keep the weights resident instead.
+        static let residencySeconds = "600"
+        static let unloadIdleWeights = true
+        // Slice an unopposed prefill command at about a second: the GPU gets
+        // gaps between commands, and the measured prefill cost is about 4%,
+        // against 13% at half a second. The CLI and server keep the engine's
+        // chunk size unless --prefill-slice-ms is passed.
+        static let responsivePrefill = true
+        static let prefillSliceMilliseconds = "1000"
         // The SSD cache: off by default; the user turns it on in the panel.
         // When on, within a 16 GiB quota and a 32 GiB a day write budget.
         static let diskCache = false
@@ -85,7 +94,19 @@ struct ServerSettings: Codable, Equatable {
     /// verify budget choose (`auto`): `all` repeats its output, `auto` is
     /// faster but its sampled tokens vary between runs.
     var verifyRows = "auto"
+    /// Whether idle weights are released after `residencySeconds`. Off passes
+    /// `--idle-release off`, so the weights stay resident until the engine
+    /// stops or `POST /v1/memory/release` asks for them.
+    var unloadIdleWeights = First.unloadIdleWeights
+    /// Seconds without a request before the engine releases the weights
+    /// (`--idle-release`), when `unloadIdleWeights` is on.
     var residencySeconds = First.residencySeconds
+    /// Whether long prefill commands are sliced (`--prefill-slice-ms`) so the
+    /// GPU is free between them for other work and the system.
+    var responsivePrefill = First.responsivePrefill
+    /// The slice's target wall time in milliseconds, 1 to 10,000. A smaller
+    /// value leaves the GPU more often, at a higher prefill cost.
+    var prefillSliceMilliseconds = First.prefillSliceMilliseconds
     /// When the engine writes the cached prefixes to disk and releases their
     /// memory (`--cache-idle-spill`): a duration, empty for the server's 30
     /// seconds, `off` to keep them. Its own timer, apart from residency.
@@ -172,7 +193,9 @@ struct ServerSettings: Codable, Equatable {
         case modelMode, modelID, modelDirectory, draftDirectory, mmproj, port
         case lanAccess, allowedHosts, allowedOrigins
         case languageOnly, kvFormat, stateFormat, neuralEngine, maxMemory, maxContext
-        case residencySeconds, cacheIdleSpill, cacheDir
+        case unloadIdleWeights, residencySeconds, responsivePrefill
+        case prefillSliceMilliseconds
+        case cacheIdleSpill, cacheDir
         case maxRequestSize, requestTimeout, maxImagePixels, decodeShare
         case allowIdleSleep, thinkingTokenBudget, thinkingEndText, announceServedName
         case apiKey, servedNames
@@ -189,7 +212,30 @@ struct ServerSettings: Codable, Equatable {
     /// default, and a row set without a version carries the switch's old
     /// default (`on`), which was not a choice the user made, so it reads as the
     /// new default — off. A row set that carries a version keeps the switch.
-    static let currentVersion = "3"
+    /// `4` carries the idle-unload switch and moves the old ten-second
+    /// residency to the new ten-minute default.
+    static let currentVersion = "4"
+
+    /// The residency the app used to write by default. A value of exactly this
+    /// from an older row set was the old default rather than a choice, and it
+    /// made every pause of ten seconds reload the whole model; migration moves
+    /// it to the new default. A value this build writes is kept as it is.
+    static let legacyResidencySeconds = "10"
+
+    /// Moves a stored old-default residency to this build's default and
+    /// records the new row set. Returns whether anything changed.
+    /// `storedVersion` is the row set the value came from, nil for one written
+    /// before row sets carried a version.
+    @discardableResult
+    static func migrateLegacyResidency(_ settings: inout ServerSettings,
+                                       storedVersion: String?) -> Bool {
+        guard settings.residencySeconds == legacyResidencySeconds,
+              storedVersion != currentVersion else { return false }
+        settings.unloadIdleWeights = First.unloadIdleWeights
+        settings.residencySeconds = First.residencySeconds
+        settings.settingsVersion = currentVersion
+        return true
+    }
 
     init(from decoder: Decoder) throws {
         self.init()
@@ -216,7 +262,11 @@ struct ServerSettings: Codable, Equatable {
         pleMemory = value(String.self, .pleMemory) ?? pleMemory
         sparseKvMemory = value(String.self, .sparseKvMemory) ?? sparseKvMemory
         verifyRows = value(String.self, .verifyRows) ?? verifyRows
+        unloadIdleWeights = value(Bool.self, .unloadIdleWeights) ?? unloadIdleWeights
         residencySeconds = value(String.self, .residencySeconds) ?? residencySeconds
+        responsivePrefill = value(Bool.self, .responsivePrefill) ?? responsivePrefill
+        prefillSliceMilliseconds =
+            value(String.self, .prefillSliceMilliseconds) ?? prefillSliceMilliseconds
         cacheIdleSpill = value(String.self, .cacheIdleSpill) ?? cacheIdleSpill
         cacheDir = value(String.self, .cacheDir) ?? cacheDir
         // A configuration stored before the switch existed follows its quota:
@@ -267,8 +317,8 @@ struct ServerSettings: Codable, Equatable {
     }
 
     /// Row sets this build can read a choice from: the one it writes, and the
-    /// one before it, which already turned the SSD cache off by default.
-    static let knownVersions: Set<String> = ["2", currentVersion]
+    /// ones before it, which already turned the SSD cache off by default.
+    static let knownVersions: Set<String> = ["2", "3", currentVersion]
 
     /// The settings as the store's key/value rows, in a fixed order.
     var rows: [(key: String, value: String)] {
@@ -293,7 +343,10 @@ struct ServerSettings: Codable, Equatable {
             ("pleMemory", pleMemory),
             ("sparseKvMemory", sparseKvMemory),
             ("verifyRows", verifyRows),
+            ("unloadIdleWeights", unloadIdleWeights ? "1" : "0"),
             ("residencySeconds", residencySeconds),
+            ("responsivePrefill", responsivePrefill ? "1" : "0"),
+            ("prefillSliceMilliseconds", prefillSliceMilliseconds),
             ("cacheIdleSpill", cacheIdleSpill),
             ("cacheDir", cacheDir),
             ("diskCache", diskCache ? "1" : "0"),
@@ -349,9 +402,16 @@ struct ServerSettings: Codable, Equatable {
         if let value = rows["verifyRows"], Self.verifyRowsOptions.contains(value) {
             verifyRows = value
         }
+        if let value = rows["unloadIdleWeights"] { unloadIdleWeights = value == "1" }
         if let value = rows["residencySeconds"],
            Self.number(value, in: 1...86_400) != nil {
             residencySeconds = value
+        }
+        if let value = rows["responsivePrefill"] {
+            responsivePrefill = value == "1"
+        }
+        if let value = Self.number(rows["prefillSliceMilliseconds"], in: 1...10_000) {
+            prefillSliceMilliseconds = String(value)
         }
         if let value = rows["maxCacheDisk"] { maxCacheDisk = value }
         // The switch's own row is a choice only once a build that knew it wrote

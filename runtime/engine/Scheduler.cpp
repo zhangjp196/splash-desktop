@@ -425,7 +425,10 @@ uint32_t Scheduler::prefillBudget(
   if (prefillMillisecondsPerToken_ <= 0.0 && prefillFixedMilliseconds_ <= 0.0)
     return maximum;
   uint32_t rows = maximum;
-  const double slice = std::max(kContendedPrefillMilliseconds, 2.0 * prefillFixedMilliseconds_);
+  const double target = prefillSliceMilliseconds_ > 0.0
+                            ? prefillSliceMilliseconds_
+                            : kContendedPrefillMilliseconds;
+  const double slice = std::max(target, 2.0 * prefillFixedMilliseconds_);
   while (rows > kMinimumPrefillRows &&
          prefillFixedMilliseconds_ + rows * prefillMillisecondsPerToken_ > slice)
     rows /= 2;
@@ -456,14 +459,22 @@ uint32_t Scheduler::prefillBudget(
   // command only when no lane finishes. A leader that runs prefill groups
   // takes up to a group; planPrefill gives what its rows leave to the next
   // lanes within ExecutionLimits::prefillTokenBudget's contract.
-  return uncontendedRows(leaderRemaining, leader.request->spec.prefillGroupRows);
+  const uint32_t unopposed =
+      uncontendedRows(leaderRemaining, leader.request->spec.prefillGroupRows);
+  // A configured slice also bounds a command no lane contends with, so a
+  // single chat's long prompt leaves the GPU between commands.
+  return prefillSliceMilliseconds_ > 0.0 ? std::min(unopposed, rows)
+                                         : unopposed;
 }
 
 uint32_t Scheduler::passesFor(const Request &leader, uint32_t rows) const {
   if (leader.spec.prefillPasses <= 1 || leader.spillsHistory)
     return 1;
   const double estimate = prefillFixedMilliseconds_ + rows * prefillMillisecondsPerToken_;
-  return static_cast<uint32_t>(std::clamp(std::ceil(estimate / kContendedPrefillMilliseconds), 1.0,
+  const double target = prefillSliceMilliseconds_ > 0.0
+                            ? prefillSliceMilliseconds_
+                            : kContendedPrefillMilliseconds;
+  return static_cast<uint32_t>(std::clamp(std::ceil(estimate / target), 1.0,
                                           static_cast<double>(leader.spec.prefillPasses)));
 }
 

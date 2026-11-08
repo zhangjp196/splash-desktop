@@ -42,6 +42,14 @@ struct LiveStatus: Equatable {
     /// panel named for it (`--max-memory`): nil while the budget is automatic.
     var governorLimitBytes: UInt64?
     var configuredMemoryLimitBytes: UInt64?
+    /// The weights' idle release: whether their memory is released now,
+    /// whether a request is taking it back, and the timer that does it
+    /// (nil for `--idle-release off`).
+    var weightsKnown = false
+    var weightsReleased = false
+    var weightsRestoring = false
+    var weightsRestores = 0
+    var idleReleaseSeconds: Double?
     var cacheHitRate: Double?
     var kvDiskHitTokens: Int?
     /// The share of the tokens requests reused that came back from the disk
@@ -269,7 +277,10 @@ final class AppModel: ObservableObject {
     @Published var neuralEngine = true
     @Published var apiKey = ""
     @Published var servedNames = ""
+    @Published var unloadIdleWeights = ServerSettings.First.unloadIdleWeights
     @Published var residencySeconds = ServerSettings.First.residencySeconds
+    @Published var responsivePrefill = ServerSettings.First.responsivePrefill
+    @Published var prefillSliceMilliseconds = ServerSettings.First.prefillSliceMilliseconds
     @Published var cacheIdleSpill = ""
     @Published var cacheDir = ""
     @Published var diskCache = ServerSettings.First.diskCache
@@ -362,6 +373,7 @@ final class AppModel: ObservableObject {
            let stored = InterfaceLanguage(rawValue: raw) {
             language = stored
         }
+        let hasStoredSettings = store.hasStoredSettings
         // The fixed level first: a thermal preference stored before the modes
         // replaced the ladder named one of its rungs, and that rung becomes
         // the same level of the fixed mode rather than losing the choice to
@@ -370,7 +382,8 @@ final class AppModel: ObservableObject {
            let stored = FixedLevel(rawValue: raw) {
             fixedLevel = stored
         }
-        if let raw = UserDefaults.standard.string(forKey: Self.thermalKey) {
+        let storedThermal = UserDefaults.standard.string(forKey: Self.thermalKey)
+        if let raw = storedThermal {
             if let stored = ThermalRung(rawValue: raw) {
                 thermalRung = stored
             } else if let rung = FixedLevel(rawValue: raw) {
@@ -379,17 +392,32 @@ final class AppModel: ObservableObject {
                 UserDefaults.standard.set(rung.rawValue, forKey: Self.fixedLevelKey)
                 UserDefaults.standard.set(ThermalRung.fixed.rawValue, forKey: Self.thermalKey)
             }
+        } else if hasStoredSettings {
+            // An existing install that never chose a mode keeps the system
+            // default it has been running; only a fresh install opens on the
+            // smart mode, so an update does not change a running Mac's heat
+            // and speed behind the user's back.
+            thermalRung = .auto
+            UserDefaults.standard.set(ThermalRung.auto.rawValue, forKey: Self.thermalKey)
+        } else {
+            // A fresh install opens on Smart/High: full speed while the Mac is
+            // cool, backing off as the fans and sensors climb.
+            thermalRung = .smart
+            if UserDefaults.standard.string(forKey: Self.smartLevelKey) == nil {
+                smartLevel = .high
+                UserDefaults.standard.set(SmartLevel.high.rawValue, forKey: Self.smartLevelKey)
+            }
+            UserDefaults.standard.set(ThermalRung.smart.rawValue, forKey: Self.thermalKey)
         }
         if let raw = UserDefaults.standard.string(forKey: Self.smartLevelKey),
            let stored = SmartLevel(rawValue: raw) {
             smartLevel = stored
         }
         applyLanguage()
-        let stored = store.hasStoredSettings
         applySettings(store.load())
         // The first launch records what the app opened with, so the settings
         // are on disk before the first edit rather than appearing from nowhere.
-        if !stored { _ = saveSettings() }
+        if !hasStoredSettings { _ = saveSettings() }
         configs = libraryStore.loadConfigs()
         activeConfigID = libraryStore.loadActive()
         if configs.isEmpty {
@@ -440,7 +468,10 @@ final class AppModel: ObservableObject {
         settings.pleMemory = pleMemory
         settings.sparseKvMemory = sparseKvMemory
         settings.verifyRows = verifyRows
+        settings.unloadIdleWeights = unloadIdleWeights
         settings.residencySeconds = residencySeconds
+        settings.responsivePrefill = responsivePrefill
+        settings.prefillSliceMilliseconds = prefillSliceMilliseconds
         settings.cacheIdleSpill = cacheIdleSpill
         settings.cacheDir = cacheDir
         settings.diskCache = diskCache
@@ -518,7 +549,10 @@ final class AppModel: ObservableObject {
         pleMemory = settings.pleMemory
         sparseKvMemory = settings.sparseKvMemory
         verifyRows = settings.verifyRows
+        unloadIdleWeights = settings.unloadIdleWeights
         residencySeconds = settings.residencySeconds
+        responsivePrefill = settings.responsivePrefill
+        prefillSliceMilliseconds = settings.prefillSliceMilliseconds
         cacheIdleSpill = settings.cacheIdleSpill
         cacheDir = settings.cacheDir
         diskCache = settings.diskCache
@@ -908,8 +942,16 @@ final class AppModel: ObservableObject {
         if eviction.protect != 0 {
             arguments += ["--cache-eviction-protect", String(eviction.protect)]
         }
-        if let seconds = Int(residencySeconds), seconds >= 1, seconds <= 86_400 {
+        // The idle unload switch: off keeps the weights resident, on releases
+        // them after the duration below. An empty or unparsable duration uses
+        // the first-launch ten minutes rather than leaving the engine's timer
+        // at a value the panel does not show.
+        if unloadIdleWeights {
+            let stored = Int(residencySeconds)
+            let seconds = stored.map { (1...86_400).contains($0) ? $0 : 600 } ?? 600
             arguments += ["--idle-release", String(seconds)]
+        } else {
+            arguments += ["--idle-release", "off"]
         }
         if !maxRequestSize.isEmpty { arguments += ["--max-request-size", maxRequestSize] }
         let timeout = requestTimeout.trimmingCharacters(in: .whitespaces)
@@ -920,6 +962,14 @@ final class AppModel: ObservableObject {
         }
         let share = decodeShare.trimmingCharacters(in: .whitespaces)
         if !share.isEmpty { arguments += ["--decode-share", share] }
+        // A long prompt otherwise runs one prefill command for seconds. The
+        // slice leaves gaps for other GPU work; the server and CLI keep the
+        // engine's chunk size unless this switch asks for it.
+        if responsivePrefill {
+            let stored = Int(prefillSliceMilliseconds)
+            let milliseconds = stored.map { (1...10_000).contains($0) ? $0 : 1_000 } ?? 1_000
+            arguments += ["--prefill-slice-ms", String(milliseconds)]
+        }
         if allowIdleSleep { arguments.append("--allow-idle-sleep") }
         if !reasoningEffort.isEmpty && profile.thinking {
             arguments += ["--default-reasoning-effort", reasoningEffort]
@@ -1427,6 +1477,18 @@ final class AppModel: ObservableObject {
         }
         if let governor = object["memory_governor"] as? [String: Any] {
             status.governorLimitBytes = governor["limit_bytes"] as? UInt64
+        }
+        if let weights = object["weights"] as? [String: Any] {
+            status.weightsKnown = true
+            status.weightsReleased = weights["released"] as? Bool ?? false
+            status.weightsRestoring = weights["restoring"] as? Bool ?? false
+            status.weightsRestores = weights["restores"] as? Int ?? 0
+            // null in /status is no idle release at all (--idle-release off).
+            if let seconds = weights["idle_release_seconds"] as? Double {
+                status.idleReleaseSeconds = seconds
+            } else if let seconds = weights["idle_release_seconds"] as? Int {
+                status.idleReleaseSeconds = Double(seconds)
+            }
         }
         if let plan = object["memory_plan"] as? [String: Any],
            let budget = plan["budget"] as? [String: Any] {

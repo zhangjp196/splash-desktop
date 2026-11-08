@@ -50,7 +50,28 @@ final class LibraryStore {
         }
     }
 
-    func loadConfigs() -> [ModelConfig] { decode([ModelConfig].self, Self.configsKey) ?? [] }
+    func loadConfigs() -> [ModelConfig] {
+        guard let data = defaults.data(forKey: Self.configsKey),
+              var configs = try? JSONDecoder().decode([ModelConfig].self, from: data)
+        else { return [] }
+        // A configuration saved by an earlier build carries the old
+        // ten-second residency. Move it to this build's default and write the
+        // library back once, so switching to it does not reload the whole
+        // model after every pause. The raw rows are read too: a value stored
+        // before row sets carried a version has none to decode.
+        let stored = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+        var changed = false
+        for index in configs.indices {
+            let version = (stored?[index]["settings"] as? [String: Any])?["settingsVersion"] as? String
+            if ServerSettings.migrateLegacyResidency(
+                &configs[index].settings, storedVersion: version) {
+                changed = true
+            }
+        }
+        if changed { saveConfigs(configs) }
+        return configs
+    }
+
     func saveConfigs(_ configs: [ModelConfig]) { encode(configs, Self.configsKey) }
 
     func loadActive() -> UUID? {

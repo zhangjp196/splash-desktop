@@ -128,12 +128,15 @@ struct SettingsEditor: View {
         case .schedule:
             return s.maxConcurrency != b.maxConcurrency || s.verifyRows != b.verifyRows
                 || s.decodeShare != b.decodeShare
+                || s.responsivePrefill != b.responsivePrefill
+                || s.prefillSliceMilliseconds != b.prefillSliceMilliseconds
         case .memory:
             return s.maxMemory != b.maxMemory || s.maxContext != b.maxContext
                 || s.expertMemory != b.expertMemory || s.pleMemory != b.pleMemory
                 || s.sparseKvMemory != b.sparseKvMemory
         case .cache:
-            return s.residencySeconds != b.residencySeconds || s.diskCache != b.diskCache
+            return s.unloadIdleWeights != b.unloadIdleWeights
+                || s.residencySeconds != b.residencySeconds || s.diskCache != b.diskCache
                 || s.cacheIdleSpill != b.cacheIdleSpill || s.cacheDir != b.cacheDir
                 || s.maxCacheDisk != b.maxCacheDisk
                 || s.maxCacheDiskWrites != b.maxCacheDiskWrites
@@ -518,6 +521,31 @@ struct SettingsEditor: View {
                     EditorField(text: $settings.decodeShare, prompt: "0.5", monospaced: true)
                 }
             }
+            rowDivider
+            SettingColumns {
+                FieldColumn(
+                    title: L10n.string("field.responsive_prefill"),
+                    help: L10n.string("help.responsive_prefill")
+                ) {
+                    Toggle("", isOn: $settings.responsivePrefill)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.amber)
+                }
+                FieldColumn(
+                    title: L10n.string("field.prefill_slice"),
+                    help: L10n.string("help.prefill_slice")
+                ) {
+                    EditorField(
+                        text: $settings.prefillSliceMilliseconds,
+                        prompt: "1000",
+                        monospaced: true,
+                        suffix: L10n.string("unit.milliseconds")
+                    )
+                    .disabled(!settings.responsivePrefill)
+                    .opacity(settings.responsivePrefill ? 1 : 0.45)
+                }
+            }
         }
     }
 
@@ -583,14 +611,27 @@ struct SettingsEditor: View {
             systemImage: "moon.zzz",
             tint: SplashPalette.violet
         ) {
+            SettingRow(
+                title: L10n.string("field.idle_unload"),
+                help: L10n.string("help.idle_unload"),
+                controlWidth: 300
+            ) {
+                Toggle("", isOn: $settings.unloadIdleWeights)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(SplashPalette.violet)
+            }
+            rowDivider
             SettingColumns {
                 FieldColumn(title: L10n.string("field.residency"), help: L10n.string("help.residency")) {
                     EditorField(
                         text: $settings.residencySeconds,
-                        prompt: "10",
+                        prompt: "600",
                         monospaced: true,
                         suffix: L10n.string("unit.seconds")
                     )
+                    .disabled(!settings.unloadIdleWeights)
+                    .opacity(settings.unloadIdleWeights ? 1 : 0.45)
                 }
                 FieldColumn(title: L10n.string("field.cache_idle_spill"), help: L10n.string("help.cache_idle_spill")) {
                     EditorField(text: $settings.cacheIdleSpill, prompt: "30", monospaced: true)

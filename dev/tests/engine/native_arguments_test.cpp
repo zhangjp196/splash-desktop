@@ -170,6 +170,8 @@ void testServerCommandLines(const char *path) {
        [](NativeArguments &read) { read.prefillDutyPercent = 80.0; }},
       {"prefill_duty_alone",
        [](NativeArguments &read) { read.prefillDutyPercent = 25.0; }},
+      {"prefill_slice",
+       [](NativeArguments &read) { read.prefillSliceMilliseconds = 500.0; }},
       {"image_patches", [](NativeArguments &read) { read.maxImagePatches = 4096; }},
       {"image_patches_rounded",
        [](NativeArguments &read) { read.maxImagePatches = 3904; }},
@@ -225,6 +227,7 @@ void testServerCommandLines(const char *path) {
            read.kvStorage == meant.kvStorage && read.stateFormat == meant.stateFormat &&
            read.decodeShare == meant.decodeShare &&
            read.prefillDutyPercent == meant.prefillDutyPercent &&
+           read.prefillSliceMilliseconds == meant.prefillSliceMilliseconds &&
            read.maxImagePatches == meant.maxImagePatches &&
            read.idleReleaseSeconds == meant.idleReleaseSeconds &&
            read.cacheIdleSpillSeconds == meant.cacheIdleSpillSeconds &&
@@ -319,6 +322,9 @@ void testRefusals() {
   for (const char *share : {"-1", "nan", "inf", "half"})
     refuses({"auto", "auto", "--decode-share", share},
             "--decode-share requires a nonnegative number");
+  for (const char *slice : {"0", "-1", "10001", "half"})
+    refuses({"auto", "auto", "--prefill-slice-ms", slice},
+            "--prefill-slice-ms requires a positive number");
   for (const char *patches : {"0", "6", "16388"})
     refuses({"auto", "auto", "--max-image-patches", patches},
             "--max-image-patches requires a positive multiple of 4");

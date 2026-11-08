@@ -145,6 +145,9 @@ function createChat(storage = new Map(), writable = true, models = null,
 }
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
+// The page coalesces streaming renders in a setTimeout; run the pending
+// callback when a test checks the message between two chunks.
+const flushRender = chat => { chat.timers.splice(0).forEach(callback => callback()); };
 const submit = chat => chat.elements.form.handlers.submit({preventDefault() {}});
 const enter = chat => chat.elements.input.handlers.keydown({
   key: 'Enter', keyCode: 13, shiftKey: false, isComposing: false,
@@ -578,10 +581,14 @@ for (const [name, overrides, shouldSend] of [
   async function chunk(delta) {
     deliver({done: false, value: Buffer.from('data: ' + JSON.stringify({choices: [{delta}]}) + '\n\n')});
     await flush();
+    flushRender(chat);
   }
   await chunk({content: '```python\ndef greet():\n    return "你好"'});
   let content = chat.elements.chat.children.at(-1).querySelector('.content');
-  assert.match(content.innerHTML, /hljs-keyword/);
+  // A streaming code block renders as code first; highlighting waits for the
+  // final flush so every delta does not re-highlight the whole reply.
+  assert.match(content.innerHTML, /def greet/);
+  assert.doesNotMatch(content.innerHTML, /hljs-keyword/);
   await chunk({content: '\n```\n\n```unknown-lang\n<b>literal</b>\n```\n\n' +
     '<img src=x onerror=alert(1)>\n\n[bad](javascript:alert(1))\n\n[good](https://example.com)\n\n' +
     '![x](https://example.com/a.png)'});
@@ -598,6 +605,8 @@ for (const [name, overrides, shouldSend] of [
   await flush();
   deliver({done: true});
   await flush();
+  // The final flush highlights the completed code blocks.
+  assert.match(content.innerHTML, /hljs-keyword/);
   chat.elements.recents.children[0].querySelector('.recent-open').handlers.click();
   assert.equal(chat.elements.chat.children.at(-1).querySelector('details')
     .querySelector('.reasoning').textContent, reasoning);
@@ -619,6 +628,7 @@ for (const [name, overrides, shouldSend] of [
     chat.grow();
     deliver({done: false, value: Buffer.from('data: ' + JSON.stringify({choices: [{delta}]}) + '\n\n')});
     await flush();
+    flushRender(chat);
   }
   let before = chat.scrolls();
   await chunk({content: 'first'});

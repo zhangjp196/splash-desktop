@@ -70,6 +70,12 @@ struct ChatPane: View {
                     ProgressView()
                         .controlSize(.mini)
                         .padding(.leading, 2)
+                    if model.live.weightsRestoring {
+                        Text(L10n.string("chat.restoring"))
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(SplashPalette.amber)
+                            .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 8)
                 if let tokens = model.contextTokens, model.phase == .ready {

@@ -53,8 +53,14 @@
 "verify.all" = "逐行";
 "field.max_concurrency" = "最大并发";
 "help.max_concurrency" = "同时运行或排队的请求数上限。";
-"field.residency" = "空闲后释放权重";
-"help.residency" = "空闲多少秒后释放权重。下一次请求需要重新载入。";
+"field.responsive_prefill" = "响应优先 prefill";
+"help.responsive_prefill" = "把长 prompt 的 prefill 切成更短的命令，在命令之间给 GPU 留出时间；prefill 会慢几个百分点。";
+"field.prefill_slice" = "prefill 时长";
+"help.prefill_slice" = "单条 prefill 命令的目标时长，1 到 10000 毫秒。越小越常让出 GPU，prefill 也越慢。";
+"field.idle_unload" = "空闲卸载权重";
+"help.idle_unload" = "开启：空闲达到下方时长后释放权重，下一次请求需要重新载入；关闭：权重常驻。默认开启，10 分钟。";
+"field.residency" = "释放前空闲时长";
+"help.residency" = "空闲多少秒后释放权重，下一次请求需要重新载入；600 秒即 10 分钟。";
 "field.disk_cache" = "使用 SSD 缓存";
 "help.disk_cache" = "把缓存前缀留在磁盘上，重启后仍可使用。";
 "field.cache_quota" = "缓存配额";
@@ -154,6 +160,13 @@
 "live.physical_memory" = "物理内存占用";
 "live.physical_memory_caption" = "引擎实际占用 / 可用预算";
 "live.memory_limit" = "内存预算";
+"live.weights" = "模型权重";
+"live.weights.resident" = "常驻";
+"live.weights.released" = "已释放";
+"live.weights.restoring" = "恢复中…";
+"live.weights.caption" = "空闲 %d 秒释放";
+"live.weights.caption_off" = "空闲卸载已关闭";
+"live.weights.caption_restores" = "%@ · 已恢复 %d 次";
 "live.disk_cache" = "磁盘缓存";
 "live.caption.idle_offload" = "%d 次空闲落盘 · %@";
 "live.caption.disk_cache_off" = "已关闭：前缀只留在内存";
@@ -200,6 +213,7 @@
 "field.hide_key" = "隐藏 API 密钥";
 "size.auto" = "自动";
 "unit.seconds" = "秒";
+"unit.milliseconds" = "毫秒";
 
 // 配置编辑器：两栏的卡片式表单。
 "config.eyebrow.new" = "新建配置";
@@ -320,6 +334,7 @@
 
 "view.chat" = "对话";
 "chat.clear" = "清空历史";
+"chat.restoring" = "正在恢复模型…";
 "chat.cleared" = "历史已清空";
 "chat.undo" = "撤销";
 

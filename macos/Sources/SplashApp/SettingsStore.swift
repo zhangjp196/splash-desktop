@@ -34,7 +34,16 @@ final class SettingsStore {
     /// new, unreadable or empty. A store that cannot open still answers, so a
     /// missing application-support folder never blocks the panel.
     func load() -> ServerSettings {
-        ServerSettings(rows: storedRows())
+        let rows = storedRows()
+        var settings = ServerSettings(rows: rows)
+        // The app used to write a ten-second residency, which reloaded the
+        // whole model after every short pause. Moving it to this build's
+        // default also records the new row set, so this runs once.
+        if ServerSettings.migrateLegacyResidency(
+            &settings, storedVersion: rows["settingsVersion"]) {
+            _ = save(settings)
+        }
+        return settings
     }
 
     /// Whether anything has been stored yet, so the first launch can record

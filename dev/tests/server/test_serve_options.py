@@ -229,6 +229,11 @@ OPTIONS = {
         {"0": 0.0, "0.25": 0.25, "2": 2.0},
         ("-0.5", "inf", "nan", "half"),
     ),
+    "--prefill-slice-ms": values(
+        "--prefill-slice-ms",
+        {"1": 1.0, "500": 500.0, "1000": 1000.0, "10000": 10000.0},
+        ("0", "-1", "10001", "inf", "nan", "half"),
+    ),
     "--thermal-policy": values(
         "--thermal-policy",
         {policy: policy for policy in serve_options.THERMAL_POLICIES},
