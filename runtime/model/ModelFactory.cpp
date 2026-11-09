@@ -14,12 +14,12 @@ namespace splash::model {
 
 void requireCompatibleModel(const LoadedModel &model) {
   if (!model.descriptor.valid() ||
-      model.descriptor.draft != model.draft.layout ||
+      (model.descriptor.hasDraft() && model.descriptor.draft != model.draft.layout) ||
       !std::visit(
           [&](const auto &target) {
             return model.descriptor.target == TargetLayout{target.layout} &&
-                   target.layout.vocabularySize ==
-                       model.draft.layout.vocabularySize;
+                   (!model.descriptor.hasDraft() ||
+                    target.layout.vocabularySize == model.draft.layout.vocabularySize);
           },
           model.target)) {
     throw std::invalid_argument(
@@ -83,9 +83,12 @@ LoadedModel loadModel(metal::MetalBackend &backend,
   result.images = std::make_shared<WeightImages>(backend, result.descriptor.sourceIdentity);
   WeightImages &images = *result.images;
   // Every source's metadata is checked before the first image is written:
-  // the vision tower's and the draft's here, the target's by its loader.
+  // the vision tower's and the draft's here, the target's by its loader. A
+  // plan without a draft reads no draft directory and loads no draft image.
   const auto vision = planVisionLoader(root, result.descriptor);
-  DraftCheckpointLoader draft(backend, images, root / "draft", result.descriptor.draft);
+  std::unique_ptr<DraftCheckpointLoader> draft;
+  if (result.descriptor.hasDraft())
+    draft = std::make_unique<DraftCheckpointLoader>(backend, images, root / "draft", result.descriptor.draft);
   // The weights that stream from their files read on the engine's readers.
   const ExpertStoreOptions experts{.memoryBytes = options.streamedMemoryBytes,
                                    .readers = options.readers,
@@ -113,7 +116,8 @@ LoadedModel loadModel(metal::MetalBackend &backend,
         throw std::invalid_argument("unknown target source");
       },
       result.descriptor.target);
-  result.draft = loadDFlashDraftWeights(backend, draft, result.descriptor.draft);
+  if (draft)
+    result.draft = loadDFlashDraftWeights(backend, *draft, result.descriptor.draft);
   result.vision = loadVisionWeights(backend, images, vision.get());
 
   std::vector<WeightFileRecord> records(result.targetFiles().begin(),

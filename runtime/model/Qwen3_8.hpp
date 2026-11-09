@@ -45,10 +45,38 @@ struct Qwen3_8Layout final : QwenHybridLayout {
                           .ffnKind = QwenFfnKind::Dense,
                           .intermediateSize = 17408},
                          "Qwen3.8-27B"} {}
-  // A family of the architecture.
+  // Qwen3.5-9B's: the same hybrid architecture at 4096 hidden, 32 layers,
+  // 16 query heads over 4 KV heads, and 32 GDN value heads. It is a family
+  // of the architecture, not a new one.
   constexpr explicit Qwen3_8Layout(const QwenHybridLayout &family) : QwenHybridLayout(family) {}
   bool operator==(const Qwen3_8Layout &) const = default;
 };
+
+// Qwen3.5-9B and its fine-tunes, such as Ornith-1.5-9B.
+inline constexpr Qwen3_8Layout kQwen3_5_9BLayout{
+    QwenHybridLayout{{.nativeContextTokens = 262'144,
+                      .yarnContextTokens = 1'010'000,
+                      .layers = 32,
+                      .hiddenSize = 4096,
+                      .vocabularySize = 248320,
+                      .packedGdnWidth = 12544,
+                      .packedFullWidth = 10240,
+                      .convolutionDimension = 8192,
+                      .gdnKeyHeads = 16,
+                      .gdnValueHeads = 32,
+                      .gdnHeadDimension = 128,
+                      .attentionWidth = 4096,
+                      .attentionQueryHeads = 16,
+                      .attentionKvHeads = 4,
+                      .attentionHeadDimension = 256,
+                      .rotaryPairs = SPLASH_TARGET_ROPE_PAIRS,
+                      .rotaryTheta = 10'000'000.0F,
+                      .fullAttentionPeriod = 4,
+                      .maskToken = 248077,
+                      .stopTokens = {248044, 248046},
+                      .ffnKind = QwenFfnKind::Dense,
+                      .intermediateSize = 12288},
+                     "Qwen3.5-9B"}};
 
 struct Qwen3_8LayerWeights final {
   ops::NormWeights inputNorm;

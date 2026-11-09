@@ -192,6 +192,8 @@ def selection(root, model=MODEL, **options):
         revision=options.get("revision"),
         language_only=options.get("language_only", True),
         draft_model=options.get("draft_model"),
+        speculation=options.get("speculation", "auto"),
+        require_draft=options.get("require_draft", False),
     )
 
 
@@ -205,6 +207,8 @@ def local_selection(root, directory, **options):
         language_only=options.get("language_only", True),
         draft_model=options.get("draft_model"),
         mmproj=options.get("mmproj"),
+        speculation=options.get("speculation", "auto"),
+        require_draft=options.get("require_draft", False),
     )
 
 

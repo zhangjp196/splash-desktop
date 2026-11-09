@@ -142,11 +142,14 @@ def _ensure_installed(selection):
         ("--revision", selection.revision),
         ("--draft-model", selection.draft_model),
         ("--mmproj", selection.mmproj),
+        ("--speculation", selection.speculation if selection.speculation != "auto" else None),
     ):
         if value is not None:
             command += [flag, str(value)]
     if selection.language_only:
         command.append("--language-only")
+    if selection.require_draft:
+        command.append("--require-draft")
     command.append("prepare")
     if _run_held(command, cwd=ROOT):
         raise LauncherError("model download or verification failed")
@@ -245,6 +248,8 @@ def serve(args):
                 language_only=args.language_only,
                 draft_model=args.draft_model,
                 mmproj=args.mmproj,
+                speculation=args.speculation,
+                require_draft=args.require_draft,
             )
             lock.seek(0)
             lock.truncate()
@@ -482,6 +487,23 @@ def parse_args(argv=None):
         "automatically selected one (a local directory with --model-dir)",
     )
     model.add_argument(
+        "--speculation",
+        choices=("auto", "none", "dflash2", "mtp", "dspark"),
+        default="auto",
+        help="how decode proposes tokens: auto (a compatible draft, else none), "
+        "none (autoregressive), or a provider this release implements",
+    )
+    model.add_argument(
+        "--no-draft",
+        action="store_true",
+        help="serve without a draft; same as --speculation none",
+    )
+    model.add_argument(
+        "--require-draft",
+        action="store_true",
+        help="refuse to start without the requested draft",
+    )
+    model.add_argument(
         "--mmproj",
         type=model_artifacts.parse_mmproj,
         metavar="FILE",
@@ -546,6 +568,27 @@ def parse_args(argv=None):
                 parser.error("--mmproj requires --model-dir")
             if args.language_only:
                 parser.error("--mmproj and --language-only are exclusive")
+        if args.no_draft and args.speculation not in ("auto", "none"):
+            parser.error("--no-draft and --speculation are exclusive")
+        if args.no_draft:
+            args.speculation = "none"
+        if args.speculation == "none" and args.draft_model is not None:
+            parser.error("--speculation none and --draft-model are exclusive")
+        if args.speculation == "none" and args.require_draft:
+            parser.error("--require-draft needs a draft provider")
+        if args.speculation == "mtp" and args.require_draft:
+            parser.error(
+                "MTP execution is not implemented; --require-draft is not available for it"
+            )
+        if args.speculation == "mtp" and args.draft_model is not None:
+            parser.error(
+                "external MTP heads are not implemented; omit --draft-model"
+            )
+        if args.speculation == "dspark":
+            parser.error(
+                "--speculation dspark is not implemented by this release; "
+                "use auto, none, dflash2 or mtp"
+            )
         serve_options.check_serve_arguments(parser, args)
     if client_args and args.command == "serve":
         parser.error("arguments after -- are only supported for coding clients")

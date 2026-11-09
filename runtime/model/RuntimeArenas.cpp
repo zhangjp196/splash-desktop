@@ -88,24 +88,33 @@ prefillTensorBytes(const RuntimeGeometry &geometry,
   put(PrefillTensor::TargetInverseFrequencies,
       bytesFor<float>(geometry.target.rotaryPairs));
   put(PrefillTensor::DraftInverseFrequencies,
-      bytesFor<float>(geometry.draftRotaryPairs()));
+      bytesFor<float>(SPLASH_DRAFT_ROPE_PAIRS));
   put(PrefillTensor::RopeCos,
       bytesFor<float>(uint64_t{kPrefillRows} * geometry.target.rotaryPairs));
   put(PrefillTensor::RopeSin,
       bytesFor<float>(uint64_t{kPrefillRows} * geometry.target.rotaryPairs));
-  put(PrefillTensor::ContextProjected,
-      bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
-  put(PrefillTensor::ContextHidden,
-      bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
-  put(PrefillTensor::ContextKv,
-      bytesFor<uint16_t>(uint64_t{kPrefillRows} *
-                         geometry.draft.contextKvSize()));
-  put(PrefillTensor::DraftRopeCos,
-      bytesFor<float>(uint64_t{kPrefillRows} *
-                      geometry.draftRotaryPairs()));
-  put(PrefillTensor::DraftRopeSin,
-      bytesFor<float>(uint64_t{kPrefillRows} *
-                      geometry.draftRotaryPairs()));
+  if (geometry.hasDraft) {
+    put(PrefillTensor::ContextProjected,
+        bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
+    put(PrefillTensor::ContextHidden,
+        bytesFor<uint16_t>(uint64_t{kPrefillRows} * geometry.draft.hiddenSize));
+    put(PrefillTensor::ContextKv,
+        bytesFor<uint16_t>(uint64_t{kPrefillRows} *
+                           geometry.draft.contextKvSize()));
+    put(PrefillTensor::DraftRopeCos,
+        bytesFor<float>(uint64_t{kPrefillRows} *
+                        geometry.draftRotaryPairs()));
+    put(PrefillTensor::DraftRopeSin,
+        bytesFor<float>(uint64_t{kPrefillRows} *
+                        geometry.draftRotaryPairs()));
+  } else {
+    // The rope kernel binds both tables; a plan without a draft builds the
+    // draft tables too, over zero positions, and no draft reads them.
+    put(PrefillTensor::DraftRopeCos,
+        bytesFor<float>(uint64_t{kPrefillRows} * SPLASH_DRAFT_ROPE_PAIRS));
+    put(PrefillTensor::DraftRopeSin,
+        bytesFor<float>(uint64_t{kPrefillRows} * SPLASH_DRAFT_ROPE_PAIRS));
+  }
   put(PrefillTensor::ChunkKeys,
       bytesFor<uint16_t>(uint64_t{geometry.target.attentionKvHeads} *
                          kRaggedAttentionRows *
@@ -118,8 +127,10 @@ prefillTensorBytes(const RuntimeGeometry &geometry,
   // prefill plan, the draft's context projections' too.
   const auto &draft = geometry.draft;
   std::vector<ops::ProjectionShape> prefillProjections = geometry.target.prefillProjections;
-  prefillProjections.push_back({draft.hiddenSize, draft.targetHiddenSize()});
-  prefillProjections.push_back({draft.contextKvSize(), draft.hiddenSize});
+  if (geometry.hasDraft) {
+    prefillProjections.push_back({draft.hiddenSize, draft.targetHiddenSize()});
+    prefillProjections.push_back({draft.contextKvSize(), draft.hiddenSize});
+  }
   for (const auto &projection : prefillProjections) {
     const ops::LinearScratchSize linear = operators.linear().prefillScratchSize(projection);
     put(PrefillTensor::LinearPartials, linear.partials);
@@ -178,8 +189,10 @@ std::array<uint64_t, decodeTensorCount>
 decodeTensorBytes(const RuntimeGeometry &geometry,
                   const ops::ExecutionPlans &operators) {
   std::array<uint64_t, decodeTensorCount> result{};
-  const auto draftWorkspace =
-      operators.draftAttentionWorkspacePerLane(geometry.draft.attentionShape());
+  const ops::DraftAttentionWorkspace draftWorkspace =
+      geometry.hasDraft
+          ? operators.draftAttentionWorkspacePerLane(geometry.draft.attentionShape())
+          : ops::DraftAttentionWorkspace{};
   const auto samplingWorkspace = ops::Sampling::workspace(kDecodeRows);
   const auto selectorWorkspace = ops::DraftSelector::workspace(kDraftProposalTokens);
   auto put = [&](DecodeTensor tensor, uint64_t bytes) {
@@ -227,22 +240,29 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
       bytesFor<float>(r * geometry.target.rotaryPairs));
   put(DecodeTensor::RopeSin,
       bytesFor<float>(r * geometry.target.rotaryPairs));
-  put(DecodeTensor::ContextProjected,
-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
-  put(DecodeTensor::ContextHidden,
-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
-  put(DecodeTensor::ContextKv,
-      bytesFor<uint16_t>(r * geometry.draft.contextKvSize()));
-  put(DecodeTensor::CapturedTargetHidden,
-      bytesFor<uint16_t>(r * geometry.draft.targetHiddenSize()));
-  put(DecodeTensor::DraftQueryKeys, draftWorkspace.queryKeysBytes);
-  put(DecodeTensor::DraftQueryValues, draftWorkspace.queryValuesBytes);
-  // Proposal attention and accepted target-hidden injection use the same
-  // eight absolute positions, so one RoPE table per lane is sufficient.
-  put(DecodeTensor::DraftRopeCos,
-      bytesFor<float>(r * geometry.draftRotaryPairs()));
-  put(DecodeTensor::DraftRopeSin,
-      bytesFor<float>(r * geometry.draftRotaryPairs()));
+  if (geometry.hasDraft) {
+    put(DecodeTensor::ContextProjected,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::ContextHidden,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::ContextKv,
+        bytesFor<uint16_t>(r * geometry.draft.contextKvSize()));
+    put(DecodeTensor::CapturedTargetHidden,
+        bytesFor<uint16_t>(r * geometry.draft.targetHiddenSize()));
+    put(DecodeTensor::DraftQueryKeys, draftWorkspace.queryKeysBytes);
+    put(DecodeTensor::DraftQueryValues, draftWorkspace.queryValuesBytes);
+    // Proposal attention and accepted target-hidden injection use the same
+    // eight absolute positions, so one RoPE table per lane is sufficient.
+    put(DecodeTensor::DraftRopeCos,
+        bytesFor<float>(r * geometry.draftRotaryPairs()));
+    put(DecodeTensor::DraftRopeSin,
+        bytesFor<float>(r * geometry.draftRotaryPairs()));
+  } else {
+    put(DecodeTensor::DraftRopeCos,
+        bytesFor<float>(r * SPLASH_DRAFT_ROPE_PAIRS));
+    put(DecodeTensor::DraftRopeSin,
+        bytesFor<float>(r * SPLASH_DRAFT_ROPE_PAIRS));
+  }
   put(DecodeTensor::FinalHidden,
       bytesFor<uint16_t>(r * geometry.target.hiddenSize));
   put(DecodeTensor::Logits,
@@ -265,28 +285,30 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
   put(DecodeTensor::VerifyRows, sizeof(uint32_t));
   put(DecodeTensor::VerifyConfidence, bytesFor<float>(kDraftProposalTokens));
   put(DecodeTensor::DraftInputTokens, bytesFor<uint32_t>(r));
-  for (uint32_t index = 0; index < 2; ++index) {
-    put(static_cast<DecodeTensor>(
-            static_cast<uint32_t>(DecodeTensor::DraftHidden0) + index),
+  if (geometry.hasDraft) {
+    for (uint32_t index = 0; index < 2; ++index) {
+      put(static_cast<DecodeTensor>(
+              static_cast<uint32_t>(DecodeTensor::DraftHidden0) + index),
+          bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    }
+    put(DecodeTensor::DraftNormalized,
         bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::DraftDynamic,
+        bytesFor<uint16_t>(r * geometry.draft.dynamicSize));
+    put(DecodeTensor::DraftConvolved, draftWorkspace.convolutionBytes);
+    put(DecodeTensor::DraftProposalQkv, draftWorkspace.qkvBytes);
+    put(DecodeTensor::DraftAttention, draftWorkspace.groupedQueriesBytes);
+    put(DecodeTensor::DraftProjected,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::DraftResidual,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::DraftIntermediate,
+        bytesFor<uint16_t>(r * geometry.draft.intermediateSize));
+    put(DecodeTensor::DraftFinalHidden,
+        bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
+    put(DecodeTensor::SelectorHidden,
+        bytesFor<uint16_t>(r * geometry.draft.selectorRank));
   }
-  put(DecodeTensor::DraftNormalized,
-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
-  put(DecodeTensor::DraftDynamic,
-      bytesFor<uint16_t>(r * geometry.draft.dynamicSize));
-  put(DecodeTensor::DraftConvolved, draftWorkspace.convolutionBytes);
-  put(DecodeTensor::DraftProposalQkv, draftWorkspace.qkvBytes);
-  put(DecodeTensor::DraftAttention, draftWorkspace.groupedQueriesBytes);
-  put(DecodeTensor::DraftProjected,
-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
-  put(DecodeTensor::DraftResidual,
-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
-  put(DecodeTensor::DraftIntermediate,
-      bytesFor<uint16_t>(r * geometry.draft.intermediateSize));
-  put(DecodeTensor::DraftFinalHidden,
-      bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
-  put(DecodeTensor::SelectorHidden,
-      bytesFor<uint16_t>(r * geometry.draft.selectorRank));
   put(DecodeTensor::Candidates, selectorWorkspace.candidatesBytes);
   put(DecodeTensor::Unary, selectorWorkspace.unaryBytes);
   put(DecodeTensor::TopPartialIds, selectorWorkspace.partialIdsBytes);
@@ -339,12 +361,14 @@ ops::LinearScratchSize DecodeArena::linearScratchSize(
   ops::LinearScratchSize result;
   // Includes the vocabulary head shared with the draft.
   for (const auto &p : geometry.target.decodeProjections) result.include(operators.linear().decodeScratchSize(p));
-  for (const ops::ProjectionShape shape : {ops::ProjectionShape{d.dynamicSize, d.hiddenSize},
-       {d.qkvSize, d.hiddenSize}, {d.contextKvSize(), d.hiddenSize},
-       {d.hiddenSize, d.attentionSize},
-       {d.intermediateSize, d.hiddenSize}, {d.hiddenSize, d.intermediateSize},
-       {d.selectorRank, d.hiddenSize}, {d.hiddenSize, d.targetHiddenSize()}})
-    result.include(operators.linear().decodeScratchSize(shape));
+  if (geometry.hasDraft) {
+    for (const ops::ProjectionShape shape : {ops::ProjectionShape{d.dynamicSize, d.hiddenSize},
+         {d.qkvSize, d.hiddenSize}, {d.contextKvSize(), d.hiddenSize},
+         {d.hiddenSize, d.attentionSize},
+         {d.intermediateSize, d.hiddenSize}, {d.hiddenSize, d.intermediateSize},
+         {d.selectorRank, d.hiddenSize}, {d.hiddenSize, d.targetHiddenSize()}})
+      result.include(operators.linear().decodeScratchSize(shape));
+  }
   return result;
 }
 

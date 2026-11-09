@@ -25,8 +25,8 @@ using TargetLayout = std::variant<Qwen3_8Layout, Qwen3_6MoeLayout, Qwen4ExpLayou
 // one type for each architecture's code. A family of an architecture is one
 // more value here. Refusals name them in this order, and a config's model type
 // finds its family among those of its type in it (describeSourceModel).
-inline constexpr std::tuple kFamilies{Qwen3_8Layout{}, Qwen3_6MoeLayout{}, kQwen3_5_122BLayout, Qwen4ExpLayout{},
-                                      FlintLayout{}};
+inline constexpr std::tuple kFamilies{Qwen3_8Layout{}, kQwen3_5_9BLayout, Qwen3_6MoeLayout{}, kQwen3_5_122BLayout,
+                                      Qwen4ExpLayout{}, FlintLayout{}};
 
 // Calls `use` with each family's layout, in kFamilies' order.
 template <class Use> constexpr void forEachFamily(Use use) {
@@ -41,12 +41,45 @@ template <class Use> constexpr void forEachFamily(Use use) {
 enum class TargetSource : uint8_t { Safetensors = 1, Gguf };
 enum class VisionSource : uint8_t { Safetensors = 1, Gguf, None };
 
+// How a model proposes tokens beside its target. None is plain autoregressive
+// decoding: the target alone is a complete model, and no draft weights, state
+// or cache namespace belong to it.
+enum class SpeculationKind : uint8_t { None = 1, DFlash2, Mtp, DSpark };
+// The container of a draft's weights. None when the plan has no draft.
+enum class DraftFormat : uint8_t { None = 1, Safetensors, Gguf };
+
+// The installed plan of a model's speculation, recorded beside its target
+// (docs/speculation.zh.md). A plan with no draft is complete: proposalRows is
+// one, the state layout's draft part is zero, and the decode cycle verifies
+// the anchor alone.
+struct SpeculationPlan final {
+  SpeculationKind kind = SpeculationKind::None;
+  DraftFormat format = DraftFormat::None;
+  uint32_t proposalRows = 1;
+
+  // Only a DFlash2 plan loads a draft today. An MTP plan is recorded and
+  // reported, but its head has no runtime yet, so the descriptor serves the
+  // target alone and /status names the fallback.
+  [[nodiscard]] constexpr bool hasDraft() const noexcept {
+    return kind == SpeculationKind::DFlash2;
+  }
+  bool operator==(const SpeculationPlan &) const = default;
+};
+
 // A model's metadata, validated before its weight buffers are loaded. The
 // engine consumes capabilities; model loading consumes the concrete layouts.
 struct ModelDescriptor final {
   std::string name;
   TargetLayout target;
+  // The DFlash2 layout when the plan has one; zero otherwise. The plan says
+  // whether the draft is part of the model, so a zero layout alone never
+  // means a missing installation.
   DFlashDraftLayout draft;
+  SpeculationPlan speculation;
+  // The target's built-in MTP layers, recorded by the installer. They are not
+  // loaded yet (P2); the count lets the status and the panel say the head is
+  // there, and the plan can name it when the provider lands.
+  uint32_t mtpLayers = 0;
   ops::VisionLayout vision;
   ModelCapabilities capabilities;
   kv::Layout targetKvLayout;
@@ -67,6 +100,9 @@ struct ModelDescriptor final {
   // vision weights and serves no image requests.
   [[nodiscard]] bool hasVision() const noexcept {
     return visionSource != VisionSource::None;
+  }
+  [[nodiscard]] bool hasDraft() const noexcept {
+    return speculation.hasDraft();
   }
   [[nodiscard]] std::string_view family() const noexcept {
     return std::visit([](const auto &layout) { return layout.family; }, target);

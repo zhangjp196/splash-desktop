@@ -614,6 +614,19 @@ std::string runtimeStatusJson(
       // budget chooses them, all where they are every row up to each lane's
       // retention limit.
       << ",\"verify_rows\":" << json::quote(executorTelemetry.verifyBudget ? "auto" : "all")
+      // The installed speculation plan, as the engine runs it. A plan without
+      // a draft is a complete model, not a missing measurement.
+      << ",\"speculation\":{\"provider\":"
+      << json::quote(plan.speculationProvider())
+      << ",\"proposal_rows\":"
+      << (plan.speculationProvider() == "dflash2" ? 8 : 1)
+      << ",\"draft_weights_bytes\":" << plan.breakdown().draftWeightsBytes
+      << ",\"available_mtp_layers\":" << plan.mtpLayers()
+      << ",\"fallback_reason\":"
+      << (plan.speculationProvider() == "mtp"
+              ? json::quote("mtp execution is not implemented in this build; serving without speculation")
+              : "null")
+      << "}"
       // Model-lifetime timings include warmup; request metrics do not.
       << ",\"model_timing\":{\"scope\":\"model_lifetime\""
       << ",\"prefill\":{\"last_gpu_ms\":"

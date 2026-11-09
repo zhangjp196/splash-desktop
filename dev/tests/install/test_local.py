@@ -3,11 +3,13 @@ import dataclasses
 import fcntl
 import io
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from dev.tests import fixture_files
 from dev.tests.installer_fixtures import (
     DENSE,
     DRAFT_COMMIT,
@@ -200,13 +202,19 @@ class LocalModelTest(unittest.TestCase):
             f"download {MOE.draft_repo}, or pass the directory of a {MOE.name} "
             "DFlash2 draft as draft"
         )
+        # Without a draft in the cache, the target alone serves: a none plan
+        # is a complete model.
+        self.assertEqual(
+            assembly.verify(self.prepare(target))["speculation"]["provider"], "none"
+        )
+        # The same start with --require-draft refuses instead.
         with self.assertRaisesRegex(
             models.ModelError,
             f"cannot resolve {MOE.draft_repo}: no draft was given, and preparing "
             "local files asks no Hub; the Hub cache records no commit for the "
             f"default branch; {remedy}",
         ):
-            self.prepare(target)
+            self.prepare(target, require_draft=True)
         cached_snapshot(
             self.cache, MOE.draft_repo, DRAFT_COMMIT, lambda p: draft_dir(p, MOE)
         )
@@ -234,25 +242,28 @@ class LocalModelTest(unittest.TestCase):
         # other commit stands in for it.
         missing = "f" * 40
         self.cache_main(MOE.draft_repo, missing)
+        # A draft the cache cannot resolve falls back to no speculation.
+        self.assertEqual(
+            assembly.verify(self.prepare(target))["speculation"]["provider"], "none"
+        )
         with self.assertRaisesRegex(
             models.ModelError, f"the Hub cache has no snapshot of {missing}; {remedy}"
         ):
-            self.prepare(target)
+            self.prepare(target, require_draft=True)
 
-    def test_a_family_without_a_released_draft_needs_a_draft(self):
+    def test_a_family_without_a_released_draft_serves_without_one(self):
         target = self.gguf(self.root / "model-Q2_0.gguf", FLASH_NEXT)
         unreleased = dataclasses.replace(FLASH_NEXT, draft_repo=None)
         with mock.patch.object(families, "FAMILIES", (unreleased,)):
-            with self.assertRaisesRegex(
-                models.ModelError,
-                "no DFlash2 draft is released for Qwen3.8-Flash-Next; pass the "
-                "directory of one as draft",
-            ):
-                self.prepare(target)
+            self.assertEqual(
+                assembly.verify(self.prepare(target))["speculation"]["provider"],
+                "none",
+            )
             record = assembly.verify(
                 self.prepare(target, draft_dir(self.root / "draft", FLASH_NEXT))
             )
         self.assertEqual(record["family"], FLASH_NEXT.name)
+        self.assertNotIn("speculation", record)
 
     def test_an_mlx_target_serves_images_with_its_own_tower(self):
         shards = {
@@ -522,3 +533,143 @@ class LocalModelTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoDraftLocalModelTest(LocalModelTest):
+    """A plan without a draft: the target alone is a complete model."""
+
+    def test_a_target_without_a_draft_publishes_a_none_plan(self):
+        target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
+        prepared = self.prepare(target, speculation="none")
+        record = assembly.verify(prepared, full=True)
+        self.assertEqual(record["version"], 2)
+        self.assertEqual(record["speculation"]["provider"], "none")
+        self.assertEqual(record["speculation"]["format"], "none")
+        self.assertEqual(record["speculation"]["proposal_rows"], 1)
+        self.assertNotIn("draft", record["sources"])
+        self.assertFalse((prepared / "draft").exists())
+        self.assertFalse(any(name.startswith("draft/") for name in record["files"]))
+
+    def test_preparing_the_same_target_without_a_draft_returns_the_same_link(self):
+        target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
+        first = self.prepare(target, speculation="none")
+        second = self.prepare(target, speculation="none")
+        self.assertEqual(first, second)
+
+    def test_a_gguf_draft_is_converted_into_the_release_layout(self):
+        target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
+        draft = draft_dir(self.root / "draft", MOE)
+        # The same checkpoint published as GGUF: the sidecar config and one
+        # BF16 tensor named as a conversion names it.
+        (draft / "model.safetensors").unlink()
+        fixture_files.write_gguf(
+            draft / "model.gguf",
+            {"general.alignment": 32},
+            [
+                (
+                    "draft.fc.weight",
+                    [2, 2],
+                    GGML["BF16"],
+                    struct.pack("<4H", 0x3F80, 0x4000, 0x4040, 0x4080),
+                )
+            ],
+        )
+        prepared = self.prepare(target, draft)
+        record = assembly.verify(prepared)
+        self.assertIn("draft/model.safetensors", record["files"])
+        weights = (prepared / "draft" / "model.safetensors").read_bytes()
+        header_bytes = struct.unpack("<Q", weights[:8])[0]
+        header = json.loads(weights[8 : 8 + header_bytes])
+        self.assertEqual(header["fc.weight"]["dtype"], "BF16")
+        self.assertEqual(header["fc.weight"]["shape"], [2, 2])
+        # The source GGUF is recorded as the draft's source; the installed
+        # weights are the engine's safetensors.
+        self.assertEqual(record["sources"]["draft"]["repo"], str(draft))
+
+    def test_a_builtin_mtp_plan_is_recorded_and_served_without_a_draft(self):
+        target = self.root / "downloads" / "mtp-Q4_K_M.gguf"
+        header = fixture(native=True, family=MOE)
+        header["qwen35moe.block_count"] = 41
+        header["qwen35moe.nextn_predict_layers"] = 1
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_gguf(
+            target, header, loadable_tensors(header, self.headers).items()
+        )
+        prepared = self.prepare(target, speculation="mtp")
+        record = assembly.verify(prepared)
+        self.assertEqual(record["version"], 2)
+        self.assertEqual(record["speculation"]["provider"], "mtp")
+        self.assertEqual(record["speculation"]["source"], {"kind": "builtin"})
+        self.assertEqual(record["mtp"], {"layers": 1})
+        self.assertNotIn("draft", record["sources"])
+        self.assertFalse((prepared / "draft").exists())
+
+    def test_an_external_mtp_head_is_installed_as_plan_data(self):
+        target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
+        head = self.root / "mtp-head"
+        head.mkdir()
+        (head / "config.json").write_text(
+            json.dumps(
+                {
+                    "architectures": ["MtpHead"],
+                    "proposal_rows": 1,
+                    "alignment": {
+                        "family": MOE.name,
+                        "hidden_size": 2048,
+                        "vocabulary_size": 248320,
+                        "target_layers": 40,
+                    },
+                }
+            )
+        )
+        (head / "head.gguf").write_bytes(b"GGUF")
+        prepared = self.prepare(target, head, speculation="mtp")
+        record = assembly.verify(prepared)
+        self.assertEqual(record["speculation"]["provider"], "mtp")
+        self.assertEqual(record["speculation"]["source"], {"kind": "external"})
+        self.assertEqual(record["speculation"]["format"], "gguf")
+        self.assertIn("draft/head.gguf", record["files"])
+        self.assertEqual(record["sources"]["draft"]["repo"], str(head))
+        self.assertFalse((prepared / "draft" / "model.safetensors").exists())
+
+    def test_an_external_mtp_alignment_must_match_the_target(self):
+        target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
+        head = self.root / "mtp-head"
+        head.mkdir()
+        (head / "config.json").write_text(
+            json.dumps(
+                {
+                    "architectures": ["MtpHead"],
+                    "alignment": {
+                        "family": MOE.name,
+                        "hidden_size": 4096,
+                        "vocabulary_size": 248320,
+                        "target_layers": 40,
+                    },
+                }
+            )
+        )
+        (head / "head.gguf").write_bytes(b"GGUF")
+        with self.assertRaisesRegex(models.ModelError, "alignment hidden_size"):
+            self.prepare(target, head, speculation="mtp")
+
+    def test_a_target_without_builtin_mtp_cannot_select_mtp(self):
+        target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
+        with self.assertRaisesRegex(models.ModelError, "no built-in MTP head"):
+            self.prepare(target, speculation="mtp")
+
+    def test_a_draft_and_a_none_plan_are_exclusive(self):
+        target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
+        draft = draft_dir(self.root / "draft", MOE)
+        with self.assertRaises(models.ModelError):
+            self.prepare(target, draft, speculation="none")
+
+    def test_the_none_selection_link_differs_from_the_auto_one(self):
+        target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
+        auto = models.prepared_selection_link(
+            self.models, target, None, None, False, "auto"
+        )
+        none = models.prepared_selection_link(
+            self.models, target, None, None, False, "none"
+        )
+        self.assertNotEqual(auto, none)

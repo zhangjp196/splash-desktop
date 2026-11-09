@@ -37,14 +37,21 @@ import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import hub, models, paths, upstream
+from . import families, hub, models, mtp, paths, upstream
 from .models import ModelError
 
 __all__ = ["ModelError", "prepare_local_model"]
 
 
 def prepare_local_model(
-    target, draft=None, *, mmproj=None, language_only=False, models_dir=paths.MODELS
+    target,
+    draft=None,
+    *,
+    mmproj=None,
+    language_only=False,
+    models_dir=paths.MODELS,
+    speculation="auto",
+    require_draft=False,
 ):
     """Prepare the target and its DFlash2 draft for the server, and return
     the directory the server loads, an absolute pathlib.Path.
@@ -89,13 +96,31 @@ def prepare_local_model(
     mmproj = None if mmproj is None else _path(mmproj)
     models_root = Path(models_dir).expanduser().resolve()
     try:
-        return _prepare(target, draft, mmproj, language_only, models_root)
+        return _prepare(
+            target, draft, mmproj, language_only, models_root, speculation, require_draft
+        )
     except ModelError as error:
         raise type(error)(f"cannot prepare {target}: {error}") from None
 
 
-def _prepare(target, draft, mmproj, language_only, models_root):
+def _prepare(
+    target, draft, mmproj, language_only, models_root, speculation="auto", require_draft=False
+):
     """prepare_local_model, of its paths made absolute."""
+    if speculation == "none" and draft is not None:
+        raise ModelError(
+            "a draft was given with a plan that serves without one "
+            "(speculation none)"
+        )
+    if speculation == "mtp" and require_draft:
+        raise ModelError(
+            "MTP execution is not implemented by this release; it cannot be required"
+        )
+    if speculation not in ("auto", "none", "dflash2", "mtp"):
+        raise ModelError(
+            f"speculation {speculation} is not implemented by this release; "
+            "use auto, none, dflash2 or mtp"
+        )
     if mmproj and language_only:
         raise ModelError(
             f"{mmproj} is a vision projector, which a model that serves text "
@@ -111,14 +136,44 @@ def _prepare(target, draft, mmproj, language_only, models_root):
             f"mmproj {mmproj} is not a file: a vision projector is a GGUF file"
         )
     link = models.prepared_selection_link(
-        models_root, target, draft, mmproj, language_only
+        models_root, target, draft, mmproj, language_only, speculation
     )
     with tempfile.TemporaryDirectory(prefix="splash-target-") as scratch:
         source, inspected = _inspect(target, mmproj, language_only, Path(scratch))
-        repo = _draft(inspected.family, draft)
-        files = upstream.draft_files(repo, inspected)
+        if speculation == "mtp" and not draft and inspected.mtp_layers <= 0:
+            raise ModelError(
+                f"{target} has no built-in MTP head (num_nextn_predict_layers is zero)"
+            )
+        repo = None
+        if speculation not in ("none", "mtp") or (speculation == "mtp" and draft):
+            try:
+                repo = _draft(inspected.family, draft)
+            except ModelError as error:
+                if require_draft or speculation != "auto":
+                    raise
+                models.warn(f"serving without speculation: {error}")
+        alignment = None
+        if repo is not None and speculation == "mtp":
+            downloaded = repo.download(set(repo.files))
+            if "config.json" not in downloaded:
+                raise ModelError(f"{repo.name} has no config.json for its MTP head")
+            alignment = mtp.validate(
+                inspected.config, downloaded["config.json"], inspected.family.name
+            )
+            files = {"draft/" + name: path for name, path in downloaded.items()}
+        else:
+            files = (
+                upstream.draft_files(repo, inspected, models_root)
+                if repo is not None
+                else {}
+            )
     files |= {path: source.paths[name] for path, name in inspected.files.items()}
-    record = upstream.assembly_record(str(target), inspected, source, repo)
+    provider = "mtp" if speculation == "mtp" else (
+        "none" if repo is None else "dflash2"
+    )
+    record = upstream.assembly_record(
+        str(target), inspected, source, repo, provider, alignment
+    )
     return upstream.publish(models_root, link, record, files)
 
 
@@ -225,21 +280,27 @@ def _draft(family, draft):
     (hub.Repository.resolve)."""
     if draft:
         return hub.Repository.local_directory(draft)
-    if family.draft_repo is None:
+    candidates = families.draft_candidates(family)
+    if not candidates:
         raise ModelError(
             f"no DFlash2 draft is released for {family.name}; pass the "
             "directory of one as draft"
         )
-    try:
-        return hub.Repository.resolve(
-            family.draft_repo,
-            unreachable="no draft was given, and preparing local files asks no Hub",
-        )
-    except ModelError as error:
-        raise ModelError(
-            f"{error}; download {family.draft_repo}, or pass the directory of a "
-            f"{family.name} DFlash2 draft as draft"
-        ) from None
+    error: ModelError | None = None
+    for repo in candidates:
+        try:
+            return hub.Repository.resolve(
+                repo,
+                unreachable="no draft was given, and preparing local files asks no Hub",
+            )
+        except ModelError as candidate_error:
+            if error is None:
+                error = candidate_error
+    assert error is not None
+    raise ModelError(
+        f"{error}; download {candidates[0]}, or pass the directory of a "
+        f"{family.name} DFlash2 draft as draft"
+    ) from None
 
 
 def _main(argv=None):
@@ -251,6 +312,8 @@ def _main(argv=None):
     parser.add_argument("target")
     parser.add_argument("--models", type=Path, default=paths.MODELS)
     parser.add_argument("--draft-model")
+    parser.add_argument("--speculation", choices=("auto", "none", "dflash2", "mtp"), default="auto")
+    parser.add_argument("--require-draft", action="store_true")
     parser.add_argument("--mmproj")
     parser.add_argument("--language-only", action="store_true")
     args = parser.parse_args(argv)
@@ -263,6 +326,8 @@ def _main(argv=None):
                 mmproj=args.mmproj,
                 language_only=args.language_only,
                 models_dir=args.models,
+                speculation=args.speculation,
+                require_draft=args.require_draft,
             )
         print(prepared)
     except (ModelError, OSError) as error:

@@ -70,7 +70,7 @@ function createChat(storage = new Map(), writable = true, models = null,
   for (const id of ['chat', 'form', 'input', 'attachments', 'image-input',
                    'attach', 'effort', 'api-key', 'send', 'context-ring', 'recents',
                    'new-chat', 'mobile-new', 'menu', 'scrim', 'scroll-bottom', 'sidebar',
-                   'sidebar-close', 'sidebar-open', 'credentials']) elements[id] = new Element();
+                   'sidebar-close', 'sidebar-open', 'credentials', 'speculation']) elements[id] = new Element();
   // Elements the markup hides start hidden, as in a browser.
   for (const [, id] of html.matchAll(/<\w+ id="([^"]+)"[^>]* hidden[ >]/g)) elements[id].hidden = true;
   elements.effort.options = ['', 'xhigh', 'medium', 'low', 'none'].map(value => ({value}));
@@ -265,6 +265,22 @@ assert.equal(fresh.requests[0].headers.Authorization, undefined);
   chat.requests[0].resolve(unauthorized);
   await flush();
   assert.equal(chat.elements.credentials.hidden, false, 'a chat answered 401');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+""")
+
+    def test_speculation_badge_reports_the_provider_and_a_fallback(self):
+        self.run_chat(r"""
+(async () => {
+  const served = spec => ({ok: true, json: async () => ({data: [{input_modalities: ['text'], speculation: spec}]})});
+  const chat = createChat(new Map(), true, () => served({provider: 'dflash2', proposal_rows: 8, fallback_reason: null}));
+  await flush();
+  assert.equal(chat.elements.speculation.hidden, false);
+  assert.equal(chat.elements.speculation.textContent, 'DFlash2 · 8 rows');
+  const fallback = createChat(new Map(), true,
+    () => served({provider: 'none', proposal_rows: 1, fallback_reason: 'unreachable'}));
+  await flush();
+  assert.equal(fallback.elements.speculation.textContent, 'No draft');
+  assert.equal(fallback.elements.speculation.title, 'Fell back: unreachable');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """)
 

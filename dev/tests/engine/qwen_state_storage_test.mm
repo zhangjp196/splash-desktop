@@ -127,6 +127,14 @@ void testLayoutFormulas() {
               bfloat.target.convolutionBytes() == 3'145'728 &&
               bfloat.laneBytes() == 205'127'680 && bfloat.cachedBytes() == 84'541'440,
           "bf16 state byte formula is wrong");
+  // A plan without a draft has the target's state alone: the zero draft
+  // layout is complete, and no bytes belong to it.
+  constexpr model::CompositeStateLayout noDraft{kTargetState, {}};
+  require(noDraft.valid() && noDraft.draft.layers == 0 &&
+              noDraft.laneBytes() ==
+                  model::CompositeStateLayout::kLaneGdnCells * kTargetState.cellBytes() &&
+              noDraft.cachedBytes() == kTargetState.cellBytes(),
+          "a state layout without a draft is wrong");
 }
 
 void testOffloadAllocationFailure(metal::MetalBackend &backend) {

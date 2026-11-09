@@ -527,6 +527,16 @@ QwenStateStorage::acquire(uint32_t cells, bool rings, std::string_view label,
     // What a driver's refusal left of the attempt goes with `fresh`.
     if (!admission)
       return admission;
+  } else {
+    // A plan of no bytes (a target without GDN state, and no draft) still
+    // holds the objects its lanes and reservations name: their buffers are
+    // empty, which is a complete state.
+    if (rings && !pooledRings)
+      fresh.draft = std::shared_ptr<DFlashDraftRing>(new DFlashDraftRing(
+          backend_, allocations_, layout_.draft, std::string(label) + "-draft"));
+    if (!pooledWindow)
+      fresh.window = std::shared_ptr<DFlashContextWindow>(new DFlashContextWindow(
+          backend_, allocations_, layout_.draft, std::string(label) + "-window"));
   }
   for (uint32_t cell = 0; cell < pooledCells; ++cell) {
     buffers.gdn[cell] = std::move(pool_->cells.back());
@@ -602,8 +612,11 @@ std::shared_ptr<const CompositeState> QwenStateStorage::adopt(const SlotRecord &
                                                               uint32_t tokens) {
   if (!file_)
     throw std::logic_error("Qwen states are taken back only from a disk tier");
-  const uint32_t window = std::min(tokens, ExecutionLimits::draftContextTokens);
-  const QwenLogicalLengths lengths{tokens, tokens - window, window, tokens};
+  const bool hasDraft = layout_.draft.layers != 0;
+  const uint32_t window = hasDraft ? std::min(tokens, ExecutionLimits::draftContextTokens) : 0;
+  const QwenLogicalLengths lengths = hasDraft
+      ? QwenLogicalLengths{tokens, tokens - window, window, tokens}
+      : QwenLogicalLengths{tokens, tokens, 0, tokens};
   validateLengths(lengths, true);
   if (record.payloadBytes != layout_.cachedBytes())
     throw std::invalid_argument("a recorded Qwen state does not match the state layout");
@@ -627,6 +640,7 @@ const QwenStateStorage::Lane &QwenStateStorage::lane(uint32_t index) const {
 
 void QwenStateStorage::validateLengths(const QwenLogicalLengths &lengths,
                                        bool cacheSnapshot) const {
+  const bool hasDraft = layout_.draft.layers != 0;
   if (lengths.draftLength > ExecutionLimits::draftContextTokens ||
       lengths.draftEnd() > lengths.targetTokens ||
       lengths.windowEnd > lengths.draftEnd()) {
@@ -634,13 +648,14 @@ void QwenStateStorage::validateLengths(const QwenLogicalLengths &lengths,
   }
   if (cacheSnapshot &&
       (!lengths.targetTokens ||
-       !lengths.hasCompleteDraftWindow(ExecutionLimits::draftContextTokens) ||
+       (hasDraft && !lengths.hasCompleteDraftWindow(ExecutionLimits::draftContextTokens)) ||
        lengths.targetTokens % kv::kPageTokens)) {
     throw std::invalid_argument(
         "composite snapshot requires equal page-aligned committed lengths");
   }
   // States are published in prefill, which keeps the window with the rings.
-  if (cacheSnapshot && !lengths.hasCurrentContextWindow())
+  // Without a draft there is no window to keep.
+  if (cacheSnapshot && hasDraft && !lengths.hasCurrentContextWindow())
     throw std::logic_error("a composite snapshot needs the context window of its draft rings");
 }
 

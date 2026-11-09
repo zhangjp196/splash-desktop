@@ -120,6 +120,7 @@ struct SettingsEditor: View {
             return s.modelMode != b.modelMode || s.modelID != b.modelID
                 || s.modelDirectory != b.modelDirectory
                 || s.draftDirectory != b.draftDirectory || s.mmproj != b.mmproj
+                || s.speculation != b.speculation || s.requireDraft != b.requireDraft
         case .server:
             return s.port != b.port || s.lanAccess != b.lanAccess
                 || s.allowedHosts != b.allowedHosts || s.allowedOrigins != b.allowedOrigins
@@ -300,6 +301,21 @@ struct SettingsEditor: View {
             tint: SplashPalette.violet
         ) {
             SettingRow(
+                title: L10n.string("field.speculation"),
+                help: L10n.string("help.speculation"),
+                controlWidth: 300
+            ) {
+                Picker("", selection: $settings.speculation) {
+                    Text(verbatim: L10n.string("speculation.auto")).tag("auto")
+                    Text(verbatim: L10n.string("speculation.none")).tag("none")
+                    Text(verbatim: L10n.string("speculation.dflash2")).tag("dflash2")
+                    Text(verbatim: L10n.string("speculation.mtp")).tag("mtp")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            rowDivider
+            SettingRow(
                 title: L10n.string("field.draft"),
                 help: L10n.string("help.draft_folder"),
                 controlWidth: 300
@@ -309,6 +325,34 @@ struct SettingsEditor: View {
                     prompt: L10n.string("field.draft.prompt")
                 )
             }
+            .disabled(settings.speculation == "none")
+            .opacity(settings.speculation == "none" ? 0.55 : 1)
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.require_draft"),
+                help: L10n.string("help.require_draft"),
+                controlWidth: 300
+            ) {
+                Toggle("", isOn: $settings.requireDraft)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(SplashPalette.violet)
+            }
+            .disabled(settings.speculation == "none" || settings.speculation == "mtp")
+            .opacity(settings.speculation == "none" || settings.speculation == "mtp" ? 0.55 : 1)
+        }
+        if settings.speculation == "none" {
+            EditorNote(
+                text: L10n.string("help.speculation.none"),
+                tone: SplashPalette.muted,
+                systemImage: "info.circle"
+            )
+        } else if settings.speculation == "mtp" {
+            EditorNote(
+                text: L10n.string("help.speculation.mtp"),
+                tone: SplashPalette.muted,
+                systemImage: "info.circle"
+            )
         }
     }
 

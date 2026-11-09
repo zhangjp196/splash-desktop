@@ -94,6 +94,13 @@ struct ModelMemoryFootprint final {
   // as long as it runs, so the plan and the governor charge it like the
   // weights it stands in for. Zero without one.
   uint64_t streamedTableBytes = 0;
+  // Whether the installed plan has a draft: a zero draftWeightsBytes is then
+  // a missing measurement, not a model that serves without speculation.
+  bool draftRequired = true;
+  // The target's built-in MTP layers, which the status reports (P2).
+  uint32_t mtpLayers = 0;
+  // The provider the installation planned: none, dflash2 or mtp.
+  std::string speculationProvider = "dflash2";
 };
 
 // What a spill-capable target plans for the K/V of long requests that lives
@@ -436,6 +443,16 @@ public:
   [[nodiscard]] uint32_t maximumContextTokens() const noexcept;
   // What admission decides which requests spill by (EngineSpillConfig).
   [[nodiscard]] SpillGeometry spillGeometry() const noexcept;
+  // Whether the plan it was built from has a draft.
+  [[nodiscard]] bool draftRequired() const noexcept {
+    return model_.footprint.draftRequired;
+  }
+  [[nodiscard]] uint32_t mtpLayers() const noexcept {
+    return model_.footprint.mtpLayers;
+  }
+  [[nodiscard]] const std::string &speculationProvider() const noexcept {
+    return model_.footprint.speculationProvider;
+  }
 
   [[nodiscard]] std::string toStatusJson() const;
 

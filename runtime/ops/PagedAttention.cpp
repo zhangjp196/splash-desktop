@@ -67,6 +67,8 @@ struct CompiledAttention final {
 };
 constexpr std::array kCompiledAttention{
     CompiledAttention{24, 4, 256, false, true, false, 32, false, 0, "", ""},
+    // Qwen3.5-9B: 16 query heads over 4 KV heads, 256 dimensions.
+    CompiledAttention{16, 4, 256, false, true, false, 32, false, 0, "_kv4_g4", ""},
     CompiledAttention{16, 2, 256, false, true, false, 32, false, 0, "_kv2_g8", "_kv2_g8"},
     CompiledAttention{32, 2, 256, false, true, false, 32, false, 0, "_kv2_g16", "_kv2_g8"},
     CompiledAttention{24, 2, 256, true, true, false, 32, false, 0, "_kv2_g12", "_kv2_vt"},

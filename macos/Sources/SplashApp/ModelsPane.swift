@@ -362,6 +362,7 @@ private struct ConfigTile: View {
             }
         }
         parts.append(config.settings.kvFormat.uppercased())
+        parts.append(L10n.string("speculation.\(config.settings.speculation)"))
         parts.append(L10n.format("models.concurrency", config.settings.maxConcurrency))
         return parts
     }

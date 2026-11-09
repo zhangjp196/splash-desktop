@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import stat
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from unittest import mock
 import httpx
 from huggingface_hub.errors import IncompleteSnapshotError
 
+from dev.tests import fixture_files
 from dev.tests.installer_fixtures import (
     CONFIGS,
     DENSE,
@@ -46,7 +48,7 @@ from install import assembly, families, hub, models, paths, upstream
 # tells it apart.
 UNSUPPORTED = (
     "no supported model has this architecture [(]{}[)]; "
-    "supported: Qwen3.8-27B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next"
+    "supported: Qwen3.8-27B, Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next"
 )
 
 
@@ -88,7 +90,7 @@ class UpstreamTest(unittest.TestCase):
         # The engine's check (its model-check command), with and without the
         # draft, of each family an MLX checkpoint serves.
         for family in families.FAMILIES:
-            if family in GGUF_ONLY:
+            if family in GGUF_ONLY or family.draft_repo is None:
                 continue
             config = mlx_target(self.root / family.name, family) / "config.json"
             draft = draft_dir(self.root / family.name / "draft", family)
@@ -739,6 +741,54 @@ class UpstreamTest(unittest.TestCase):
                 self.assertFalse(chosen.models_root.exists())
                 shutil.rmtree(fake.remote)
 
+    def test_a_mirror_draft_installs_when_the_release_is_absent(self):
+        # The released repository first, then the family's mirrors: a z-lab
+        # mirror is a source like any other, and the checkpoint's own config
+        # decides compatibility.
+        fake = FakeHub(self, self.cache)
+        fake.publish(MODEL, "a" * 40, lambda p: mlx_target(p, DENSE))
+        mirror = DENSE.draft_mirrors[0]
+        fake.publish(mirror, DRAFT_COMMIT, lambda p: draft_dir(p, DENSE))
+        chosen = selection(self.root)
+        self.prepare(chosen)
+        self.assertEqual(
+            fake.requests,
+            [(MODEL, None), (DENSE.draft_repo, None), (mirror, None)],
+        )
+        self.assertEqual(
+            assembly.verify(chosen.link)["sources"]["draft"],
+            {"repo": mirror, "revision": DRAFT_COMMIT},
+        )
+
+    def test_a_gguf_draft_repository_is_converted_at_install(self):
+        fake = FakeHub(self, self.cache)
+        fake.publish(MODEL, "a" * 40, lambda p: mlx_target(p, DENSE))
+
+        def release(root):
+            draft_dir(root, DENSE)
+            (root / "model.safetensors").unlink()
+            fixture_files.write_gguf(
+                root / "model-BF16.gguf",
+                {"general.alignment": 32},
+                [
+                    (
+                        "draft.fc.weight",
+                        [2, 2],
+                        GGML["BF16"],
+                        struct.pack("<4H", 0, 1, 2, 3),
+                    )
+                ],
+            )
+
+        fake.publish(DENSE.draft_repo, DRAFT_COMMIT, release)
+        chosen = selection(self.root)
+        self.prepare(chosen)
+        record = assembly.verify(chosen.link)
+        self.assertEqual(record["sources"]["draft"]["repo"], DENSE.draft_repo)
+        self.assertIn("draft/model.safetensors", record["files"])
+        self.assertIn("draft/config.json", record["files"])
+        self.assertNotIn("draft/model-BF16.gguf", record["files"])
+
     def test_a_draft_that_ships_its_mask_embedding_installs_it(self):
         # A release may ship its mask token's embedding beside its weights,
         # which the draft reads in place of the target's token table row.
@@ -1174,7 +1224,7 @@ class UpstreamTest(unittest.TestCase):
             f"Warning: keeping the installed {MODEL}@{'a' * 12}; cannot install "
             f"{MODEL}@{'b' * 40}: no supported model has this architecture (text "
             "config head_dim: safetensors 128, Qwen3.8-27B 256); supported: Qwen3.8-27B, "
-            "Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next",
+            "Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next",
             warnings,
         )
         self.assertEqual(chosen.link.resolve(), installed)

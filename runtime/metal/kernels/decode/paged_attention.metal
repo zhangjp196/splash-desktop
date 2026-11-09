@@ -67,6 +67,7 @@
 
 PAGED_VERIFY_SPLIT(verify_attention_q8_split, 4, 6, 256, 0, int8_t)
 PAGED_VERIFY_SPLIT(verify_attention_q8_split_kv2_g8, 2, 8, 256, 0, int8_t)
+PAGED_VERIFY_SPLIT(verify_attention_q8_split_kv4_g4, 4, 4, 256, 0, int8_t)
 PAGED_VERIFY_SPLIT(verify_attention_q8_split_kv2_g16, 2, 16, 256, 0, int8_t)
 // Four KV heads of 128 dimensions over the whole history, and over a window
 // of the 512 keys before each row.
@@ -75,6 +76,7 @@ PAGED_VERIFY_SPLIT(verify_attention_q8_split_kv4_g8_d128_w512, 4, 8, 128, 512, i
 // BF16 shares the page loop and reduction, without quantization scales.
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split, 4, 6, 256, 0, bfloat)
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv2_g8, 2, 8, 256, 0, bfloat)
+PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv4_g4, 4, 4, 256, 0, bfloat)
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv2_g16, 2, 16, 256, 0, bfloat)
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv4_g8_d128, 4, 8, 128, 0, bfloat)
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv4_g8_d128_w512, 4, 8, 128, 512, bfloat)
@@ -82,6 +84,7 @@ PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv4_g8_d128_w512, 4, 8, 128, 512,
 // int4b_format slabs.
 PAGED_VERIFY_SPLIT(verify_attention_q4_split, 4, 6, 256, 0, SplashKvInt4)
 PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv2_g8, 2, 8, 256, 0, SplashKvInt4)
+PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv4_g4, 4, 4, 256, 0, SplashKvInt4)
 PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv2_g16, 2, 16, 256, 0, SplashKvInt4)
 PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv4_g8_d128, 4, 8, 128, 0, SplashKvInt4)
 PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv4_g8_d128_w512, 4, 8, 128, 512, SplashKvInt4)
@@ -89,6 +92,7 @@ PAGED_VERIFY_SPLIT(verify_attention_q4_split_kv4_g8_d128_w512, 4, 8, 128, 512, S
 // geometry as the 4-bit format, with two element types.
 PAGED_VERIFY_SPLIT(verify_attention_k8v4_split, 4, 6, 256, 0, SplashKvK8V4)
 PAGED_VERIFY_SPLIT(verify_attention_k8v4_split_kv2_g8, 2, 8, 256, 0, SplashKvK8V4)
+PAGED_VERIFY_SPLIT(verify_attention_k8v4_split_kv4_g4, 4, 4, 256, 0, SplashKvK8V4)
 PAGED_VERIFY_SPLIT(verify_attention_k8v4_split_kv2_g16, 2, 16, 256, 0, SplashKvK8V4)
 PAGED_VERIFY_SPLIT(verify_attention_k8v4_split_kv4_g8_d128, 4, 8, 128, 0, SplashKvK8V4)
 PAGED_VERIFY_SPLIT(verify_attention_k8v4_split_kv4_g8_d128_w512, 4, 8, 128, 512, SplashKvK8V4)
@@ -157,6 +161,7 @@ inline void splash_verify_attention_reduce_phase(
   }
 PAGED_VERIFY_REDUCE(verify_attention_reduce, 4, 6, 256, 0)
 PAGED_VERIFY_REDUCE(verify_attention_reduce_kv2_g8, 2, 8, 256, 0)
+PAGED_VERIFY_REDUCE(verify_attention_reduce_kv4_g4, 4, 4, 256, 0)
 PAGED_VERIFY_REDUCE(verify_attention_reduce_kv2_g16, 2, 16, 256, 0)
 PAGED_VERIFY_SINK_REDUCE(verify_attention_reduce_kv4_g8_d128_sinks, 4, 8, 128, 0)
 PAGED_VERIFY_SINK_REDUCE(verify_attention_reduce_kv4_g8_d128_w512_sinks, 4, 8, 128, 512)

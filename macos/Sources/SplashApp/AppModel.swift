@@ -11,6 +11,12 @@ struct LiveStatus: Equatable {
     var decodeTokensPerSecond: Double?
     var prefillTokensPerSecond: Double?
     var draftAcceptanceRate: Double?
+    /// The installed speculation plan the engine runs: provider, proposal
+    /// rows, and why a requested one fell back to none.
+    var speculationProvider: String?
+    var speculationRows: Int?
+    var speculationFallback: String?
+    var availableMTPLayers: Int?
     /// The engine's request latency histograms, in milliseconds. `samples` is
     /// the window the percentiles cover; zero means the engine has not
     /// completed a request since it started.
@@ -267,6 +273,8 @@ final class AppModel: ObservableObject {
     @Published var draftDirectory = ""
     @Published var draftMode = ServerSettings.First.draftMode
     @Published var draftID = ""
+    @Published var speculation = ServerSettings.First.speculation
+    @Published var requireDraft = ServerSettings.First.requireDraft
     @Published var mmproj = ""
     @Published var port = ServerSettings.First.port
     @Published var lanAccess = false
@@ -466,6 +474,8 @@ final class AppModel: ObservableObject {
         settings.draftDirectory = draftDirectory
         settings.draftMode = draftMode
         settings.draftID = draftID
+        settings.speculation = speculation
+        settings.requireDraft = requireDraft
         settings.mmproj = mmproj
         settings.port = port
         settings.lanAccess = lanAccess
@@ -553,6 +563,8 @@ final class AppModel: ObservableObject {
         draftDirectory = settings.draftDirectory
         draftMode = settings.draftMode
         draftID = settings.draftID
+        speculation = settings.speculation
+        requireDraft = settings.requireDraft
         mmproj = settings.mmproj
         port = settings.port
         lanAccess = settings.lanAccess
@@ -885,15 +897,26 @@ final class AppModel: ObservableObject {
                 arguments += ["--mmproj", projector]
             }
         }
+        // Whether decode may propose tokens, and whether a missing draft is
+        // fatal. `none` passes no draft at all; `auto` and `dflash2` name
+        // one when the configuration has it.
+        if speculation != "auto" {
+            arguments += ["--speculation", speculation]
+        }
+        if requireDraft && speculation != "none" && speculation != "mtp" {
+            arguments.append("--require-draft")
+        }
         // The DFlash2 draft is a local folder, like any other model the panel
         // serves. A repository ID an older configuration saved still names
         // its own download until an edit moves it to a folder.
         let draft = draftDirectory.trimmingCharacters(in: .whitespaces)
-        if !draft.isEmpty {
-            arguments += ["--draft-model", draft]
-        } else if draftMode == "hub" {
-            let stored = draftID.trimmingCharacters(in: .whitespaces)
-            if !stored.isEmpty { arguments += ["--draft-model", stored] }
+        if speculation != "none" {
+            if !draft.isEmpty {
+                arguments += ["--draft-model", draft]
+            } else if draftMode == "hub" {
+                let stored = draftID.trimmingCharacters(in: .whitespaces)
+                if !stored.isEmpty { arguments += ["--draft-model", stored] }
+            }
         }
         arguments += ["--port", String(port)]
         // Loopback unless the configuration asks for the LAN; the extra Host
@@ -1475,6 +1498,12 @@ final class AppModel: ObservableObject {
             status.contextTokens = tokens
             contextTokens = tokens
             if phase == .starting { phase = .ready }
+        }
+        if let speculation = object["speculation"] as? [String: Any] {
+            status.speculationProvider = speculation["provider"] as? String
+            status.speculationRows = speculation["proposal_rows"] as? Int
+            status.speculationFallback = speculation["fallback_reason"] as? String
+            status.availableMTPLayers = speculation["available_mtp_layers"] as? Int
         }
         if let metrics = object["metrics"] as? [String: Any] {
             status.decodeTokensPerSecond = metrics["decode_tokens_per_second"] as? Double

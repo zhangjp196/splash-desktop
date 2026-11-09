@@ -351,6 +351,9 @@ def model_config(metadata, vision=None):
         model_type=architecture.model_type,
         vocab_size=len(metadata.require("tokenizer.ggml.tokens", list)),
     )
+    mtp = mtp_layers(metadata, arch)
+    if mtp:
+        text["num_nextn_predict_layers"] = mtp
     if architecture.text_config is not None:
         text.update(architecture.text_config(metadata, arch))
     if architecture.flat:
@@ -383,14 +386,19 @@ def scalar_metadata(metadata):
     return typed
 
 
-def loaded_layers(metadata, arch):
-    """The target's layer count without its MTP layers, which are never
-    loaded."""
+def mtp_layers(metadata, arch):
+    """The target's MTP layers, which are never loaded."""
     layers = metadata.positive(arch + ".block_count")
     mtp = metadata.values.get(arch + ".nextn_predict_layers", 0)
     if type(mtp) is not int or not 0 <= mtp < layers:
         raise ModelError("invalid GGUF MTP layer count")
-    return layers - mtp
+    return mtp
+
+
+def loaded_layers(metadata, arch):
+    """The target's layer count without its MTP layers, which are never
+    loaded."""
+    return metadata.positive(arch + ".block_count") - mtp_layers(metadata, arch)
 
 
 def dense_layers(metadata, arch):

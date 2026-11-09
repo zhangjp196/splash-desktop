@@ -134,6 +134,8 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
     edited.modelDirectory = "/tmp/selfcheck"
     edited.draftDirectory = "/tmp/selfcheck-draft"
     edited.draftMode = "folder"
+    edited.speculation = "dflash2"
+    edited.requireDraft = true
     edited.mmproj = "/tmp/selfcheck-mmproj.gguf"
     edited.port = 9123
     edited.lanAccess = true
@@ -182,6 +184,8 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         && edited.rows.contains { $0.key == "modelMode" && $0.value == AppModel.ModelMode.local.rawValue }
         && edited.rows.contains { $0.key == "modelDirectory" && $0.value == "/tmp/selfcheck" }
         && edited.rows.contains { $0.key == "mmproj" && $0.value == "/tmp/selfcheck-mmproj.gguf" }
+        && edited.rows.contains { $0.key == "speculation" && $0.value == "dflash2" }
+        && edited.rows.contains { $0.key == "requireDraft" && $0.value == "1" }
         && edited.rows.contains { $0.key == "cacheEvictionPreset" && $0.value == "custom" }
         && edited.resolvedCacheEviction.policy == "lfu"
         && edited.resolvedCacheEviction.protect == 3
@@ -357,6 +361,8 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         passed = passed
             && carries("--model-dir", "/tmp/selfcheck")
             && carries("--draft-model", "/tmp/selfcheck-draft")
+            && carries("--speculation", "dflash2")
+            && launch.contains("--require-draft")
             && carries("--expert-memory", "16G")
             && carries("--expert-memory-grow", "on")
             && carries("--ple-memory", "2G")
@@ -381,6 +387,13 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             // the engine's default; only the switch that turns it off is
             // passed.
             && carries("--cache-idle-evict", "off")
+        // A none plan passes no draft at all, whatever folder the form keeps.
+        reloaded.speculation = "none"
+        let none = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+        passed = passed
+            && carries(none, "--speculation", "none")
+            && !none.contains("--draft-model")
+        reloaded.speculation = "dflash2"
         // Turning the idle unload off keeps the weights resident.
         reloaded.unloadIdleWeights = false
         let resident = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")

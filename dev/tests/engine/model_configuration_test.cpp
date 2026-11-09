@@ -89,6 +89,14 @@ model::ModelDescriptor inspect(const SourceModel &model) {
   return model::inspectModelRoot(root.path());
 }
 
+// The descriptor of a model whose plan holds no draft directory.
+model::ModelDescriptor inspectWithoutDraft(const SourceModel &model) {
+  const test::TemporaryDirectory root("splash-source-model");
+  test::writeFile(root.path() / "model.json", model.record);
+  test::writeFile(root.path() / "config.json", model.config);
+  return model::inspectModelRoot(root.path());
+}
+
 void refuses(const SourceModel &model, std::string_view error, const std::string &message) {
   rejects([&] { static_cast<void>(inspect(model)); }, error, message);
 }
@@ -98,6 +106,25 @@ void refuses(const SourceModel &model, std::string_view error, const std::string
 void testFamilies(const std::filesystem::path &fixtures) {
   const SourceModel dense = mlxModel(fixtures, "qwen3.8-27b");
   const model::ModelDescriptor denseDescriptor = inspect(dense);
+  // The record's MTP head is metadata: a count the status reports, which does
+  // not change the descriptor's validity before P2 runs it.
+  require(inspect(dense.with(&SourceModel::record, R"("version":1)",
+                             R"("version":1,"mtp":{"layers":2})"))
+              .mtpLayers == 2,
+          "an MTP layer count was not read from the record");
+  // An MTP plan is recorded without a draft: the head has no runtime yet, so
+  // the descriptor serves the target alone and the status names the fallback.
+  const SourceModel mtp = dense.with(
+      &SourceModel::record, R"({"version":1)", R"({"version":2)").with(
+      &SourceModel::record, R"("model":)",
+      R"("speculation":{"version":1,"provider":"mtp","format":"none",)"
+      R"("source":{"kind":"builtin"},"proposal_rows":1,"state":"mtp-cache",)"
+      R"("fallback":"none"},"mtp":{"layers":1},"model":)");
+  const model::ModelDescriptor mtpDescriptor = inspectWithoutDraft(mtp);
+  require(mtpDescriptor.valid() && !mtpDescriptor.hasDraft() &&
+              mtpDescriptor.speculation.kind == model::SpeculationKind::Mtp &&
+              mtpDescriptor.mtpLayers == 1,
+          "an MTP plan without a draft was not a valid descriptor");
   require(denseDescriptor.name == "community/fine-tune" &&
               std::holds_alternative<model::Qwen3_8Layout>(denseDescriptor.target) &&
               denseDescriptor.targetSource == model::TargetSource::Safetensors && !denseDescriptor.hasVision() &&
@@ -177,7 +204,7 @@ void testFamilies(const std::filesystem::path &fixtures) {
   // tell its target from other models of the architecture, which Splash does
   // not serve, such as Qwen3.5-4B.
   constexpr std::string_view supported =
-      "; supported: Qwen3.8-27B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next";
+      "; supported: Qwen3.8-27B, Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next";
   struct Refused final {
     std::string_view from, to, difference;
   };
@@ -221,6 +248,18 @@ void testSources() {
   };
   require(described(model::TargetSource::Safetensors, model::VisionSource::None).valid(),
           "a descriptor of its sources was not valid");
+  // A plan without a draft is complete: no draft layout, no draft bytes, a
+  // zero state layout, and the target alone makes it valid.
+  const model::ModelDescriptor none =
+      described(model::TargetSource::Safetensors, model::VisionSource::None, model::DFlashDraftLayout{});
+  require(none.valid() && !none.hasDraft() && !none.stateLayout.draft.layers &&
+              none.speculation.kind == model::SpeculationKind::None &&
+              none.speculation.proposalRows == 1,
+          "a descriptor without a draft was not valid");
+  require(!described(model::TargetSource::Safetensors, model::VisionSource::None,
+                     model::DFlashDraftLayout{})
+               .stateLayout.draft.layers,
+          "a plan without a draft kept draft state");
   require(!described(model::TargetSource{}, model::VisionSource::None).valid() &&
               !described(model::TargetSource::Safetensors, model::VisionSource{}).valid(),
           "a descriptor without a source was valid");
@@ -249,7 +288,7 @@ void testOneRulePerValue(const std::filesystem::path &fixtures) {
   require(inspect(gguf).targetSource == model::TargetSource::Gguf, "a GGUF's derived config was refused");
   // A difference names the source that states the value beside the family.
   refuses(gguf.with(&SourceModel::config, R"("hidden_size":5120)", R"("hidden_size":4096)"),
-          "(text config hidden_size: GGUF 4096, Qwen3.8-27B 5120)", "a GGUF of another width was accepted");
+          "(text config num_hidden_layers: GGUF 64, Qwen3.5-9B 32)", "a GGUF of another width was accepted");
 
   struct Refused final {
     std::string SourceModel::*file;
@@ -257,7 +296,7 @@ void testOneRulePerValue(const std::filesystem::path &fixtures) {
   };
   for (const Refused &refused : std::initializer_list<Refused>{
            {&SourceModel::record, R"("version":1)", R"("version":2)",
-            "model record version mismatch: assembly 2, runtime 1"},
+            "speculation plan must be an object"},
            {&SourceModel::config, R"("num_hidden_layers": 64)", R"("num_hidden_layers": true)",
             "text config num_hidden_layers must be a number"},
            {&SourceModel::config, R"("head_dim": 256,)", "", "text config head_dim must be a number"},

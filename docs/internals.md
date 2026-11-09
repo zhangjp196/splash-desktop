@@ -74,8 +74,9 @@ the Hub. The result is an assembly, a local directory of links to the sources'
 Hub snapshots, published atomically. The other installer modules each own one
 part: `hub.py` the sources, the Hub cache and its pins; `assembly.py` the
 assembly layout, its build, verification and garbage collection, and the
-metadata derived from a GGUF; `families.py` each family's draft repository;
-`local.py` the assembly of local files ([Local model files](models.md#local-model-files)),
+metadata derived from a GGUF; `families.py` each family's draft repository
+and mirrors; `draftgguf.py` the conversion of a DFlash2 GGUF draft into the
+BF16 safetensors the draft loader reads; `local.py` the assembly of local files ([Local model files](models.md#local-model-files)),
 which inspects them and publishes them as `upstream.py` does a repository's;
 and `models.py` model IDs, selections, the
 installation lock, the command line (`install/models.py --model ID

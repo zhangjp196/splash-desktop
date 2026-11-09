@@ -31,11 +31,28 @@ class ModelFamily:
     # loads from the target repository unless --language-only. The models of
     # a family without one serve text only, whatever their repository holds.
     vision: bool = True
+    # Other repositories of the same checkpoint, tried after draft_repo when
+    # it cannot be resolved (a z-lab mirror, for example). Their names are
+    # data: compatibility is the checkpoint's own config, never its owner.
+    draft_mirrors: tuple[str, ...] = ()
 
 
 FAMILIES = (
-    ModelFamily("Qwen3.8-27B", "incoai/Qwen3.8-27B-DFlash2", QWEN),
-    ModelFamily("Qwen3.6-35B-A3B", "incoai/Qwen3.6-35B-A3B-DFlash2", QWEN),
+    # Qwen3.5-9B and its fine-tunes, such as Ornith-1.5-9B. No DFlash2 draft is
+    # released for it; auto serves it without one.
+    ModelFamily("Qwen3.5-9B", None, QWEN, vision=False),
+    ModelFamily(
+        "Qwen3.8-27B",
+        "incoai/Qwen3.8-27B-DFlash2",
+        QWEN,
+        draft_mirrors=("z-lab/Qwen3.8-27B-DFlash2",),
+    ),
+    ModelFamily(
+        "Qwen3.6-35B-A3B",
+        "incoai/Qwen3.6-35B-A3B-DFlash2",
+        QWEN,
+        draft_mirrors=("z-lab/Qwen3.6-35B-A3B-DFlash2",),
+    ),
     # Its fine-tune Ornith-1.5-122B is the family too, and the draft
     # released for it the family's.
     ModelFamily("Qwen3.5-122B-A10B", "incoai/Ornith-1.5-122B-DFlash2", QWEN),
@@ -48,3 +65,13 @@ FAMILIES = (
 def named(name):
     """The family called name, or None."""
     return next((family for family in FAMILIES if family.name == name), None)
+
+
+def draft_candidates(family):
+    """The family's draft repositories, the released one then its mirrors,
+    without duplicates."""
+    candidates = []
+    for repo in (family.draft_repo, *family.draft_mirrors):
+        if repo and repo not in candidates:
+            candidates.append(repo)
+    return tuple(candidates)

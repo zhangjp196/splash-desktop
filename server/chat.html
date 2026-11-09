@@ -77,6 +77,9 @@
   aside { position: fixed; inset: 0 auto 0 0; z-index: 20; overflow-y: auto; width: var(--sidebar); padding: 14px 10px; background: var(--side); border-right: 1px solid var(--border); transition: transform var(--sidebar-duration) ease, visibility 0s }
   .brand { display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 9px; font-size: 16.5px; font-weight: 650; letter-spacing: -.02em }
   .brand img { width: 20px; height: 20px; border-radius: 6px }
+  .speculation { margin: 0 10px 10px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 10.5px; font-weight: 600; letter-spacing: .02em; width: fit-content }
+  .speculation[data-provider="dflash2"] { color: #c8b6ff; border-color: color-mix(in srgb, #c8b6ff 35%, var(--border)) }
+  .speculation[data-provider="none"] { color: var(--muted) }
   #sidebar-close, #sidebar-open { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border-radius: 8px; color: var(--muted) }
   #sidebar-close { margin-left: auto }
   #sidebar-open { position: fixed; top: 14px; left: 16px; z-index: 12; display: none }
@@ -316,6 +319,7 @@
       <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18m7-12-3 3 3 3"/></svg>
     </button>
   </div>
+  <div id="speculation" class="speculation" hidden></div>
   <button id="new-chat" type="button">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-6"/><path d="M18 2v8M14 6h8"/></svg>
     New chat
@@ -491,6 +495,18 @@
       askForKeyIfUnauthorized(response);
       if (!response.ok) return;
       const model = (await response.json()).data?.[0];
+      const speculation = model?.speculation;
+      const badge = document.querySelector('#speculation');
+      if (badge && speculation?.provider) {
+        const names = {dflash2: 'DFlash2', none: 'No draft', mtp: 'MTP', dspark: 'DSpark'};
+        badge.textContent = (names[speculation.provider] || speculation.provider) +
+          (Number(speculation.proposal_rows) > 1 ? ` · ${speculation.proposal_rows} rows` : '');
+        badge.setAttribute('data-provider', speculation.provider);
+        badge.hidden = false;
+        if (speculation.fallback_reason) {
+          badge.title = 'Fell back: ' + speculation.fallback_reason;
+        }
+      }
       const modalities = model?.input_modalities;
       if (Number.isFinite(model?.context_length) && model.context_length > 0) {
         contextLimit = model.context_length;

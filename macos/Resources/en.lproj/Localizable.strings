@@ -513,3 +513,19 @@
 "draft.hub" = "Hub ID";
 "field.draft_id" = "Draft repository";
 "help.draft_id" = "The DFlash2 draft\u2019s Hugging Face repository, e.g. owner/repo, downloaded into the base folder below.";
+
+// Speculation: how decode proposes tokens.
+"field.speculation" = "Speculation";
+"help.speculation" = "Auto uses a compatible DFlash2 draft and falls back to none; None serves the target alone; DFlash2 requires the draft; MTP records a built-in head, which this release reports but does not run yet.";
+"speculation.auto" = "Auto";
+"speculation.none" = "None";
+"speculation.dflash2" = "DFlash2";
+"field.require_draft" = "Require draft";
+"help.require_draft" = "Refuse to start when the requested draft cannot be used.";
+"help.speculation.none" = "No draft is loaded; decode runs the target alone.";
+"live.speculation" = "Speculation";
+"live.caption.speculation_rows" = "%d rows a cycle";
+"live.caption.speculation_fallback" = "fell back: %@";
+"live.caption.available_mtp" = "%d built-in MTP layers";
+"speculation.mtp" = "MTP";
+"help.speculation.mtp" = "An external MTP head folder is installed as data; this release reports it but does not run it yet. Empty uses the target's built-in head.";

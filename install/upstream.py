@@ -18,6 +18,7 @@ with the same inspection and publishing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -26,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import assembly, families, gguf, hub, models
+from . import assembly, draftgguf, families, gguf, hub, models, mtp
 
 # The tokenizer files an MLX target may supply, linked when present.
 TOKENIZER_FILES = (
@@ -71,6 +72,10 @@ class Target:
     # serves (the layout in assembly.py). A GGUF's configuration and tokenizer
     # are derived from it at installation instead.
     files: dict[str, str]
+    # The target's built-in MTP layers, which are not loaded yet
+    # (docs/speculation.zh.md P2): a positive count is a model whose
+    # checkpoint carries a head the engine can learn to use later.
+    mtp_layers: int = 0
 
 
 def root_ggufs(files):
@@ -345,6 +350,19 @@ def _gguf_target(repo, variant, language_only, scratch, projector=select_vision)
     return target
 
 
+def _mtp_layers(config: Path) -> int:
+    """The built-in MTP layers a target configuration declares
+    (num_nextn_predict_layers), zero for a model without any. The installer
+    records the count; the engine reports it until P2 can run the head."""
+    try:
+        value = json.loads(config.read_text())
+    except (OSError, ValueError):
+        return 0
+    text = value.get("text_config", value) if isinstance(value, dict) else {}
+    layers = text.get("num_nextn_predict_layers", 0) if isinstance(text, dict) else 0
+    return layers if type(layers) is int and layers > 0 else 0
+
+
 def gguf_target(repo, names, scratch, *, projector=None):
     """The GGUF target whose files in repo are names, one or a split GGUF's
     parts in split order, its configuration and metadata written into
@@ -379,7 +397,10 @@ def gguf_target(repo, names, scratch, *, projector=None):
             raise models.VisionError(f"vision projector {name}: {error}") from None
         files[assembly.GGUF_VISION] = name
         vision_format = "gguf"
-    return Target("gguf", vision_format, config, metadata, family, files)
+    return Target(
+        "gguf", vision_format, config, metadata, family, files,
+        _mtp_layers(config),
+    )
 
 
 def mlx_target(repo, language_only):
@@ -427,7 +448,7 @@ def mlx_target(repo, language_only):
             raise models.VisionError(str(error)) from None
         files["vision/config.json"] = "config.json"
         files |= {"vision/" + n: n for n in shards}
-    return Target("mlx-affine", vision_format, config, None, family, files)
+    return Target("mlx-affine", vision_format, config, None, family, files, _mtp_layers(config))
 
 
 def _image_processor(repo):
@@ -548,6 +569,9 @@ def prepare(selection):
         with hub.as_model_errors(f"cannot install {selection.model}"):
             manifest = models.read_json(target.file("manifest.json"))
         models.refuse_package(selection.model, manifest)
+    if selection.speculation in ("none", "mtp"):
+        _prepare_without_draft(selection, target, installed)
+        return
     if installed is not None and target.revision == installed_commit:
         _start_installed(selection, target, installed)
     else:
@@ -610,13 +634,16 @@ def prepare_local(selection):
             installed = assembly.verify(selection.link)
         except (models.ModelError, OSError) as error:
             print(f"Reinstalling {selection.model}: {error}", flush=True)
+    if selection.speculation in ("none", "mtp"):
+        _prepare_without_draft(selection, repo, installed, projector=projector)
+        return
     if selection.draft_model is None:
         # No draft named: the family's DFlash2 release stands in, which
         # _install resolves from the Hub and downloads when it is missing.
         _install(selection, repo, installed, projector=projector)
         return
     draft = _local_draft(selection, installed)
-    if installed is not None and installed["sources"]["draft"] == draft.identity():
+    if installed is not None and (installed or {}).get("sources", {}).get("draft") == draft.identity():
         if (replaced := _retain_installed(selection)) is None:
             print(
                 f"Splash model {selection.model} is already installed in "
@@ -628,6 +655,22 @@ def prepare_local(selection):
     _install(selection, repo, installed, draft, projector)
 
 
+def _prepare_without_draft(selection, repo, installed, **options):
+    """Start or install the plan without a draft, reusing an installed one
+    that already serves without speculation."""
+    expected = "mtp" if selection.speculation == "mtp" else "none"
+    if installed is not None and installed.get("speculation", {}).get("provider") == expected:
+        if (replaced := _retain_installed(selection)) is None:
+            print(
+                f"Splash model {selection.model} is already installed in "
+                f"{selection.link}",
+                flush=True,
+            )
+            return
+        print(f"Reinstalling {selection.model}: {replaced}", flush=True)
+    _install(selection, repo, installed, **options)
+
+
 def _local_draft(selection, installed):
     """The DFlash2 draft a --model-dir installation is served with, which
     --draft-model names: a local directory needs no request, while a
@@ -637,7 +680,7 @@ def _local_draft(selection, installed):
     name = selection.draft_model
     if Path(name).is_absolute():
         return hub.Repository.local_directory(name)
-    recorded = installed and installed["sources"]["draft"]
+    recorded = installed and (installed or {}).get("sources", {}).get("draft")
     installed_commit = (
         recorded["revision"]
         if recorded and recorded["repo"] == name and recorded["revision"]
@@ -753,10 +796,12 @@ def _retain_installed(selection):
 
 
 def _install(selection, repo, installed, draft=None, projector=select_vision):
-    """Assemble repo's target and its draft, and publish the assembly at the
-    selection link. draft is the draft's repository as this start resolved
-    it, or None to resolve it here, asking the Hub only when it answered for
-    repo. projector names the target's vision projector (select_vision)."""
+    """Assemble repo's target and, when the selection asks for one, its draft,
+    and publish the assembly at the selection link. draft is the draft's
+    repository as this start resolved it, or None to resolve it here, asking
+    the Hub only when it answered for repo. projector names the target's
+    vision projector (select_vision). A selection with --speculation none
+    resolves no draft and publishes a plan without one."""
     # Every Hub request (header reads, downloads) happens here.
     with (
         hub.as_model_errors(f"cannot install {selection.model}"),
@@ -765,13 +810,53 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
         target = inspect_target(
             repo, selection.variant, selection.language_only, Path(scratch), projector
         )
-        if draft is None:
-            draft = _resolve_draft(target.family, selection, installed, repo)
-        draft, files = _draft(target, installed, draft)
+        no_draft = selection.speculation == "none"
+        provider = "mtp" if selection.speculation == "mtp" else (
+            "none" if no_draft else "dflash2"
+        )
+        if provider == "mtp" and selection.draft_model is None and target.mtp_layers <= 0:
+            raise models.ModelError(
+                f"{selection.model} has no built-in MTP head "
+                f"(num_nextn_predict_layers is zero)"
+            )
+        if no_draft:
+            draft = None
+        elif provider == "mtp" and selection.draft_model is not None:
+            # An external MTP head is installed as data; this build reports it
+            # but does not run it yet.
+            draft = _local_draft(selection, installed)
+        elif draft is None:
+            try:
+                draft = _resolve_draft(target.family, selection, installed, repo)
+            except models.ModelError as error:
+                # auto falls back to the target alone; an explicit provider
+                # or --require-draft refuses instead.
+                if selection.require_draft or selection.speculation != "auto":
+                    raise
+                models.warn(f"serving without speculation: {error}")
+                draft = None
+        files = {}
+        alignment = None
+        if provider == "mtp" and draft is not None:
+            downloaded = draft.download(set(draft.files))
+            if "config.json" not in downloaded:
+                raise models.ModelError(
+                    f"{draft.name} has no config.json for its MTP head"
+                )
+            alignment = mtp.validate(
+                target.config, downloaded["config.json"], target.family.name
+            )
+            files = {"draft/" + name: path for name, path in downloaded.items()}
+        elif draft is not None:
+            draft, files = _draft(target, installed, draft, selection.models_root)
+        elif provider == "dflash2":
+            # Auto could not resolve a draft: the published plan is none.
+            provider = "none"
         vision = "disabled" if target.vision_format == "none" else "enabled"
+        draft_name = draft.name if draft is not None else "none"
         print(
             f"Installing {selection.model} as {target.family.name} ({target.format}); "
-            f"draft {draft.name}; vision {vision}.",
+            f"draft {draft_name}; vision {vision}.",
             flush=True,
         )
         downloaded = repo.download(set(target.files.values()))
@@ -779,21 +864,62 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
     publish(
         selection.models_root,
         selection.link,
-        assembly_record(selection.model, target, repo, draft),
+        assembly_record(selection.model, target, repo, draft, provider, alignment),
         files,
     )
 
 
-def assembly_record(model, target, repo, draft):
+def assembly_record(model, target, repo, draft, provider="dflash2", alignment=None):
     """The record of model's assembly of target, inspected in repo, and the
-    draft repository draft, but for the files it links (publish)."""
+    draft repository draft, if any, but for the files it links (publish). A
+    plan without a draft writes provider none and no draft source; provider
+    mtp records the target's built-in head, which this build reports but does
+    not run yet."""
+    # A draft installation keeps the version 1 record every release reads;
+    # only a plan without a draft, or an MTP plan, needs version 2.
+    if draft is not None and provider != "mtp":
+        return {
+            "version": 1,
+            "model": model,
+            "family": target.family.name,
+            "target_format": target.format,
+            "vision_format": target.vision_format,
+            "mtp": {"layers": target.mtp_layers},
+            "sources": {"target": repo.identity(), "draft": draft.identity()},
+        }
+    sources = {"target": repo.identity()}
+    if provider == "mtp" and draft is not None:
+        sources["draft"] = draft.identity()
+        format = "gguf" if any(name.endswith(".gguf") for name in draft.files) else "safetensors"
+        speculation = {
+            "version": 1,
+            "provider": "mtp",
+            "format": format,
+            "source": {"kind": "external"},
+            "proposal_rows": alignment["proposal_rows"] if alignment else 1,
+            "state": "mtp-cache",
+            "fallback": "none",
+            "alignment": alignment,
+        }
+    else:
+        speculation = {
+            "version": 1,
+            "provider": provider,
+            "format": "none",
+            "source": {"kind": "none" if provider == "none" else "builtin"},
+            "proposal_rows": 1,
+            "state": "none" if provider == "none" else "mtp-cache",
+            "fallback": "none",
+        }
     return {
-        "version": 1,
+        "version": 2,
         "model": model,
         "family": target.family.name,
         "target_format": target.format,
         "vision_format": target.vision_format,
-        "sources": {"target": repo.identity(), "draft": draft.identity()},
+        "mtp": {"layers": target.mtp_layers},
+        "speculation": speculation,
+        "sources": sources,
     }
 
 
@@ -861,11 +987,16 @@ def _changes(installed, family, draft):
     if family is None:
         return [f"no supported family is named {installed['family']}"]
     changes = []
-    recorded = installed["sources"]["draft"]
-    if draft.identity() != recorded:
+    recorded = (installed or {}).get("sources", {}).get("draft")
+    if recorded is None:
+        if draft is not None:
+            changes.append(f"it now uses the draft {_at(draft)}")
+    elif draft is None or draft.identity() != recorded:
         changes.append(
             f"{draft.name} moved from {recorded['revision'][:12]} to {draft.revision[:12]}"
-            if draft.name == recorded["repo"]
+            if draft is not None and draft.name == recorded["repo"]
+            else "its plan now serves without a draft"
+            if draft is None
             else f"its draft is now {_at(draft)}"
         )
     if installed["target_format"] == "gguf" and installed[
@@ -883,48 +1014,60 @@ def _resolve_draft(family, selection, installed, target):
     cache holds for this selection; the installed draft also stands in, with
     the reason, when the draft cannot be resolved. A family no draft is
     released for takes --draft-model's."""
-    name = selection.draft_model or family.draft_repo
-    if name is None:
+    names = (
+        (selection.draft_model,)
+        if selection.draft_model
+        else families.draft_candidates(family)
+    )
+    if not names:
         raise models.ModelError(
             f"no DFlash2 draft is released for {family.name}; "
             "name one with --draft-model"
         )
-    recorded = installed and installed["sources"]["draft"]
+    recorded = installed and (installed or {}).get("sources", {}).get("draft")
     asked = _answered(target)
     if recorded and not asked:
         return hub.Repository(recorded["repo"], recorded["revision"], frozenset())
-    commit = recorded["revision"] if recorded and recorded["repo"] == name else None
-    try:
-        return hub.Repository.resolve(
-            name,
-            installation=selection.link,
-            installed=commit,
-            unreachable=None
-            if asked
-            else target.unreachable_reason or "the Hub did not list the target",
-        )
-    except models.ModelError as error:
-        if not recorded:
-            raise
+    error: models.ModelError | None = None
+    for name in names:
+        commit = recorded["revision"] if recorded and recorded["repo"] == name else None
+        try:
+            return hub.Repository.resolve(
+                name,
+                installation=selection.link,
+                installed=commit,
+                unreachable=None
+                if asked
+                else target.unreachable_reason or "the Hub did not list the target",
+            )
+        except models.ModelError as candidate_error:
+            # The released repository first, then its mirrors: a mirror is
+            # tried only when the release cannot be resolved, and the report
+            # names the release's reason.
+            if error is None:
+                error = candidate_error
+    if recorded:
         return hub.Repository(
             recorded["repo"],
             recorded["revision"],
             frozenset(),
             unreachable_reason=str(error),
         )
+    assert error is not None
+    raise error
 
 
-def _draft(target, installed, draft):
+def _draft(target, installed, draft, models_root):
     """The draft repository and its downloaded files, by assembly path: draft,
     as this start resolved it, when it is not the installed draft, or else
     the installed one, which is kept too when draft cannot be fetched
     (downloaded and checked for the target)."""
     family = target.family
-    recorded = installed and installed["sources"]["draft"]
+    recorded = installed and (installed or {}).get("sources", {}).get("draft")
     if draft.identity() != recorded:
         try:
             with hub.as_model_errors(f"cannot fetch the {family.name} draft"):
-                return draft, draft_files(draft, target)
+                return draft, draft_files(draft, target, models_root)
         except models.ModelError as error:
             if not recorded:
                 raise
@@ -933,7 +1076,7 @@ def _draft(target, installed, draft):
                 f"keeping the installed one: {error}"
             )
     repo = hub.Repository.recorded(recorded)
-    return repo, draft_files(repo, target)
+    return repo, draft_files(repo, target, models_root)
 
 
 def _answered(repo):
@@ -947,19 +1090,102 @@ def _at(repo):
     return f"{repo.name}@{repo.revision[:12]}" if repo.revision else repo.name
 
 
-def draft_files(repo, target):
+def _draft_ggufs(files):
+    """The root-level draft GGUFs of files, in name order: a vision projector
+    (mmproj) is never one."""
+    return sorted(
+        name
+        for name in files
+        if "/" not in name
+        and name.endswith(".gguf")
+        and "mmproj" not in name.lower()
+    )
+
+
+def _select_draft_gguf(names):
+    """The draft's GGUF files: one root file, or every part of one split
+    draft, preferring the types the converter reads without a broad
+    dequantization, then the first. A split draft's parts are ordered by
+    upstream.split_order."""
+    singles = [name for name in names if "-of-" not in name]
+    groups = []
+    split = {}
+    for name in names:
+        if "-of-" in name:
+            split.setdefault(split_model(name), []).append(name)
+    for model in sorted(split):
+        groups.append(split_order(split[model], f"the split draft GGUF {model}"))
+    candidates = [[name] for name in singles] + groups
+    for token in ("BF16", "F16", "F32", "Q8_0"):
+        for group in candidates:
+            if token in group[0].upper():
+                return group
+    return candidates[0]
+
+
+def _converted_draft(source, config: Path, models_root: Path) -> dict[str, Path]:
+    """The converted BF16 safetensors of source (a draft GGUF or its ordered
+    split parts), under models/.metadata, by the release's names. The entry
+    is derived from the source and converter identities, so a changed draft
+    or converter writes another entry."""
+    sources = [source] if isinstance(source, (str, Path)) else list(source)
+    identity = {
+        "version": draftgguf.VERSION,
+        "source": [models.sha256(path) for path in sources],
+        "config": models.sha256(config),
+        "bytes": sum(path.stat().st_size for path in sources),
+    }
+    key = "draft-" + hashlib.sha256(models.json_bytes(identity)).hexdigest()
+    entry = models_root / ".metadata" / key
+    model = entry / "model.safetensors"
+    if model.is_file():
+        return {name: entry / name for name in _converted_names(entry)}
+    models_root.mkdir(parents=True, exist_ok=True)
+    (models_root / ".metadata").mkdir(parents=True, exist_ok=True)
+    with models.installation_lock(models_root):
+        if model.is_file():
+            return {name: entry / name for name in _converted_names(entry)}
+        stage = Path(
+            tempfile.mkdtemp(prefix=models.ENTRY_STAGING, dir=models_root / ".metadata")
+        )
+        try:
+            draftgguf.convert(source, stage)
+            wrote = _converted_names(stage)
+            if not wrote:
+                raise models.ModelError("the draft GGUF conversion wrote no weights")
+            os.replace(stage, entry)
+        finally:
+            if stage.exists():
+                import shutil
+
+                shutil.rmtree(stage)
+    return {name: entry / name for name in _converted_names(entry)}
+
+
+def _converted_names(directory: Path):
+    return sorted(
+        name
+        for name in ("model.safetensors", "mask_embedding.safetensors")
+        if (directory / name).is_file()
+    )
+
+
+def draft_files(repo, target, models_root=None):
     """The DFlash2 draft in repo for target's family, downloaded, by assembly
     path: its config.json and safetensors weights, model.safetensors or the
     shards its index names, and the mask token's embedding when the release
     ships one (DRAFT_MASK_EMBEDDING), at the root of the repository or
-    --draft-model directory, as a DFlash2 release holds them. The weights
-    download only once the engine accepts its configuration with the
-    target's (check_model)."""
+    --draft-model directory, as a DFlash2 release holds them. A repository
+    that publishes its weights as GGUF instead is converted, once, into the
+    BF16 safetensors the engine loads (draftgguf.py). The weights download
+    only once the engine accepts its configuration with the target's
+    (check_model)."""
     family = target.family
+    gguf_names = _draft_ggufs(repo.files)
     try:
         if "config.json" not in repo.files:
             raise models.ModelError("no config.json")
-        weights = _weight_files(repo)
+        weights = _draft_weights(repo, gguf_names)
     except models.ModelError as error:
         raise models.ModelError(
             f"{repo.name} does not contain a DFlash2 checkpoint for {family.name}"
@@ -979,6 +1205,25 @@ def draft_files(repo, target):
             f"{repo.name}'s draft configuration is incompatible with {family.name}: "
             f"{error}"
         ) from error
+    if gguf_names:
+        if models_root is None:
+            raise models.ModelError("a GGUF draft needs the models directory")
+        chosen = _select_draft_gguf(gguf_names)
+        downloaded = repo.download({"config.json", *chosen})
+        converted = _converted_draft(
+            [downloaded[name] for name in chosen], downloaded["config.json"], models_root
+        )
+        files = {"draft/config.json": downloaded["config.json"]}
+        files |= {"draft/" + name: path for name, path in converted.items()}
+        return files
     mask = {DRAFT_MASK_EMBEDDING} & set(repo.files)
     downloaded = repo.download({"config.json", *weights, *mask})
     return {"draft/" + name: path for name, path in downloaded.items()}
+
+
+def _draft_weights(repo, gguf_names):
+    """The draft's weight files: a GGUF release's selected file, or the
+    safetensors shards of a released checkpoint."""
+    if gguf_names:
+        return set(_select_draft_gguf(gguf_names))
+    return _weight_files(repo)

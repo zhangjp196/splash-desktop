@@ -806,6 +806,10 @@ ModelDescriptor describeSourceModel(std::string name, std::string_view targetFor
                                                {.outputHiddenSize = std::visit(
                                                     [](const auto &layout) { return layout.hiddenSize; }, *target)},
                                                targetSource, visionSource);
+  // A model without a draft config is a complete model: the plan is None and
+  // the draft layout stays zero. A model with one records the DFlash2 plan
+  // makeModelDescriptor derived from its layout.
+  if (!draft) result.speculation = {};
   if (result.hasVision())
     validateVisionConfig(requireObject(config, @"vision_config", "vision config"), result.vision,
                          result.targetSource);
@@ -867,6 +871,8 @@ ModelDescriptor makeModelDescriptor(std::string name, TargetLayout target,
   result.name = std::move(name);
   result.target = target;
   result.draft = draft;
+  result.speculation = draft.layers ? SpeculationPlan{SpeculationKind::DFlash2, DraftFormat::Safetensors, 8}
+                                    : SpeculationPlan{};
   result.vision = vision;
   result.targetSource = targetSource;
   result.visionSource = visionSource;
@@ -882,12 +888,14 @@ ModelDescriptor makeModelDescriptor(std::string name, TargetLayout target,
 }
 
 bool ModelDescriptor::valid() const noexcept {
+  const bool hasDraft = this->hasDraft();
   if (name.empty() || targetSource == TargetSource{} || visionSource == VisionSource{} ||
       !capabilities.vocabularySize ||
       !capabilities.maximumContextTokens ||
       !targetKvLayout.valid() || !stateLayout.valid() ||
-      stateLayout.draft != draft.stateLayout() ||
-      vision.outputHiddenSize != draft.hiddenSize) {
+      (hasDraft && (stateLayout.draft != draft.stateLayout() ||
+                    vision.outputHiddenSize != draft.hiddenSize)) ||
+      (!hasDraft && (draft.layers || stateLayout.draft.layers))) {
     return false;
   }
   return std::visit(
@@ -902,12 +910,16 @@ bool ModelDescriptor::valid() const noexcept {
                  capabilities.maximumContextTokens <= layout.yarnContextTokens)) &&
                capabilities.sparseKv == sparseKvShape(layout) &&
                (!capabilities.sparseKv || capabilities.sparseKv->blockTokens == SPLASH_ATTENTION_BLOCK_TOKENS) &&
-               layout.hiddenSize == draft.hiddenSize &&
-               draft.targetLayerCount && draft.targetLayerCount <= ExecutionLimits::maximumDraftTargetLayers &&
-               draft.targetLayers[draft.targetLayerCount - 1] < layout.layers &&
-               // A family whose drafts choose the mask token holds its draft's.
-               (!layout.draftChoosesMaskToken() ||
-                (layout.maskToken >= layout.firstDraftMaskToken && layout.maskToken <= layout.lastDraftMaskToken)) &&
+               // A plan without a draft has no draft layout to hold against
+               // the target, and its state layout's draft part is zero.
+               (!hasDraft ||
+                (layout.hiddenSize == draft.hiddenSize &&
+                 draft.targetLayerCount && draft.targetLayerCount <= ExecutionLimits::maximumDraftTargetLayers &&
+                 draft.targetLayers[draft.targetLayerCount - 1] < layout.layers &&
+                 // A family whose drafts choose the mask token holds its draft's.
+                 (!layout.draftChoosesMaskToken() ||
+                  (layout.maskToken >= layout.firstDraftMaskToken &&
+                   layout.maskToken <= layout.lastDraftMaskToken)))) &&
                layout.kvLayout() == targetKvLayout &&
                layout.gdnStateLayout() == stateLayout.target;
       },
@@ -937,16 +949,62 @@ ModelDescriptor inspectModelRoot(const std::filesystem::path &root) {
   @autoreleasepool {
     std::string sourceIdentity;
     NSDictionary *record = readObject(root / "model.json", "resolved model", &sourceIdentity);
-    requireNumbers(record, "assembly", "model record", {{"version", 1}});
+    const uint32_t recordVersion = requireWhole(record[@"version"], "model record version");
+    if (recordVersion != 1 && recordVersion != 2)
+      throw std::invalid_argument("model record version " + std::to_string(recordVersion) +
+                                  " is not one this engine reads");
     std::string name = requireString(record, @"model", "model name");
     const std::string targetFormat = requireString(record, @"target_format", "target format");
     const std::string visionFormat = requireString(record, @"vision_format", "vision format");
     NSDictionary *config = readObject(root / "config.json", "upstream model config");
-    // Every family decodes with its DFlash2 draft, in draft/.
-    if (!std::filesystem::exists(root / "draft"))
-      throw std::invalid_argument("the model's root holds no draft/ for its DFlash2 draft");
-    NSDictionary *draft = readObject(root / "draft" / "config.json", "draft config");
+    // A model's draft is optional: without draft/, the plan is None and the
+    // target alone serves. With one, the draft's config is required.
+    std::optional<std::string> provider;
+    std::optional<std::string> format;
+    if (recordVersion == 2) {
+      NSDictionary *speculation = requireObject(record, @"speculation", "speculation plan");
+      provider = requireString(speculation, @"provider", "speculation provider");
+      format = requireString(speculation, @"format", "speculation format");
+      if (*provider != "none" && *provider != "dflash2" && *provider != "mtp")
+        throw std::invalid_argument("speculation provider " + *provider +
+                                    " is not one this engine implements");
+      if (*provider == "dflash2" && *format != "safetensors")
+        throw std::invalid_argument("speculation format " + *format +
+                                    " is not one this engine loads for DFlash2");
+      if (*provider == "mtp" && *format != "none" && *format != "gguf" && *format != "safetensors")
+        throw std::invalid_argument("an MTP plan has no such draft format");
+    }
+    NSDictionary *draft = nil;
+    const bool draftDirectory = std::filesystem::exists(root / "draft");
+    if (provider && *provider == "none") {
+      if (draftDirectory)
+        throw std::invalid_argument("a plan without a draft holds a draft/ directory");
+    } else if (provider && *provider == "mtp") {
+      // An external MTP head is installed as data; this build reports it but
+      // has no loader for it yet, so it never reads draft/.
+    } else if (draftDirectory) {
+      draft = readObject(root / "draft" / "config.json", "draft config");
+    } else if (recordVersion == 2 && provider && *provider == "dflash2") {
+      throw std::invalid_argument("the model's root holds no draft/ for its DFlash2 plan");
+    }
     ModelDescriptor result = describeSourceModel(std::move(name), targetFormat, visionFormat, config, draft);
+    if (NSDictionary *mtp = record[@"mtp"]) {
+      if (![mtp isKindOfClass:[NSDictionary class]])
+        throw std::invalid_argument("mtp must be an object");
+      result.mtpLayers = requireWhole(mtp[@"layers"], "mtp layers");
+    }
+    if (recordVersion == 2) {
+      if (*provider == "none")
+        result.speculation = {};
+      else if (*provider == "mtp")
+        result.speculation = {
+            SpeculationKind::Mtp,
+            *format == "gguf" ? DraftFormat::Gguf
+                              : *format == "safetensors" ? DraftFormat::Safetensors : DraftFormat::None,
+            1};
+      else
+        result.speculation = {SpeculationKind::DFlash2, DraftFormat::Safetensors, 8};
+    }
     result.sourceIdentity = std::move(sourceIdentity);
     if (!result.valid()) throw std::invalid_argument("incompatible target and draft model");
     return result;

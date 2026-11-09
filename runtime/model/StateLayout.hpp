@@ -82,8 +82,11 @@ struct DraftStateLayout final {
   uint32_t headDimension = 0;
   uint32_t contextWidth = 0;
 
+  // A plan without a draft has no rings and no context window: its layout is
+  // the all-zero value, which is a complete layout, not a missing one.
   [[nodiscard]] constexpr bool valid() const noexcept {
-    return layers && kvHeads && headDimension && contextWidth &&
+    if (!layers) return !kvHeads && !headDimension && !contextWidth;
+    return kvHeads && headDimension && contextWidth &&
            contextWidth % SPLASH_DRAFT_CONTEXT_GROUP == 0;
   }
   [[nodiscard]] constexpr uint64_t tensorBytes() const noexcept {

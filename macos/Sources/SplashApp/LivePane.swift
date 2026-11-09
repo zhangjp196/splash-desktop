@@ -289,7 +289,38 @@ struct LivePane: View {
                 caption: contextCaption,
                 systemImage: "text.alignleft", tint: SplashPalette.blue
             ),
+            MetricCard(
+                title: L10n.string("live.speculation"),
+                value: speculationLabel(live.speculationProvider),
+                caption: speculationCaption(live),
+                systemImage: "sparkles", tint: SplashPalette.violet
+            ),
         ]
+    }
+
+    private func speculationLabel(_ provider: String?) -> String {
+        switch provider {
+        case "dflash2": return "DFlash2"
+        case "none": return L10n.string("speculation.none")
+        case "mtp": return "MTP"
+        case "dspark": return "DSpark"
+        default: return provider ?? "—"
+        }
+    }
+
+    /// The rows a cycle verifies and, when a requested draft fell back, why.
+    private func speculationCaption(_ live: LiveStatus) -> String {
+        if let fallback = live.speculationFallback, !fallback.isEmpty {
+            return L10n.format("live.caption.speculation_fallback", fallback)
+        }
+        var parts: [String] = []
+        if let rows = live.speculationRows {
+            parts.append(L10n.format("live.caption.speculation_rows", rows))
+        }
+        if let mtp = live.availableMTPLayers, mtp > 0 {
+            parts.append(L10n.format("live.caption.available_mtp", mtp))
+        }
+        return parts.joined(separator: " · ")
     }
 
     /// The context the engine serves, with the panel's own setting beside it:

@@ -11,6 +11,10 @@ struct ServerSettings: Codable, Equatable {
         static let modelID = "mlx-community/Qwen3.8-27B-4bit"
         static let localKind = "gguf"
         static let draftMode = "none"
+        // Speculation is auto by default: a compatible DFlash2 draft when one
+        // resolves, and the target alone when it does not.
+        static let speculation = "auto"
+        static let requireDraft = false
         static let port = 8000
         static let kvFormat = "int8"
         // The recurrent state: fp32 is the server's default; bf16 halves it.
@@ -72,6 +76,9 @@ struct ServerSettings: Codable, Equatable {
     /// Where the DFlash2 draft comes from: nothing, a local draft directory,
     /// or a Hugging Face repository ID.
     static let draftModes = ["none", "folder", "hub"]
+    /// How decode proposes tokens: automatic (a compatible DFlash2 draft,
+    /// else none), none (autoregressive), or DFlash2 explicitly.
+    static let speculationModes = ["auto", "none", "dflash2", "mtp"]
     static let stateFormats = ["fp32", "bf16"]
     static let verifyRowsOptions = ["auto", "all"]
     /// The eviction presets by level, and the policies a custom one picks.
@@ -94,6 +101,10 @@ struct ServerSettings: Codable, Equatable {
     /// ID it names when the mode is `hub`.
     var draftMode = First.draftMode
     var draftID = ""
+    /// How decode proposes tokens (`speculationModes`), and whether a start
+    /// refuses to run without the requested draft (`--require-draft`).
+    var speculation = First.speculation
+    var requireDraft = First.requireDraft
     /// A local GGUF target's vision projector (`--mmproj`): a GGUF file
     /// wherever it lies, or empty for the one beside the target.
     var mmproj = ""
@@ -235,7 +246,7 @@ struct ServerSettings: Codable, Equatable {
     // failing the whole decode and dropping the user's configurations.
     private enum CodingKeys: String, CodingKey {
         case modelMode, modelID, modelDirectory, localKind
-        case draftMode, draftDirectory, draftID, mmproj, port
+        case draftMode, draftDirectory, draftID, speculation, requireDraft, mmproj, port
         case lanAccess, allowedHosts, allowedOrigins
         case languageOnly, kvFormat, stateFormat, neuralEngine, maxMemory, maxContext
         case unloadIdleWeights, residencySeconds, residencyKeepAlive, responsivePrefill
@@ -295,6 +306,11 @@ struct ServerSettings: Codable, Equatable {
         draftDirectory = value(String.self, .draftDirectory) ?? draftDirectory
         draftMode = value(String.self, .draftMode) ?? draftMode
         draftID = value(String.self, .draftID) ?? draftID
+        if let mode = value(String.self, .speculation),
+           Self.speculationModes.contains(mode) {
+            speculation = mode
+        }
+        requireDraft = value(Bool.self, .requireDraft) ?? requireDraft
         mmproj = value(String.self, .mmproj) ?? mmproj
         port = value(Int.self, .port) ?? port
         lanAccess = value(Bool.self, .lanAccess) ?? lanAccess
@@ -382,6 +398,8 @@ struct ServerSettings: Codable, Equatable {
             ("draftDirectory", draftDirectory),
             ("draftMode", draftMode),
             ("draftID", draftID),
+            ("speculation", speculation),
+            ("requireDraft", requireDraft ? "1" : "0"),
             ("mmproj", mmproj),
             ("port", String(port)),
             ("lanAccess", lanAccess ? "1" : "0"),
@@ -443,6 +461,10 @@ struct ServerSettings: Codable, Equatable {
         if let value = rows["draftDirectory"] { draftDirectory = value }
         if let value = rows["draftMode"], Self.draftModes.contains(value) { draftMode = value }
         if let value = rows["draftID"] { draftID = value }
+        if let value = rows["speculation"], Self.speculationModes.contains(value) {
+            speculation = value
+        }
+        if let value = rows["requireDraft"] { requireDraft = value == "1" }
         if let value = rows["mmproj"] { mmproj = value }
         if let value = Self.number(rows["port"], in: 0...65_535) { port = value }
         if let value = rows["lanAccess"] { lanAccess = value == "1" }

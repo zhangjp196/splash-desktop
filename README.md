@@ -53,12 +53,17 @@ toolbar. Closing the window keeps a miniature live dashboard in the menu bar.
   the server directly, in the same aurora palette.
 - **Models** — the configurations you have saved, each holding the whole set
   of server settings: add, edit, and switch between them, or aim one at a
-  model folder on your disk. The editor keeps its sections in a rail beside
-  card-style rows, with the explanation under each field and a strip at the
-  foot showing what Start would use.
+  model folder on your disk. Each configuration also chooses how decode
+  speculates — **Auto** (a compatible DFlash2 draft, else none), **None**
+  (autoregressive), **DFlash2**, or **MTP** (a built-in head this release
+  reports but does not run yet) — and whether a draft is required. The
+  editor keeps its sections in a rail beside card-style rows, with the
+  explanation under each field and a strip at the foot showing what Start
+  would use.
 - **Live** — the engine's request lifecycle in real time (**Queued**,
   **Prefill**, **Decode**, **Idle**), decode and prefill sparklines over the
-  last minute with hover scrubbing, DFlash 2 acceptance, a unified-memory ring
+  last minute with hover scrubbing, DFlash 2 acceptance and the speculation
+  provider (with a fallback reason when one was planned), a unified-memory ring
   against the budget, TTFT and inter-token latency (p50/p95), the clients
   connected to the port, a short feed of completed, failed and cancelled
   requests, request counts, caches, and the heat at a glance.
@@ -131,12 +136,15 @@ in Chat. Anthropic Messages requests reason only when they set `thinking`.
 
 ## Models
 
-Splash supports these model families, with a matching DFlash2 draft selected
-automatically:
+Splash supports these model families. A matching DFlash2 draft is selected
+automatically; `--no-draft` serves the target alone when a draft is not
+wanted or not available. `auto` falls back to no speculation with a warning,
+and `--require-draft` refuses instead.
 
 | Model | GGUF example | MLX 4-bit |
 | --- | --- | --- |
 | Qwen3.8-27B | `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` | `mlx-community/Qwen3.8-27B-4bit` |
+| Qwen3.5-9B / Ornith-1.5-9B | — | `Ornith-1.5-9B-MLX-4bit` |
 | Qwen3.6-35B-A3B | `unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M` | `mlx-community/Qwen3.6-35B-A3B-4bit` |
 | Ornith-1.5-122B | `unsloth/Ornith-1.5-122B-GGUF:UD-Q4_K_XL` | `ornith-ai/Ornith-1.5-122B-MLX-4bit` |
 | Qwen3.8-Flash-Next | `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:Q2_0` | — |

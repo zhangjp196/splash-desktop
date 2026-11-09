@@ -519,6 +519,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 self._json(200, stored.response)
             return
         if path == "/v1/models" or path.startswith("/v1/models/"):
+            speculation = self.app.backend.status().get("speculation")
             models = [
                 {
                     "id": name,
@@ -530,6 +531,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                     "vision": self.app.vision,
                     "input_modalities": self.app.input_modalities,
                     "reasoning": self.app.reasoning,
+                    "speculation": speculation,
                     **(
                         {"root": self.app.response_model}
                         if name != self.app.response_model

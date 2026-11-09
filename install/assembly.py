@@ -58,7 +58,28 @@ RECORD_KEYS = {
     "sources",
     "files",
 }
+# A version 2 record names its speculation plan; a version 1 record always has
+# a DFlash2 draft (sources.draft) and is read as that plan.
+SPECULATION_KEYS = {
+    "version",
+    "provider",
+    "format",
+    "source",
+    "proposal_rows",
+    "state",
+    "fallback",
+}
+# An external MTP head's alignment, which the installer checked against the
+# target; a plan without one is still complete.
+SPECULATION_OPTIONAL_KEYS = {"alignment"}
+PROVIDERS = {"none", "dflash2", "mtp", "dspark"}
+DRAFT_FORMATS = {"none", "safetensors", "gguf"}
+SOURCE_KINDS = {"none", "builtin", "external"}
 FILE_RECORD_KEYS = {"path", "bytes", "mtime_ns", "ctime_ns", "digest"}
+# Optional record members: a plan's built-in MTP head, and a source format a
+# converted draft came from. They carry information the engine may show; an
+# installation without them is complete.
+OPTIONAL_RECORD_KEYS = {"mtp"}
 
 
 def build(models_root: Path, record, files) -> Path:
@@ -178,17 +199,50 @@ def _well_formed(record):
     gguf_target = record.get("target_format") == "gguf"
     sources = record.get("sources")
     files = record.get("files")
+    version = record.get("version")
+    keys = RECORD_KEYS | ({"metadata"} if gguf_target else set())
+    if version == 2:
+        keys |= {"speculation"}
+        speculation = record.get("speculation")
+        if (
+            not isinstance(speculation, dict)
+            or set(speculation) - SPECULATION_OPTIONAL_KEYS != SPECULATION_KEYS
+        ):
+            return False
+        if not _speculation_well_formed(speculation, sources):
+            return False
+    elif version == 1:
+        speculation = None
+    else:
+        return False
+    if speculation is None:
+        expected_sources = {"target", "draft"}
+    elif speculation["provider"] == "none":
+        expected_sources = {"target"}
+    elif speculation["provider"] == "mtp":
+        expected_sources = {"target"} | (
+            {"draft"} if speculation.get("source", {}).get("kind") == "external" else set()
+        )
+    else:
+        expected_sources = {"target", "draft"}
+    mtp = record.get("mtp")
     return (
-        set(record) == RECORD_KEYS | ({"metadata"} if gguf_target else set())
-        and type(record["version"]) is int
-        and record["version"] == 1
+        set(record) <= keys | OPTIONAL_RECORD_KEYS
+        and keys <= set(record)
+        and (mtp is None or (
+            isinstance(mtp, dict)
+            and set(mtp) == {"layers"}
+            and type(mtp["layers"]) is int
+            and mtp["layers"] >= 0
+        ))
+        and type(version) is int
         and isinstance(record["model"], str)
         and isinstance(record["family"], str)
         and record["target_format"] in TARGET_FORMATS
         and record["vision_format"] in VISION_FORMATS
         and (not gguf_target or models.is_hex_digest(record["metadata"], 64))
         and isinstance(sources, dict)
-        and set(sources) == {"target", "draft"}
+        and set(sources) == expected_sources
         and all(
             isinstance(source, dict)
             and set(source) == {"repo", "revision"}
@@ -215,6 +269,59 @@ def _well_formed(record):
             for name, entry in files.items()
         )
     )
+
+
+def _speculation_well_formed(speculation, sources):
+    """The plan a version 2 record holds: a provider this release reads, the
+    format and source that describe it, and the presence or absence of a draft
+    source that follows from the provider."""
+    provider = speculation["provider"]
+    if provider not in PROVIDERS:
+        return False
+    if speculation["format"] not in DRAFT_FORMATS:
+        return False
+    if speculation["state"] not in {"none", "draft-rings", "mtp-cache", "dspark-state"}:
+        return False
+    if speculation["fallback"] not in {"none", "required"}:
+        return False
+    source = speculation["source"]
+    if not isinstance(source, dict) or source.get("kind") not in SOURCE_KINDS:
+        return False
+    if type(speculation["version"]) is not int or speculation["version"] != 1:
+        return False
+    if type(speculation["proposal_rows"]) is not int or not 1 <= speculation["proposal_rows"] <= 8:
+        return False
+    if provider == "none":
+        return (
+            speculation["format"] == "none"
+            and source["kind"] == "none"
+            and speculation["proposal_rows"] == 1
+            and speculation["state"] == "none"
+        )
+    if provider == "dflash2":
+        return (
+            speculation["format"] in {"safetensors", "gguf"}
+            and source["kind"] == "external"
+            and speculation["proposal_rows"] == 8
+            and speculation["state"] == "draft-rings"
+        )
+    if provider == "mtp":
+        if source["kind"] == "builtin":
+            return (
+                speculation["format"] == "none"
+                and speculation["proposal_rows"] == 1
+                and speculation["state"] == "mtp-cache"
+            )
+        if source["kind"] == "external":
+            return (
+                speculation["format"] in {"gguf", "safetensors"}
+                and 1 <= speculation["proposal_rows"] <= 8
+                and speculation["state"] == "mtp-cache"
+            )
+        return False
+    # A DSpark plan is accepted by the schema; the engine refuses it until its
+    # provider lands, with a plan check that names it.
+    return True
 
 
 def pins(record):

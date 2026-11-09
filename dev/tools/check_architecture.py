@@ -461,7 +461,13 @@ def family_names(path: Path) -> list[tuple[str, str]]:
         if isinstance(node, ast.Assign)
         and any(getattr(target, "id", None) == "FAMILIES" for target in node.targets)
     )
-    return [(family.args[0].value, family.args[1].value) for family in families.elts]
+    return [
+        (
+            family.args[0].value,
+            family.args[1].value if len(family.args) > 1 and isinstance(family.args[1], ast.Constant) and isinstance(family.args[1].value, str) else "",
+        )
+        for family in families.elts
+    ]
 
 
 def family_words(

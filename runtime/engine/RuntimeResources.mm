@@ -423,6 +423,10 @@ void reportStreamedStores(const model::LoadedModel &loaded, const model::Streama
 
 // The rows the target's decode cycles verify (--verify-rows), and why.
 void reportVerifyRows(const model::LoadedModel &loaded, model::VerifyRows rows) {
+  if (!loaded.hasDraft()) {
+    logLine("Decode is autoregressive: no draft proposes tokens (speculation none).");
+    return;
+  }
   if (model::budgetsVerifyRows(loaded, rows))
     logLine("Decode cycles verify the rows the verify budget chooses (--verify-rows auto, as ", loaded.name(),
             " is a MoE target): greedy and seeded outputs can differ from run to run.");
@@ -487,7 +491,7 @@ std::array<uint8_t, 32> parseSha256(std::string_view value) {
 
 void requireLoadedModel(const model::LoadedModel &loaded) {
   if (!loaded.targetActualAllocatedBytes() ||
-      !loaded.draft.actualAllocatedBytes ||
+      (loaded.descriptor.hasDraft() && !loaded.draft.actualAllocatedBytes) ||
       (loaded.descriptor.hasVision() && !loaded.vision.actualAllocatedBytes) ||
       loaded.manifestFingerprintSha256.empty() ||
       loaded.targetManifestFingerprint().empty()) {
@@ -991,6 +995,11 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
         stagingBytes,
         aneFfnBytes + mixerBytes,
         loaded.streamedTable() ? loaded.streamedTable()->committedBytes() : 0,
+        loaded.descriptor.hasDraft(),
+        loaded.descriptor.mtpLayers,
+        loaded.descriptor.speculation.kind == model::SpeculationKind::Mtp
+            ? "mtp"
+            : loaded.descriptor.hasDraft() ? "dflash2" : "none",
     };
     // A lane's prefill command writes a group of chunks where the routed
     // experts stream (model::RuntimeGeometry::prefillChunks).

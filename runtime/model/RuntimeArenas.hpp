@@ -50,6 +50,9 @@ inline constexpr uint32_t kMaximumPageTableEntries =
 struct RuntimeGeometry final {
   QwenTargetGeometry target;
   DFlashDraftLayout draft;
+  // Whether the model's speculation plan has a draft. A geometry without one
+  // sizes no draft tensor and runs no draft kernel.
+  bool hasDraft = true;
   // The attention of a target whose K/V spills (ModelCapabilities::sparseKv),
   // whose runtime reads it through the hot block cache and the history
   // stream (RuntimeContext); none for K/V that stays in memory.
@@ -82,6 +85,7 @@ struct RuntimeGeometry final {
                                             ops::GdnStateFormat stateFormat, StreamedParts parts) {
     RuntimeGeometry result;
     result.draft = model.draft.layout;
+    result.hasDraft = model.descriptor.hasDraft();
     result.target = std::visit(
         [&](const auto &weights) { return qwenTargetGeometry(weights, result.draft.targetLayerIds()); },
         model.target);
@@ -93,9 +97,10 @@ struct RuntimeGeometry final {
     if (!result.target.valid() || !result.draft.stateLayout().valid() ||
         (parts.kv && (!result.spilledKv || !result.target.kvLayout.spillable())) ||
         result.target.contextTokens() != model.descriptor.capabilities.maximumContextTokens ||
-        result.target.hiddenSize != result.draft.hiddenSize ||
-        result.target.vocabularySize != result.draft.vocabularySize ||
-        result.target.capturedHiddenSize() != result.draft.targetHiddenSize()) {
+        (result.hasDraft &&
+         (result.target.hiddenSize != result.draft.hiddenSize ||
+          result.target.vocabularySize != result.draft.vocabularySize ||
+          result.target.capturedHiddenSize() != result.draft.targetHiddenSize()))) {
       throw std::invalid_argument("invalid model runtime geometry");
     }
     // Sized from the geometry, once it is valid.
@@ -251,16 +256,27 @@ public:
       throw std::logic_error("prefill arena mismatch");
     auto *target = static_cast<float *>(
         get(PrefillTensor::TargetInverseFrequencies).contents());
-    auto *draft = static_cast<float *>(
-        get(PrefillTensor::DraftInverseFrequencies).contents());
-    if (!target || !draft)
+    if (!target)
       throw std::logic_error("RoPE frequencies are not CPU-visible");
     rotaryInverseFrequencies(geometry.target.rotaryTheta, geometry.target.rotaryPairs,
                              geometry.target.ropeScaling,
                              {target, geometry.target.rotaryPairs});
-    for (uint32_t dim = 0; dim < geometry.draftRotaryPairs(); ++dim) {
-      draft[dim] = std::pow(geometry.draft.rotaryTheta,
-                            -static_cast<float>(dim) / geometry.draftRotaryPairs());
+    auto *draft = static_cast<float *>(
+        get(PrefillTensor::DraftInverseFrequencies).contents());
+    if (!draft)
+      throw std::logic_error("draft RoPE frequencies are not CPU-visible");
+    const float theta = geometry.hasDraft ? geometry.draft.rotaryTheta : 10000.0F;
+    for (uint32_t dim = 0; dim < SPLASH_DRAFT_ROPE_PAIRS; ++dim) {
+      draft[dim] = std::pow(theta, -static_cast<float>(dim) / SPLASH_DRAFT_ROPE_PAIRS);
+    }
+    // A plan without a draft captures no rows; the table still reads defined
+    // positions for the rows the kernel builds.
+    if (!geometry.hasDraft) {
+      auto *positions = static_cast<uint32_t *>(
+          get(PrefillTensor::DraftPositions).contents());
+      if (!positions)
+        throw std::logic_error("draft positions are not CPU-visible");
+      std::memset(positions, 0, get(PrefillTensor::DraftPositions).sizeBytes());
     }
     // Split projections return their counters to zero; they start there.
     if (const metal::MetalBuffer counters = get(PrefillTensor::LinearCounters))
@@ -524,8 +540,12 @@ public:
     // One private gate buffer is reused serially by the target dense FFN (when
     // present) and the always-dense DFlash draft. Sparse target FFNs use their
     // own route-major arena tensors, but must not remove the draft's scratch.
-    const uint64_t draft = operators.gateUpWorkspace(
-        {geometry.draft.intermediateSize, geometry.draft.hiddenSize});
+    // A plan without a draft has only the target's.
+    const uint64_t draft =
+        geometry.hasDraft
+            ? operators.gateUpWorkspace(
+                  {geometry.draft.intermediateSize, geometry.draft.hiddenSize})
+            : 0;
     uint64_t target = 0;
     for (const auto &p : geometry.target.gateUpProjections)
       target = std::max(target, operators.gateUpWorkspace(p));

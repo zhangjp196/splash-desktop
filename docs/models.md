@@ -303,8 +303,16 @@ place of the dense form's names.
 
 ## Drafts
 
-Every model decodes with a DFlash2 draft. Each family names the repository
-of the DFlash2 checkpoint trained for it (`families.FAMILIES`), which holds
+A model may be served without a draft: `--speculation none` (or `--no-draft`)
+installs a plan with no draft directory, and decode runs the target alone.
+A family that has a released draft still uses it under `auto`; when no
+compatible draft can be resolved, `auto` warns and serves without one, and
+`--require-draft` refuses instead. The rest of this section describes the
+DFlash2 path.
+
+Every model with a DFlash2 draft decodes with it. Each family names the
+repository of the DFlash2 checkpoint trained for it (`families.FAMILIES`),
+which holds
 it as the release publishes it: `config.json` and BF16 `model.safetensors`
 (or the shards its index names), and `mask_embedding.safetensors` when the
 release ships its mask token's embedding; a family whose draft is not released
@@ -315,6 +323,28 @@ accepts another repository, followed the same way, or a local directory that
 holds them. A checkpoint is installed only when the engine accepts its
 configuration with the target's (its `model-check`), so a draft of another
 architecture never replaces one that loads.
+
+A DFlash2 checkpoint may also be published as GGUF. Installation reads its
+BF16, F16, F32 or Q8_0 tensors, renames them to the release's names and writes
+the BF16 `model.safetensors` (and `mask_embedding.safetensors`, when present) the
+engine loads under `draft/`; the source repository and commit stay in
+`model.json` as `sources.draft`. Other quantized draft GGUFs are refused for now,
+naming the tensor and its type. A split draft GGUF's parts are read in split
+order and converted as one checkpoint.
+
+An installation tries the family's released draft repository first, then the
+mirrors `families.ModelFamily.draft_mirrors` names (the `z-lab` checkpoints,
+for example). A mirror is a source like any other: its checkpoint's own
+configuration and tensors decide compatibility, never its owner's name.
+
+A target with built-in MTP layers (`nextn_predict_layers`) records their count
+in `model.json` (`mtp.layers`) and reports it in `/status`
+(`speculation.available_mtp_layers`). `--speculation mtp` records such a plan,
+but this release has no MTP runtime: it serves the target without speculation
+and names that fallback in `/status`. An external MTP head folder or
+repository (`--draft-model` with `--speculation mtp`) is installed as plan data
+under `draft/`; its `alignment` (family, hidden size, vocabulary and target
+layers) is checked against the target, and the plan is reported but not run.
 
 A draft's `config.json` states its layers, intermediate size, rotary base and
 the target layers whose outputs it reads (`dflash_config.target_layer_ids`,
@@ -606,8 +636,11 @@ splash serve --model local/qwen \
 
 `--model` remains required in `OWNER/REPO[:VARIANT]` form as the API's model
 name; it selects no files and makes no Hub request in this mode. Preparation
-never contacts the Hub, whether or not `--offline` is set. `--draft-model`
-must name a local compatible DFlash2 draft directory; without one, the
+never contacts the Hub, whether or not `--offline` is set. `--no-draft` (or
+`--speculation none`) prepares the target alone; it is the way to serve a
+local model whose draft is neither released nor present. Otherwise
+`--draft-model` names a local compatible DFlash2 draft directory; without it,
+the
 family's released draft must already be in the Hub cache at the commit its
 default branch records, as `hf download REPO` or `splash serve` leaves it. A
 missing draft is refused with its download instruction; it is never downloaded

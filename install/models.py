@@ -249,35 +249,60 @@ def json_bytes(value) -> bytes:
 
 
 def selection_link(
-    models: Path, model_id: str, *, revision=None, language_only=False, draft_model=None
+    models: Path,
+    model_id: str,
+    *,
+    revision=None,
+    language_only=False,
+    draft_model=None,
+    speculation="auto",
+    require_draft=False,
 ) -> Path:
     """The selection link of model_id with these source options:
     OWNER/REPO[:VARIANT] under models for the model alone, else
     .selections/<hash of the selection>."""
     repo_id, variant = split_model_id(model_id)
-    if revision or language_only or draft_model:
-        return _hashed_link(models, [model_id, revision, language_only, draft_model])
+    if (
+        revision
+        or language_only
+        or draft_model
+        or speculation != "auto"
+        or require_draft
+    ):
+        return _hashed_link(
+            models,
+            [model_id, revision, language_only, draft_model, speculation, require_draft],
+        )
     if variant is None:
         return models / repo_id
     return models / f"{repo_id}{serve_options.VARIANT_SEPARATOR}{variant}"
 
 
 def local_selection_link(
-    models: Path, directory: Path, *, language_only=False, draft_model=None, mmproj=None
+    models: Path,
+    directory: Path,
+    *,
+    language_only=False,
+    draft_model=None,
+    mmproj=None,
+    speculation="auto",
+    require_draft=False,
 ) -> Path:
     """The selection link of a local target directory with these source
     options, in the same .selections place as a selected Hub model: the
     directory has no repository ID to name a link. A named vision projector is
     part of the selection: the same target with the installer's projector and
     with this one links apart. Without one, the link is what it always was."""
-    selection = [str(directory), language_only, draft_model]
+    selection = [str(directory), language_only, draft_model, speculation, require_draft]
     if mmproj is not None:
         selection.append(str(mmproj))
     selection = json.dumps(selection, separators=(",", ":"))
     return models / ".selections" / hashlib.sha256(selection.encode()).hexdigest()
 
 
-def prepared_selection_link(models: Path, target, draft, mmproj, language_only) -> Path:
+def prepared_selection_link(
+    models: Path, target, draft, mmproj, language_only, speculation="auto"
+) -> Path:
     """The selection link of a model prepared from local files (local.py):
     .selections/<hash of its paths and options>, apart from every Hub
     selection's, whose hashed form is a list."""
@@ -288,6 +313,7 @@ def prepared_selection_link(models: Path, target, draft, mmproj, language_only) 
             "draft": draft and str(draft),
             "mmproj": mmproj and str(mmproj),
             "language_only": language_only,
+            "speculation": speculation,
         },
     )
 
@@ -320,6 +346,11 @@ class Selection:
     # The vision projector a local GGUF target names, instead of the one the
     # installer selects from the directory and the Hub.
     mmproj: Path | None = None
+    # auto (a compatible draft when one resolves, else none), none, or a
+    # provider this release implements (dflash2). MTP and DSpark are refused
+    # by the installer until their providers land.
+    speculation: str = "auto"
+    require_draft: bool = False
 
     @classmethod
     def of(
@@ -332,6 +363,8 @@ class Selection:
         language_only=False,
         draft_model=None,
         mmproj=None,
+        speculation="auto",
+        require_draft=False,
     ):
         models_root = Path(models_root).resolve()
         if mmproj is not None:
@@ -355,22 +388,28 @@ class Selection:
             directory = local_target_path(directory)
             model = derived_model_id(directory)
             repo_id = variant = None
-            link = local_selection_link(
-                models_root,
-                directory,
-                language_only=language_only,
-                draft_model=draft_model,
-                mmproj=mmproj,
-            )
+            options = {
+                "language_only": language_only,
+                "draft_model": draft_model,
+                "mmproj": mmproj,
+            }
+            if speculation != "auto":
+                options["speculation"] = speculation
+            if require_draft:
+                options["require_draft"] = require_draft
+            link = local_selection_link(models_root, directory, **options)
         else:
             repo_id, variant = split_model_id(model)
-            link = selection_link(
-                models_root,
-                model,
-                revision=revision,
-                language_only=language_only,
-                draft_model=draft_model,
-            )
+            options = {
+                "revision": revision,
+                "language_only": language_only,
+                "draft_model": draft_model,
+            }
+            if speculation != "auto":
+                options["speculation"] = speculation
+            if require_draft:
+                options["require_draft"] = require_draft
+            link = selection_link(models_root, model, **options)
         return cls(
             model,
             repo_id,
@@ -382,6 +421,8 @@ class Selection:
             link,
             directory,
             mmproj,
+            speculation,
+            require_draft,
         )
 
 
@@ -491,6 +532,18 @@ def parse_args(argv=None):
         action="store_true",
         help="skip vision preparation and loading",
     )
+    parser.add_argument(
+        "--speculation",
+        choices=("auto", "none", "dflash2", "mtp", "dspark"),
+        default="auto",
+        help="how decode proposes tokens: auto (a compatible draft, else none), "
+        "none (autoregressive), or a provider this release implements",
+    )
+    parser.add_argument(
+        "--require-draft",
+        action="store_true",
+        help="refuse to install or start without the requested draft",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare").add_argument(
         "--json-progress",
@@ -511,6 +564,19 @@ def parse_args(argv=None):
             parser.error("--mmproj requires --model-dir")
         if args.language_only:
             parser.error("--mmproj and --language-only are exclusive")
+    if args.speculation == "none" and args.draft_model is not None:
+        parser.error("--speculation none and --draft-model are exclusive")
+    if args.speculation == "none" and args.require_draft:
+        parser.error("--require-draft needs a draft provider")
+    if args.speculation == "mtp" and args.require_draft:
+        parser.error("MTP execution is not implemented; --require-draft is not available for it")
+    if args.speculation == "mtp" and args.draft_model is not None:
+        parser.error("external MTP heads are not implemented; omit --draft-model")
+    if args.speculation == "dspark":
+        parser.error(
+            "--speculation dspark is not implemented by this release; "
+            "use auto, none, dflash2 or mtp"
+        )
     return args
 
 
@@ -524,6 +590,8 @@ def main(argv=None):
         language_only=args.language_only,
         draft_model=args.draft_model,
         mmproj=args.mmproj,
+        speculation=args.speculation,
+        require_draft=args.require_draft,
     )
     if args.command == "link":
         print(selection.link)
