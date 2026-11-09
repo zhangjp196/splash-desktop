@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import assembly, draftgguf, families, gguf, hub, models, mtp
+from . import assembly, draftgguf, families, gguf, hub, models, mtp, tied
 
 # The tokenizer files an MLX target may supply, linked when present.
 TOKENIZER_FILES = (
@@ -407,20 +407,35 @@ def mlx_target(repo, language_only):
     """The MLX target in repo, which serves images unless language_only."""
     required = {"config.json", "tokenizer.json", "tokenizer_config.json"}
     missing = sorted(required - repo.files)
-    # Serving text only drops the processor requirement and no other.
-    processor = language_only or any(n in repo.files for n in PROCESSOR_FILES)
-    if missing or not processor:
-        # A checkpoint that lacks only the processor can serve text.
-        refusal = models.ModelError if missing else models.VisionError
-        if not processor:
-            missing.append(" or ".join(PROCESSOR_FILES))
-        raise refusal(
+    if missing:
+        raise models.ModelError(
             f"target repository {repo.name} is missing: {', '.join(missing)}. "
             "Configuration, tokenizer and processor must come from the target "
             "repository"
         )
+    # Serving text only drops the processor requirement and no other; a
+    # family without a vision tower serves text only whatever its repository
+    # holds. A config that cannot be read is only reported as such when the
+    # repository has a processor; otherwise the missing metadata is the
+    # refusal, as it was before the family was known.
+    processor = any(n in repo.files for n in PROCESSOR_FILES)
+    if not language_only and not processor:
+        raise models.VisionError(
+            f"target repository {repo.name} is missing: "
+            f"{' or '.join(PROCESSOR_FILES)}. Configuration, tokenizer and "
+            "processor must come from the target repository"
+        )
+    family = check_model("mlx-affine", "none", repo.file("config.json"))
+    # A family without a vision tower serves text only whatever its repository
+    # holds.
+    text_only = language_only or not family.vision
+    if not text_only and not processor:
+        raise models.VisionError(
+            f"target repository {repo.name} is missing: "
+            f"{' or '.join(PROCESSOR_FILES)}. Configuration, tokenizer and "
+            "processor must come from the target repository"
+        )
     config = repo.file("config.json")
-    family = check_model("mlx-affine", "none", config)
     files = {
         path: "config.json"
         for path in ("config.json", "target/config.json", "tokenizer/config.json")
@@ -431,7 +446,7 @@ def mlx_target(repo, language_only):
     # keeps it in a subdirectory).
     files |= {"target/" + n: n for n in _weight_files(repo, exclude=VISION_TOWER)}
     vision_format = "none"
-    if not language_only:
+    if not text_only:
         # The text passed, so a refusal of the tower's processor, shards or
         # configuration refuses the vision alone.
         try:
@@ -861,6 +876,8 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
         )
         downloaded = repo.download(set(target.files.values()))
     files |= {path: downloaded[name] for path, name in target.files.items()}
+    if target.format == "mlx-affine":
+        files |= tied.prepare(target.config, downloaded, selection.models_root) or {}
     publish(
         selection.models_root,
         selection.link,

@@ -25,8 +25,8 @@ using TargetLayout = std::variant<Qwen3_8Layout, Qwen3_6MoeLayout, Qwen4ExpLayou
 // one type for each architecture's code. A family of an architecture is one
 // more value here. Refusals name them in this order, and a config's model type
 // finds its family among those of its type in it (describeSourceModel).
-inline constexpr std::tuple kFamilies{Qwen3_8Layout{}, kQwen3_5_9BLayout, Qwen3_6MoeLayout{}, kQwen3_5_122BLayout,
-                                      Qwen4ExpLayout{}, FlintLayout{}};
+inline constexpr std::tuple kFamilies{Qwen3_8Layout{}, kQwen3_8_4BLayout, kQwen3_5_9BLayout, Qwen3_6MoeLayout{},
+                                      kQwen3_5_122BLayout, Qwen4ExpLayout{}, FlintLayout{}};
 
 // Calls `use` with each family's layout, in kFamilies' order.
 template <class Use> constexpr void forEachFamily(Use use) {

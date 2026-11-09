@@ -38,6 +38,9 @@ class ModelFamily:
 
 
 FAMILIES = (
+    # Qwen3.8-4B and its fine-tunes, such as the Heretic ablation. No DFlash2
+    # draft is released for it.
+    ModelFamily("Qwen3.8-4B", None, QWEN, vision=False),
     # Qwen3.5-9B and its fine-tunes, such as Ornith-1.5-9B. No DFlash2 draft is
     # released for it; auto serves it without one.
     ModelFamily("Qwen3.5-9B", None, QWEN, vision=False),

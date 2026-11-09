@@ -52,10 +52,10 @@ constexpr std::array<uint64_t, 22> kPoolPages{
 std::string familyValues() {
   std::ostringstream out;
   model::forEachFamily([&](const auto &family) {
-    // Qwen3.5-9B has no DFlash2 draft to take values with; its memory plan
-    // is still checked by the loader's layout consistency and by a real
-    // start, not by this draft-shaped fixture.
-    if (family.family == "Qwen3.5-9B") return;
+    // Qwen3.5-9B and Qwen3.8-4B have no DFlash2 draft to take values with;
+    // their memory plans are still checked by the loader's layout consistency
+    // and by a real start, not by this draft-shaped fixture.
+    if (family.family == "Qwen3.5-9B" || family.family == "Qwen3.8-4B") return;
     const model::DFlashDraftLayout draft = draftOf(family.family);
     // A family whose drafts choose their mask token holds its draft's, the
     // fixture's first reserved token.

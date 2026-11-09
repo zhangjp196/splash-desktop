@@ -204,12 +204,13 @@ void testFamilies(const std::filesystem::path &fixtures) {
   // tell its target from other models of the architecture, which Splash does
   // not serve, such as Qwen3.5-4B.
   constexpr std::string_view supported =
-      "; supported: Qwen3.8-27B, Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next";
+      "; supported: Qwen3.8-27B, Qwen3.8-4B, Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next";
   struct Refused final {
     std::string_view from, to, difference;
   };
   for (const Refused &refused : std::initializer_list<Refused>{
-           {R"("hidden_size": 5120)", R"("hidden_size": 2560)", "text config hidden_size: safetensors 2560, Qwen3.8-27B 5120"},
+           {R"("hidden_size": 5120)", R"("hidden_size": 2561)",
+            "text config hidden_size: safetensors 2561, Qwen3.8-27B 5120"},
            {R"("num_hidden_layers": 64)", R"("num_hidden_layers": 32)",
             "text config num_hidden_layers: safetensors 32, Qwen3.8-27B 64"},
            {R"("model_type": "qwen3_5_text")", R"("model_type": "gemma3_text")", "text model type gemma3_text"},

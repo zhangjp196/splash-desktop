@@ -1610,21 +1610,21 @@ P0 是硬前置；P1 可与 P2 部分并行；P3 依赖 P2 的 state 抽象；P4
 
 ## 17. 决策记录（ADR）
 
-- **ADR-001**：`none` 是一等 provider，不是“特殊分支”。  
+- **ADR-001**：`none` 是一等 provider，不是“特殊分支”。
   理由：统一 plan、状态、内存、缓存、状态字段；避免 if-else 扩散。
-- **ADR-002**：plan 写入 `model.json`，属于安装身份。  
+- **ADR-002**：plan 写入 `model.json`，属于安装身份。
   理由：可复现、可缓存、可回滚；回退原因属于运行时。
-- **ADR-003**：provider/format 由内容决定，不由仓库名决定。  
+- **ADR-003**：provider/format 由内容决定，不由仓库名决定。
   理由：`z-lab`、`incoai`、本地目录都应走同一校验。
-- **ADR-004**：默认 fallback 为 `none`，`--require-draft` 为显式严格模式。  
+- **ADR-004**：默认 fallback 为 `none`，`--require-draft` 为显式严格模式。
   理由：可用性优先；基准/CI 需要严格性。
-- **ADR-005**：不在 host 反量化不支持的 GGUF draft 类型。  
+- **ADR-005**：不在 host 反量化不支持的 GGUF draft 类型。
   理由：性能与内存不可控；失败要显式。
-- **ADR-006**：模型扩展用 family pack，不做“通用 loader 吞一切”。  
+- **ADR-006**：模型扩展用 family pack，不做“通用 loader 吞一切”。
   理由：kernel 形状、tokenizer、chat 语义都需要显式声明。
-- **ADR-007**：`CompositeStateLayout` 的 draft 部分允许全零。  
+- **ADR-007**：`CompositeStateLayout` 的 draft 部分允许全零。
   理由：无 draft 是正常状态，不是缺失。
-- **ADR-008**：缓存命名空间加入 plan。  
+- **ADR-008**：缓存命名空间加入 plan。
   理由：有/无 draft 的状态不可互换。
 
 ---

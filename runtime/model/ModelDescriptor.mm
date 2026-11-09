@@ -286,8 +286,9 @@ void validateTextConfig(NSDictionary *text, const QwenHybridLayout &target, Targ
                    {{"intermediate_size", target.intermediateSize}});
   requireBooleans(text, "text config",
                   {{"attention_bias", false},
-                   {"attn_output_gate", true},
-                   {"tie_word_embeddings", false}});
+                   {"attn_output_gate", true}});
+  if (text[@"tie_word_embeddings"] && !target.tiedEmbeddings)
+    requireBooleans(text, "text config", {{"tie_word_embeddings", false}});
   requireEqual(requireString(text, @"hidden_act", "text config hidden_act"),
                "silu", name, "text config hidden_act");
   requireLayerTypes(requireArray(text, @"layer_types", "text config layer_types"),

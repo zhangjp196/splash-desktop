@@ -37,7 +37,7 @@ import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import families, hub, models, mtp, paths, upstream
+from . import families, hub, models, mtp, paths, tied, upstream
 from .models import ModelError
 
 __all__ = ["ModelError", "prepare_local_model"]
@@ -168,6 +168,8 @@ def _prepare(
                 else {}
             )
     files |= {path: source.paths[name] for path, name in inspected.files.items()}
+    if inspected.format == "mlx-affine":
+        files |= tied.prepare(inspected.config, source.paths, models_root) or {}
     provider = "mtp" if speculation == "mtp" else (
         "none" if repo is None else "dflash2"
     )

@@ -48,7 +48,7 @@ from install import assembly, families, hub, models, paths, upstream
 # tells it apart.
 UNSUPPORTED = (
     "no supported model has this architecture [(]{}[)]; "
-    "supported: Qwen3.8-27B, Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next"
+    "supported: Qwen3.8-27B, Qwen3.8-4B, Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next"
 )
 
 
@@ -625,7 +625,7 @@ class UpstreamTest(unittest.TestCase):
             tower(root, "model.visual.")
 
         def other_size(root):
-            mlx_target(root, DENSE, changes={"hidden_size": 2560})
+            mlx_target(root, DENSE, changes={"hidden_size": 2561})
             tower(root, "vision_tower.")
 
         fake = FakeHub(self, self.cache)
@@ -642,7 +642,7 @@ class UpstreamTest(unittest.TestCase):
                 "mlx-community/Qwen3.5-4B-MLX-4bit",
                 other_size,
                 UNSUPPORTED.format(
-                    "text config hidden_size: safetensors 2560, Qwen3.8-27B 5120"
+                    "text config hidden_size: safetensors 2561, Qwen3.8-27B 5120"
                 ),
             ),
         ):
@@ -1224,7 +1224,7 @@ class UpstreamTest(unittest.TestCase):
             f"Warning: keeping the installed {MODEL}@{'a' * 12}; cannot install "
             f"{MODEL}@{'b' * 40}: no supported model has this architecture (text "
             "config head_dim: safetensors 128, Qwen3.8-27B 256); supported: Qwen3.8-27B, "
-            "Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next",
+            "Qwen3.8-4B, Qwen3.5-9B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B, Qwen3.8-Flash-Next",
             warnings,
         )
         self.assertEqual(chosen.link.resolve(), installed)

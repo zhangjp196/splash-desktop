@@ -145,6 +145,7 @@ and `--require-draft` refuses instead.
 | --- | --- | --- |
 | Qwen3.8-27B | `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` | `mlx-community/Qwen3.8-27B-4bit` |
 | Qwen3.5-9B / Ornith-1.5-9B | — | `Ornith-1.5-9B-MLX-4bit` |
+| Qwen3.8-4B | — | tied-head MLX checkpoints |
 | Qwen3.6-35B-A3B | `unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M` | `mlx-community/Qwen3.6-35B-A3B-4bit` |
 | Ornith-1.5-122B | `unsloth/Ornith-1.5-122B-GGUF:UD-Q4_K_XL` | `ornith-ai/Ornith-1.5-122B-MLX-4bit` |
 | Qwen3.8-Flash-Next | `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:Q2_0` | — |

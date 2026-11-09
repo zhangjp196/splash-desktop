@@ -110,6 +110,10 @@ struct QwenTargetDimensions {
   uint32_t pleHeadsPerNgram = 0;
   uint32_t pleHeadDimension = 0;
   uint32_t pleConvolutionTaps = 0;
+  // A checkpoint whose head is tied to its token table until the installer
+  // materializes one (Qwen3.8-4B); every other family requires an untied
+  // head, as its checkpoint states.
+  bool tiedEmbeddings = false;
 
   [[nodiscard]] constexpr bool
   isFullAttentionLayer(uint32_t layer) const noexcept {
