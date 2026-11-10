@@ -1,7 +1,9 @@
 import Foundation
 
 /// A saved configuration the models pane adds, edits and switches to: a name
-/// the user can set and the whole `ServerSettings` the server starts with.
+/// the user can set and a complete `ServerSettings`. Only its model-owned
+/// fields belong to the configuration; `AppModel` keeps the app-wide share in
+/// step with the Settings page.
 struct ModelConfig: Codable, Identifiable, Equatable {
     var id = UUID()
     var name = ""

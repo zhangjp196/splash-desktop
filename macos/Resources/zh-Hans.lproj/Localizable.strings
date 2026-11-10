@@ -2,7 +2,7 @@
 "mode.local" = "本地文件夹";
 "model.picker" = "模型模式";
 "section.model" = "模型";
-"section.model.help" = "要服务什么，以及它放在哪里。";
+"section.model.help" = "要服务的模型、它的文件与纯文本模式。";
 "section.server" = "服务";
 "section.server.help" = "端口、网络访问与 KV 精度。";
 "section.memory" = "内存";
@@ -206,7 +206,7 @@
 "download.title" = "下载模型";
 "download.subtitle" = "把模型（以及指定时的 DFlash2 草稿）拉取到 base 目录，不会启动服务。";
 "download.source.title" = "下载源";
-"download.base" = "base 目录";
+"download.base" = "下载目录";
 "download.endpoint" = "Hub 地址";
 "download.source.help" = "应用级设置：所有配置都从这里下载、走这个地址。留空则用 Hugging Face 默认值；可填镜像或代理地址。";
 "download.start" = "开始下载";
@@ -245,8 +245,8 @@
 "config.eyebrow.edit" = "编辑配置";
 "config.name.placeholder" = "为这个配置命名";
 "config.changed" = "有未保存的修改";
-"config.sections" = "设置";
-"config.hint" = "只修改这个配置，启动时才会应用。";
+"config.sections" = "模型";
+"config.hint" = "只修改这个配置的模型；服务器共用的设置都在「设置」页。";
 "config.needs_model" = "请先选择模型再保存。";
 "config.group.mode" = "要服务什么";
 "config.review" = "启动时";
@@ -487,7 +487,7 @@
 
 // 编辑器侧栏现在把设置归入三个分组。
 "section.serving" = "运行";
-"section.serving.help" = "精度、内存、调度与请求限制。";
+"section.serving.help" = "这个模型的精度、准入、prefill 节奏与思考默认值。";
 "section.storage" = "存储";
 "section.storage.help" = "空闲释放、SSD 缓存与淘汰。";
 
@@ -513,16 +513,53 @@
 
 // Speculation: how decode proposes tokens.
 "field.speculation" = "推测解码";
-"help.speculation" = "自动使用兼容的 DFlash2 草稿，没有则回退为无草稿；无草稿只跑目标模型；DFlash2 要求使用草稿；MTP 记录内置头，本版本只报告、暂不执行。";
+"help.speculation" = "自动使用配置提供的草稿，没有则只跑目标模型；DFlash2 要求使用草稿；MTP 记录内置头，本版本只报告、暂不执行。";
 "speculation.auto" = "自动";
-"speculation.none" = "无草稿";
 "speculation.dflash2" = "DFlash2";
 "field.require_draft" = "必须使用草稿";
 "help.require_draft" = "草稿不可用时拒绝启动。";
-"help.speculation.none" = "不加载草稿，解码只运行目标模型。";
 "live.speculation" = "推测解码";
 "live.caption.speculation_rows" = "每轮验证 %d 行";
 "live.caption.speculation_fallback" = "已回退：%@";
 "live.caption.available_mtp" = "内置 MTP %d 层";
 "speculation.mtp" = "MTP";
 "help.speculation.mtp" = "外部 MTP 头目录会作为数据安装；本版本只报告、暂不执行。留空则使用目标内置的头。";
+
+// 应用级「设置」页：所有模型配置共用的项目。
+"view.settings" = "设置";
+"sidebar.app" = "应用";
+"settings.eyebrow" = "应用";
+"settings.subtitle" = "应用级偏好，以及所有模型配置共用的服务器设置。";
+"settings.sections" = "分类";
+"settings.hint" = "服务器设置下次启动生效；应用偏好立即生效。";
+"settings.next_start" = "下次启动生效";
+"settings.review" = "每次启动都会使用";
+"settings.review.on" = "开启";
+"settings.review.off" = "关闭";
+"settings.section.connection" = "连接";
+"settings.section.connection.help" = "端口、局域网访问，以及服务器接受的 Host 名称。";
+"settings.section.access" = "访问";
+"settings.section.access.help" = "所有模型共用的 API 密钥、服务名与请求上限。";
+"settings.section.serving.help" = "引擎使用的精度、准入与思考默认值。";
+"settings.section.storage" = "存储";
+"settings.section.storage.help" = "空闲释放，以及请求结束后仍保留的 SSD 缓存。";
+"settings.help.port" = "API 监听的本地端口，所有配置共用。";
+"settings.help.lan_access" = "监听所有网络接口，让局域网中的其他设备也能访问服务器。";
+"section.draft" = "草稿";
+"section.draft.help" = "推测解码，以及为解码提案的草稿模型。";
+"config.group.thinking" = "思考默认值";
+"residency.prompt" = "跟随空闲释放";
+
+"settings.reset.help" = "把所有共用设置恢复为首次启动时的值";
+"settings.reset.title" = "恢复共用设置？";
+"settings.reset.message" = "端点、访问、运行与存储设置会恢复为首次启动时的值；模型配置不会被修改。";
+
+"settings.section.application" = "应用";
+"settings.section.application.help" = "外观、界面语言，以及模型下载的来源。";
+"settings.group.application" = "外观与语言";
+"settings.help.appearance" = "跟随系统，或让窗口固定为深色、浅色。";
+"settings.help.language" = "窗口和对话页都会跟随这个选择。";
+"settings.source.base.prompt" = "Hugging Face 默认";
+"download.base.help" = "模型和草稿下载到的位置；留空使用主目录下的 Hugging Face 缓存。";
+"download.endpoint.help" = "要访问的 Hub 地址；留空使用 huggingface.co，也可以填镜像或代理地址。";
+"settings.review.application" = "应用偏好";

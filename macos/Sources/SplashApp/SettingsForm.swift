@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 /// a short description, so the rail explains the form instead of only naming
 /// it.
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case model, server, schedule, memory, cache, request
+    case model, draft, memory, serving
 
     var id: String { rawValue }
 
@@ -16,22 +16,18 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .model: return "cube.box"
-        case .server: return "network"
-        case .schedule: return "speedometer"
+        case .draft: return "bolt.badge.clock"
         case .memory: return "memorychip"
-        case .cache: return "internaldrive"
-        case .request: return "text.bubble"
+        case .serving: return "speedometer"
         }
     }
 
     var tint: Color {
         switch self {
         case .model: return SplashPalette.blue
-        case .server: return SplashPalette.cyan
-        case .schedule: return SplashPalette.amber
+        case .draft: return SplashPalette.violet
         case .memory: return SplashPalette.mint
-        case .cache: return SplashPalette.violet
-        case .request: return SplashPalette.rose
+        case .serving: return SplashPalette.amber
         }
     }
 }
@@ -118,45 +114,28 @@ struct SettingsEditor: View {
         switch item {
         case .model:
             return s.modelMode != b.modelMode || s.modelID != b.modelID
-                || s.modelDirectory != b.modelDirectory
-                || s.draftDirectory != b.draftDirectory || s.mmproj != b.mmproj
-                || s.speculation != b.speculation || s.requireDraft != b.requireDraft
-        case .server:
-            return s.port != b.port || s.lanAccess != b.lanAccess
-                || s.allowedHosts != b.allowedHosts || s.allowedOrigins != b.allowedOrigins
-                || s.kvFormat != b.kvFormat || s.stateFormat != b.stateFormat
-                || s.neuralEngine != b.neuralEngine || s.languageOnly != b.languageOnly
-        case .schedule:
-            return s.maxConcurrency != b.maxConcurrency || s.verifyRows != b.verifyRows
-                || s.decodeShare != b.decodeShare
-                || s.responsivePrefill != b.responsivePrefill
-                || s.prefillSliceMilliseconds != b.prefillSliceMilliseconds
+                || s.modelDirectory != b.modelDirectory || s.localKind != b.localKind
+                || s.mmproj != b.mmproj || s.languageOnly != b.languageOnly
+        case .draft:
+            return s.speculation != b.speculation || s.requireDraft != b.requireDraft
+                || s.draftDirectory != b.draftDirectory || s.draftMode != b.draftMode
+                || s.draftID != b.draftID || s.verifyRows != b.verifyRows
         case .memory:
             return s.maxMemory != b.maxMemory || s.maxContext != b.maxContext
                 || s.expertMemory != b.expertMemory
                 || s.expertMemoryGrow != b.expertMemoryGrow
                 || s.pleMemory != b.pleMemory
                 || s.sparseKvMemory != b.sparseKvMemory
-        case .cache:
-            return s.unloadIdleWeights != b.unloadIdleWeights
-                || s.residencySeconds != b.residencySeconds || s.diskCache != b.diskCache
-                || s.cacheIdleSpill != b.cacheIdleSpill || s.cacheIdleEvict != b.cacheIdleEvict
-                || s.residencyKeepAlive != b.residencyKeepAlive || s.cacheDir != b.cacheDir
-                || s.maxCacheDisk != b.maxCacheDisk
-                || s.maxCacheDiskWrites != b.maxCacheDiskWrites
-                || s.cacheEvictionPreset != b.cacheEvictionPreset
-                || s.cacheEvictionPolicy != b.cacheEvictionPolicy
-                || s.cacheEvictionProtect != b.cacheEvictionProtect
-        case .request:
-            return s.apiKey != b.apiKey || s.servedNames != b.servedNames
-                || s.announceServedName != b.announceServedName
-                || s.maxRequestSize != b.maxRequestSize
-                || s.requestTimeout != b.requestTimeout
-                || s.maxImagePixels != b.maxImagePixels
-                || s.allowIdleSleep != b.allowIdleSleep
+        case .serving:
+            return s.kvFormat != b.kvFormat || s.stateFormat != b.stateFormat
+                || s.neuralEngine != b.neuralEngine
+                || s.maxConcurrency != b.maxConcurrency
+                || s.decodeShare != b.decodeShare
+                || s.responsivePrefill != b.responsivePrefill
+                || s.prefillSliceMilliseconds != b.prefillSliceMilliseconds
+                || s.reasoningEffort != b.reasoningEffort
                 || s.thinkingTokenBudget != b.thinkingTokenBudget
                 || s.thinkingEndText != b.thinkingEndText
-                || s.reasoningEffort != b.reasoningEffort
         }
     }
 
@@ -194,14 +173,8 @@ struct SettingsEditor: View {
         switch section {
         case .model:
             modelPage
-        case .server:
-            VStack(alignment: .leading, spacing: 14) {
-                endpointCard
-                endpointNote
-                runtimeCard
-            }
-        case .schedule:
-            scheduleCard
+        case .draft:
+            draftPage
         case .memory:
             VStack(alignment: .leading, spacing: 14) {
                 budgetCard
@@ -209,15 +182,13 @@ struct SettingsEditor: View {
                     streamedCard
                 }
             }
-        case .cache:
+        case .serving:
             VStack(alignment: .leading, spacing: 14) {
-                idleCard
-                diskCard
-            }
-        case .request:
-            VStack(alignment: .leading, spacing: 14) {
-                accessCard
-                payloadCard
+                runtimeCard
+                paceCard
+                if profile.thinking {
+                    thinkingCard
+                }
             }
         }
     }
@@ -283,6 +254,19 @@ struct SettingsEditor: View {
                 .disabled(settings.languageOnly)
                 .opacity(settings.languageOnly ? 0.55 : 1)
             }
+            if profile.vision {
+                rowDivider
+                SettingRow(
+                    title: L10n.string("field.language_only"),
+                    help: L10n.string("help.language_only"),
+                    controlWidth: 300
+                ) {
+                    Toggle("", isOn: $settings.languageOnly)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.cyan)
+                }
+            }
         }
         if settings.localKind == "gguf" && profile.vision && settings.languageOnly {
             EditorNote(
@@ -291,10 +275,15 @@ struct SettingsEditor: View {
                 systemImage: "info.circle"
             )
         }
+    }
 
-        // DFlash2 is its own choice: a local draft folder, like any other
-        // model the panel serves — a Hub one is fetched by the downloader and
-        // then chosen here.
+    // MARK: Draft
+
+    /// How decode proposes tokens, and the draft it proposes them from. This
+    /// is the one part of a configuration besides its model and memory: a
+    /// draft is tied to the target it verifies against, so it cannot be an
+    /// app-wide setting.
+    @ViewBuilder private var draftPage: some View {
         EditorCard(
             title: L10n.string("config.group.draft"),
             systemImage: "bolt.badge.clock",
@@ -307,7 +296,6 @@ struct SettingsEditor: View {
             ) {
                 Picker("", selection: $settings.speculation) {
                     Text(verbatim: L10n.string("speculation.auto")).tag("auto")
-                    Text(verbatim: L10n.string("speculation.none")).tag("none")
                     Text(verbatim: L10n.string("speculation.dflash2")).tag("dflash2")
                     Text(verbatim: L10n.string("speculation.mtp")).tag("mtp")
                 }
@@ -325,8 +313,8 @@ struct SettingsEditor: View {
                     prompt: L10n.string("field.draft.prompt")
                 )
             }
-            .disabled(settings.speculation == "none")
-            .opacity(settings.speculation == "none" ? 0.55 : 1)
+            .disabled(settings.speculation == "mtp")
+            .opacity(settings.speculation == "mtp" ? 0.55 : 1)
             rowDivider
             SettingRow(
                 title: L10n.string("field.require_draft"),
@@ -338,137 +326,28 @@ struct SettingsEditor: View {
                     .toggleStyle(.switch)
                     .tint(SplashPalette.violet)
             }
-            .disabled(settings.speculation == "none" || settings.speculation == "mtp")
-            .opacity(settings.speculation == "none" || settings.speculation == "mtp" ? 0.55 : 1)
+            .disabled(settings.speculation == "mtp")
+            .opacity(settings.speculation == "mtp" ? 0.55 : 1)
+            rowDivider
+            SettingRow(
+                title: L10n.string("field.verify_rows"),
+                help: L10n.string("help.verify_rows"),
+                controlWidth: 300
+            ) {
+                Picker("", selection: $settings.verifyRows) {
+                    Text(verbatim: L10n.string("verify.auto")).tag("auto")
+                    Text(verbatim: L10n.string("verify.all")).tag("all")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
         }
-        if settings.speculation == "none" {
-            EditorNote(
-                text: L10n.string("help.speculation.none"),
-                tone: SplashPalette.muted,
-                systemImage: "info.circle"
-            )
-        } else if settings.speculation == "mtp" {
+        if settings.speculation == "mtp" {
             EditorNote(
                 text: L10n.string("help.speculation.mtp"),
                 tone: SplashPalette.muted,
                 systemImage: "info.circle"
             )
-        }
-    }
-
-    // MARK: Endpoint and access
-
-    private var endpointCard: some View {
-        EditorCard(
-            title: L10n.string("config.group.endpoint"),
-            systemImage: "network",
-            tint: SplashPalette.cyan
-        ) {
-            SettingColumns {
-                FieldColumn(title: L10n.string("field.port"), help: L10n.string("help.port")) {
-                    EditorNumberField(value: $settings.port, range: 1...65535, width: 88)
-                }
-                FieldColumn(title: L10n.string("field.lan_access"), help: L10n.string("help.lan_access")) {
-                    Toggle("", isOn: $settings.lanAccess)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(SplashPalette.cyan)
-                }
-            }
-            rowDivider
-            SettingColumns {
-                FieldColumn(title: L10n.string("field.allowed_hosts"), help: L10n.string("help.allowed_hosts")) {
-                    EditorField(text: $settings.allowedHosts, prompt: "studio.local, proxy.example")
-                }
-                FieldColumn(title: L10n.string("field.allowed_origins"), help: L10n.string("help.allowed_origins")) {
-                    EditorField(text: $settings.allowedOrigins, prompt: "tauri://localhost")
-                }
-            }
-        }
-    }
-
-    private var endpointNote: some View {
-        Group {
-            if settings.lanAccess && settings.apiKey.isEmpty {
-                EditorNote(text: L10n.string("help.lan_access.no_key"))
-            }
-        }
-    }
-
-    private var accessCard: some View {
-        EditorCard(
-            title: L10n.string("config.group.access"),
-            systemImage: "key",
-            tint: SplashPalette.rose
-        ) {
-            SettingRow(
-                title: L10n.string("field.api_key"),
-                help: L10n.string("help.api_key"),
-                controlWidth: 300
-            ) {
-                SecretField(text: $settings.apiKey)
-            }
-            rowDivider
-            SettingColumns {
-                FieldColumn(title: L10n.string("field.served_names"), help: L10n.string("help.served_names")) {
-                    EditorField(text: $settings.servedNames, prompt: "alias-a, alias-b")
-                }
-                FieldColumn(title: L10n.string("field.announce_served_name"), help: L10n.string("help.announce_served_name")) {
-                    Toggle("", isOn: $settings.announceServedName)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(SplashPalette.rose)
-                        .disabled(settings.servedNames.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            }
-        }
-    }
-
-    // MARK: Runtime
-
-    private var runtimeCard: some View {
-        EditorCard(
-            title: L10n.string("config.group.runtime"),
-            systemImage: "cpu",
-            tint: SplashPalette.mint
-        ) {
-            SettingColumns {
-                FieldColumn(title: L10n.string("field.kv"), help: L10n.string("help.kv")) {
-                    Picker("", selection: $settings.kvFormat) {
-                        Text(verbatim: L10n.string("kv.int8")).tag("int8")
-                        Text(verbatim: L10n.string("kv.int4")).tag("int4")
-                        Text(verbatim: L10n.string("kv.k8v4")).tag("k8v4")
-                        Text(verbatim: L10n.string("kv.bf16")).tag("bf16")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-                FieldColumn(title: L10n.string("field.state_format"), help: L10n.string("help.state_format")) {
-                    Picker("", selection: $settings.stateFormat) {
-                        Text(verbatim: L10n.string("state.fp32")).tag("fp32")
-                        Text(verbatim: L10n.string("state.bf16")).tag("bf16")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-            }
-            rowDivider
-            SettingColumns {
-                FieldColumn(title: L10n.string("field.neural_engine"), help: L10n.string("help.neural_engine")) {
-                    Toggle("", isOn: $settings.neuralEngine)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(SplashPalette.mint)
-                }
-                if profile.vision {
-                    FieldColumn(title: L10n.string("field.language_only"), help: L10n.string("help.language_only")) {
-                        Toggle("", isOn: $settings.languageOnly)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .tint(SplashPalette.mint)
-                    }
-                }
-            }
         }
     }
 
@@ -530,7 +409,48 @@ struct SettingsEditor: View {
         }
     }
 
-    private var scheduleCard: some View {
+    // MARK: Serving
+
+    /// How this model's engine runs: precision, how many requests it admits,
+    /// how prefill is paced, and the thinking defaults a request may use.
+    /// These are per configuration because a model's files and memory plan
+    /// decide what it can afford.
+    private var runtimeCard: some View {
+        EditorCard(
+            title: L10n.string("config.group.runtime"),
+            systemImage: "cpu",
+            tint: SplashPalette.mint
+        ) {
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.kv"), help: L10n.string("help.kv")) {
+                    Picker("", selection: $settings.kvFormat) {
+                        Text(verbatim: L10n.string("kv.int8")).tag("int8")
+                        Text(verbatim: L10n.string("kv.int4")).tag("int4")
+                        Text(verbatim: L10n.string("kv.k8v4")).tag("k8v4")
+                        Text(verbatim: L10n.string("kv.bf16")).tag("bf16")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                FieldColumn(title: L10n.string("field.state_format"), help: L10n.string("help.state_format")) {
+                    Picker("", selection: $settings.stateFormat) {
+                        Text(verbatim: L10n.string("state.fp32")).tag("fp32")
+                        Text(verbatim: L10n.string("state.bf16")).tag("bf16")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                FieldColumn(title: L10n.string("field.neural_engine"), help: L10n.string("help.neural_engine")) {
+                    Toggle("", isOn: $settings.neuralEngine)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.mint)
+                }
+            }
+        }
+    }
+
+    private var paceCard: some View {
         EditorCard(
             title: L10n.string("config.group.pacing"),
             systemImage: "speedometer",
@@ -543,14 +463,6 @@ struct SettingsEditor: View {
                         Stepper("", value: $settings.maxConcurrency, in: 1...4096)
                             .labelsHidden()
                     }
-                }
-                FieldColumn(title: L10n.string("field.verify_rows"), help: L10n.string("help.verify_rows")) {
-                    Picker("", selection: $settings.verifyRows) {
-                        Text(verbatim: L10n.string("verify.auto")).tag("auto")
-                        Text(verbatim: L10n.string("verify.all")).tag("all")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
                 }
                 FieldColumn(title: L10n.string("field.decode_share"), help: L10n.string("help.decode_share")) {
                     EditorField(text: $settings.decodeShare, prompt: "0.5", monospaced: true)
@@ -584,180 +496,28 @@ struct SettingsEditor: View {
         }
     }
 
-    private var payloadCard: some View {
+    private var thinkingCard: some View {
         EditorCard(
-            title: L10n.string("config.group.payload"),
-            systemImage: "doc.text",
-            tint: SplashPalette.cyan
+            title: L10n.string("config.group.thinking"),
+            systemImage: "brain",
+            tint: SplashPalette.blue
         ) {
             SettingColumns {
-                FieldColumn(title: L10n.string("field.max_request_size"), help: L10n.string("help.max_request_size")) {
-                    SizeField(text: $settings.maxRequestSize, prompt: "128M")
-                }
-                FieldColumn(title: L10n.string("field.request_timeout"), help: L10n.string("help.request_timeout")) {
-                    EditorField(text: $settings.requestTimeout, prompt: "30m", monospaced: true)
-                }
-                if profile.vision {
-                    FieldColumn(title: L10n.string("field.max_image_pixels"), help: L10n.string("help.max_image_pixels")) {
-                        EditorField(text: $settings.maxImagePixels, prompt: "4194304", monospaced: true)
-                    }
-                }
-            }
-            rowDivider
-            SettingColumns {
-                FieldColumn(title: L10n.string("field.allow_idle_sleep"), help: L10n.string("help.allow_idle_sleep")) {
-                    Toggle("", isOn: $settings.allowIdleSleep)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(SplashPalette.cyan)
-                }
-                if profile.thinking {
-                    FieldColumn(title: L10n.string("field.reasoning_effort"), help: L10n.string("help.reasoning_effort")) {
-                        Picker("", selection: $settings.reasoningEffort) {
-                            Text(verbatim: L10n.string("reasoning.default")).tag("")
-                            ForEach(ServerSettings.reasoningEfforts, id: \.self) { effort in
-                                Text(verbatim: effort).tag(effort)
-                            }
+                FieldColumn(title: L10n.string("field.reasoning_effort"), help: L10n.string("help.reasoning_effort")) {
+                    Picker("", selection: $settings.reasoningEffort) {
+                        Text(verbatim: L10n.string("reasoning.default")).tag("")
+                        ForEach(ServerSettings.reasoningEfforts, id: \.self) { effort in
+                            Text(verbatim: effort).tag(effort)
                         }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
                     }
-                }
-            }
-            if profile.thinking {
-                rowDivider
-                SettingColumns {
-                    FieldColumn(title: L10n.string("field.thinking_token_budget"), help: L10n.string("help.thinking_token_budget")) {
-                        EditorField(text: $settings.thinkingTokenBudget, prompt: "4096", monospaced: true)
-                    }
-                    FieldColumn(title: L10n.string("field.thinking_end_text"), help: L10n.string("help.thinking_end_text")) {
-                        EditorField(text: $settings.thinkingEndText, prompt: L10n.string("thinking_end.prompt"))
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: Cache
-
-    private var idleCard: some View {
-        EditorCard(
-            title: L10n.string("config.group.idle"),
-            systemImage: "moon.zzz",
-            tint: SplashPalette.violet
-        ) {
-            SettingRow(
-                title: L10n.string("field.idle_unload"),
-                help: L10n.string("help.idle_unload"),
-                controlWidth: 300
-            ) {
-                Toggle("", isOn: $settings.unloadIdleWeights)
+                    .pickerStyle(.menu)
                     .labelsHidden()
-                    .toggleStyle(.switch)
-                    .tint(SplashPalette.violet)
-            }
-            rowDivider
-            SettingColumns {
-                FieldColumn(title: L10n.string("field.residency"), help: L10n.string("help.residency")) {
-                    EditorField(
-                        text: $settings.residencySeconds,
-                        prompt: "600",
-                        monospaced: true,
-                        suffix: L10n.string("unit.seconds")
-                    )
-                    .disabled(!settings.unloadIdleWeights)
-                    .opacity(settings.unloadIdleWeights ? 1 : 0.45)
                 }
-                FieldColumn(title: L10n.string("field.cache_idle_spill"), help: L10n.string("help.cache_idle_spill")) {
-                    EditorField(text: $settings.cacheIdleSpill, prompt: "5m", monospaced: true)
+                FieldColumn(title: L10n.string("field.thinking_token_budget"), help: L10n.string("help.thinking_token_budget")) {
+                    EditorField(text: $settings.thinkingTokenBudget, prompt: "4096", monospaced: true)
                 }
-                FieldColumn(title: L10n.string("field.residency_keepalive"), help: L10n.string("help.residency_keepalive")) {
-                    EditorField(text: $settings.residencyKeepAlive, prompt: "follows idle release", monospaced: true)
-                }
-            }
-            rowDivider
-            SettingRow(
-                title: L10n.string("field.cache_idle_evict"),
-                help: L10n.string("help.cache_idle_evict"),
-                controlWidth: 300
-            ) {
-                Toggle("", isOn: $settings.cacheIdleEvict)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .tint(SplashPalette.violet)
-            }
-        }
-    }
-
-    private var diskCard: some View {
-        EditorCard(
-            title: L10n.string("config.group.disk"),
-            systemImage: "internaldrive",
-            tint: SplashPalette.violet
-        ) {
-            SettingColumns {
-                FieldColumn(title: L10n.string("field.disk_cache"), help: L10n.string("help.disk_cache")) {
-                    Toggle("", isOn: $settings.diskCache)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(SplashPalette.violet)
-                }
-                FieldColumn(title: L10n.string("field.cache_quota"), help: L10n.string("help.cache_quota")) {
-                    SizeField(text: $settings.maxCacheDisk, prompt: "16G")
-                }
-                FieldColumn(title: L10n.string("field.cache_writes"), help: L10n.string("help.cache_writes")) {
-                    SizeField(text: $settings.maxCacheDiskWrites, prompt: "32G")
-                }
-            }
-            rowDivider
-            SettingRow(
-                title: L10n.string("field.cache_eviction"),
-                help: L10n.string("help.cache_eviction")
-            ) {
-                Picker("", selection: $settings.cacheEvictionPreset) {
-                    Text(verbatim: L10n.string("eviction.light")).tag("light")
-                    Text(verbatim: L10n.string("eviction.balanced")).tag("balanced")
-                    Text(verbatim: L10n.string("eviction.strong")).tag("strong")
-                    Text(verbatim: L10n.string("eviction.custom")).tag("custom")
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
-            if settings.cacheEvictionPreset == "custom" {
-                rowDivider
-                SettingColumns {
-                    FieldColumn(title: L10n.string("field.cache_policy")) {
-                        Picker("", selection: $settings.cacheEvictionPolicy) {
-                            Text(verbatim: L10n.string("eviction.policy.lru")).tag("lru")
-                            Text(verbatim: L10n.string("eviction.policy.fifo")).tag("fifo")
-                            Text(verbatim: L10n.string("eviction.policy.lfu")).tag("lfu")
-                            Text(verbatim: L10n.string("eviction.policy.largest")).tag("largest")
-                        }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                    }
-                    FieldColumn(title: L10n.string("field.cache_protect")) {
-                        Picker("", selection: $settings.cacheEvictionProtect) {
-                            ForEach(0...8, id: \.self) { count in
-                                Text(verbatim: count == 0
-                                    ? L10n.string("eviction.protect.off")
-                                    : String(count))
-                                    .tag(count)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                    }
-                }
-            }
-            if settings.diskCache {
-                rowDivider
-                SettingRow(
-                    title: L10n.string("field.cache_dir"),
-                    help: L10n.string("help.cache_dir"),
-                    controlWidth: 300
-                ) {
-                    EditorField(text: $settings.cacheDir, prompt: L10n.string("cache_dir.prompt"))
+                FieldColumn(title: L10n.string("field.thinking_end_text"), help: L10n.string("help.thinking_end_text")) {
+                    EditorField(text: $settings.thinkingEndText, prompt: L10n.string("thinking_end.prompt"))
                 }
             }
         }
@@ -775,23 +535,21 @@ struct SettingsEditor: View {
                 ReviewStat(title: L10n.string("live.model"), value: modelLabel)
                 reviewDivider
                 ReviewStat(
-                    title: L10n.string("field.port"),
-                    value: String(settings.port),
-                    caption: settings.lanAccess
-                        ? L10n.string("config.review.lan")
-                        : L10n.string("config.review.local")
-                )
-                reviewDivider
-                ReviewStat(
                     title: L10n.string("config.group.budget"),
                     value: settings.maxMemory,
                     caption: L10n.format("config.review.context", settings.maxContext)
                 )
                 reviewDivider
                 ReviewStat(
-                    title: L10n.string("field.max_concurrency"),
-                    value: String(settings.maxConcurrency),
-                    caption: settings.kvFormat.uppercased()
+                    title: L10n.string("field.kv"),
+                    value: settings.kvFormat.uppercased(),
+                    caption: settings.stateFormat.uppercased()
+                )
+                reviewDivider
+                ReviewStat(
+                    title: L10n.string("field.speculation"),
+                    value: L10n.string("speculation.\(settings.speculation)"),
+                    caption: draftLabel
                 )
             }
             .padding(.top, 7)
@@ -811,6 +569,12 @@ struct SettingsEditor: View {
         }
     }
 
+    private var draftLabel: String {
+        let draft = settings.draftDirectory.trimmingCharacters(in: .whitespaces)
+        guard !draft.isEmpty else { return L10n.string("models.none") }
+        return (draft as NSString).lastPathComponent
+    }
+
     private var reviewDivider: some View {
         Rectangle()
             .fill(SplashPalette.hairline.opacity(0.55))
@@ -825,7 +589,7 @@ struct SettingsEditor: View {
 }
 
 /// One figure in the "when you start" strip.
-private struct ReviewStat: View {
+struct ReviewStat: View {
     let title: String
     let value: String
     var caption: String?
@@ -927,7 +691,7 @@ private struct RailItem: View {
 // MARK: - Cards and rows
 
 /// A titled card in the form: a small section label above a stack of rows.
-private struct EditorCard<Content: View>: View {
+struct EditorCard<Content: View>: View {
     let title: String
     let systemImage: String
     var tint: Color = SplashPalette.cyan
@@ -946,7 +710,7 @@ private struct EditorCard<Content: View>: View {
 
 /// A row of two or three controls, each labelled above its value: the form
 /// uses these where a single setting's own row would waste the width.
-private struct SettingColumns<Content: View>: View {
+struct SettingColumns<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -959,7 +723,7 @@ private struct SettingColumns<Content: View>: View {
 
 /// One labelled control in a SettingColumns row. Its title and explanation
 /// sit above the control, so several read as one band rather than a form.
-private struct FieldColumn<Control: View>: View {
+struct FieldColumn<Control: View>: View {
     let title: String
     var help: String?
     @ViewBuilder var control: Control
@@ -987,7 +751,7 @@ private struct FieldColumn<Control: View>: View {
 
 /// A labelled row: the name and its explanation on the left, the control on
 /// the right at a shared width so the form scans as a column.
-private struct SettingRow<Control: View>: View {
+struct SettingRow<Control: View>: View {
     let title: String
     var help: String?
     var controlWidth: CGFloat = 250
@@ -1022,7 +786,7 @@ private struct SettingRow<Control: View>: View {
 }
 
 /// A short note under a page or inside a card: a warning, or a quiet hint.
-private struct EditorNote: View {
+struct EditorNote: View {
     let text: String
     var tone: Color = SplashPalette.amber
     var systemImage: String = "exclamationmark.triangle.fill"
@@ -1114,7 +878,7 @@ struct EditorField: View {
     }
 }
 
-private struct EditorNumberField: View {
+struct EditorNumberField: View {
     @Binding var value: Int
     var range: ClosedRange<Int>?
     var width: CGFloat = 90
@@ -1138,7 +902,7 @@ private struct EditorNumberField: View {
 
 /// A size field (`16G`, `off`, or empty for automatic) with the unit hint
 /// kept outside the text, so the value stays easy to copy.
-private struct SizeField: View {
+struct SizeField: View {
     @Binding var text: String
     var prompt: String
 
@@ -1147,7 +911,7 @@ private struct SizeField: View {
     }
 }
 
-private struct SecretField: View {
+struct SecretField: View {
     @Binding var text: String
     @State private var revealed = false
     @FocusState private var focused: Bool
@@ -1179,7 +943,7 @@ private struct SecretField: View {
 }
 
 /// A path field with a browse button, and a clear button inside the field.
-private struct DirectoryPicker: View {
+struct DirectoryPicker: View {
     @Binding var path: String
     let prompt: String
     /// Choose a GGUF file rather than a directory: only a vision projector

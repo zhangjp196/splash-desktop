@@ -266,6 +266,9 @@ final class AppModel: ObservableObject {
     /// The download source is the app's own, so an edit stores it here rather
     /// than in a configuration.
     func saveSource() { source.save() }
+    /// The model-owned share of the settings: what one configuration chooses
+    /// about the model it serves. Everything the whole server shares lives in
+    /// `global` below.
     @Published var modelMode: ModelMode = .upstream
     @Published var modelID = ServerSettings.First.modelID
     @Published var modelDirectory = ""
@@ -276,10 +279,6 @@ final class AppModel: ObservableObject {
     @Published var speculation = ServerSettings.First.speculation
     @Published var requireDraft = ServerSettings.First.requireDraft
     @Published var mmproj = ""
-    @Published var port = ServerSettings.First.port
-    @Published var lanAccess = false
-    @Published var allowedHosts = ""
-    @Published var allowedOrigins = ""
     @Published var languageOnly = false
     @Published var maxMemory = ServerSettings.First.maxMemory
     @Published var maxContext = ServerSettings.First.maxContext
@@ -287,36 +286,25 @@ final class AppModel: ObservableObject {
     @Published var pleMemory = ""
     @Published var sparseKvMemory = ""
     @Published var verifyRows = "auto"
+    @Published var expertMemoryGrow = ServerSettings.First.expertMemoryGrow
+    /// How the engine runs this model: precision, admission, prefill pacing,
+    /// and the thinking defaults a request may use. These belong to the
+    /// configuration because they are chosen for the model it serves.
     @Published var kvFormat = ServerSettings.First.kvFormat
     @Published var stateFormat = ServerSettings.First.stateFormat
     @Published var neuralEngine = true
-    @Published var apiKey = ""
-    @Published var servedNames = ""
-    @Published var unloadIdleWeights = ServerSettings.First.unloadIdleWeights
-    @Published var residencySeconds = ServerSettings.First.residencySeconds
-    @Published var residencyKeepAlive = ServerSettings.First.residencyKeepAlive
-    @Published var expertMemoryGrow = ServerSettings.First.expertMemoryGrow
+    @Published var maxConcurrency = ServerSettings.First.maxConcurrency
+    @Published var decodeShare = ""
     @Published var responsivePrefill = ServerSettings.First.responsivePrefill
     @Published var prefillSliceMilliseconds = ServerSettings.First.prefillSliceMilliseconds
-    @Published var cacheIdleSpill = ""
-    @Published var cacheIdleEvict = ServerSettings.First.cacheIdleEvict
-    @Published var cacheDir = ""
-    @Published var diskCache = ServerSettings.First.diskCache
-    @Published var maxCacheDisk = ServerSettings.First.maxCacheDisk
-    @Published var maxCacheDiskWrites = ServerSettings.First.maxCacheDiskWrites
-    @Published var cacheEvictionPreset = ServerSettings.First.cacheEvictionPreset
-    @Published var cacheEvictionPolicy = ServerSettings.First.cacheEvictionPolicy
-    @Published var cacheEvictionProtect = ServerSettings.First.cacheEvictionProtect
-    @Published var maxRequestSize = ""
-    @Published var requestTimeout = ""
-    @Published var maxImagePixels = ""
-    @Published var decodeShare = ""
-    @Published var allowIdleSleep = false
+    @Published var reasoningEffort = ""
     @Published var thinkingTokenBudget = ""
     @Published var thinkingEndText = ""
-    @Published var announceServedName = false
-    @Published var reasoningEffort = ""
-    @Published var maxConcurrency = ServerSettings.First.maxConcurrency
+
+    /// The settings every configuration shares, edited on the Settings page
+    /// and stored with the rest of the settings. A configuration keeps a copy
+    /// for a complete `ServerSettings`, but a start always takes this value.
+    @Published var global = GlobalSettings()
 
     // The model library: the configurations the app has served, persisted as
     // JSON beside the settings.
@@ -331,6 +319,16 @@ final class AppModel: ObservableObject {
     enum InterfaceLanguage: String, CaseIterable, Identifiable {
         case followSystem, chinese, english
         var id: String { rawValue }
+
+        /// The name the toolbar menu and the Settings page show. The two
+        /// language names stay in their own language, as language menus do.
+        var title: String {
+            switch self {
+            case .followSystem: return L10n.string("language.follow")
+            case .chinese: return "中文"
+            case .english: return "English"
+            }
+        }
     }
 
     @Published var language: InterfaceLanguage = .followSystem
@@ -432,7 +430,12 @@ final class AppModel: ObservableObject {
             smartLevel = stored
         }
         applyLanguage()
-        applySettings(store.load())
+        // The store keeps the whole command's settings, so it is the first
+        // source for both shares. The active configuration then names the
+        // model share, while the app-wide share stays what the store holds.
+        let stored = store.load()
+        applyGlobalSettings(stored)
+        applyModelSettings(stored)
         // The first launch records what the app opened with, so the settings
         // are on disk before the first edit rather than appearing from nowhere.
         if !hasStoredSettings { _ = saveSettings() }
@@ -444,6 +447,8 @@ final class AppModel: ObservableObject {
             activeConfigID = seed.id
             libraryStore.saveConfigs(configs)
             libraryStore.saveActive(seed.id)
+        } else if let active = configs.first(where: { $0.id == activeConfigID }) {
+            applyModelSettings(active.settings)
         }
         // A server left over from a previous session is detected and taken
         // over asynchronously.
@@ -464,7 +469,9 @@ final class AppModel: ObservableObject {
 
     // MARK: Settings
 
-    /// The settings the form currently shows, the value SQLite keeps.
+    /// The settings the form currently shows, the value SQLite keeps: the
+    /// model's own fields followed by the app-wide share that every launch
+    /// takes from the Settings page.
     var settings: ServerSettings {
         var settings = ServerSettings()
         settings.modelMode = modelMode
@@ -477,47 +484,25 @@ final class AppModel: ObservableObject {
         settings.speculation = speculation
         settings.requireDraft = requireDraft
         settings.mmproj = mmproj
-        settings.port = port
-        settings.lanAccess = lanAccess
-        settings.allowedHosts = allowedHosts
-        settings.allowedOrigins = allowedOrigins
         settings.languageOnly = languageOnly
-        settings.kvFormat = kvFormat
-        settings.stateFormat = stateFormat
-        settings.neuralEngine = neuralEngine
         settings.maxMemory = maxMemory
         settings.maxContext = maxContext
         settings.expertMemory = expertMemory
         settings.pleMemory = pleMemory
         settings.sparseKvMemory = sparseKvMemory
         settings.verifyRows = verifyRows
-        settings.unloadIdleWeights = unloadIdleWeights
-        settings.residencySeconds = residencySeconds
-        settings.residencyKeepAlive = residencyKeepAlive
         settings.expertMemoryGrow = expertMemoryGrow
+        settings.kvFormat = kvFormat
+        settings.stateFormat = stateFormat
+        settings.neuralEngine = neuralEngine
+        settings.maxConcurrency = maxConcurrency
+        settings.decodeShare = decodeShare
         settings.responsivePrefill = responsivePrefill
         settings.prefillSliceMilliseconds = prefillSliceMilliseconds
-        settings.cacheIdleSpill = cacheIdleSpill
-        settings.cacheIdleEvict = cacheIdleEvict
-        settings.cacheDir = cacheDir
-        settings.diskCache = diskCache
-        settings.maxCacheDisk = maxCacheDisk
-        settings.maxCacheDiskWrites = maxCacheDiskWrites
-        settings.cacheEvictionPreset = cacheEvictionPreset
-        settings.cacheEvictionPolicy = cacheEvictionPolicy
-        settings.cacheEvictionProtect = cacheEvictionProtect
-        settings.maxRequestSize = maxRequestSize
-        settings.requestTimeout = requestTimeout
-        settings.maxImagePixels = maxImagePixels
-        settings.decodeShare = decodeShare
-        settings.allowIdleSleep = allowIdleSleep
+        settings.reasoningEffort = reasoningEffort
         settings.thinkingTokenBudget = thinkingTokenBudget
         settings.thinkingEndText = thinkingEndText
-        settings.announceServedName = announceServedName
-        settings.apiKey = apiKey
-        settings.servedNames = servedNames
-        settings.reasoningEffort = reasoningEffort
-        settings.maxConcurrency = maxConcurrency
+        global.applying(to: &settings)
         return settings
     }
 
@@ -547,13 +532,31 @@ final class AppModel: ObservableObject {
     /// Return the form to the values the app opened with, leaving a running
     /// server alone: these are the next launch's settings, not this one's.
     func restoreDefaultSettings() {
-        applySettings(.default)
+        applyGlobalSettings(.default)
+        applyModelSettings(.default)
         saveSettings()
         activeConfigID = nil
         libraryStore.saveActive(nil)
     }
 
-    private func applySettings(_ settings: ServerSettings) {
+    /// Return only the app-wide settings to their first-launch values, leaving
+    /// the model the user picked and every configuration alone. This is the
+    /// Settings page's reset: a model configuration has no reset of its own.
+    func restoreDefaultGlobalSettings() {
+        applyGlobalSettings(.default)
+        saveSettings()
+    }
+
+    /// Take the app-wide share of a complete configuration. The store is the
+    /// first source at launch, and Reset returns this share to its defaults
+    /// without touching the model the user picked.
+    func applyGlobalSettings(_ settings: ServerSettings) {
+        global = GlobalSettings(settings)
+    }
+
+    /// Take the model-owned share of a complete configuration, leaving the
+    /// app-wide share as the Settings page last left it.
+    private func applyModelSettings(_ settings: ServerSettings) {
         restoring = true
         defer { restoring = false }
         modelMode = settings.modelMode
@@ -566,50 +569,28 @@ final class AppModel: ObservableObject {
         speculation = settings.speculation
         requireDraft = settings.requireDraft
         mmproj = settings.mmproj
-        port = settings.port
-        lanAccess = settings.lanAccess
-        allowedHosts = settings.allowedHosts
-        allowedOrigins = settings.allowedOrigins
         languageOnly = settings.languageOnly
-        kvFormat = settings.kvFormat
-        stateFormat = settings.stateFormat
-        neuralEngine = settings.neuralEngine
         maxMemory = settings.maxMemory
         maxContext = settings.maxContext
         expertMemory = settings.expertMemory
         pleMemory = settings.pleMemory
         sparseKvMemory = settings.sparseKvMemory
         verifyRows = settings.verifyRows
-        unloadIdleWeights = settings.unloadIdleWeights
-        residencySeconds = settings.residencySeconds
-        residencyKeepAlive = settings.residencyKeepAlive
         expertMemoryGrow = settings.expertMemoryGrow
+        kvFormat = settings.kvFormat
+        stateFormat = settings.stateFormat
+        neuralEngine = settings.neuralEngine
+        maxConcurrency = settings.maxConcurrency
+        decodeShare = settings.decodeShare
         responsivePrefill = settings.responsivePrefill
         prefillSliceMilliseconds = settings.prefillSliceMilliseconds
-        cacheIdleSpill = settings.cacheIdleSpill
-        cacheIdleEvict = settings.cacheIdleEvict
-        cacheDir = settings.cacheDir
-        diskCache = settings.diskCache
-        maxCacheDisk = settings.maxCacheDisk
-        maxCacheDiskWrites = settings.maxCacheDiskWrites
-        cacheEvictionPreset = settings.cacheEvictionPreset
-        cacheEvictionPolicy = settings.cacheEvictionPolicy
-        cacheEvictionProtect = settings.cacheEvictionProtect
-        maxRequestSize = settings.maxRequestSize
-        requestTimeout = settings.requestTimeout
-        maxImagePixels = settings.maxImagePixels
-        decodeShare = settings.decodeShare
-        allowIdleSleep = settings.allowIdleSleep
+        reasoningEffort = settings.reasoningEffort
         thinkingTokenBudget = settings.thinkingTokenBudget
         thinkingEndText = settings.thinkingEndText
-        announceServedName = settings.announceServedName
-        apiKey = settings.apiKey
-        servedNames = settings.servedNames
-        reasoningEffort = settings.reasoningEffort
-        maxConcurrency = settings.maxConcurrency
     }
 
-    /// Every edited field calls this, so one place decides when to write.
+    /// Every edited app-wide field calls this, so one place decides when to
+    /// write. A model configuration is saved by its own editor instead.
     func settingsEdited() {
         guard !restoring else { return }
         scheduleSettingsSave()
@@ -723,13 +704,13 @@ final class AppModel: ObservableObject {
     /// too, which is what its command line carries.
     private func pushThermalDuty(_ duty: Double) async {
         guard isRunning, phase == .ready,
-              let url = URL(string: "http://127.0.0.1:\(port)/v1/thermal") else { return }
+              let url = URL(string: "http://127.0.0.1:\(global.port)/v1/thermal") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 8
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !global.apiKey.isEmpty {
+            request.setValue("Bearer \(global.apiKey)", forHTTPHeaderField: "Authorization")
         }
         request.httpBody = try? JSONSerialization.data(
             withJSONObject: ["prefill_duty_percent": duty]
@@ -763,22 +744,27 @@ final class AppModel: ObservableObject {
 
     // MARK: Model configurations
 
-    /// Store a configuration and make it the one the server starts with.
+    /// Store a configuration and make it the one the server starts with. The
+    /// app-wide share is copied in so the saved configuration stays a complete
+    /// command; a start still reads the Settings page's current value.
     func save(_ config: ModelConfig) {
-        if let index = configs.firstIndex(where: { $0.id == config.id }) {
-            configs[index] = config
+        var saved = config
+        global.applying(to: &saved.settings)
+        if let index = configs.firstIndex(where: { $0.id == saved.id }) {
+            configs[index] = saved
         } else {
-            configs.append(config)
+            configs.append(saved)
         }
         libraryStore.saveConfigs(configs)
-        apply(config)
+        apply(saved)
     }
 
-    /// Make a configuration current: the form and the next start follow it.
+    /// Make a configuration current: the model share follows it, while the
+    /// app-wide share stays where the Settings page left it.
     func apply(_ config: ModelConfig) {
         activeConfigID = config.id
         libraryStore.saveActive(config.id)
-        applySettings(config.settings)
+        applyModelSettings(config.settings)
         saveSettings()
     }
 
@@ -799,6 +785,7 @@ final class AppModel: ObservableObject {
         defaults.modelDirectory = ""
         defaults.draftDirectory = ""
         defaults.mmproj = ""
+        global.applying(to: &defaults)
         return ModelConfig(settings: defaults)
     }
 
@@ -812,9 +799,9 @@ final class AppModel: ObservableObject {
     // The chat is the server's own web page. The app embeds it in embed mode,
     // where the page keeps only the conversation; the browser gets the full
     // page, history sidebar and all.
-    var chatURL: URL? { URL(string: "http://127.0.0.1:\(port)/") }
-    var chatEmbedURL: URL? { URL(string: "http://127.0.0.1:\(port)/?embed=1") }
-    var apiBaseURL: String { "http://127.0.0.1:\(port)/v1" }
+    var chatURL: URL? { URL(string: "http://127.0.0.1:\(global.port)/") }
+    var chatEmbedURL: URL? { URL(string: "http://127.0.0.1:\(global.port)/?embed=1") }
+    var apiBaseURL: String { "http://127.0.0.1:\(global.port)/v1" }
 
     var activeConfig: ModelConfig? {
         configs.first { $0.id == activeConfigID }
@@ -854,7 +841,7 @@ final class AppModel: ObservableObject {
         switch phase {
         case .idle: return L10n.string("status.stopped")
         case .starting: return L10n.string("status.starting")
-        case .ready: return L10n.format("status.ready", port)
+        case .ready: return L10n.format("status.ready", global.port)
         case .stopping: return L10n.string("status.stopping")
         case .failed(let reason): return L10n.format("status.failed", reason)
         }
@@ -898,36 +885,33 @@ final class AppModel: ObservableObject {
             }
         }
         // Whether decode may propose tokens, and whether a missing draft is
-        // fatal. `none` passes no draft at all; `auto` and `dflash2` name
-        // one when the configuration has it.
+        // fatal. `auto` and `dflash2` use the draft the configuration names.
         if speculation != "auto" {
             arguments += ["--speculation", speculation]
         }
-        if requireDraft && speculation != "none" && speculation != "mtp" {
+        if requireDraft && speculation != "mtp" {
             arguments.append("--require-draft")
         }
         // The DFlash2 draft is a local folder, like any other model the panel
         // serves. A repository ID an older configuration saved still names
         // its own download until an edit moves it to a folder.
         let draft = draftDirectory.trimmingCharacters(in: .whitespaces)
-        if speculation != "none" {
-            if !draft.isEmpty {
-                arguments += ["--draft-model", draft]
-            } else if draftMode == "hub" {
-                let stored = draftID.trimmingCharacters(in: .whitespaces)
-                if !stored.isEmpty { arguments += ["--draft-model", stored] }
-            }
+        if !draft.isEmpty {
+            arguments += ["--draft-model", draft]
+        } else if draftMode == "hub" {
+            let stored = draftID.trimmingCharacters(in: .whitespaces)
+            if !stored.isEmpty { arguments += ["--draft-model", stored] }
         }
-        arguments += ["--port", String(port)]
-        // Loopback unless the configuration asks for the LAN; the extra Host
+        arguments += ["--port", String(global.port)]
+        // Loopback unless the Settings page asks for the LAN; the extra Host
         // names are passed either way, since a tunnel or proxy reaches the
         // loopback listener under a name of its own.
-        if lanAccess { arguments += ["--host", "0.0.0.0"] }
-        for name in allowedHosts.split(separator: ",") {
+        if global.lanAccess { arguments += ["--host", "0.0.0.0"] }
+        for name in global.allowedHosts.split(separator: ",") {
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += ["--allowed-host", trimmed] }
         }
-        for origin in allowedOrigins.split(separator: ",") {
+        for origin in global.allowedOrigins.split(separator: ",") {
             let trimmed = origin.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += ["--allowed-origin", trimmed] }
         }
@@ -960,8 +944,8 @@ final class AppModel: ObservableObject {
         if kvFormat != "int8" { arguments += ["--kv-format", kvFormat] }
         if stateFormat != "fp32" { arguments += ["--state-format", stateFormat] }
         if !neuralEngine { arguments.append("--disable-ane") }
-        if !apiKey.isEmpty { arguments += ["--api-key", apiKey] }
-        for name in servedNames.split(separator: ",") {
+        if !global.apiKey.isEmpty { arguments += ["--api-key", global.apiKey] }
+        for name in global.servedNames.split(separator: ",") {
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += ["--served-model-name", trimmed] }
         }
@@ -973,20 +957,20 @@ final class AppModel: ObservableObject {
         // switch turns the disk tier off outright (`--max-cache-disk 0`),
         // keeping cached prefixes in memory only; the engine's idle spill is
         // its own timer and needs no argument. A quota of `0` still means off.
-        let cacheQuota = maxCacheDisk.trimmingCharacters(in: .whitespaces)
-        let cacheOn = diskCache && cacheQuota != "0"
-        let idleSpill = cacheIdleSpill.trimmingCharacters(in: .whitespaces)
+        let cacheQuota = global.maxCacheDisk.trimmingCharacters(in: .whitespaces)
+        let cacheOn = global.diskCache && cacheQuota != "0"
+        let idleSpill = global.cacheIdleSpill.trimmingCharacters(in: .whitespaces)
         if !idleSpill.isEmpty { arguments += ["--cache-idle-spill", idleSpill] }
         // A disk tier that is off leaves the pass nothing to spill to; the
         // switch says whether it evicts the idle prefixes instead. On, the
         // engine's own default, passes nothing.
-        if !cacheIdleEvict { arguments += ["--cache-idle-evict", "off"] }
+        if !global.cacheIdleEvict { arguments += ["--cache-idle-evict", "off"] }
         if cacheOn {
             arguments.append("--persistent-cache")
             if !cacheQuota.isEmpty { arguments += ["--max-cache-disk", cacheQuota] }
-            let directory = cacheDir.trimmingCharacters(in: .whitespaces)
+            let directory = global.cacheDir.trimmingCharacters(in: .whitespaces)
             if !directory.isEmpty { arguments += ["--cache-dir", directory] }
-            let cacheWrites = maxCacheDiskWrites.trimmingCharacters(in: .whitespaces)
+            let cacheWrites = global.maxCacheDiskWrites.trimmingCharacters(in: .whitespaces)
             if !cacheWrites.isEmpty {
                 arguments += ["--max-cache-disk-writes", cacheWrites]
             }
@@ -997,8 +981,8 @@ final class AppModel: ObservableObject {
         // preset passes nothing, leaving the engine's own LRU; the custom one
         // passes its policy and protected tier.
         let eviction = ServerSettings.cacheEviction(
-            preset: cacheEvictionPreset, policy: cacheEvictionPolicy,
-            protect: cacheEvictionProtect)
+            preset: global.cacheEvictionPreset, policy: global.cacheEvictionPolicy,
+            protect: global.cacheEvictionProtect)
         if eviction.policy != "lru" {
             arguments += ["--cache-eviction", eviction.policy]
         }
@@ -1009,8 +993,8 @@ final class AppModel: ObservableObject {
         // them after the duration below. An empty or unparsable duration uses
         // the first-launch ten minutes rather than leaving the engine's timer
         // at a value the panel does not show.
-        if unloadIdleWeights {
-            let stored = Int(residencySeconds)
+        if global.unloadIdleWeights {
+            let stored = Int(global.residencySeconds)
             let seconds = stored.map { (1...86_400).contains($0) ? $0 : 600 } ?? 600
             arguments += ["--idle-release", String(seconds)]
         } else {
@@ -1019,12 +1003,14 @@ final class AppModel: ObservableObject {
         // The buffers' own keep-alive, apart from the weights' release:
         // empty follows --idle-release, the engine's behavior without the
         // option.
-        let keepAlive = residencyKeepAlive.trimmingCharacters(in: .whitespaces)
+        let keepAlive = global.residencyKeepAlive.trimmingCharacters(in: .whitespaces)
         if !keepAlive.isEmpty { arguments += ["--residency-keepalive", keepAlive] }
-        if !maxRequestSize.isEmpty { arguments += ["--max-request-size", maxRequestSize] }
-        let timeout = requestTimeout.trimmingCharacters(in: .whitespaces)
+        if !global.maxRequestSize.isEmpty {
+            arguments += ["--max-request-size", global.maxRequestSize]
+        }
+        let timeout = global.requestTimeout.trimmingCharacters(in: .whitespaces)
         if !timeout.isEmpty { arguments += ["--request-timeout", timeout] }
-        let pixels = maxImagePixels.trimmingCharacters(in: .whitespaces)
+        let pixels = global.maxImagePixels.trimmingCharacters(in: .whitespaces)
         if !pixels.isEmpty && profile.vision {
             arguments += ["--max-image-pixels", pixels]
         }
@@ -1038,7 +1024,7 @@ final class AppModel: ObservableObject {
             let milliseconds = stored.map { (1...10_000).contains($0) ? $0 : 1_000 } ?? 1_000
             arguments += ["--prefill-slice-ms", String(milliseconds)]
         }
-        if allowIdleSleep { arguments.append("--allow-idle-sleep") }
+        if global.allowIdleSleep { arguments.append("--allow-idle-sleep") }
         if !reasoningEffort.isEmpty && profile.thinking {
             arguments += ["--default-reasoning-effort", reasoningEffort]
         }
@@ -1050,7 +1036,8 @@ final class AppModel: ObservableObject {
         if !endText.isEmpty && profile.thinking {
             arguments += ["--thinking-end-text", endText]
         }
-        if announceServedName && !servedNames.trimmingCharacters(in: .whitespaces).isEmpty {
+        if global.announceServedName &&
+            !global.servedNames.trimmingCharacters(in: .whitespaces).isEmpty {
             arguments.append("--announce-served-name")
         }
         // How loud the Mac may get: the system default passes nothing, leaving
@@ -1151,7 +1138,7 @@ final class AppModel: ObservableObject {
                     process.terminate()
                 }
             }
-        } else if let pid = foreignPID ?? servePID(port: port) {
+        } else if let pid = foreignPID ?? servePID(port: global.port) {
             foreignPID = pid
             phase = .stopping
             stopping = true
@@ -1186,9 +1173,9 @@ final class AppModel: ObservableObject {
     /// A server a previous session left running is taken over on launch: the
     /// header shows it ready with a working Stop, and the live panel reads it.
     func detectRunningServer() async {
-        guard let snapshot = await statusFetcher.fetch(port: port),
+        guard let snapshot = await statusFetcher.fetch(port: global.port),
               snapshot.status["maximum_context_tokens"] is Int else { return }
-        foreignPID = servePID(port: port)
+        foreignPID = servePID(port: global.port)
         if let tokens = snapshot.status["maximum_context_tokens"] as? Int {
             contextTokens = tokens
         }
@@ -1272,7 +1259,7 @@ final class AppModel: ObservableObject {
         let status = finished.terminationStatus
         if status == 0 {
             phase = .idle
-        } else if let record = Runtime.serveRecord(port: port),
+        } else if let record = Runtime.serveRecord(port: global.port),
                   record.pid == finished.processIdentifier,
                   let failure = record.failure {
             // The launcher or the server wrote why this start failed; the
@@ -1302,7 +1289,7 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshStatus() async {
-        guard let snapshot = await statusFetcher.fetch(port: port) else {
+        guard let snapshot = await statusFetcher.fetch(port: global.port) else {
             offlineCount += 1
             // A foreign server we asked to stop has gone silent: done.
             if offlineCount >= 3, phase == .stopping {
@@ -1342,8 +1329,8 @@ final class AppModel: ObservableObject {
         excluding.insert(getpid())
         if let pid = process?.processIdentifier { excluding.insert(pid) }
         if let pid = foreignPID { excluding.insert(pid) }
-        if let pid = servePID(port: port) { excluding.insert(pid) }
-        let scanned = await clientScanner.scan(port: port, excluding: excluding)
+        if let pid = servePID(port: global.port) { excluding.insert(pid) }
+        let scanned = await clientScanner.scan(port: global.port, excluding: excluding)
         guard phase == .ready else { return }
         if scanned != connectedClients {
             connectedClients = scanned

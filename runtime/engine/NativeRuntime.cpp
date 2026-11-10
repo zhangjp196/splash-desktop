@@ -405,11 +405,12 @@ bool NativeRuntime::handleRelease(const protocol::ReleaseRequestFrame &release) 
 
 // A running engine's duty changes in place: the frame is a wish and the status
 // document is the truth, so it is not answered. The engine clamps the value and
-// ignores one that is not finite; the line names the duty it holds afterwards.
+// ignores one that is not finite. The smart thermal mode sends a frame each
+// second, so the change is deliberately not logged: the status document
+// carries the duty for anything that needs to read it.
 bool NativeRuntime::handlePrefillDuty(
     const protocol::PrefillDutyRequestFrame &request) {
-  logLine("Prefill duty set to ", std::fixed, std::setprecision(1),
-          core_.setPrefillDutyPercent(request.dutyPercent), " percent");
+  core_.setPrefillDutyPercent(request.dutyPercent);
   return true;
 }
 

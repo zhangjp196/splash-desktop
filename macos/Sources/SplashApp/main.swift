@@ -55,6 +55,15 @@ if CommandLine.arguments.contains("--render-ui") {
         }
 
         let model = AppModel.shared
+        model.global = GlobalSettings(sample)
+        for section in GlobalSection.allCases {
+            write(
+                GlobalSettingsPane(section: section).environmentObject(model),
+                width: 1200,
+                height: 900,
+                "global-\(section.rawValue)"
+            )
+        }
         model.phase = .ready
         model.live = LiveStatus(
             updated: true, ready: true, modelID: "mlx-community/Qwen3.8-27B-4bit",
@@ -387,18 +396,11 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             // the engine's default; only the switch that turns it off is
             // passed.
             && carries("--cache-idle-evict", "off")
-        // A none plan passes no draft at all, whatever folder the form keeps.
-        reloaded.speculation = "none"
-        let none = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
-        passed = passed
-            && carries(none, "--speculation", "none")
-            && !none.contains("--draft-model")
-        reloaded.speculation = "dflash2"
         // Turning the idle unload off keeps the weights resident.
-        reloaded.unloadIdleWeights = false
+        reloaded.global.unloadIdleWeights = false
         let resident = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
         passed = passed && carries(resident, "--idle-release", "off")
-        reloaded.unloadIdleWeights = true
+        reloaded.global.unloadIdleWeights = true
         // Turning responsive prefill off leaves the engine's chunk size.
         reloaded.responsivePrefill = false
         let chunked = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
@@ -447,7 +449,7 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
         // Turning the SSD cache on is what keeps a coding conversation's prefix
         // across a restart: the command asks for the persistent cache and
         // passes the quota and the day's write budget beside it.
-        reloaded.diskCache = true
+        reloaded.global.diskCache = true
         let cached = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
         passed = passed
             && cached.contains("--persistent-cache")
@@ -455,18 +457,41 @@ if CommandLine.arguments.contains("--selfcheck-settings") {
             && carries(cached, "--max-cache-disk-writes", edited.maxCacheDiskWrites)
         // A custom eviction preset passes the policy and its protected tier;
         // the default level passes neither, leaving the engine's own order.
-        reloaded.cacheEvictionPreset = "custom"
-        reloaded.cacheEvictionPolicy = "largest"
-        reloaded.cacheEvictionProtect = 4
+        reloaded.global.cacheEvictionPreset = "custom"
+        reloaded.global.cacheEvictionPolicy = "largest"
+        reloaded.global.cacheEvictionProtect = 4
         let evicted = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
         passed = passed
             && carries(evicted, "--cache-eviction", "largest")
             && carries(evicted, "--cache-eviction-protect", "4")
-        reloaded.cacheEvictionPreset = "light"
+        reloaded.global.cacheEvictionPreset = "light"
         let defaultEviction = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
         passed = passed
             && !defaultEviction.contains("--cache-eviction")
             && !defaultEviction.contains("--cache-eviction-protect")
+        // The app-wide share and a configuration's model share stay separate:
+        // applying a configuration must keep the Settings page's endpoint
+        // rather than bringing the copy the configuration was saved with back.
+        reloaded.global.port = 9311
+        var shared = reloaded.newConfig()
+        shared.settings.modelDirectory = "/tmp/selfcheck-shared"
+        shared.settings.port = 1111
+        shared.settings.kvFormat = "int4"
+        shared.settings.maxConcurrency = 12
+        reloaded.save(shared)
+        passed = passed
+            && reloaded.global.port == 9311
+            && reloaded.settings.port == 9311
+            && reloaded.kvFormat == "int4"
+            && reloaded.maxConcurrency == 12
+        let afterApply = AppModel()
+        passed = passed
+            && afterApply.global.port == 9311
+            && afterApply.settings.modelDirectory == "/tmp/selfcheck-shared"
+            && afterApply.kvFormat == "int4"
+            && afterApply.maxConcurrency == 12
+        library.saveConfigs([])
+        library.saveActive(nil)
         reloaded.restoreDefaultSettings()
         let restored = AppModel()
         let defaultLaunch = restored.launchArguments(launcherPath: "/tmp/launcher.py")

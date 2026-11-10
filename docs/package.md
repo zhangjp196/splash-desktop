@@ -163,9 +163,20 @@ stored value the launcher would reject falls
 back to its first-launch default rather than starting a server that refuses to
 run. `swift run --selfcheck-settings` exercises the store and that round trip
 headlessly against a temporary database. The **Models** pane lists the saved
-configurations, each holding the whole set of server settings, and shows the
-one that is running above them: add, edit and switch between them, or aim one
-at a model folder on your disk. The
+configurations and shows the one that is running above them: add, edit and
+switch between them, or aim one at a model folder on your disk. A
+configuration keeps what belongs to its model — the target, its files and
+text-only mode, the DFlash2 draft and speculation, the memory ceiling, context
+length and streamed stores — and how that model's engine runs: KV and
+recurrent-state precision, the neural engine, admission, prefill pacing and
+thinking defaults. The **Settings** tab holds what every configuration shares:
+**Connection** (port, LAN access and extra Host names), **Access** (API key,
+served names and request limits), and **Storage** (idle release, the SSD
+cache, its quota, write budget and eviction). Its **Application** section
+holds the window's appearance and interface language, and the folder and Hub
+every download uses. The server page saves as it is edited and applies at the
+next start, so a new configuration does not repeat what the app already knows;
+application choices apply at once. The
 conversation is the server's own web page, embedded in the **Chat** tab: the
 app loads `chat.html?embed=1`, where the page keeps only the conversation and
 posts its history and state to the view, so the native band can list chats,
@@ -173,21 +184,7 @@ start a new one, and clear them with one undo. The same page without `embed`
 still opens in a browser, sidebar and all, for anyone using the server
 directly. Its labels and
 the chat page follow the system interface language (English and Simplified
-Chinese are bundled). The model
-section offers two modes — an upstream MLX or GGUF model (the installer pairs
-its draft), or a local directory per
-[local model directories](models.md#local-model-directories) — and the
-remaining sections group the rest by what it decides: the server's port and
-whether it serves the LAN, with the extra Host names it accepts; KV
-format, text-only mode, API key and model aliases; the admission limit of
-requests running or waiting at once; the memory ceiling and
-context length; what happens while idle (releasing weights back to the GPU the
-way LM Studio unloads a model) and the cache section beside it (a switch that
-turns the SSD cache on, off by default so cached prefixes stay in memory, and,
-while it is on, its quota and the day's write budget; with the switch on the
-cache is persistent, so a restart keeps the conversation prefixes); and the
-per-request size and default reasoning
-effort. The app offers
+Chinese are bundled). The app offers
 `install/suggested-models.tsv`, per model the variant meant for the Mac's
 memory with its download size and a few words about the model, and starts
 coding agents with `splash AGENT --port PORT` in Terminal, in a folder the user

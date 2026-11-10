@@ -413,7 +413,7 @@ struct LivePane: View {
     /// tier that is off reports no capacity and the figures alone would read
     /// as a cache that is empty rather than one that is not used.
     private func diskCacheCaption(_ live: LiveStatus) -> String {
-        if !model.diskCache { return L10n.string("live.caption.disk_cache_off") }
+        if !model.global.diskCache { return L10n.string("live.caption.disk_cache_off") }
         let offload = idleOffloadCaption(live)
         return offload.isEmpty ? L10n.string("live.caption.disk_cache_on") : offload
     }

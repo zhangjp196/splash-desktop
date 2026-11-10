@@ -26,7 +26,7 @@ struct RootView: View {
     }
 
     enum Section: String, CaseIterable, Identifiable {
-        case chat, models, live, thermal, log, about
+        case chat, models, live, thermal, log, settings, about
 
         var id: String { rawValue }
 
@@ -37,6 +37,7 @@ struct RootView: View {
             case .live: return L10n.string("view.live")
             case .thermal: return L10n.string("view.thermal")
             case .log: return L10n.string("view.log")
+            case .settings: return L10n.string("view.settings")
             case .about: return L10n.string("view.about")
             }
         }
@@ -48,6 +49,7 @@ struct RootView: View {
             case .live: return "waveform.path.ecg"
             case .thermal: return "fan.fill"
             case .log: return "terminal.fill"
+            case .settings: return "gearshape.fill"
             case .about: return "info.circle.fill"
             }
         }
@@ -59,11 +61,12 @@ struct RootView: View {
             case .live: return SplashPalette.mint
             case .thermal: return SplashPalette.amber
             case .log: return SplashPalette.violet
+            case .settings: return SplashPalette.cyan
             case .about: return SplashPalette.muted
             }
         }
 
-        /// ⌘1 through ⌘6, in the sidebar's order, for moving without the mouse.
+        /// ⌘1 through ⌘7, in the sidebar's order, for moving without the mouse.
         var shortcut: KeyEquivalent {
             switch self {
             case .chat: return "1"
@@ -71,7 +74,8 @@ struct RootView: View {
             case .live: return "3"
             case .thermal: return "4"
             case .log: return "5"
-            case .about: return "6"
+            case .settings: return "6"
+            case .about: return "7"
             }
         }
     }
@@ -182,6 +186,7 @@ struct RootView: View {
             case .live: LivePane()
             case .thermal: ThermalPane()
             case .log: LogPane()
+            case .settings: GlobalSettingsPane()
             case .about: AboutPane()
             }
         }
@@ -232,9 +237,9 @@ struct RootView: View {
                         model.applyLanguage()
                     } label: {
                         if model.language == language {
-                            Label(languageLabel(language), systemImage: "checkmark")
+                            Label(language.title, systemImage: "checkmark")
                         } else {
-                            Text(languageLabel(language))
+                            Text(language.title)
                         }
                     }
                 }
@@ -250,14 +255,6 @@ struct RootView: View {
             }
             .disabled(model.phase != .ready)
             .help(L10n.string("open.in.browser"))
-        }
-    }
-
-    private func languageLabel(_ language: AppModel.InterfaceLanguage) -> String {
-        switch language {
-        case .followSystem: return L10n.string("language.follow")
-        case .chinese: return "中文"
-        case .english: return "English"
         }
     }
 
@@ -354,6 +351,8 @@ private struct Sidebar: View {
                     row(.live)
                     row(.thermal)
                     row(.log)
+                    groupLabel("sidebar.app")
+                    row(.settings)
                     groupLabel("sidebar.about")
                     row(.about)
                 }

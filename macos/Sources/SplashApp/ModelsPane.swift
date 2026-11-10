@@ -363,7 +363,8 @@ private struct ConfigTile: View {
         }
         parts.append(config.settings.kvFormat.uppercased())
         parts.append(L10n.string("speculation.\(config.settings.speculation)"))
-        parts.append(L10n.format("models.concurrency", config.settings.maxConcurrency))
+        parts.append(L10n.format("config.review.context", config.settings.maxContext))
+        if !config.settings.maxMemory.isEmpty { parts.append(config.settings.maxMemory) }
         return parts
     }
 
@@ -372,7 +373,7 @@ private struct ConfigTile: View {
     }
 }
 
-/// The configuration editor: a name, the whole settings form, and a summary of
+/// The configuration editor: a name, the model settings form, and a summary of
 /// what saving will start, in one sheet. Each instance owns an independent
 /// draft, so editing one configuration never bleeds into another.
 private struct ConfigEditor: View {
@@ -414,7 +415,7 @@ private struct ConfigEditor: View {
         let mode = draft.settings.modelMode == .local
             ? L10n.string("mode.local.short")
             : L10n.string("mode.upstream.short")
-        return "\(mode) · \(draft.settings.kvFormat.uppercased())"
+        return "\(mode) · \(draft.settings.kvFormat.uppercased()) · \(L10n.string("speculation.\(draft.settings.speculation)"))"
     }
 
     var body: some View {
@@ -541,11 +542,6 @@ private struct ConfigEditor: View {
                 Label(L10n.string("config.needs_model"), systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 10.5))
                     .foregroundStyle(SplashPalette.amber)
-            } else if draft.settings.lanAccess && draft.settings.apiKey.isEmpty {
-                Label(L10n.string("help.lan_access.no_key"), systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(SplashPalette.amber)
-                    .lineLimit(1)
             }
         }
         .padding(.horizontal, 20)

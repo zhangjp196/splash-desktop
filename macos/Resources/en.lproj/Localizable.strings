@@ -2,7 +2,7 @@
 "mode.local" = "Local folder";
 "model.picker" = "Model mode";
 "section.model" = "Model";
-"section.model.help" = "What to serve, and where it lives.";
+"section.model.help" = "The model to serve, its files and text-only mode.";
 "section.server" = "Server";
 "section.server.help" = "Port, network access and KV precision.";
 "section.memory" = "Memory";
@@ -245,8 +245,8 @@
 "config.eyebrow.edit" = "Edit configuration";
 "config.name.placeholder" = "Name this configuration";
 "config.changed" = "Unsaved changes";
-"config.sections" = "Settings";
-"config.hint" = "Only this configuration changes. Start applies it.";
+"config.sections" = "Model";
+"config.hint" = "Only this configuration\u2019s model. The Settings tab holds everything the server shares.";
 "config.needs_model" = "Choose a model before saving.";
 "config.group.mode" = "What to serve";
 "config.review" = "When you start";
@@ -490,7 +490,7 @@
 
 // The three sections the editor's rail now groups the settings into.
 "section.serving" = "Serving";
-"section.serving.help" = "Precision, memory, scheduling and request limits.";
+"section.serving.help" = "Precision, admission, prefill pacing and thinking defaults for this model.";
 "section.storage" = "Storage";
 "section.storage.help" = "Idle release, the SSD cache and eviction.";
 
@@ -516,16 +516,53 @@
 
 // Speculation: how decode proposes tokens.
 "field.speculation" = "Speculation";
-"help.speculation" = "Auto uses a compatible DFlash2 draft and falls back to none; None serves the target alone; DFlash2 requires the draft; MTP records a built-in head, which this release reports but does not run yet.";
+"help.speculation" = "Auto uses the draft the configuration provides, and serves the target alone when there is none; DFlash2 requires the draft; MTP records a built-in head, which this release reports but does not run yet.";
 "speculation.auto" = "Auto";
-"speculation.none" = "None";
 "speculation.dflash2" = "DFlash2";
 "field.require_draft" = "Require draft";
 "help.require_draft" = "Refuse to start when the requested draft cannot be used.";
-"help.speculation.none" = "No draft is loaded; decode runs the target alone.";
 "live.speculation" = "Speculation";
 "live.caption.speculation_rows" = "%d rows a cycle";
 "live.caption.speculation_fallback" = "fell back: %@";
 "live.caption.available_mtp" = "%d built-in MTP layers";
 "speculation.mtp" = "MTP";
 "help.speculation.mtp" = "An external MTP head folder is installed as data; this release reports it but does not run it yet. Empty uses the target's built-in head.";
+
+// The app-wide Settings tab: what every model configuration shares.
+"view.settings" = "Settings";
+"sidebar.app" = "App";
+"settings.eyebrow" = "Application";
+"settings.subtitle" = "App-wide preferences, and the server settings every model configuration shares.";
+"settings.sections" = "Sections";
+"settings.hint" = "Server settings apply at the next start; application choices apply at once.";
+"settings.next_start" = "Next start";
+"settings.review" = "What every start uses";
+"settings.review.on" = "On";
+"settings.review.off" = "Off";
+"settings.section.connection" = "Connection";
+"settings.section.connection.help" = "The port, LAN access and the Host names the server accepts.";
+"settings.section.access" = "Access";
+"settings.section.access.help" = "The API key, served names and the request limits every model shares.";
+"settings.section.serving.help" = "Precision, admission and the thinking defaults the engine applies.";
+"settings.section.storage" = "Storage";
+"settings.section.storage.help" = "Idle release and the SSD cache that outlive a request.";
+"settings.help.port" = "The loopback port the API listens on; every configuration uses it.";
+"settings.help.lan_access" = "Listen on every interface so other devices on the network can reach the server.";
+"section.draft" = "Draft";
+"section.draft.help" = "Speculation and the draft that proposes tokens.";
+"config.group.thinking" = "Thinking defaults";
+"residency.prompt" = "follows idle release";
+
+"settings.reset.help" = "Restore the shared settings to their first-launch values";
+"settings.reset.title" = "Restore the shared settings?";
+"settings.reset.message" = "The endpoint, access, serving and storage settings return to their first-launch values. Your model configurations are not changed.";
+
+"settings.section.application" = "Application";
+"settings.section.application.help" = "Appearance, language and where downloads come from.";
+"settings.group.application" = "Appearance and language";
+"settings.help.appearance" = "Follow the system, or keep the window dark or light.";
+"settings.help.language" = "The window and the chat page follow this choice.";
+"settings.source.base.prompt" = "Hugging Face default";
+"download.base.help" = "Where models and drafts land; empty uses the Hugging Face cache under your home folder.";
+"download.endpoint.help" = "The Hub to ask; empty uses huggingface.co. A mirror or proxy URL works.";
+"settings.review.application" = "App preferences";

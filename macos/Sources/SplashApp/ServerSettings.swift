@@ -1,7 +1,8 @@
 import Foundation
 
-/// The control panel's settings as one value: what the form edits, what SQLite
-/// keeps between launches, and what Restore Defaults returns to. `default` is
+/// The control panel's settings as one value: the model-owned share a
+/// configuration edits, the app-wide share the Settings page edits, and what
+/// a launch reads. SQLite keeps the whole value between launches. `default` is
 /// the state the app is in when it is first opened, which is the state the
 /// defaults button restores.
 struct ServerSettings: Codable, Equatable {
@@ -78,7 +79,7 @@ struct ServerSettings: Codable, Equatable {
     static let draftModes = ["none", "folder", "hub"]
     /// How decode proposes tokens: automatic (a compatible DFlash2 draft,
     /// else none), none (autoregressive), or DFlash2 explicitly.
-    static let speculationModes = ["auto", "none", "dflash2", "mtp"]
+    static let speculationModes = ["auto", "dflash2", "mtp"]
     static let stateFormats = ["fp32", "bf16"]
     static let verifyRowsOptions = ["auto", "all"]
     /// The eviction presets by level, and the policies a custom one picks.

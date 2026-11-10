@@ -33,33 +33,42 @@ installing it nor its first run needs anything but the model you choose.
    point a coding agent at the server.
 
 To reach the server from another device on the same network, turn on **Allow
-access from other devices** in the configuration's **Server** section: it
-starts the server with `--host 0.0.0.0`, so this Mac's IP address works from
-the other device. Set an **API key** in the **Requests and access** section at
-the same time — without one, anyone on the network can use the model. Reaching
-it over a name rather than an IP, such as `mymac.local` or a tunnel domain,
-also lists that name in **Extra host names** (each becomes `--allowed-host`).
-These edits apply to the next start.
+access from other devices** in the **Settings** tab's **Connection** section:
+it starts the server with `--host 0.0.0.0`, so this Mac's IP address works from
+the other device. Set an **API key** in the **Access** section at the same
+time — without one, anyone on the network can use the model. Reaching it over
+a name rather than an IP, such as `mymac.local` or a tunnel domain, also lists
+that name in **Extra host names** (each becomes `--allowed-host`). These edits
+apply to the next start.
 
 The window is a dark-first dashboard — an aurora backdrop behind translucent
 cards — with a sidebar of **Chat**, **Models**, **Live**, **Thermal**, **Log**,
-and **About**, and the run state and Start and Stop pinned beneath it. Move
-between pages with ⌘1–⌘6, open the ⌘K command palette to jump or run a server
-action, and switch between dark, light, and the system appearance from the
-toolbar. Closing the window keeps a miniature live dashboard in the menu bar.
+**Settings**, and **About**, and the run state and Start and Stop pinned
+beneath it. Move between pages with ⌘1–⌘7, open the ⌘K command palette to jump
+or run a server action, and switch between dark, light, and the system
+appearance from the toolbar. Closing the window keeps a miniature live
+dashboard in the menu bar.
 
 - **Chat** — the conversation, in the window: history, a new chat, and one
   click to clear it. The same page still opens in a browser for anyone using
   the server directly, in the same aurora palette.
-- **Models** — the configurations you have saved, each holding the whole set
-  of server settings: add, edit, and switch between them, or aim one at a
-  model folder on your disk. Each configuration also chooses how decode
-  speculates — **Auto** (a compatible DFlash2 draft, else none), **None**
-  (autoregressive), **DFlash2**, or **MTP** (a built-in head this release
-  reports but does not run yet) — and whether a draft is required. The
-  editor keeps its sections in a rail beside card-style rows, with the
-  explanation under each field and a strip at the foot showing what Start
-  would use.
+- **Models** — the configurations you have saved: add, edit, and switch
+  between them, or aim one at a model folder on your disk. A configuration
+  holds what belongs to its model — the target, its files and text-only mode,
+  the DFlash2 draft, and the memory budget — and how that model's engine runs:
+  KV and recurrent-state precision, the neural engine, admission, prefill
+  pacing and thinking defaults. It also chooses how decode speculates —
+  **Auto** (the draft the configuration provides, or the target alone when
+  there is none), **DFlash2**, or **MTP** (a built-in head this release
+  reports but does not run yet) — and whether a draft is required. The editor keeps its sections in
+  a rail beside card-style rows, with the explanation under each field and a
+  strip at the foot showing what Start would use.
+- **Settings** — the app's own **Application** preferences (appearance,
+  interface language and download source) beside what every configuration
+  shares: the port, LAN access and extra host names; the API key, served names
+  and request limits; and the idle release and SSD cache. The server settings
+  apply to every start, so a new configuration does not repeat what the app
+  already knows; application choices apply at once.
 - **Live** — the engine's request lifecycle in real time (**Queued**,
   **Prefill**, **Decode**, **Idle**), decode and prefill sparklines over the
   last minute with hover scrubbing, DFlash 2 acceptance and the speculation
@@ -137,9 +146,8 @@ in Chat. Anthropic Messages requests reason only when they set `thinking`.
 ## Models
 
 Splash supports these model families. A matching DFlash2 draft is selected
-automatically; `--no-draft` serves the target alone when a draft is not
-wanted or not available. `auto` falls back to no speculation with a warning,
-and `--require-draft` refuses instead.
+automatically from the configuration; a model with none is served alone, and
+`--require-draft` refuses a missing draft instead.
 
 | Model | GGUF example | MLX 4-bit |
 | --- | --- | --- |
