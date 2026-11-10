@@ -67,8 +67,26 @@ LINK_STAGING = ".prepare-"
 ENTRY_STAGING = ".loading-"
 
 
+# The speculation modes a selection names. auto takes the draft the
+# configuration provides (the family's release or --draft-model) and serves
+# without one when there is none; a provider names the draft's implementation.
+SPECULATION_MODES = ("auto", "dflash2", "mtp", "dspark")
+
+
 class ModelError(RuntimeError):
     pass
+
+
+def speculation_mode(value):
+    """The mode a selection names; `none` was one before this release, and is
+    auto now: the draft is whatever the configuration provides."""
+    mode = "auto" if value is None or value == "none" else value
+    if mode not in SPECULATION_MODES:
+        raise ModelError(
+            f"speculation {value} is not one this release implements; "
+            "use auto, dflash2, mtp or dspark"
+        )
+    return mode
 
 
 class VisionError(ModelError):
@@ -346,9 +364,8 @@ class Selection:
     # The vision projector a local GGUF target names, instead of the one the
     # installer selects from the directory and the Hub.
     mmproj: Path | None = None
-    # auto (a compatible draft when one resolves, else none), none, or a
-    # provider this release implements (dflash2). MTP and DSpark are refused
-    # by the installer until their providers land.
+    # auto (the draft the configuration provides, else none) or a provider
+    # this release implements. DSpark is refused until its provider lands.
     speculation: str = "auto"
     require_draft: bool = False
 
@@ -367,6 +384,7 @@ class Selection:
         require_draft=False,
     ):
         models_root = Path(models_root).resolve()
+        speculation = speculation_mode(speculation)
         if mmproj is not None:
             mmproj = Path(mmproj).expanduser().resolve()
             if directory is None:
@@ -534,10 +552,10 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--speculation",
-        choices=("auto", "none", "dflash2", "mtp", "dspark"),
+        metavar="MODE",
         default="auto",
-        help="how decode proposes tokens: auto (a compatible draft, else none), "
-        "none (autoregressive), or a provider this release implements",
+        help="how decode proposes tokens: auto (the configured draft, or none), "
+        "or a provider this release implements",
     )
     parser.add_argument(
         "--require-draft",
@@ -564,10 +582,10 @@ def parse_args(argv=None):
             parser.error("--mmproj requires --model-dir")
         if args.language_only:
             parser.error("--mmproj and --language-only are exclusive")
-    if args.speculation == "none" and args.draft_model is not None:
-        parser.error("--speculation none and --draft-model are exclusive")
-    if args.speculation == "none" and args.require_draft:
-        parser.error("--require-draft needs a draft provider")
+    try:
+        args.speculation = speculation_mode(args.speculation)
+    except ModelError as error:
+        parser.error(str(error))
     if args.speculation == "mtp" and args.require_draft:
         parser.error("MTP execution is not implemented; --require-draft is not available for it")
     if args.speculation == "mtp" and args.draft_model is not None:
@@ -575,7 +593,7 @@ def parse_args(argv=None):
     if args.speculation == "dspark":
         parser.error(
             "--speculation dspark is not implemented by this release; "
-            "use auto, none, dflash2 or mtp"
+            "use auto, dflash2 or mtp"
         )
     return args
 

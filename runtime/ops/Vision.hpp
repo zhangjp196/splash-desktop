@@ -8,10 +8,10 @@
 
 namespace splash::ops {
 
-// A vision tower's geometry. The defaults are the one tower the kernels are
-// specialized for, Qwen3.5's 27 blocks; outputHiddenSize, the width of the
-// text model its merger projects into, is each family's, stated beside its
-// target (Qwen3_8.hpp, Qwen3_6Moe.hpp).
+// A vision tower's geometry, read from a model's vision_config
+// (ModelDescriptor.mm) or defaulted to Qwen3.5's 27-block tower, which the
+// tests use. outputHiddenSize, the width of the text model its merger
+// projects into, is each family's.
 struct VisionLayout final {
   uint32_t depth = 27;
   uint32_t hiddenSize = 1152;
@@ -28,6 +28,11 @@ struct VisionLayout final {
 
   bool operator==(const VisionLayout &) const = default;
 };
+
+// Throws unless the tower is one the kernels run: the widths their tiles
+// stride over, a head dimension an attention variant covers, and a merger
+// whose four-patch rows the shared tile reads.
+void requireTowerLayout(const VisionLayout &layout);
 
 struct VisionAffine final {
   metal::MetalBuffer weight;

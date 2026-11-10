@@ -298,13 +298,13 @@ class LocalModelTest(unittest.TestCase):
             self.prepare(target, draft)
         (target / "preprocessor_config.json").write_text(json.dumps(PROCESSOR))
         config = json.loads((target / "config.json").read_text())
-        tower = config["vision_config"] | {"depth": 1}
+        tower = config["vision_config"] | {"hidden_size": 1536}
         (target / "config.json").write_text(
             json.dumps(config | {"vision_config": tower})
         )
         with self.assertRaisesRegex(
             models.VisionError,
-            "vision config.*; pass language_only=True to serve text only",
+            "vision tower.*; pass language_only=True to serve text only",
         ):
             self.prepare(target, draft)
         (target / "config.json").write_text(json.dumps(config))
@@ -536,11 +536,11 @@ if __name__ == "__main__":
 
 
 class NoDraftLocalModelTest(LocalModelTest):
-    """A plan without a draft: the target alone is a complete model."""
+    """A target whose configuration provides no draft is a complete model."""
 
     def test_a_target_without_a_draft_publishes_a_none_plan(self):
         target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
-        prepared = self.prepare(target, speculation="none")
+        prepared = self.prepare(target)
         record = assembly.verify(prepared, full=True)
         self.assertEqual(record["version"], 2)
         self.assertEqual(record["speculation"]["provider"], "none")
@@ -552,8 +552,8 @@ class NoDraftLocalModelTest(LocalModelTest):
 
     def test_preparing_the_same_target_without_a_draft_returns_the_same_link(self):
         target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
-        first = self.prepare(target, speculation="none")
-        second = self.prepare(target, speculation="none")
+        first = self.prepare(target)
+        second = self.prepare(target)
         self.assertEqual(first, second)
 
     def test_a_gguf_draft_is_converted_into_the_release_layout(self):
@@ -658,18 +658,10 @@ class NoDraftLocalModelTest(LocalModelTest):
         with self.assertRaisesRegex(models.ModelError, "no built-in MTP head"):
             self.prepare(target, speculation="mtp")
 
-    def test_a_draft_and_a_none_plan_are_exclusive(self):
+    def test_the_legacy_none_mode_is_auto(self):
         target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
         draft = draft_dir(self.root / "draft", MOE)
-        with self.assertRaises(models.ModelError):
-            self.prepare(target, draft, speculation="none")
-
-    def test_the_none_selection_link_differs_from_the_auto_one(self):
-        target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
-        auto = models.prepared_selection_link(
-            self.models, target, None, None, False, "auto"
-        )
-        none = models.prepared_selection_link(
-            self.models, target, None, None, False, "none"
-        )
-        self.assertNotEqual(auto, none)
+        # `none` named no draft before this release; the configuration now
+        # decides, so the draft it names is used.
+        legacy = self.prepare(target, draft, speculation="none")
+        self.assertEqual(legacy, self.prepare(target, draft))

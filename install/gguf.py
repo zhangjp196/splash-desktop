@@ -357,6 +357,10 @@ def model_config(metadata, vision=None):
     if architecture.text_config is not None:
         text.update(architecture.text_config(metadata, arch))
     if architecture.flat:
+        # A flat config holds its text keys at the top level, and a vision
+        # tower's beside them, where the engine reads it (ModelDescriptor.mm).
+        if vision is not None:
+            text["vision_config"] = vision_config(vision)
         return text
     config = {
         "model_type": architecture.model_type.removesuffix("_text"),

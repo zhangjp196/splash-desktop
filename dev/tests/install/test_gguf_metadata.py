@@ -897,8 +897,8 @@ class GgufMetadataTests(unittest.TestCase):
             )[0],
             "Model-mmproj-BF16.gguf",
         )
-        with self.assertRaisesRegex(models.ModelError, "no GGUF named mmproj"):
-            upstream.select_vision(projectors())
+        # A repository that names no projector describes a text-only model.
+        self.assertIsNone(upstream.select_vision(projectors()))
 
     def test_metadata_cache_hit_integrity_and_atomic_failure(self):
         path = write_gguf(self.root / "model.gguf", fixture())

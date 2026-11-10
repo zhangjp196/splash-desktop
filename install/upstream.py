@@ -213,13 +213,16 @@ def select_vision(repo):
     by content among its root GGUF files named mmproj, whatever the publisher
     calls them: a projector Splash loads (read_projector) of BF16, F32 or F16
     weights, preferred in that order, else one of Q8_0 weights, a quantized
-    tower. Each header costs a few range requests."""
+    tower. Each header costs a few range requests. None when the repository
+    names no projector."""
     usable, found = {"BF16": [], "F32": [], "F16": [], "Q8_0": []}, []
     for name in filter(projector_named, root_ggufs(repo.files)):
         header, precision, kind = read_projector(repo, name)
         found.append(f"{name} ({kind})")
         if precision:
             usable[precision].append((name, header))
+    if not found:
+        return None
     for precision, projectors in usable.items():
         if len(projectors) == 1:
             return projectors[0]
@@ -367,9 +370,8 @@ def gguf_target(repo, names, scratch, *, projector=None):
     """The GGUF target whose files in repo are names, one or a split GGUF's
     parts in split order, its configuration and metadata written into
     scratch. projector, for a model that serves images, gives the name and
-    header of its vision projector in repo (select_vision): called once the
-    text configuration passed, for a family whose models have a vision
-    tower; the others serve text only."""
+    header of its vision projector in repo (select_vision), or None when the
+    repository names none."""
     headers = []
     for part in names:
         with repo.open(part) as stream:
@@ -385,8 +387,9 @@ def gguf_target(repo, names, scratch, *, projector=None):
     family = check_model("gguf", "none", config, gguf_metadata=metadata)
     gguf.require_loadable(header)
     vision_format = "none"
-    if projector is not None and family.vision:
-        name, vision_header = projector(repo)
+    selected = None if projector is None else projector(repo)
+    if selected is not None:
+        name, vision_header = selected
         try:
             _validate_processor(gguf.processor_config(vision_header))
             config.write_bytes(
@@ -404,7 +407,8 @@ def gguf_target(repo, names, scratch, *, projector=None):
 
 
 def mlx_target(repo, language_only):
-    """The MLX target in repo, which serves images unless language_only."""
+    """The MLX target in repo: its vision tower when its configuration
+    describes one (describes_vision), unless language_only."""
     required = {"config.json", "tokenizer.json", "tokenizer_config.json"}
     missing = sorted(required - repo.files)
     if missing:
@@ -413,29 +417,18 @@ def mlx_target(repo, language_only):
             "Configuration, tokenizer and processor must come from the target "
             "repository"
         )
-    # Serving text only drops the processor requirement and no other; a
-    # family without a vision tower serves text only whatever its repository
-    # holds. A config that cannot be read is only reported as such when the
-    # repository has a processor; otherwise the missing metadata is the
-    # refusal, as it was before the family was known.
+    config = repo.file("config.json")
+    family = check_model("mlx-affine", "none", config)
+    # The configuration, not the family, says whether the model serves images;
+    # a tower it describes needs the processor and the shards holding it.
+    text_only = language_only or not describes_vision(models.read_json(config))
     processor = any(n in repo.files for n in PROCESSOR_FILES)
-    if not language_only and not processor:
-        raise models.VisionError(
-            f"target repository {repo.name} is missing: "
-            f"{' or '.join(PROCESSOR_FILES)}. Configuration, tokenizer and "
-            "processor must come from the target repository"
-        )
-    family = check_model("mlx-affine", "none", repo.file("config.json"))
-    # A family without a vision tower serves text only whatever its repository
-    # holds.
-    text_only = language_only or not family.vision
     if not text_only and not processor:
         raise models.VisionError(
             f"target repository {repo.name} is missing: "
             f"{' or '.join(PROCESSOR_FILES)}. Configuration, tokenizer and "
             "processor must come from the target repository"
         )
-    config = repo.file("config.json")
     files = {
         path: "config.json"
         for path in ("config.json", "target/config.json", "tokenizer/config.json")
@@ -464,6 +457,13 @@ def mlx_target(repo, language_only):
         files["vision/config.json"] = "config.json"
         files |= {"vision/" + n: n for n in shards}
     return Target("mlx-affine", vision_format, config, None, family, files, _mtp_layers(config))
+
+
+def describes_vision(config):
+    """Whether a target configuration describes a vision tower: the
+    vision_config object the engine holds a vision source to
+    (validateVisionConfig in ModelDescriptor.mm)."""
+    return isinstance(config.get("vision_config"), dict)
 
 
 def _image_processor(repo):
@@ -584,7 +584,7 @@ def prepare(selection):
         with hub.as_model_errors(f"cannot install {selection.model}"):
             manifest = models.read_json(target.file("manifest.json"))
         models.refuse_package(selection.model, manifest)
-    if selection.speculation in ("none", "mtp"):
+    if selection.speculation == "mtp":
         _prepare_without_draft(selection, target, installed)
         return
     if installed is not None and target.revision == installed_commit:
@@ -649,7 +649,7 @@ def prepare_local(selection):
             installed = assembly.verify(selection.link)
         except (models.ModelError, OSError) as error:
             print(f"Reinstalling {selection.model}: {error}", flush=True)
-    if selection.speculation in ("none", "mtp"):
+    if selection.speculation == "mtp":
         _prepare_without_draft(selection, repo, installed, projector=projector)
         return
     if selection.draft_model is None:
@@ -671,10 +671,9 @@ def prepare_local(selection):
 
 
 def _prepare_without_draft(selection, repo, installed, **options):
-    """Start or install the plan without a draft, reusing an installed one
-    that already serves without speculation."""
-    expected = "mtp" if selection.speculation == "mtp" else "none"
-    if installed is not None and installed.get("speculation", {}).get("provider") == expected:
+    """Start or install a plan without an external draft, the target's
+    built-in MTP head, reusing an installed one."""
+    if installed is not None and installed.get("speculation", {}).get("provider") == "mtp":
         if (replaced := _retain_installed(selection)) is None:
             print(
                 f"Splash model {selection.model} is already installed in "
@@ -730,14 +729,22 @@ def _start_installed(selection, target, installed):
         )
     recorded = installed["sources"]["target"]
     family = families.named(installed["family"])
-    draft = family and _resolve_draft(family, selection, installed, target)
+    draft = None
+    if family is not None:
+        try:
+            draft = _resolve_draft(family, selection, installed, target)
+        except models.ModelError as error:
+            if selection.require_draft or selection.speculation != "auto":
+                raise
+            if selection.draft_model or families.draft_candidates(family):
+                models.warn(f"serving without speculation: {error}")
     if draft and draft.unreachable_reason:
         print(
             f"Could not reach the Hub ({draft.unreachable_reason}); "
             f"using the installed draft {_at(draft)}.",
             flush=True,
         )
-    if changes := _changes(installed, family, draft):
+    if changes := _changes(installed, family, draft, selection, target):
         print(f"Updating {selection.model}: {'; '.join(changes)}.", flush=True)
         with _keeping_installation(
             selection, installed, f"update it ({'; '.join(changes)})"
@@ -815,8 +822,8 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
     and publish the assembly at the selection link. draft is the draft's
     repository as this start resolved it, or None to resolve it here, asking
     the Hub only when it answered for repo. projector names the target's
-    vision projector (select_vision). A selection with --speculation none
-    resolves no draft and publishes a plan without one."""
+    vision projector (select_vision). A selection with --speculation mtp
+    publishes the target's built-in head as plan data."""
     # Every Hub request (header reads, downloads) happens here.
     with (
         hub.as_model_errors(f"cannot install {selection.model}"),
@@ -825,30 +832,24 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
         target = inspect_target(
             repo, selection.variant, selection.language_only, Path(scratch), projector
         )
-        no_draft = selection.speculation == "none"
-        provider = "mtp" if selection.speculation == "mtp" else (
-            "none" if no_draft else "dflash2"
-        )
+        provider = "mtp" if selection.speculation == "mtp" else "dflash2"
         if provider == "mtp" and selection.draft_model is None and target.mtp_layers <= 0:
             raise models.ModelError(
                 f"{selection.model} has no built-in MTP head "
                 f"(num_nextn_predict_layers is zero)"
             )
-        if no_draft:
-            draft = None
-        elif provider == "mtp" and selection.draft_model is not None:
+        if provider == "mtp":
             # An external MTP head is installed as data; this build reports it
             # but does not run it yet.
-            draft = _local_draft(selection, installed)
+            draft = _local_draft(selection, installed) if selection.draft_model else None
         elif draft is None:
             try:
                 draft = _resolve_draft(target.family, selection, installed, repo)
             except models.ModelError as error:
-                # auto falls back to the target alone; an explicit provider
-                # or --require-draft refuses instead.
                 if selection.require_draft or selection.speculation != "auto":
                     raise
-                models.warn(f"serving without speculation: {error}")
+                if selection.draft_model or families.draft_candidates(target.family):
+                    models.warn(f"serving without speculation: {error}")
                 draft = None
         files = {}
         alignment = None
@@ -996,11 +997,10 @@ def _file_records(previous, paths):
     }
 
 
-def _changes(installed, family, draft):
+def _changes(installed, family, draft, selection, target):
     """What a start changes in a verified assembly of the target's installed
-    commit: the draft, when draft, as this start resolved it, is another
-    repository or commit, or the GGUF metadata, when this release derives it
-    otherwise."""
+    commit: the draft as this start resolved it, the GGUF metadata, and the
+    vision the target's configuration describes."""
     if family is None:
         return [f"no supported family is named {installed['family']}"]
     changes = []
@@ -1020,7 +1020,36 @@ def _changes(installed, family, draft):
         "metadata"
     ] != assembly.metadata_key(installed["files"]):
         changes.append("the GGUF metadata adapter changed")
+    # A release that read vision from the family installed a target text
+    # only; an installation of another vision format is replaced.
+    if not selection.language_only:
+        described = _described_vision(installed, selection.link, target)
+        if described is not None and described != installed["vision_format"]:
+            changes.append(
+                "its configuration now describes a vision tower"
+                if described != "none"
+                else "its configuration describes no vision tower"
+            )
     return changes
+
+
+def _described_vision(installed, link, target):
+    """The vision format the target's configuration describes now: an MLX
+    target's linked config.json (describes_vision), or a GGUF repository
+    naming a projector. None when a GGUF repository was not listed."""
+    if installed["target_format"] == "mlx-affine":
+        return (
+            "safetensors"
+            if describes_vision(models.read_json(link / "config.json"))
+            else "none"
+        )
+    if not target.files:
+        return None
+    return (
+        "gguf"
+        if any(projector_named(name) for name in root_ggufs(target.files))
+        else "none"
+    )
 
 
 def _resolve_draft(family, selection, installed, target):

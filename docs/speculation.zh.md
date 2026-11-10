@@ -225,7 +225,7 @@ model::Runtime::decodeAsync()  DFlash 提议 8 行 → target 验证 → 接受
 | 模块 | 职责 | 不做什么 |
 |---|---|---|
 | `install` 下的 `speculation.py` | plan 类型、解析优先级、候选选择、alignment 比较 | 不下载、不读权重 |
-| `install/families.py` | 家族默认 provider 候选、chat/vision 元数据 | 不判断仓库名兼容性 |
+| `install/families.py` | 家族默认 provider 候选、chat 元数据 | 不判断仓库名兼容性，也不判断 vision（由目标配置决定） |
 | `install/upstream.py` | 解析 revision、检查、下载、发布 | 不实现 provider 算法 |
 | `install/local.py` | 本地文件/目录的 plan 解析 | 不发网络请求 |
 | `install/assembly.py` | record schema、verify、GC | 不解释 provider 语义 |
@@ -686,39 +686,35 @@ acceptance 不低于 DFlash2 才转正。
 
 | 选项 | 取值 | 默认 | 说明 |
 |---|---|---|---|
-| `--speculation` | `auto`/`none`/`dflash2`/`mtp`/`dspark` | `auto` | 显式 provider |
-| `--no-draft` | flag | — | `--speculation none` 的别名 |
+| `--speculation` | `auto`/`dflash2`/`mtp`/`dspark` | `auto` | 显式 provider |
+| `--no-draft` | flag | — | 兼容旧值，等同 `auto` |
 | `--draft-model` | `OWNER/REPO` 或本地路径 | — | 显式 draft 来源（保留现有语义） |
 | `--draft-format` | `auto`/`safetensors`/`gguf` | `auto` | 容器选择 |
 | `--require-draft` | flag | — | fallback = required |
 | `--draft-revision` | commit/tag/branch | 默认分支 | draft 独立 revision |
 | `--list-speculation` | flag | — | 打印可选 provider 与原因 |
 
-`--no-draft` 与 `--draft-model` 互斥；`--speculation none` 与
-`--draft-model` 互斥；`--require-draft` 与 `--speculation none` 互斥。
+`--speculation dflash2` 与 MTP head 不匹配；`--require-draft` 要求草稿可解析。
 
 ### 7.2 优先级
 
-1. `--speculation none` / `--no-draft` → 直接 `none`。
-2. `--speculation dflash2|mtp|dspark` → 该 provider；缺来源则报错或回退。
-3. `--draft-model` → 由内容探测 provider/format，覆盖家族默认。
-4. target 自身声明：
+1. `--speculation dflash2|mtp|dspark` → 该 provider；缺来源则报错或回退。
+2. `--draft-model` → 由内容探测 provider/format，覆盖家族默认。
+3. target 自身声明：
    - MLX `config.json` 的 `speculation` 对象；
    - GGUF 的 `splash.speculation` KV；
    - 内置 MTP 的 `nextn_predict_layers`（仅当用户选 `mtp` 或 `auto`）。
-5. family registry 的默认候选。
-6. `none`。
+4. family registry 的默认候选。
+5. `none`。
 
-`auto` 的语义：能解析到兼容 draft 就用；解析不到就用 `none`，并记录原因。
+`auto` 的语义：能解析到兼容 draft 就用；解析不到就用 `none`。
 `dflash2`/`mtp`/`dspark` 的语义：必须用该 provider，解析不到则按 `fallback`
 处理（默认回退 `none`，`--require-draft` 则失败）。
 
 ### 7.3 冲突规则
 
-- `--speculation none --draft-model X`：参数错误。
 - `--speculation dflash2` + 路径是 MTP head：参数错误（provider 不匹配）。
 - `--draft-format gguf` + 仓库只有 safetensors：解析错误，不自动换格式。
-- `--require-draft` + `--speculation none`：参数错误。
 - `--model-dir` + `--draft-model` 指向 target 目录内部：拒绝（与现有
   `_gguf_in`/`_split_parts` 的规则一致）。
 
@@ -764,14 +760,14 @@ ModelFamily(
 `Selection` 增加：
 
 ```python
-speculation: str          # auto/none/dflash2/mtp/dspark
+speculation: str          # auto/dflash2/mtp/dspark
 draft_format: str         # auto/safetensors/gguf
 require_draft: bool
 ```
 
 `selection_link()`、`local_selection_link()`、`prepared_selection_link()` 的
-哈希输入都加入这些字段。这样 `--model X` 与 `--model X --no-draft` 是两个
-安装，互不覆盖。
+哈希输入都加入这些字段。这样 `--model X` 与 `--model X --draft-model D` 是两
+个安装，互不覆盖。
 
 ---
 
@@ -869,7 +865,6 @@ class ModelFamily:
     name: str
     speculation: tuple[Candidate, ...]
     chat_format: ChatFormat
-    vision: bool = True
     supports_builtin_mtp: bool = False
 
     @property
@@ -952,7 +947,7 @@ def _install(selection, repo, installed, plan, projector):
 示例：
 
 ```python
-model.add_argument("--speculation", choices=("auto", "none", "dflash2", "mtp", "dspark"),
+model.add_argument("--speculation", choices=("auto", "dflash2", "mtp", "dspark"),
                    default="auto")
 model.add_argument("--no-draft", action="store_true")
 model.add_argument("--draft-format", choices=("auto", "safetensors", "gguf"), default="auto")

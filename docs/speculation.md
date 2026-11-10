@@ -180,8 +180,8 @@ tested against.
 One function, shared by `splash serve`, `--model-dir` and
 `prepare_local_model`, decides the plan:
 
-1. `--speculation none|dflash2|mtp|dspark` (new; `--no-draft` is an alias for
-   `none`).
+1. `--speculation auto|dflash2|mtp|dspark` (new; `--no-draft` is accepted as
+   `auto`).
 2. `--draft-model REPO|PATH` (existing) and its format probe.
 3. A declaration in the target's own configuration: an MLX `speculation`
    object, or the GGUF key `splash.speculation`.
@@ -189,8 +189,8 @@ One function, shared by `splash serve`, `--model-dir` and
 5. `none`.
 
 Explicit input wins, and a conflicting explicit pair is an error rather than a
-guess: `--speculation none --draft-model X` is refused, and so is
-`--speculation dflash2` with a path whose config is an MTP head.
+guess: `--speculation dflash2` with a path whose config is an MTP head is
+refused.
 
 `--draft-format auto|safetensors|gguf` resolves the container when a
 repository holds both, such as a `z-lab` mirror beside its GGUF conversion.

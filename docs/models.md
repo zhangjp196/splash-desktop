@@ -303,12 +303,11 @@ place of the dense form's names.
 
 ## Drafts
 
-A model may be served without a draft: `--speculation none` (or `--no-draft`)
-installs a plan with no draft directory, and decode runs the target alone.
-A family that has a released draft still uses it under `auto`; when no
-compatible draft can be resolved, `auto` warns and serves without one, and
-`--require-draft` refuses instead. The rest of this section describes the
-DFlash2 path.
+A model decodes with the draft its configuration provides: the family's
+released DFlash2 checkpoint, or the one `--draft-model` names. A model with
+neither is installed with no draft directory and decodes alone; a draft that
+cannot be resolved is reported, and `--require-draft` refuses instead. The
+rest of this section describes the DFlash2 path.
 
 Every model with a DFlash2 draft decodes with it. Each family names the
 repository of the DFlash2 checkpoint trained for it (`families.FAMILIES`),
@@ -442,7 +441,10 @@ only `config.json` and the shards holding them, or the GGUF repository's root
 projector, a GGUF whose name holds `mmproj` (as `mmproj-BF16.gguf` or
 `MODEL-mmproj-BF16.gguf`), chosen by its header: a `clip` projector whose
 weights are BF16, F32 or F16, preferred in that order, else one of Q8_0
-weights. An F16 projector made from a BF16 tower, llama.cpp's default output,
+weights. The tower's own `vision_config` states its depth and widths, which
+the engine reads (a GGUF's from its `clip.vision` metadata): the 27-block
+tower's 72-wide heads and the 24-block tower's 64 both run. An F16 projector
+made from a BF16 tower, llama.cpp's default output,
 loads exactly: F16 rounds the
 smallest BF16 weights onto its subnormal grid, and what that keeps is still a
 BF16. A Q8_0 projector is the quantized tower llama.cpp's `--mmproj` quantizer
@@ -457,9 +459,9 @@ configuration (MLX `preprocessor_config.json`, or the
 `image_processor` object of `processor_config.json`, where newer Transformers
 releases save it; the GGUF's `clip.vision` metadata) must describe the one
 preprocessing Splash implements (`server/images.py`); it is checked before any
-weight download and not installed. The models of a family without a vision
-tower (Flint; `vision` in `install/families.py`) serve text only: their
-installation reads no projector, with or without `--language-only`.
+weight download and not installed. The target's configuration, not its
+family, decides: an MLX config with no `vision_config`, or a GGUF repository
+naming no projector, serves text only without `--language-only`.
 
 Both sources are written into one image, which the one BF16 vision operator
 reads: BF16 tensors are
@@ -636,18 +638,17 @@ splash serve --model local/qwen \
 
 `--model` remains required in `OWNER/REPO[:VARIANT]` form as the API's model
 name; it selects no files and makes no Hub request in this mode. Preparation
-never contacts the Hub, whether or not `--offline` is set. `--no-draft` (or
-`--speculation none`) prepares the target alone; it is the way to serve a
-local model whose draft is neither released nor present. Otherwise
-`--draft-model` names a local compatible DFlash2 draft directory; without it,
-the
-family's released draft must already be in the Hub cache at the commit its
-default branch records, as `hf download REPO` or `splash serve` leaves it. A
-missing draft is refused with its download instruction; it is never downloaded
+never contacts the Hub, whether or not `--offline` is set. `--draft-model`
+names a local compatible DFlash2 draft directory; without it the family's
+released draft is taken from the Hub cache at the commit its default branch
+records, as `hf download REPO` or `splash serve` leaves it. A model with no
+draft in the cache is prepared without speculation, and `--require-draft`
+refuses it with its download instruction instead; a draft is never downloaded
 implicitly.
 
 `--mmproj` supplies a local BF16, F32 or F16 GGUF vision projector. Without
-one, a GGUF serves text only. An MLX target uses its own vision tower unless
+one, a GGUF target serves text only. An MLX target serves images from the
+tower in its checkpoint, when its configuration describes one, unless
 `--language-only` is set. `--revision` cannot be combined with `--model-dir`,
 and `--mmproj` requires `--model-dir` and cannot be combined with
 `--language-only`. Files are linked, and each start prepares them again under
@@ -689,9 +690,8 @@ model's source options (`--revision`, `--draft-model`, `--language-only`,
   the commit last recorded there for its default branch, as `hf download
   incoai/Qwen3.8-27B-DFlash2` and `splash serve` record it.
 - `mmproj`: a GGUF target's vision projector ([Vision](#vision)); without
-  one, a GGUF target serves text only, and a target of a family without a
-  vision tower refuses one. An MLX target serves images with the tower in
-  its checkpoint unless `language_only=True`.
+  one, a GGUF target serves text only. An MLX target serves images from the
+  tower its configuration describes unless `language_only=True`.
 - `models_dir`: where prepared models are kept, Splash's own models
   directory by default ([files Splash writes](server.md#files-splash-writes)).
 

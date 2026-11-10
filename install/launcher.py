@@ -488,16 +488,14 @@ def parse_args(argv=None):
     )
     model.add_argument(
         "--speculation",
-        choices=("auto", "none", "dflash2", "mtp", "dspark"),
+        metavar="MODE",
         default="auto",
-        help="how decode proposes tokens: auto (a compatible draft, else none), "
-        "none (autoregressive), or a provider this release implements",
+        help="how decode proposes tokens: auto (the configured draft, or none), "
+        "or a provider this release implements",
     )
-    model.add_argument(
-        "--no-draft",
-        action="store_true",
-        help="serve without a draft; same as --speculation none",
-    )
+    # Before this release --no-draft served without one; auto is that choice
+    # when no draft is configured, so the flag is accepted and does nothing.
+    model.add_argument("--no-draft", action="store_true", help=argparse.SUPPRESS)
     model.add_argument(
         "--require-draft",
         action="store_true",
@@ -568,14 +566,10 @@ def parse_args(argv=None):
                 parser.error("--mmproj requires --model-dir")
             if args.language_only:
                 parser.error("--mmproj and --language-only are exclusive")
-        if args.no_draft and args.speculation not in ("auto", "none"):
-            parser.error("--no-draft and --speculation are exclusive")
-        if args.no_draft:
-            args.speculation = "none"
-        if args.speculation == "none" and args.draft_model is not None:
-            parser.error("--speculation none and --draft-model are exclusive")
-        if args.speculation == "none" and args.require_draft:
-            parser.error("--require-draft needs a draft provider")
+        try:
+            args.speculation = model_artifacts.speculation_mode(args.speculation)
+        except model_artifacts.ModelError as error:
+            parser.error(str(error))
         if args.speculation == "mtp" and args.require_draft:
             parser.error(
                 "MTP execution is not implemented; --require-draft is not available for it"
@@ -587,7 +581,7 @@ def parse_args(argv=None):
         if args.speculation == "dspark":
             parser.error(
                 "--speculation dspark is not implemented by this release; "
-                "use auto, none, dflash2 or mtp"
+                "use auto, dflash2 or mtp"
             )
         serve_options.check_serve_arguments(parser, args)
     if client_args and args.command == "serve":

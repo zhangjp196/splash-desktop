@@ -29,18 +29,25 @@ static_assert(sizeof(VisionNormParams) == 4,
 struct VisionGridParams {
   uint32_t grid_height;
   uint32_t grid_width;
+  uint32_t hidden_size;
+  uint32_t head_dim;
+  uint32_t grid_side;
 };
 
-static_assert(sizeof(VisionGridParams) == 8,
-              "Vision grid parameters are 8 bytes on both sides");
+static_assert(sizeof(VisionGridParams) == 20,
+              "Vision grid parameters are 20 bytes on both sides");
 
 struct VisionQkvParams {
   uint32_t tokens;
   uint32_t padded_tokens;
+  uint32_t hidden_size;
+  uint32_t head_dim;
+  uint32_t qk_dim;
+  uint32_t heads;
 };
 
-static_assert(sizeof(VisionQkvParams) == 8,
-              "Vision QKV parameters are 8 bytes on both sides");
+static_assert(sizeof(VisionQkvParams) == 24,
+              "Vision QKV parameters are 24 bytes on both sides");
 
 // Query rows of one head a vision_attention threadgroup takes, and its
 // threads: four simdgroups whose softmax gives each row four lanes; a

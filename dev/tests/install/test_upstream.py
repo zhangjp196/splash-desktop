@@ -709,25 +709,22 @@ class UpstreamTest(unittest.TestCase):
         fake = FakeHub(self, self.cache)
         for missing in required:
             with self.subTest(missing=missing):
-                fake.publish(
-                    "user/custom",
-                    "a" * 40,
-                    lambda p: (
-                        p.mkdir(parents=True, exist_ok=True),
-                        [
-                            (p / name).write_text("{}")
-                            for name in ("model.safetensors", *required)
-                            if name != missing
-                        ],
-                    ),
-                )
+
+                def build(p, missing=missing):
+                    mlx_target(p, DENSE)
+                    (p / "preprocessor_config.json").write_text(json.dumps(PROCESSOR))
+                    (p / missing).unlink()
+
+                fake.publish("user/custom", "a" * 40, build)
+                fake.downloads.clear()
                 chosen = selection(self.root, "user/custom", language_only=False)
                 with self.assertRaisesRegex(
                     models.ModelError, "must come from the target repository"
                 ) as refused:
                     self.prepare(chosen)
-                # A text-only checkpoint lacks only the processor, which either
-                # of two files holds.
+                # A target whose configuration describes a tower needs the
+                # processor, which either of two files holds; the
+                # configuration is read to know whether it does.
                 self.assertEqual(
                     "use --language-only to serve text only" in str(refused.exception),
                     missing == "preprocessor_config.json",
@@ -737,7 +734,12 @@ class UpstreamTest(unittest.TestCase):
                     in str(refused.exception),
                     missing == "preprocessor_config.json",
                 )
-                self.assertEqual(fake.downloads, [])
+                self.assertEqual(
+                    fake.downloads,
+                    ["user/custom/config.json"]
+                    if missing == "preprocessor_config.json"
+                    else [],
+                )
                 self.assertFalse(chosen.models_root.exists())
                 shutil.rmtree(fake.remote)
 
@@ -885,9 +887,9 @@ class UpstreamTest(unittest.TestCase):
             sorted(p.name for p in (chosen.link / "target").iterdir()),
             ["config.json", *sorted(set(shards.values()))],
         )
-        # A checkpoint without the tower cannot serve images, nor can a
-        # text-only conversion that keeps the processor but drops the tower's
-        # configuration too: its text configuration is checked first.
+        # A config that describes a tower the checkpoint does not hold cannot
+        # serve images; one that describes none serves text only, whatever
+        # its repository keeps beside it.
         del shards["vision_tower.blocks.0.attn.qkv.weight"]
         fake.publish("someone/text-model", "b" * 40, target)
 
@@ -898,14 +900,16 @@ class UpstreamTest(unittest.TestCase):
             (root / "config.json").write_text(json.dumps(config))
 
         fake.publish("someone/text-conversion", "c" * 40, text_conversion)
-        for model in ("someone/text-model", "someone/text-conversion"):
-            with (
-                self.subTest(model=model),
-                self.assertRaisesRegex(
-                    models.ModelError, "no vision tower; use --language-only"
-                ),
-            ):
-                self.prepare(selection(self.root, model, language_only=False))
+        with self.assertRaisesRegex(
+            models.ModelError, "no vision tower; use --language-only"
+        ):
+            self.prepare(
+                selection(self.root, "someone/text-model", language_only=False)
+            )
+        chosen = selection(self.root, "someone/text-conversion", language_only=False)
+        self.prepare(chosen)
+        self.assertEqual(assembly.verify(chosen.link)["vision_format"], "none")
+        self.assertFalse((chosen.link / "vision").exists())
 
     def test_mlx_vision_reads_the_image_processor_of_processor_config(self):
         # Newer Transformers releases save no preprocessor_config.json: the
@@ -1037,6 +1041,99 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaisesRegex(models.ModelError, "unsupported file name"):
             self.prepare(selection(self.root))
         self.assertNotIn(f"{MODEL}/model-*.safetensors", fake.downloads)
+
+    def test_a_checkpoint_that_describes_a_vision_tower_installs_it(self):
+        # Qwen3.8-4B is one family whose earlier releases served text only
+        # whatever their repository held. The configuration decides: a
+        # checkpoint that describes a tower links it, and its tied head is
+        # materialized from the token table beside it (install/tied.py).
+        family = families.named("Qwen3.8-4B")
+        shards = {
+            "vision_tower.blocks.0.attn.qkv.weight": "model-00001-of-00002.safetensors",
+            "language_model.model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+            "language_model.model.embed_tokens.scales": "model-00001-of-00002.safetensors",
+            "language_model.model.embed_tokens.biases": "model-00001-of-00002.safetensors",
+        }
+
+        def write_shard(path, tensors):
+            header, bodies, offset = {}, [], 0
+            for name, (dtype, shape, payload) in tensors.items():
+                header[name] = {
+                    "dtype": dtype,
+                    "shape": shape,
+                    "data_offsets": [offset, offset + len(payload)],
+                }
+                bodies.append(payload)
+                offset += len(payload)
+            encoded = json.dumps(header, separators=(",", ":")).encode()
+            encoded += b" " * ((8 - len(encoded) % 8) % 8)
+            path.write_bytes(
+                struct.pack("<Q", len(encoded)) + encoded + b"".join(bodies)
+            )
+
+        def target(root):
+            mlx_target(root, family)
+            (root / "model.safetensors").unlink()
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps({"weight_map": shards})
+            )
+            (root / "preprocessor_config.json").write_text(json.dumps(PROCESSOR))
+            write_shard(
+                root / "model-00001-of-00002.safetensors",
+                {
+                    "vision_tower.blocks.0.attn.qkv.weight": ("BF16", [1], b"\0\0"),
+                    "language_model.model.embed_tokens.weight": (
+                        "U32",
+                        [1, 64],
+                        b"\0" * 4,
+                    ),
+                    "language_model.model.embed_tokens.scales": (
+                        "BF16",
+                        [1, 1],
+                        b"\0\0",
+                    ),
+                    "language_model.model.embed_tokens.biases": (
+                        "BF16",
+                        [1, 1],
+                        b"\0\0",
+                    ),
+                },
+            )
+
+        repo = "someone/Qwen3.8-4B-MLX-4bit"
+        fake = FakeHub(self, self.cache)
+        fake.publish(repo, "a" * 40, target)
+        chosen = selection(self.root, repo, language_only=False)
+        output, _ = self.prepare(chosen)
+        self.assertIn("as Qwen3.8-4B (mlx-affine); draft none; vision enabled.", output)
+        record = assembly.verify(chosen.link, full=True)
+        self.assertEqual(
+            (record["family"], record["vision_format"]),
+            ("Qwen3.8-4B", "safetensors"),
+        )
+        self.assertEqual(
+            sorted(p.name for p in (chosen.link / "vision").iterdir()),
+            ["config.json", "model-00001-of-00002.safetensors"],
+        )
+        self.assertTrue((chosen.link / "target/lm_head.safetensors").exists())
+        config = models.read_json(chosen.link / "config.json")
+        self.assertFalse(config["text_config"]["tie_word_embeddings"])
+        self.assertEqual(config["vision_config"]["out_hidden_size"], 2560)
+        # An installation a release made text only at the same commit, when
+        # vision was its family's, is assembled again: the configuration it
+        # links describes a tower, which the record did not.
+        chosen.link.unlink()
+        with mock.patch.object(upstream, "describes_vision", return_value=False):
+            self.prepare(selection(self.root, repo, language_only=False))
+        self.assertEqual(assembly.verify(chosen.link)["vision_format"], "none")
+        output, _ = self.prepare(selection(self.root, repo, language_only=False))
+        self.assertIn("its configuration now describes a vision tower", output)
+        self.assertEqual(assembly.verify(chosen.link)["vision_format"], "safetensors")
+        # The family releases no draft, so a later start serves the
+        # installation without one, and without a warning about it.
+        output, warnings = self.prepare(selection(self.root, repo, language_only=False))
+        self.assertIn("is already installed", output)
+        self.assertEqual(warnings, "")
 
     def test_a_single_checkpoint_file_is_searched_for_the_tower_by_header(self):
         def checkpoint(tensors):

@@ -393,26 +393,27 @@ class FlintGgufTests(unittest.TestCase):
         self.assertIn("blk.2.ffn_gate_up_exps.weight", gguf.loaded_tensors(metadata))
 
     @staticmethod
-    def flint_gguf(path):
+    def flint_gguf(path, *, projector=True):
         """A GGUF target of Flint's header and tensor table at path, and a
-        vision projector beside it."""
+        vision projector beside it unless projector is False."""
         path.parent.mkdir(parents=True, exist_ok=True)
         fixture_files.write_gguf(
             path,
             header_values(),
             [(name, extents, kind, b"") for name, extents, kind in tensor_table()],
         )
-        write_gguf(
-            path.parent / "mmproj-F32.gguf",
-            vision_fixture(),
-            [("v.patch_embd.weight", GGML["F32"])],
-        )
+        if projector:
+            write_gguf(
+                path.parent / "mmproj-F32.gguf",
+                vision_fixture(),
+                [("v.patch_embd.weight", GGML["F32"])],
+            )
         return path
 
-    def test_a_repository_installs_text_only_without_language_only(self):
-        # Flint's models have no vision tower: an installation that serves
-        # images where it can serves Flint's text only, reads no projector its
-        # repository holds and needs no --language-only.
+    def test_a_repository_installs_the_projector_it_holds(self):
+        # Whether an installation serves images is the target configuration's
+        # answer, never its family's: a projector the repository holds is
+        # linked for Flint as for another family.
         family = families.named("Flint")
         repo, variant = "unsloth/flint-GGUF", "UD-Q4_K_XL"
         target = f"flint-{variant}.gguf"
@@ -430,18 +431,51 @@ class FlintGgufTests(unittest.TestCase):
             contextlib.redirect_stderr(io.StringIO()),
         ):
             upstream.prepare(chosen)
-        self.assertIn(
-            f"as Flint (gguf); draft {draft}; vision disabled.",
-            output.getvalue(),
+        self.assertIn("vision enabled", output.getvalue())
+        record = assembly.verify(chosen.link, full=True)
+        self.assertEqual((record["family"], record["vision_format"]), ("Flint", "gguf"))
+        self.assertEqual(
+            (chosen.link / assembly.GGUF_VISION).resolve(),
+            (fake.snapshot(repo, "a" * 40) / "mmproj-F32.gguf").resolve(),
         )
+        self.assertEqual(
+            sorted(fake.downloads),
+            sorted([f"{repo}/{target}", f"{repo}/mmproj-F32.gguf"]),
+        )
+
+    def test_a_repository_without_a_projector_serves_text_only(self):
+        # The same target without a projector: its configuration describes no
+        # vision tower, and the installation needs no --language-only.
+        family = families.named("Flint")
+        repo, variant = "unsloth/flint-GGUF", "UD-Q4_K_XL"
+        target = f"flint-{variant}.gguf"
+        fake = FakeHub(self, self.root / "hub")
+        fake.publish(
+            repo,
+            "a" * 40,
+            lambda root: self.flint_gguf(root / target, projector=False),
+        )
+        draft = draft_dir(self.root / "draft", family)
+        chosen = selection(
+            self.root,
+            f"{repo}:{variant}",
+            language_only=False,
+            draft_model=str(draft),
+        )
+        with (
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            upstream.prepare(chosen)
+        self.assertIn("vision disabled.", output.getvalue())
         record = assembly.verify(chosen.link, full=True)
         self.assertEqual((record["family"], record["vision_format"]), ("Flint", "none"))
         self.assertFalse((chosen.link / "vision").exists())
-        self.assertEqual(fake.range_reads, [f"{repo}/{target}"])
         self.assertEqual(fake.downloads, [f"{repo}/{target}"])
 
-    def test_local_files_serve_text_only_and_take_no_projector(self):
-        # Resolved, as prepare_local_model names the files it prepares.
+    def test_local_files_serve_the_projector_they_name(self):
+        # Resolved, as prepare_local_model names the files it prepares. The
+        # named projector is the installation's configuration.
         root = self.root.resolve()
         target = self.flint_gguf(root / "model" / "flint.gguf")
         mmproj = target.parent / "mmproj-F32.gguf"
@@ -454,14 +488,9 @@ class FlintGgufTests(unittest.TestCase):
                 )
 
         self.assertEqual(assembly.verify(prepare())["vision_format"], "none")
-        with self.assertRaisesRegex(
-            models.ModelError,
-            re.escape(
-                f"{mmproj} is a vision projector, which a Flint model, without a "
-                "vision tower, does not load"
-            ),
-        ):
-            prepare(mmproj=mmproj)
+        chosen = prepare(mmproj=mmproj)
+        self.assertEqual(assembly.verify(chosen)["vision_format"], "gguf")
+        self.assertEqual((chosen / assembly.GGUF_VISION).resolve(), mmproj.resolve())
 
     def test_the_fixture_metadata_is_the_header_s_scalars(self):
         # What the engine's model check takes besides the config: the

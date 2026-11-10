@@ -66,11 +66,12 @@ def prepare_local_model(
     (HF_HUB_CACHE), at the commit last recorded there for its default
     branch, as `hf download REPO` and `splash serve` record it.
     mmproj: a GGUF target's vision projector, a GGUF file, with which it
-    serves images; a GGUF target serves text only without one, as one of a
-    family without a vision tower (Flint) always does. An MLX target's
-    vision tower is in its checkpoint, and it serves images unless
+    serves images; without one it serves text only. An MLX target serves
+    images from the vision tower its configuration describes unless
     language_only.
     language_only: serve text only.
+    speculation: auto takes the draft the files provide, or none; a provider
+    this release implements names one.
     models_dir: where prepared models are kept, Splash's own models
     directory by default. Preparations there run one at a time, beside the
     installations `splash serve` makes.
@@ -107,19 +108,15 @@ def _prepare(
     target, draft, mmproj, language_only, models_root, speculation="auto", require_draft=False
 ):
     """prepare_local_model, of its paths made absolute."""
-    if speculation == "none" and draft is not None:
-        raise ModelError(
-            "a draft was given with a plan that serves without one "
-            "(speculation none)"
-        )
+    speculation = models.speculation_mode(speculation)
     if speculation == "mtp" and require_draft:
         raise ModelError(
             "MTP execution is not implemented by this release; it cannot be required"
         )
-    if speculation not in ("auto", "none", "dflash2", "mtp"):
+    if speculation not in ("auto", "dflash2", "mtp"):
         raise ModelError(
             f"speculation {speculation} is not implemented by this release; "
-            "use auto, none, dflash2 or mtp"
+            "use auto, dflash2 or mtp"
         )
     if mmproj and language_only:
         raise ModelError(
@@ -145,13 +142,14 @@ def _prepare(
                 f"{target} has no built-in MTP head (num_nextn_predict_layers is zero)"
             )
         repo = None
-        if speculation not in ("none", "mtp") or (speculation == "mtp" and draft):
+        if speculation != "mtp" or draft:
             try:
                 repo = _draft(inspected.family, draft)
             except ModelError as error:
                 if require_draft or speculation != "auto":
                     raise
-                models.warn(f"serving without speculation: {error}")
+                if draft or families.draft_candidates(inspected.family):
+                    models.warn(f"serving without speculation: {error}")
         alignment = None
         if repo is not None and speculation == "mtp":
             downloaded = repo.download(set(repo.files))
@@ -226,11 +224,6 @@ def _inspect(target, mmproj, language_only, scratch):
         inspected = upstream.gguf_target(repo, names, scratch, projector=projector)
     except models.VisionError as error:
         raise models.VisionError(f"{error}; omit mmproj to serve text only") from None
-    if mmproj and not inspected.family.vision:
-        raise ModelError(
-            f"{mmproj} is a vision projector, which a {inspected.family.name} "
-            "model, without a vision tower, does not load"
-        )
     return repo, inspected
 
 
@@ -314,7 +307,7 @@ def _main(argv=None):
     parser.add_argument("target")
     parser.add_argument("--models", type=Path, default=paths.MODELS)
     parser.add_argument("--draft-model")
-    parser.add_argument("--speculation", choices=("auto", "none", "dflash2", "mtp"), default="auto")
+    parser.add_argument("--speculation", choices=("auto", "dflash2", "mtp"), default="auto")
     parser.add_argument("--require-draft", action="store_true")
     parser.add_argument("--mmproj")
     parser.add_argument("--language-only", action="store_true")

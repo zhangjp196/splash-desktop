@@ -593,13 +593,28 @@ void testQuantization(const std::filesystem::path &fixtures) {
             "a compressed-tensors quantization was accepted with " + refused.groups);
 }
 
-// The vision tower the record names is the family's, over RGB patches of two
-// frames, without deepstack layers; a text-only installation reads none.
+// The vision tower a model's configuration describes, over RGB patches of two
+// frames, without deepstack layers; a text-only installation reads none. The
+// tower's own sizes say which one it is: the 27-block tower and the 24-block
+// one a 4B or 9B checkpoint holds both run.
 void testVisionConfig(const std::filesystem::path &fixtures) {
   const SourceModel text = mlxModel(fixtures, "qwen3.8-27b");
   require(!inspect(text.with(&SourceModel::config, R"("vision_config")", R"("unused")")).hasVision(),
           "a text-only installation read the vision config");
   const SourceModel vision = text.with(&SourceModel::record, R"("none")", R"("safetensors")");
+  const model::ModelDescriptor dense = inspect(vision);
+  require(dense.vision.depth == 27 && dense.vision.hiddenSize == 1152 && dense.vision.headDimension == 72 &&
+              dense.vision.paddedIntermediateSize == 4352 && dense.vision.mergedHiddenSize == 4608,
+          "the 27-block tower's sizes were not read from its config");
+  const SourceModel small = vision
+                                .with(&SourceModel::config, R"("depth": 27)", R"("depth": 24)")
+                                .with(&SourceModel::config, R"("hidden_size": 1152)", R"("hidden_size": 1024)")
+                                .with(&SourceModel::config, R"("intermediate_size": 4304)", R"("intermediate_size": 4096)");
+  const model::ModelDescriptor smallTower = inspect(small);
+  require(smallTower.vision.depth == 24 && smallTower.vision.hiddenSize == 1024 &&
+              smallTower.vision.headDimension == 64 && smallTower.vision.paddedIntermediateSize == 4096 &&
+              smallTower.vision.mergedHiddenSize == 4096 && smallTower.vision.outputHiddenSize == 5120,
+          "the 24-block tower's sizes were not read from its config");
   struct Refused final {
     std::string_view from, to, error;
   };
@@ -607,6 +622,8 @@ void testVisionConfig(const std::filesystem::path &fixtures) {
            {R"("vision_config")", R"("unused")", "vision config must be an object"},
            {R"("out_hidden_size": 5120)", R"("out_hidden_size": 2048)",
             "vision config out_hidden_size mismatch"},
+           {R"("hidden_size": 1152)", R"("hidden_size": 1536)",
+            "the vision tower is not one Splash's kernels run"},
            {R"("in_channels": 3)", R"("in_channels": 4)", "vision config in_channels mismatch"},
            {R"("hidden_act": "gelu_pytorch_tanh")", R"("hidden_act": "gelu")", "vision config hidden_act mismatch"},
            {R"("deepstack_visual_indexes": [])", R"("deepstack_visual_indexes": [8])",

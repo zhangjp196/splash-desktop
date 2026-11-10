@@ -89,6 +89,23 @@ class LauncherTests(unittest.TestCase):
                 launcher.parse_args(["serve", "--model", model]).model, model
             )
 
+    def test_the_legacy_no_draft_flag_is_accepted_as_auto(self):
+        # A release before this one served without a draft on request; the
+        # configuration decides now, so the old spellings name auto.
+        for options in (["--no-draft"], ["--speculation", "none"]):
+            with self.subTest(options=options):
+                args = launcher.parse_args(
+                    ["serve", "--model", MODEL_ID, *options]
+                )
+                self.assertEqual(args.speculation, "auto")
+        with (
+            mock.patch("sys.stderr", io.StringIO()) as error,
+            self.assertRaises(SystemExit) as refused,
+        ):
+            launcher.parse_args(["serve", "--model", MODEL_ID, "--speculation", "bogus"])
+        self.assertEqual(refused.exception.code, 2)
+        self.assertIn("is not one this release implements", error.getvalue())
+
     def test_only_serve_and_clients_are_public(self):
         for command in (
             "start",

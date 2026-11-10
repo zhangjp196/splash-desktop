@@ -27,10 +27,6 @@ class ModelFamily:
     # How the family's model reasons and calls tools, and the tokens it
     # shares with the engine (server/chat_format.py).
     chat_format: ChatFormat
-    # Whether the family's models have a vision tower, which an installation
-    # loads from the target repository unless --language-only. The models of
-    # a family without one serve text only, whatever their repository holds.
-    vision: bool = True
     # Other repositories of the same checkpoint, tried after draft_repo when
     # it cannot be resolved (a z-lab mirror, for example). Their names are
     # data: compatibility is the checkpoint's own config, never its owner.
@@ -40,10 +36,10 @@ class ModelFamily:
 FAMILIES = (
     # Qwen3.8-4B and its fine-tunes, such as the Heretic ablation. No DFlash2
     # draft is released for it.
-    ModelFamily("Qwen3.8-4B", None, QWEN, vision=False),
+    ModelFamily("Qwen3.8-4B", None, QWEN),
     # Qwen3.5-9B and its fine-tunes, such as Ornith-1.5-9B. No DFlash2 draft is
     # released for it; auto serves it without one.
-    ModelFamily("Qwen3.5-9B", None, QWEN, vision=False),
+    ModelFamily("Qwen3.5-9B", None, QWEN),
     ModelFamily(
         "Qwen3.8-27B",
         "incoai/Qwen3.8-27B-DFlash2",
@@ -60,8 +56,7 @@ FAMILIES = (
     # released for it the family's.
     ModelFamily("Qwen3.5-122B-A10B", "incoai/Ornith-1.5-122B-DFlash2", QWEN),
     ModelFamily("Qwen3.8-Flash-Next", "incoai/Qwen3.8-Flash-Next-DFlash2", QWEN),
-    # It has no vision tower.
-    ModelFamily("Flint", "incoai/Flint-DFlash2", FLINT, vision=False),
+    ModelFamily("Flint", "incoai/Flint-DFlash2", FLINT),
 )
 
 

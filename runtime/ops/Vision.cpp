@@ -22,20 +22,22 @@ constexpr uint32_t kGemmColumnTile = 128;
 constexpr uint32_t kMergerRowTile = 32;
 constexpr uint32_t kMergerColumnTile = 256;
 constexpr uint32_t kKeyTile = 128;
-constexpr uint32_t kQkDimension = 80; // head dimension 72 padded to 16
 constexpr uint64_t kBf16Bytes = 2;
 constexpr uint64_t kFloatBytes = 4;
 
-// The one vision tower the kernels are specialized for.
-constexpr VisionLayout kTower{};
-static_assert(kTower.headDimension + 8 == kQkDimension && kTower.hiddenSize % kGemmColumnTile == 0 &&
-                  kTower.paddedIntermediateSize % kGemmColumnTile == 0 &&
-                  kTower.mergedHiddenSize % kMergerColumnTile == 0 &&
-                  kTower.patchDimension % kGemmColumnTile == 0,
-              "vision kernels' tile assumptions");
-
 uint32_t roundUp(uint32_t value, uint32_t multiple) noexcept {
   return (value + multiple - 1) / multiple * multiple;
+}
+
+// The Q/K width a matmul's K extent needs: the head dimension padded to 16.
+uint32_t qkDimension(const VisionLayout &layout) noexcept {
+  return roundUp(layout.headDimension, 16);
+}
+
+// The attention kernel a tower's head dimension has: 72 padded to 80, and
+// 64 as it is.
+const char *attentionPipeline(uint32_t headDimension) noexcept {
+  return headDimension == 64 ? "vision_attention_h64" : "vision_attention";
 }
 
 // Scratch tensor byte sizes for one encoder sized to maximumPatches. GEMM
@@ -47,6 +49,7 @@ std::array<uint64_t, 12> scratchLayout(const VisionLayout &layout,
   const uint64_t padded = roundUp(maximumPatches, kKeyTile);
   const uint64_t mergedRows = roundUp(maximumPatches / 4, kMergerRowTile);
   const uint64_t hidden = layout.hiddenSize;
+  const uint64_t qk = qkDimension(layout);
   const uint64_t headRows = uint64_t{layout.heads} * padded;
   return {
       rows * layout.patchDimension * kBf16Bytes,                 // Patches
@@ -58,23 +61,12 @@ std::array<uint64_t, 12> scratchLayout(const VisionLayout &layout,
       std::max(rows * 3 * hidden, mergedRows * layout.mergedHiddenSize) *
           kBf16Bytes,                                            // Qkv
       rows * layout.paddedIntermediateSize * kBf16Bytes,         // Intermediate
-      headRows * kQkDimension * kBf16Bytes,                      // Queries
-      headRows * kQkDimension * kBf16Bytes,                      // Keys
+      headRows * qk * kBf16Bytes,                                // Queries
+      headRows * qk * kBf16Bytes,                                // Keys
       headRows * layout.headDimension * kBf16Bytes,              // Values
       headRows * layout.headDimension * kBf16Bytes,              // Attention
       rows * hidden * kBf16Bytes,                                // Context
   };
-}
-
-void requireLayout(const VisionLayout &layout) {
-  // The targets share the same vision tower; only the language-space
-  // projection width varies with the text model.
-  VisionLayout tower = layout;
-  tower.outputHiddenSize = kTower.outputHiddenSize;
-  if (tower != kTower || !layout.outputHiddenSize || layout.outputHiddenSize % kMergerColumnTile) {
-    throw std::invalid_argument(
-        "vision kernels are specialized for the Qwen3.5 27-block tower");
-  }
 }
 
 // Every weight of the tower the kernels read, in each of its layout's blocks:
@@ -116,9 +108,34 @@ void requireWeights(const VisionWeights &model) {
 
 } // namespace
 
+void requireTowerLayout(const VisionLayout &layout) {
+  // The GEMM tiles read whole 128-column tiles of every width they stride,
+  // and attention has a variant per head dimension the tower states.
+  const uint32_t qk = qkDimension(layout);
+  if (!layout.depth || !layout.hiddenSize || !layout.heads || !layout.headDimension ||
+      layout.heads * layout.headDimension != layout.hiddenSize ||
+      (layout.headDimension != 64 && layout.headDimension != 72) ||
+      layout.mergedHiddenSize != layout.hiddenSize * layout.spatialMerge * layout.spatialMerge ||
+      layout.patchDimension != kImageChannels * 2 * layout.patchSize * layout.patchSize ||
+      layout.patchSize != 16 || layout.spatialMerge != 2 ||
+      layout.hiddenSize % kGemmColumnTile || layout.patchDimension % kGemmColumnTile ||
+      layout.paddedIntermediateSize < layout.intermediateSize ||
+      layout.paddedIntermediateSize % kGemmColumnTile ||
+      layout.mergedHiddenSize % kMergerColumnTile ||
+      !layout.outputHiddenSize || layout.outputHiddenSize % kMergerColumnTile ||
+      !layout.positionGridSide || !layout.patchSize || qk % 16)
+    throw std::invalid_argument(
+        "the vision tower is not one Splash's kernels run: " +
+        std::to_string(layout.depth) + " blocks, " + std::to_string(layout.hiddenSize) +
+        " hidden, " + std::to_string(layout.heads) + " heads of " +
+        std::to_string(layout.headDimension) + ", " +
+        std::to_string(layout.intermediateSize) + " intermediate, " +
+        std::to_string(layout.outputHiddenSize) + " output");
+}
+
 uint64_t Vision::scratchBytes(const VisionLayout &layout,
                               uint32_t maximumPatches) {
-  requireLayout(layout);
+  requireTowerLayout(layout);
   if (!maximumPatches || maximumPatches % 4) {
     throw std::invalid_argument(
         "vision scratch must cover a positive multiple of four patches");
@@ -188,8 +205,11 @@ void Vision::encode(CommandGraph &graph, ImageGrid grid,
 
   const uint32_t padded = roundUp(tokens, kKeyTile);
   const uint32_t merged = grid.mergedTokens();
-  const VisionGridParams gridParams{grid.height, grid.width};
-  const VisionQkvParams qkvParams{tokens, padded};
+  const VisionGridParams gridParams{grid.height, grid.width, layout.hiddenSize,
+                                    layout.headDimension, layout.positionGridSide};
+  const VisionQkvParams qkvParams{tokens, padded, layout.hiddenSize,
+                                  layout.headDimension, qkDimension(layout),
+                                  layout.heads};
   const VisionAttentionParams attentionParams{
       tokens, padded, 1.0F / std::sqrt(static_cast<float>(layout.headDimension))};
   const MetalBuffer &hidden = scratch(Scratch::Hidden);
@@ -220,7 +240,7 @@ void Vision::encode(CommandGraph &graph, ImageGrid grid,
                scratch(Scratch::Queries), scratch(Scratch::Keys),
                scratch(Scratch::Values)},
               qkvParams, {padded, 1, 1});
-    graph.add("vision_attention",
+    graph.add(attentionPipeline(layout.headDimension),
               {scratch(Scratch::Queries), scratch(Scratch::Keys),
                scratch(Scratch::Values), scratch(Scratch::Attention)},
               attentionParams,
@@ -228,7 +248,8 @@ void Vision::encode(CommandGraph &graph, ImageGrid grid,
                    SPLASH_VISION_ATTENTION_ROWS,
                layout.heads, 1},
               {SPLASH_VISION_ATTENTION_THREADS, 1, 1});
-    graph.add("vision_attention_gather", {scratch(Scratch::Attention), context},
+    graph.add("vision_attention_gather",
+              {scratch(Scratch::Attention), context},
               qkvParams, {tokens, 1, 1});
     addGemm(graph, "vision_gemm_m64n128_residual", context, block.projection, hidden,
             hidden, layout.hiddenSize, layout.hiddenSize, tokens, kGemmRowTile,

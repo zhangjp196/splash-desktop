@@ -136,6 +136,16 @@ class InstallerTest(unittest.TestCase):
         args = installer.parse_args(["--model", self.MODEL_ID, "prepare"])
         self.assertEqual((args.command, args.model), ("prepare", self.MODEL_ID))
 
+    def test_the_legacy_none_speculation_is_auto(self):
+        # A release before this one served without a draft on request; the
+        # configuration decides now, so none names auto.
+        args = installer.parse_args(
+            ["--model", self.MODEL_ID, "--speculation", "none", "link"]
+        )
+        self.assertEqual(args.speculation, "auto")
+        with self.assertRaises(installer.ModelError):
+            installer.Selection.of(self.root, self.MODEL_ID, speculation="bogus")
+
     def test_prepare_json_progress_has_downloads_report_their_progress(self):
         reporting = []
         base = ["--models", str(self.root), "--model", self.MODEL_ID, "prepare"]

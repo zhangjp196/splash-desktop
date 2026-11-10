@@ -727,26 +727,44 @@ DFlashDraftLayout readDraftLayout(NSDictionary *draft, const QwenTargetDimension
   return layout;
 }
 
-// The vision tower's config, config.json's vision_config, which the
-// installer derives from a GGUF's mmproj too: the tower the layout describes,
-// over RGB patches of two frames, without deepstack layers.
-void validateVisionConfig(NSDictionary *vision, const ops::VisionLayout &layout,
-                          TargetSource source) {
-  requireNumbers(vision, sourceName(source), "vision config",
-                 {{"depth", layout.depth},
-                  {"hidden_size", layout.hiddenSize},
-                  {"num_heads", layout.heads},
-                  {"intermediate_size", layout.intermediateSize},
-                  {"out_hidden_size", layout.outputHiddenSize},
-                  {"patch_size", layout.patchSize},
-                  {"spatial_merge_size", layout.spatialMerge},
-                  {"temporal_patch_size", 2},
-                  {"in_channels", ops::kImageChannels},
-                  {"num_position_embeddings", layout.positionGridSide * layout.positionGridSide}});
+// The vision tower's config, config.json's vision_config, which the installer
+// derives from a GGUF's mmproj too: a tower over RGB patches of two frames,
+// without deepstack layers, whose output width is the target's. The tower's
+// own sizes say which one it is; ops::requireTowerLayout holds them to what
+// the kernels run.
+ops::VisionLayout readVisionLayout(NSDictionary *vision, uint32_t outputHidden,
+                                   TargetSource source) {
+  const std::string_view name = sourceName(source);
+  requireNumbers(vision, name, "vision config",
+                 {{"temporal_patch_size", 2}, {"in_channels", ops::kImageChannels}});
+  ops::VisionLayout layout;
+  layout.depth = requireWhole(vision[@"depth"], "vision config depth");
+  layout.hiddenSize = requireWhole(vision[@"hidden_size"], "vision config hidden_size");
+  layout.heads = requireWhole(vision[@"num_heads"], "vision config num_heads");
+  if (!layout.heads || layout.hiddenSize % layout.heads)
+    throw std::invalid_argument("vision config hidden_size is not a multiple of num_heads");
+  layout.headDimension = layout.hiddenSize / layout.heads;
+  layout.intermediateSize = requireWhole(vision[@"intermediate_size"], "vision config intermediate_size");
+  layout.paddedIntermediateSize = (layout.intermediateSize + 127) / 128 * 128;
+  layout.patchSize = requireWhole(vision[@"patch_size"], "vision config patch_size");
+  layout.spatialMerge = requireWhole(vision[@"spatial_merge_size"], "vision config spatial_merge_size");
+  layout.mergedHiddenSize = layout.hiddenSize * layout.spatialMerge * layout.spatialMerge;
+  layout.patchDimension = ops::kImageChannels * 2 * layout.patchSize * layout.patchSize;
+  const uint32_t positions =
+      requireWhole(vision[@"num_position_embeddings"], "vision config num_position_embeddings");
+  const auto side = static_cast<uint32_t>(std::lround(std::sqrt(static_cast<double>(positions))));
+  if (uint64_t{side} * side != positions)
+    throw std::invalid_argument("vision config num_position_embeddings is not a square grid");
+  layout.positionGridSide = side;
+  layout.outputHiddenSize = outputHidden;
+  if (vision[@"out_hidden_size"])
+    requireNumbers(vision, name, "vision config", {{"out_hidden_size", outputHidden}});
   requireEqual(requireString(vision, @"hidden_act", "vision config hidden_act"), "gelu_pytorch_tanh",
-               sourceName(source), "vision config hidden_act");
+               name, "vision config hidden_act");
   if (requireArray(vision, @"deepstack_visual_indexes", "vision config deepstack_visual_indexes").count)
     throw std::invalid_argument("vision deepstack layers are unsupported");
+  ops::requireTowerLayout(layout);
+  return layout;
 }
 
 // The descriptor, named name, of an upstream model of the family its text
@@ -803,17 +821,17 @@ ModelDescriptor describeSourceModel(std::string name, std::string_view targetFor
     if (draft && layout.draftChoosesMaskToken()) layout.maskToken = draftMaskToken(draft, layout);
     if (draft) dflashLayout = readDraftLayout(draft, layout);
   }, *target);
-  ModelDescriptor result = makeModelDescriptor(std::move(name), *target, dflashLayout,
-                                               {.outputHiddenSize = std::visit(
-                                                    [](const auto &layout) { return layout.hiddenSize; }, *target)},
+  ops::VisionLayout vision{.outputHiddenSize = std::visit(
+      [](const auto &layout) { return layout.hiddenSize; }, *target)};
+  if (visionSource != VisionSource::None)
+    vision = readVisionLayout(requireObject(config, @"vision_config", "vision config"),
+                              vision.outputHiddenSize, targetSource);
+  ModelDescriptor result = makeModelDescriptor(std::move(name), *target, dflashLayout, vision,
                                                targetSource, visionSource);
   // A model without a draft config is a complete model: the plan is None and
   // the draft layout stays zero. A model with one records the DFlash2 plan
   // makeModelDescriptor derived from its layout.
   if (!draft) result.speculation = {};
-  if (result.hasVision())
-    validateVisionConfig(requireObject(config, @"vision_config", "vision config"), result.vision,
-                         result.targetSource);
   return result;
 }
 
