@@ -336,15 +336,6 @@ mirrors `families.ModelFamily.draft_mirrors` names (the `z-lab` checkpoints,
 for example). A mirror is a source like any other: its checkpoint's own
 configuration and tensors decide compatibility, never its owner's name.
 
-A target with built-in MTP layers (`nextn_predict_layers`) records their count
-in `model.json` (`mtp.layers`) and reports it in `/status`
-(`speculation.available_mtp_layers`). `--speculation mtp` records such a plan,
-but this release has no MTP runtime: it serves the target without speculation
-and names that fallback in `/status`. An external MTP head folder or
-repository (`--draft-model` with `--speculation mtp`) is installed as plan data
-under `draft/`; its `alignment` (family, hidden size, vocabulary and target
-layers) is checked against the target, and the plan is reported but not run.
-
 A draft's `config.json` states its layers, intermediate size, rotary base and
 the target layers whose outputs it reads (`dflash_config.target_layer_ids`,
 ascending, at most eight); its hidden size, vocabulary and mask token are its
@@ -541,7 +532,7 @@ own tokenizer.json has them. Unknown profiles, malformed metadata
 and automatic BOS/EOS insertion are rejected, with no cross-repository
 fallback; GGUF sidecar tokenizer/config files do not override embedded metadata.
 Model geometry is translated from the same metadata, subtracting any declared
-MTP layers from the layer count. Only the header is read before the download.
+NextN prediction layers from the layer count. Only the header is read before the download.
 The tokenizer and configuration are derived from the downloaded file once and
 cached under `models/.metadata`, keyed by the size and digest of each source
 GGUF, the SHA-256 of `gguf.py` and the `tokenizers` version; publication is

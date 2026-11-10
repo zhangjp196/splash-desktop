@@ -570,18 +570,10 @@ def parse_args(argv=None):
             args.speculation = model_artifacts.speculation_mode(args.speculation)
         except model_artifacts.ModelError as error:
             parser.error(str(error))
-        if args.speculation == "mtp" and args.require_draft:
-            parser.error(
-                "MTP execution is not implemented; --require-draft is not available for it"
-            )
-        if args.speculation == "mtp" and args.draft_model is not None:
-            parser.error(
-                "external MTP heads are not implemented; omit --draft-model"
-            )
         if args.speculation == "dspark":
             parser.error(
                 "--speculation dspark is not implemented by this release; "
-                "use auto, dflash2 or mtp"
+                "use auto or dflash2"
             )
         serve_options.check_serve_arguments(parser, args)
     if client_args and args.command == "serve":

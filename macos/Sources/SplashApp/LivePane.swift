@@ -301,8 +301,7 @@ struct LivePane: View {
     private func speculationLabel(_ provider: String?) -> String {
         switch provider {
         case "dflash2": return "DFlash2"
-        case "none": return L10n.string("speculation.none")
-        case "mtp": return "MTP"
+        case "none": return L10n.string("speculation.target_only")
         case "dspark": return "DSpark"
         default: return provider ?? "—"
         }
@@ -316,9 +315,6 @@ struct LivePane: View {
         var parts: [String] = []
         if let rows = live.speculationRows {
             parts.append(L10n.format("live.caption.speculation_rows", rows))
-        }
-        if let mtp = live.availableMTPLayers, mtp > 0 {
-            parts.append(L10n.format("live.caption.available_mtp", mtp))
         }
         return parts.joined(separator: " · ")
     }

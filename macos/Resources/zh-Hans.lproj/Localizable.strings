@@ -513,7 +513,8 @@
 
 // Speculation: how decode proposes tokens.
 "field.speculation" = "推测解码";
-"help.speculation" = "自动使用配置提供的草稿，没有则只跑目标模型；DFlash2 要求使用草稿；MTP 记录内置头，本版本只报告、暂不执行。";
+"help.speculation" = "自动使用配置提供的草稿，没有则只跑目标模型；DFlash2 要求使用草稿。";
+"speculation.target_only" = "仅目标模型";
 "speculation.auto" = "自动";
 "speculation.dflash2" = "DFlash2";
 "field.require_draft" = "必须使用草稿";
@@ -521,9 +522,6 @@
 "live.speculation" = "推测解码";
 "live.caption.speculation_rows" = "每轮验证 %d 行";
 "live.caption.speculation_fallback" = "已回退：%@";
-"live.caption.available_mtp" = "内置 MTP %d 层";
-"speculation.mtp" = "MTP";
-"help.speculation.mtp" = "外部 MTP 头目录会作为数据安装；本版本只报告、暂不执行。留空则使用目标内置的头。";
 
 // 应用级「设置」页：所有模型配置共用的项目。
 "view.settings" = "设置";

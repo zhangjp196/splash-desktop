@@ -30,7 +30,6 @@ INSTALL_FILES = (
     "assembly.py",
     "upstream.py",
     "draftgguf.py",
-    "mtp.py",
     "tied.py",
     "local.py",
     "cached.py",

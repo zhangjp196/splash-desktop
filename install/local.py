@@ -37,7 +37,7 @@ import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import families, hub, models, mtp, paths, tied, upstream
+from . import families, hub, models, paths, tied, upstream
 from .models import ModelError
 
 __all__ = ["ModelError", "prepare_local_model"]
@@ -109,14 +109,10 @@ def _prepare(
 ):
     """prepare_local_model, of its paths made absolute."""
     speculation = models.speculation_mode(speculation)
-    if speculation == "mtp" and require_draft:
-        raise ModelError(
-            "MTP execution is not implemented by this release; it cannot be required"
-        )
-    if speculation not in ("auto", "dflash2", "mtp"):
+    if speculation not in ("auto", "dflash2"):
         raise ModelError(
             f"speculation {speculation} is not implemented by this release; "
-            "use auto, dflash2 or mtp"
+            "use auto or dflash2"
         )
     if mmproj and language_only:
         raise ModelError(
@@ -137,43 +133,23 @@ def _prepare(
     )
     with tempfile.TemporaryDirectory(prefix="splash-target-") as scratch:
         source, inspected = _inspect(target, mmproj, language_only, Path(scratch))
-        if speculation == "mtp" and not draft and inspected.mtp_layers <= 0:
-            raise ModelError(
-                f"{target} has no built-in MTP head (num_nextn_predict_layers is zero)"
-            )
         repo = None
-        if speculation != "mtp" or draft:
-            try:
-                repo = _draft(inspected.family, draft)
-            except ModelError as error:
-                if require_draft or speculation != "auto":
-                    raise
-                if draft or families.draft_candidates(inspected.family):
-                    models.warn(f"serving without speculation: {error}")
-        alignment = None
-        if repo is not None and speculation == "mtp":
-            downloaded = repo.download(set(repo.files))
-            if "config.json" not in downloaded:
-                raise ModelError(f"{repo.name} has no config.json for its MTP head")
-            alignment = mtp.validate(
-                inspected.config, downloaded["config.json"], inspected.family.name
-            )
-            files = {"draft/" + name: path for name, path in downloaded.items()}
-        else:
-            files = (
-                upstream.draft_files(repo, inspected, models_root)
-                if repo is not None
-                else {}
-            )
+        try:
+            repo = _draft(inspected.family, draft)
+        except ModelError as error:
+            if require_draft or speculation != "auto":
+                raise
+            if draft or families.draft_candidates(inspected.family):
+                models.warn(f"serving without speculation: {error}")
+        files = (
+            upstream.draft_files(repo, inspected, models_root)
+            if repo is not None
+            else {}
+        )
     files |= {path: source.paths[name] for path, name in inspected.files.items()}
     if inspected.format == "mlx-affine":
         files |= tied.prepare(inspected.config, source.paths, models_root) or {}
-    provider = "mtp" if speculation == "mtp" else (
-        "none" if repo is None else "dflash2"
-    )
-    record = upstream.assembly_record(
-        str(target), inspected, source, repo, provider, alignment
-    )
+    record = upstream.assembly_record(str(target), inspected, source, repo)
     return upstream.publish(models_root, link, record, files)
 
 
@@ -307,7 +283,7 @@ def _main(argv=None):
     parser.add_argument("target")
     parser.add_argument("--models", type=Path, default=paths.MODELS)
     parser.add_argument("--draft-model")
-    parser.add_argument("--speculation", choices=("auto", "dflash2", "mtp"), default="auto")
+    parser.add_argument("--speculation", choices=("auto", "dflash2"), default="auto")
     parser.add_argument("--require-draft", action="store_true")
     parser.add_argument("--mmproj")
     parser.add_argument("--language-only", action="store_true")

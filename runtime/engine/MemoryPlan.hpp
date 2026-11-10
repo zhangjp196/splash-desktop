@@ -97,9 +97,7 @@ struct ModelMemoryFootprint final {
   // Whether the installed plan has a draft: a zero draftWeightsBytes is then
   // a missing measurement, not a model that serves without speculation.
   bool draftRequired = true;
-  // The target's built-in MTP layers, which the status reports (P2).
-  uint32_t mtpLayers = 0;
-  // The provider the installation planned: none, dflash2 or mtp.
+  // The provider the installation planned: none or dflash2.
   std::string speculationProvider = "dflash2";
 };
 
@@ -446,9 +444,6 @@ public:
   // Whether the plan it was built from has a draft.
   [[nodiscard]] bool draftRequired() const noexcept {
     return model_.footprint.draftRequired;
-  }
-  [[nodiscard]] uint32_t mtpLayers() const noexcept {
-    return model_.footprint.mtpLayers;
   }
   [[nodiscard]] const std::string &speculationProvider() const noexcept {
     return model_.footprint.speculationProvider;

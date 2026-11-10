@@ -33,7 +33,7 @@ The proposal is to make that chain a *plan* with a first-class `none` value:
    dispatches decode through a `Speculator` interface with a real
    no-speculation implementation.
 3. Providers cover DFlash2 (safetensors or GGUF, including the `z-lab`
-   mirrors), built-in MTP, external MTP and DSpark.
+   mirrors) and DSpark.
 4. A missing, incompatible or unreachable draft degrades to `none` with a
    warning and a visible status field, unless the installation asked for a
    required draft.
@@ -46,8 +46,8 @@ tokenizer profile and a chat format to be servable.
 
 - `--model` / `--model-dir` serve a supported GGUF or MLX target with no
   draft at all.
-- A draft may be a DFlash2 safetensors checkpoint, a DFlash2 GGUF, a
-  built-in MTP head, an external MTP head or a DSpark bundle.
+- A draft may be a DFlash2 safetensors checkpoint, a DFlash2 GGUF or a
+  DSpark bundle.
 - Draft resolution follows one order, is recorded in the installation, and
   never silently substitutes a different model.
 - Every start validates the target and the plan before weights are read.
@@ -73,7 +73,7 @@ tokenizer profile and a chat format to be servable.
 - **Speculation plan**: the record of how a model's decode cycles may propose
   tokens. It is part of the immutable installation record, not a runtime
   preference.
-- **Provider**: the algorithm. `none`, `dflash2`, `mtp`, `dspark`.
+- **Provider**: the algorithm. `none`, `dflash2`, `dspark`.
 - **Source**: where the provider's weights come from. `builtin` (inside the
   target checkpoint), `external` (a draft repository or directory), or
   `none`.
@@ -83,7 +83,7 @@ tokenizer profile and a chat format to be servable.
   size, vocabulary, mask token, target layer ids, reduction, architecture
   family, tokenizer hash).
 - **Proposal width**: the number of rows a cycle may propose, including the
-  anchor row. DFlash2 uses eight; `none` uses one; MTP and DSpark are
+  anchor row. DFlash2 uses eight; `none` uses one; DSpark is
   provider-defined.
 - **Fallback**: what installation and loading do when the requested provider
   is unavailable or incompatible. `none` means serve without speculation.
@@ -139,16 +139,15 @@ current meaning: a DFlash2 safetensors draft, as recorded by `sources.draft`.
 
 Rules:
 
-- `provider` is one of `none`, `dflash2`, `mtp`, `dspark`. An unknown value is
+- `provider` is one of `none`, `dflash2`, `dspark`. An unknown value is
   refused before any weight read, naming the engine build that would read it.
-- `format` is `none`, `safetensors` or `gguf` for DFlash2; `gguf` or
-  `safetensors` for MTP according to the target; `external` for DSpark's own
-  bundle.
+- `format` is `none`, `safetensors` or `gguf` for DFlash2, and `external`
+  for DSpark's own bundle.
 - `source.kind` is `none`, `builtin` or `external`. Only `external` carries a
   repository or path.
 - `proposal_rows` is 1 for `none`, the block's rows for DFlash2, and the
   provider's declared width otherwise.
-- `state` is `none`, `draft-rings`, `mtp-cache` or `dspark-state`.
+- `state` is `none`, `draft-rings` or `dspark-state`.
 - `fallback` is `none` (degrade to no draft) or `required` (refuse to start).
   It is recorded from the user's request; the reason a fallback happened is
   runtime state, not installation identity.
@@ -168,7 +167,6 @@ collide with a draft's.
 | --- | --- | --- | --- | --- | --- |
 | `none` | anchor only | none | none | 1 | first |
 | `dflash2` | one block of `proposal_rows` in a single draft forward | BF16 safetensors or GGUF | draft rings + context window | 1–8 | existing |
-| `mtp` | `k` tokens, autoregressively through the target's own head(s) | built-in nextn layers or an external head | target KV for the head's layers | 1–k | second |
 | `dspark` | parallel backbone + sequential Markov head, confidence-scheduled | external bundle | provider state | 1–n | experimental |
 
 `none` is not a degraded DFlash2; it is a separate decode path that runs the
@@ -180,7 +178,7 @@ tested against.
 One function, shared by `splash serve`, `--model-dir` and
 `prepare_local_model`, decides the plan:
 
-1. `--speculation auto|dflash2|mtp|dspark` (new; `--no-draft` is accepted as
+1. `--speculation auto|dflash2|dspark` (new; `--no-draft` is accepted as
    `auto`).
 2. `--draft-model REPO|PATH` (existing) and its format probe.
 3. A declaration in the target's own configuration: an MLX `speculation`
@@ -189,8 +187,7 @@ One function, shared by `splash serve`, `--model-dir` and
 5. `none`.
 
 Explicit input wins, and a conflicting explicit pair is an error rather than a
-guess: `--speculation dflash2` with a path whose config is an MTP head is
-refused.
+guess: a named draft whose configuration this build does not load is refused.
 
 `--draft-format auto|safetensors|gguf` resolves the container when a
 repository holds both, such as a `z-lab` mirror beside its GGUF conversion.
@@ -321,7 +318,7 @@ unconditionally calls `encodeDraftBatchGraph` or `encodeDraftStateCommitBatch`.
 - `MemoryAudit` treats a zero draft category as complete when the plan is
   `none`, not as a missing measurement.
 - Prefill captures target hidden rows only for providers that read them
-  (DFlash2, MTP). `none` writes no capture rows and allocates no draft context
+  (DFlash2). `none` writes no capture rows and allocates no draft context
   window.
 - Persistent and SSD caches use the plan-aware namespace described above. A
   cached state written with a draft is never restored into a no-draft model.
@@ -401,52 +398,6 @@ mirror*, not a hard-coded provider:
 
 This keeps one code path for every publisher and avoids a vendor allowlist.
 
-### Built-in MTP
-
-Some targets ship multi-token-prediction heads in the same checkpoint
-(`nextn_predict_layers` in GGUF, `model.mtp.*`/`model.layers.N.mtp.*` in MLX,
-Model Optimizer's `mtp` modules). Today they are deliberately excluded: the
-GGUF layer count subtracts them (`gguf.py`) and the Model Optimizer loader
-does not read them.
-
-The built-in MTP provider:
-
-- reads `num_nextn_predict_layers` (GGUF `nextn_predict_layers`) and the head's
-  tensor set at plan check;
-- requires `provider: mtp`, `source.kind: builtin`, `format` equal to the
-  target's, and `alignment` that records the target's layer count, hidden size
-  and head count;
-- loads the head beside the target, from the same shards/GGUF, with no extra
-  download;
-- proposes `k` tokens through the head, verifies them with the target, and
-  commits the head's own KV beside the target's;
-- is refused, with fallback, when the target has no complete head or when the
-  head's shapes are not ones this build's kernels can run.
-
-The head is not a DFlash2 draft: it has no draft rings, no block selector and
-no `dflash_config`. It gets its own `MtpLayout`, state kind `mtp-cache`, and
-`proposal_rows` from the head's declared `k` (clamped to the verify shapes).
-
-### External MTP
-
-A separate repository or directory may hold only the MTP head. It is an
-external source with the same `MtpLayout`, plus an alignment record naming the
-base model it was trained for:
-
-```json
-"alignment": {
-  "family": "Qwen3.8-27B",
-  "hidden_size": 5120,
-  "vocabulary_size": 151936,
-  "target_layers": 64,
-  "base_model_digest": "<sha256 of the target's config or GGUF header>"
-}
-```
-
-The head must state an alignment that matches the target; a head with a
-missing or different alignment is incompatible and falls back. There is no
-"closest match" heuristic.
-
 ### DSpark
 
 DSpark couples a parallel draft backbone with a lightweight sequential
@@ -493,7 +444,6 @@ to dozens without a fork per model.
 Concretely, the first expansion candidates after the infrastructure lands:
 
 1. dense Qwen2/Qwen3 and Llama 3.x GGUFs and MLX 4-bit (Tier B, no draft);
-2. DeepSeek-V3/V4-style MoE with built-in MTP (Tier B, `mtp` builtin);
 3. Gemma 3/4 and Mistral Small (Tier B, no draft; vision later);
 4. DSpark bundles for DeepSeek-V4 (Tier C, experimental).
 
@@ -523,22 +473,14 @@ Each phase is independently shippable and leaves the current path working.
 - Exit: a quantized GGUF target pairs with a GGUF DFlash2 draft; a
   safetensors target pairs with the same draft in either format.
 
-### P2 — built-in and external MTP (~2–3 weeks)
-
-- `MtpLayout`, tensor extraction from GGUF/MLX/Model Optimizer checkpoints.
-- `MtpSpeculator`, its KV, commit and state layout.
-- Alignment records and external-head installation.
-- Exit: a DeepSeek-style target serves with its built-in MTP head and with an
-  external head; a mismatched head falls back to `none` with a reason.
-
-### P3 — DSpark (~3–4 weeks)
+### P2 — DSpark (~3–4 weeks)
 
 - Bundle ABI, plan check, parallel backbone and Markov head.
 - Confidence scheduler wired to the verify budget.
 - Exit: an experimental DSpark bundle serves a supported target, with
   acceptance at least that of DFlash2 on the release prompts.
 
-### P4 — family packs (~ongoing)
+### P3 — family packs (~ongoing)
 
 - Declarative registry, Tier B generic layouts, tokenizer/chat profiles.
 - First three candidate families.
@@ -583,10 +525,10 @@ Each phase is independently shippable and leaves the current path working.
 
 ## Open questions
 
-1. Should a draft's tokenizer digest be mandatory for external MTP and DSpark,
-   or only for DFlash2?
-2. Is `--verify-rows` meaningful for `none` / MTP, or should it become a
-   provider option?
+1. Should a draft's tokenizer digest be mandatory for DSpark, or only for
+   DFlash2?
+2. Is `--verify-rows` meaningful for `none`, or should it become a provider
+   option?
 3. Should a no-draft installation still allocate the eight-row decode arena,
    or grow a one-row arena for `none` (memory vs. code paths)?
 4. Which `z-lab` repositories are official mirrors, and should the family

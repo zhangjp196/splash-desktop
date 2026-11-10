@@ -69,16 +69,15 @@ SPECULATION_KEYS = {
     "state",
     "fallback",
 }
-# An external MTP head's alignment, which the installer checked against the
-# target; a plan without one is still complete.
+# A release before this one recorded an external MTP head's alignment and
+# the target's built-in count; neither is read any more.
 SPECULATION_OPTIONAL_KEYS = {"alignment"}
-PROVIDERS = {"none", "dflash2", "mtp", "dspark"}
+PROVIDERS = {"none", "dflash2", "dspark"}
 DRAFT_FORMATS = {"none", "safetensors", "gguf"}
 SOURCE_KINDS = {"none", "builtin", "external"}
 FILE_RECORD_KEYS = {"path", "bytes", "mtime_ns", "ctime_ns", "digest"}
-# Optional record members: a plan's built-in MTP head, and a source format a
-# converted draft came from. They carry information the engine may show; an
-# installation without them is complete.
+# A plan's built-in MTP head, which a release before this one recorded and
+# the engine no longer reads; an installation carrying it still verifies.
 OPTIONAL_RECORD_KEYS = {"mtp"}
 
 
@@ -219,10 +218,6 @@ def _well_formed(record):
         expected_sources = {"target", "draft"}
     elif speculation["provider"] == "none":
         expected_sources = {"target"}
-    elif speculation["provider"] == "mtp":
-        expected_sources = {"target"} | (
-            {"draft"} if speculation.get("source", {}).get("kind") == "external" else set()
-        )
     else:
         expected_sources = {"target", "draft"}
     mtp = record.get("mtp")
@@ -280,7 +275,7 @@ def _speculation_well_formed(speculation, sources):
         return False
     if speculation["format"] not in DRAFT_FORMATS:
         return False
-    if speculation["state"] not in {"none", "draft-rings", "mtp-cache", "dspark-state"}:
+    if speculation["state"] not in {"none", "draft-rings", "dspark-state"}:
         return False
     if speculation["fallback"] not in {"none", "required"}:
         return False
@@ -305,20 +300,6 @@ def _speculation_well_formed(speculation, sources):
             and speculation["proposal_rows"] == 8
             and speculation["state"] == "draft-rings"
         )
-    if provider == "mtp":
-        if source["kind"] == "builtin":
-            return (
-                speculation["format"] == "none"
-                and speculation["proposal_rows"] == 1
-                and speculation["state"] == "mtp-cache"
-            )
-        if source["kind"] == "external":
-            return (
-                speculation["format"] in {"gguf", "safetensors"}
-                and 1 <= speculation["proposal_rows"] <= 8
-                and speculation["state"] == "mtp-cache"
-            )
-        return False
     # A DSpark plan is accepted by the schema; the engine refuses it until its
     # provider lands, with a plan check that names it.
     return True

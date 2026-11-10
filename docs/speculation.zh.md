@@ -1,9 +1,9 @@
-# Splash 推测解码完整方案：可选 DFlash2、GGUF/MLX、MTP、DSpark 与模型扩展
+# Splash 推测解码完整方案：可选 DFlash2、GGUF/MLX、DSpark 与模型扩展
 
 状态：完整工程方案；P0 的“无 draft”路径已在当前检出中实现（见文末“实现
 状态”）。本文把“DFlash2 允许为空”扩展成一条可落地的改造路线：先解除
 DFlash2 的硬依赖，再把 draft 抽象成多种 provider，最后用声明式 family pack
-扩大模型范围。落地按 P0 → P4 分阶段，每一阶段都可独立发布、可回滚。
+扩大模型范围。落地按 P0 → P3 分阶段，每一阶段都可独立发布、可回滚。
 
 ---
 
@@ -18,12 +18,11 @@ DFlash2 的硬依赖，再把 draft 抽象成多种 provider，最后用声明�
 - **支持范围**：
   - `none`：纯自回归，GGUF/MLX 目标无需任何 draft；
   - `dflash2`：safetensors 或 GGUF，来源可以是 `z-lab` 等镜像；
-  - `mtp`：模型内置 nextn/MTP head，或外部 MTP head；
   - `dspark`：外部 DSpark bundle（并行 backbone + 顺序 Markov head +
     置信度调度），实验性。
 - **模型范围**：Tier A 现有调优家族；Tier B 用声明式 family pack 接入标准
   dense/MoE；Tier C 需要新算子的实验架构。不承诺“任意模型零改动可跑”。
-- **工期**：P0 1–2 周；P1 1–2 周；P2 2–3 周；P3 3–4 周；P4 持续。
+- **工期**：P0 1–2 周；P1 1–2 周；P2 3–4 周；P3 持续。
 - **最大风险**：无 draft 路径的输出一致性、内存审计的零值处理、缓存命名空间
   隔离、GGUF draft 的 kernel/量化覆盖。
 
@@ -95,10 +94,9 @@ model::Runtime::decodeAsync()  DFlash 提议 8 行 → target 验证 → 接受
 
 - **F1 可选 draft**：任意受支持的 GGUF/MLX target 可以在没有 draft 的情况下
   安装、加载、服务。
-- **F2 显式策略**：用户可以要求 `auto`、`none`、`dflash2`、`mtp`、`dspark`。
+- **F2 显式策略**：用户可以要求 `auto`、`none`、`dflash2`、`dspark`。
 - **F3 多格式 draft**：DFlash2 draft 可以是 safetensors 或 GGUF。
-- **F4 多来源 draft**：`z-lab`、`incoai`、本地目录、本地 GGUF 文件、模型内置
-  MTP 张量、外部 MTP/DSpark bundle。
+- **F4 多来源 draft**：`z-lab`、`incoai`、本地目录、本地 GGUF 文件、DSpark bundle。
 - **F5 无 draft 的正常服务**：输出、采样、约束、停止条件与 target 单独运行一致。
 - **F6 可见性**：启动日志、`/status`、`/v1/models` 明确报告 provider、来源、
   回退原因。
@@ -128,7 +126,6 @@ model::Runtime::decodeAsync()  DFlash 提议 8 行 → target 验证 → 接受
 | A5 | 无 draft 的约束/停止条件 | 与现有有 draft 路径行为一致 |
 | A6 | GGUF DFlash2 draft | Q8_0/BF16 draft 与 Q4_K target 配对成功；draft 权重按 GGUF 类型加载 |
 | A7 | 不兼容 draft | 默认回退到 `none` 并给出原因；`--require-draft` 时启动失败 |
-| A8 | 内置 MTP | DeepSeek 风格 GGUF 用 `nextn_predict_layers` 成功提议；不匹配时回退 |
 | A9 | 旧 v1 安装 | 仍可加载，行为与当前一致 |
 | A10 | 旧缓存 | 不会被无 draft 模型命中；反之亦然 |
 | A11 | 性能 | `none` 的 decode tok/s 不低于 target-only 基线；draft provider 不劣化现有 5 家族 |
@@ -141,13 +138,13 @@ model::Runtime::decodeAsync()  DFlash 提议 8 行 → target 验证 → 接受
 ### 3.1 术语
 
 - **SpeculationPlan**：一次安装中“如何推测”的不可变记录，属于安装身份。
-- **Provider**：算法。`none`、`dflash2`、`mtp`、`dspark`。
+- **Provider**：算法。`none`、`dflash2`、`dspark`。
 - **Format**：权重容器。`none`、`safetensors`、`gguf`。
 - **Source**：权重来源。`none`、`builtin`（target 内）、`external`
   （独立仓库/目录）。
 - **Alignment**：draft 与 target 必须共享的属性集合。
 - **Proposal width**：一个周期最多提出的行数，含 anchor。DFlash2 为 8，
-  `none` 为 1，MTP 为 `k`，DSpark 为 `n`。
+  `none` 为 1，DSpark 为 `n`。
 - **Fallback**：provider 不可用时的行为。`none`（降级）或 `required`（失败）。
 - **Family pack**：声明式家族描述，含 model type、维度谓词、张量命名、
   tokenizer/chat profile、kernel shape 行。
@@ -198,14 +195,14 @@ model::Runtime::decodeAsync()  DFlash 提议 8 行 → target 验证 → 接受
                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │ Loader                                                           │
-│  target loader + 可选 draft loader（safetensors/GGUF/MTP/DSpark）│
+│  target loader + 可选 draft loader（safetensors/GGUF/DSpark）  │
 │  LoadedModel{target, speculator, vision}                         │
 └───────────────────────────────┬──────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │ Runtime                                                          │
 │  Speculator::addPropose → target verify → accept → addCommit     │
-│  none: 1 行 verify；dflash2: 8 行；mtp: k 行；dspark: n 行       │
+│  none: 1 行 verify；dflash2: 8 行；dspark: n 行                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -302,17 +299,17 @@ model::Runtime::decodeAsync()  DFlash 提议 8 行 → target 验证 → 接受
 |---|---|---|
 | `version` | `2` | 有 `speculation` 时为 2；读取器接受 1 |
 | `speculation.version` | `1` | plan schema 版本，独立于 record 版本 |
-| `provider` | `none`/`dflash2`/`mtp`/`dspark` | 未知值拒绝，消息点名引擎版本 |
+| `provider` | `none`/`dflash2`/`dspark` | 未知值拒绝，消息点名引擎版本 |
 | `format` | `none`/`safetensors`/`gguf` | 与 provider 匹配；`none` 必须配 `none` |
 | `source.kind` | `none`/`builtin`/`external` | `builtin` 不允许 `repo`/`revision` |
 | `source.repo` | 仓库 ID | 仅 `external`；本地路径用 `path` |
 | `source.revision` | commit | 仅 `external` repository |
 | `source.files` | assembly 路径 → digest | 只读展示与校验，不单独信任 |
-| `proposal_rows` | `1..8`（DFlash2 固定 8） | `none` 必须为 1；MTP/DSpark 由 provider 定义 |
-| `state` | `none`/`draft-rings`/`mtp-cache`/`dspark-state` | 与 provider 匹配 |
+| `proposal_rows` | `1..8`（DFlash2 固定 8） | `none` 必须为 1；DSpark 由 provider 定义 |
+| `state` | `none`/`draft-rings`/`dspark-state` | 与 provider 匹配 |
 | `fallback` | `none`/`required` | 用户显式请求 `--require-draft` 时为 `required` |
 | `alignment` | 对象 | 有 draft 时必填；`none` 可省略 |
-| `alignment.tokenizer_digest` | sha256 | 外部 MTP/DSpark 必填；DFlash2 建议填 |
+| `alignment.tokenizer_digest` | sha256 | DSpark 必填；DFlash2 建议填 |
 
 ### 5.3 C++ 类型
 
@@ -393,7 +390,6 @@ from enum import Enum
 class Provider(str, Enum):
     NONE = "none"
     DFLASH2 = "dflash2"
-    MTP = "mtp"
     DSPARK = "dspark"
 
 class DraftFormat(str, Enum):
@@ -562,73 +558,6 @@ metadata、split、tensor rows 读取；计划阶段校验每个张量的名称�
 **禁止**：按仓库名判断兼容性。兼容性只看 config/header/张量，与当前
 `families.py` 的规则一致。
 
-### 6.5 `mtp` / builtin
-
-**输入**：target 自带的 MTP/nextn head。
-
-- GGUF：`<arch>.nextn_predict_layers`，张量名
-  `blk.<N>.nextn.*` / `mtp.*`；
-- MLX：`model.mtp.*`、`model.layers.<N>.mtp.*`；
-- Model Optimizer：`mtp.*` 模块（当前明确不读）。
-
-**Plan**：
-
-```json
-{
-  "provider": "mtp",
-  "format": "gguf",
-  "source": {"kind": "builtin"},
-  "proposal_rows": 2,
-  "state": "mtp-cache",
-  "alignment": {
-    "family": "DeepSeek-V4",
-    "hidden_size": 7168,
-    "vocabulary_size": 129280,
-    "target_layers": 61
-  }
-}
-```
-
-**算法**：
-
-```text
-propose(k)：
-  for i in 0..k-1:
-    h = MTPLayer(hidden_or_embedding(prev_token), kv_cache)
-    logits = target.lm_head(h)
-    next = sample_or_argmax(logits)
-    prev_token = next
-verify：target 对 anchor + k 个 proposal 跑 k+1 行
-commit：target KV + MTP 自己的 KV
-```
-
-**状态**：`MtpStateLayout`，每层 K/V 或 MLA latent，按 head 的实际结构；
-`CompositeStateLayout` 增加 `mtp` 可选部分，`none` 时为零。
-
-**约束**：head 必须完整；缺张量、层数不符、head 维度不符 → 回退；不允许用
-target 的普通层“近似”MTP。
-
-### 6.6 `mtp` / external
-
-独立仓库或目录只放 MTP head，必须带：
-
-```json
-{
-  "architectures": ["MtpHead"],
-  "base_model": "deepseek-ai/DeepSeek-V4",
-  "alignment": {
-    "family": "DeepSeek-V4",
-    "hidden_size": 7168,
-    "vocabulary_size": 129280,
-    "target_layers": 61,
-    "base_model_digest": "<sha256 of target config or GGUF header>",
-    "tokenizer_digest": "<sha256 of tokenizer.json>"
-  }
-}
-```
-
-`base_model_digest` 或 `tokenizer_digest` 不匹配即不兼容，不做“最接近匹配”。
-
 ### 6.7 `dspark`
 
 参考 [DSpark](https://arxiv.org/abs/2607.05147)：并行 backbone + 轻量顺序
@@ -668,15 +597,15 @@ acceptance 不低于 DFlash2 才转正。
 
 ### 6.8 Provider 能力矩阵
 
-| 能力 | none | dflash2/safetensors | dflash2/gguf | mtp/builtin | mtp/external | dspark |
-|---|---|---|---|---|---|---|
-| target 必需 | 是 | 是 | 是 | 是 | 是 | 是 |
-| draft 仓库 | 否 | 是 | 是 | 否 | 是 | 是 |
-| 量化 draft | — | 否（BF16） | 是 | 随 target | 是 | 是 |
-| 额外下载 | 0 | draft | draft | 0 | head | bundle |
-| 状态 | 0 | rings+window | rings+window | mtp KV | mtp KV | markov |
-| 验证宽度 | 1 | 1–8 | 1–8 | 1–k | 1–k | 1–n |
-| 成熟度 | P0 | 现有 | P1 | P2 | P2 | P3 |
+| 能力 | none | dflash2/safetensors | dflash2/gguf | dspark |
+|---|---|---|---|---|
+| target 必需 | 是 | 是 | 是 | 是 |
+| draft 仓库 | 否 | 是 | 是 | 是 |
+| 量化 draft | — | 否（BF16） | 是 | 是 |
+| 额外下载 | 0 | draft | draft | bundle |
+| 状态 | 0 | rings+window | rings+window | markov |
+| 验证宽度 | 1 | 1–8 | 1–8 | 1–n |
+| 成熟度 | P0 | 现有 | P1 | P2 |
 
 ---
 
@@ -686,7 +615,7 @@ acceptance 不低于 DFlash2 才转正。
 
 | 选项 | 取值 | 默认 | 说明 |
 |---|---|---|---|
-| `--speculation` | `auto`/`dflash2`/`mtp`/`dspark` | `auto` | 显式 provider |
+| `--speculation` | `auto`/`dflash2`/`dspark` | `auto` | 显式 provider |
 | `--no-draft` | flag | — | 兼容旧值，等同 `auto` |
 | `--draft-model` | `OWNER/REPO` 或本地路径 | — | 显式 draft 来源（保留现有语义） |
 | `--draft-format` | `auto`/`safetensors`/`gguf` | `auto` | 容器选择 |
@@ -694,26 +623,24 @@ acceptance 不低于 DFlash2 才转正。
 | `--draft-revision` | commit/tag/branch | 默认分支 | draft 独立 revision |
 | `--list-speculation` | flag | — | 打印可选 provider 与原因 |
 
-`--speculation dflash2` 与 MTP head 不匹配；`--require-draft` 要求草稿可解析。
+`--require-draft` 要求草稿可解析。
 
 ### 7.2 优先级
 
-1. `--speculation dflash2|mtp|dspark` → 该 provider；缺来源则报错或回退。
+1. `--speculation dflash2|dspark` → 该 provider；缺来源则报错或回退。
 2. `--draft-model` → 由内容探测 provider/format，覆盖家族默认。
 3. target 自身声明：
    - MLX `config.json` 的 `speculation` 对象；
    - GGUF 的 `splash.speculation` KV；
-   - 内置 MTP 的 `nextn_predict_layers`（仅当用户选 `mtp` 或 `auto`）。
 4. family registry 的默认候选。
 5. `none`。
 
 `auto` 的语义：能解析到兼容 draft 就用；解析不到就用 `none`。
-`dflash2`/`mtp`/`dspark` 的语义：必须用该 provider，解析不到则按 `fallback`
+`dflash2`/`dspark` 的语义：必须用该 provider，解析不到则按 `fallback`
 处理（默认回退 `none`，`--require-draft` 则失败）。
 
 ### 7.3 冲突规则
 
-- `--speculation dflash2` + 路径是 MTP head：参数错误（provider 不匹配）。
 - `--draft-format gguf` + 仓库只有 safetensors：解析错误，不自动换格式。
 - `--model-dir` + `--draft-model` 指向 target 目录内部：拒绝（与现有
   `_gguf_in`/`_split_parts` 的规则一致）。
@@ -760,7 +687,7 @@ ModelFamily(
 `Selection` 增加：
 
 ```python
-speculation: str          # auto/dflash2/mtp/dspark
+speculation: str          # auto/dflash2/dspark
 draft_format: str         # auto/safetensors/gguf
 require_draft: bool
 ```
@@ -780,8 +707,6 @@ require_draft: bool
 | `none` | 只检查 target；无 draft 字段 |
 | `dflash2` | draft config/header 的 architecture、hidden、vocab、mask、target layers、attention/selector/window、block size |
 | `dflash2`/GGUF | 上述 + GGUF header 的 `dflash2.*` 或 sidecar config + 张量名/类型列表 |
-| `mtp`/builtin | target 的 `nextn_predict_layers`、head 张量完整性、head 维度、层数 |
-| `mtp`/external | head config、alignment、base digest、tokenizer digest |
 | `dspark` | bundle config、ABI、alignment、backbone/markov 张量列表 |
 
 Plan check 由 `engine model-check` 执行，输入是 target 的 config/GGUF metadata
@@ -792,7 +717,7 @@ Plan check 由 `engine model-check` 执行，输入是 target 的 config/GGUF me
 - 每个期望张量存在、类型支持、形状匹配；
 - 没有多余的必要张量缺失；
 - draft 的 vocabulary 与 target 的 head 一致；
-- MTP/DSpark 的层数与 config 一致；
+- DSpark 的层数与 config 一致；
 - GGUF draft 的 split 完整；
 - 不支持的量化类型 → `unsupported_draft_type`。
 
@@ -806,8 +731,8 @@ Plan check 由 `engine model-check` 执行，输入是 target 的 config/GGUF me
 | `mask_token_id` | 精确（DFlash2） | 必填 |
 | `target_layers` | 精确 | 必填 |
 | `target_hidden_reduction` | 精确 | 取 target 默认 |
-| `tokenizer_digest` | 精确 | 外部 MTP/DSpark 必填 |
-| `base_model_digest` | 精确 | 外部 MTP 必填 |
+| `tokenizer_digest` | 精确 | DSpark 必填 |
+| `base_model_digest` | 精确 | DSpark 必填 |
 
 ### 8.4 回退矩阵
 
@@ -819,7 +744,6 @@ Plan check 由 `engine model-check` 执行，输入是 target 的 config/GGUF me
 | draft 配置不兼容 | 警告 + `none` | 启动失败 | `incompatible_config` |
 | draft 张量不匹配 | 警告 + `none` | 启动失败 | `incompatible_tensors` |
 | 引擎无该 provider | 警告 + `none` | 启动失败 | `unsupported_provider` |
-| 内置 MTP 不完整 | 警告 + `none` | 启动失败 | `incomplete_mtp` |
 | DSpark ABI 未知 | 警告 + `none` | 启动失败 | `unsupported_abi` |
 
 **绝不**因为 draft 不可用而换一个“相似”的 draft；只允许 `none`。
@@ -849,8 +773,7 @@ error: cannot prepare /models/Qwen3.8-27B-GGUF: the DFlash2 draft z-lab/... is i
 
 - `ModelFamily` 增加 `speculation: tuple[Candidate, ...]`；
 - 保留 `draft_repo` 属性（取第一个 DFlash2 候选）以兼容现有调用；
-- 增加 `MtpCandidate`、`DFlash2Candidate` 数据类；
-- 家族可以声明 `supports_builtin_mtp`。
+- 增加 `DFlash2Candidate` 数据类。
 
 ```python
 @dataclass(frozen=True)
@@ -865,7 +788,6 @@ class ModelFamily:
     name: str
     speculation: tuple[Candidate, ...]
     chat_format: ChatFormat
-    supports_builtin_mtp: bool = False
 
     @property
     def draft_repo(self) -> str | None:
@@ -882,7 +804,7 @@ class ModelFamily:
 - `_install()`：先解析 plan，再决定是否解析 draft；
 - `_draft()` → `_speculation_files(plan, repo, installed)`：按 format 分派；
 - `draft_files()` → `dflash2_safetensors_files()` / `dflash2_gguf_files()` /
-  `mtp_files()` / `dspark_files()`；
+  `dspark_files()`；
 - `assembly_record()`：写 `speculation` 对象（v2）；
 - `_changes()`：plan 变化也算变化（provider/format/revision/files）；
 - `_start_installed()`：plan 不兼容时按 fallback 决定“重装为 none”还是失败。
@@ -947,7 +869,7 @@ def _install(selection, repo, installed, plan, projector):
 示例：
 
 ```python
-model.add_argument("--speculation", choices=("auto", "dflash2", "mtp", "dspark"),
+model.add_argument("--speculation", choices=("auto", "dflash2", "dspark"),
                    default="auto")
 model.add_argument("--no-draft", action="store_true")
 model.add_argument("--draft-format", choices=("auto", "safetensors", "gguf"), default="auto")
@@ -998,8 +920,6 @@ bool ModelDescriptor::valid() const noexcept {
   // 只校验 plan 声明的部分
   if (speculation.provider == SpeculationProvider::DFlash2)
     return validDraft(target, speculation, dflash);
-  if (speculation.provider == SpeculationProvider::Mtp)
-    return validMtp(target, speculation, mtp);
   if (speculation.provider == SpeculationProvider::DSpark)
     return validDSpark(target, speculation, dspark);
   return validTarget(target);  // none
@@ -1041,16 +961,15 @@ if (descriptor.speculation.hasDraft()) {
 struct CompositeStateLayout final {
   GdnStateLayout target;
   DraftStateLayout draft;   // 全零合法
-  MtpStateLayout mtp;       // 可选
   DSparkStateLayout dspark; // 可选
 
   [[nodiscard]] constexpr bool valid() const noexcept {
-    return target.valid() && draft.validOrNone() && mtp.validOrNone() &&
-           dspark.validOrNone() && onlyPlannedState();
+    return target.valid() && draft.validOrNone() && dspark.validOrNone() &&
+           onlyPlannedState();
   }
   [[nodiscard]] constexpr uint64_t laneBytes() const noexcept {
     return kLaneGdnCells * target.cellBytes() + draft.ringBytes() +
-           draft.windowBytes() + mtp.laneBytes() + dspark.laneBytes();
+           draft.windowBytes() + dspark.laneBytes();
   }
 };
 ```
@@ -1214,7 +1133,7 @@ canonical << "speculation " << providerName(plan.provider) << ' '
 | `runtime/model/ModelDescriptor.hpp/.mm` | plan 类型、valid、inspect | 高 |
 | `runtime/model/ModelFactory.hpp/.cpp` | 可选加载、Speculator | 高 |
 | `runtime/model` 下的 `Speculator.hpp` 与 `Speculator.cpp` | 新增接口与 None | 中 |
-| `runtime/model/StateLayout.hpp` | 零值合法、可选 MTP/DSpark | 高 |
+| `runtime/model/StateLayout.hpp` | 零值合法、可选 DSpark | 高 |
 | `runtime/model/DraftCheckpoint.*` | GGUF source 抽象 | 高 |
 | `runtime/model/Runtime.cpp` | 解码循环、提交 | 高 |
 | `runtime/engine/Engine.cpp` | DraftContextPlan 可选、junction | 高 |
@@ -1293,9 +1212,7 @@ canonical << "speculation " << providerName(plan.provider) << ' '
 | MLX 4bit/6bit/8bit | DFlash2 safetensors BF16 | 现有 |
 | MLX 4bit | DFlash2 GGUF Q8_0 | P1 |
 | 任意 | none | P0 |
-| GGUF/MLX | MTP builtin | P2 |
-| GGUF/MLX | MTP external | P2 |
-| GGUF/MLX | DSpark | P3 |
+| GGUF/MLX | DSpark | P2 |
 
 ### 11.5 候选家族（按优先级）
 
@@ -1303,7 +1220,7 @@ canonical << "speculation " << providerName(plan.provider) << ' '
 2. Qwen2.5/Qwen3 dense（Tier B，none）；
 3. Gemma 3/4（Tier B，none；vision 后续）；
 4. Mistral Small 3.x（Tier B，none）；
-5. DeepSeek-V3/V4 MoE（Tier B + MTP builtin）；
+5. DeepSeek-V3/V4 MoE（Tier B，none）；
 6. DSpark for DeepSeek-V4（Tier C）。
 
 ### 11.6 不承诺的部分
@@ -1327,12 +1244,6 @@ splash serve --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --no-draft
 splash serve --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M \
   --draft-model z-lab/Qwen3.8-27B-DFlash2-GGUF \
   --draft-format gguf
-
-# 内置 MTP
-splash serve --model deepseek-ai/DeepSeek-V4-GGUF:Q4_K_M --speculation mtp
-
-# 外部 MTP
-splash serve --model ... --draft-model /models/DeepSeek-V4-MTP --speculation mtp
 
 # 实验 DSpark
 splash serve --model ... --draft-model /models/DeepSeek-V4-DSpark --speculation dspark
@@ -1378,7 +1289,7 @@ Speculation: none (autoregressive; no compatible draft found: unsupported_draft_
 
 ### 12.5 桌面 App
 
-- Models 编辑器增加 “Speculation” 段：Auto / None / DFlash2 / MTP / DSpark；
+- Models 编辑器增加 “Speculation” 段：Auto / None / DFlash2 / DSpark；
 - 新增 “Draft format” 与 “Require draft”；
 - Live 页显示 provider、acceptance、fallback reason；
 - 启动参数透传 `--speculation`、`--draft-format`、`--require-draft`；
@@ -1421,7 +1332,7 @@ Speculation: none (autoregressive; no compatible draft found: unsupported_draft_
 2. 安装器：写 v2 + `--no-draft`（P0）。
 3. 引擎：GGUF draft（P1）。
 4. 安装器：GGUF draft 选择（P1）。
-5. MTP（P2）、DSpark（P3）。
+5. DSpark（P2）。
 6. 文档与桌面 App 同步。
 
 ---
@@ -1482,7 +1393,7 @@ Speculation: none (autoregressive; no compatible draft found: unsupported_draft_
 | 维度 | 取值 |
 |---|---|
 | target | GGUF dense / GGUF MoE / MLX dense / MLX MoE / Flint |
-| provider | none / dflash2-safetensors / dflash2-gguf / mtp-builtin / mtp-external / dspark |
+| provider | none / dflash2-safetensors / dflash2-gguf / dspark |
 | context | 4K / 32K / auto |
 | sampling | greedy / seeded / constrained |
 | vision | on / off |
@@ -1532,21 +1443,7 @@ Speculation: none (autoregressive; no compatible draft found: unsupported_draft_
 **验收**：Q4_K target + Q8_0 draft 可服务；safetensors target + GGUF draft
 可服务；不支持的 draft 类型回退。
 
-### P2：内置/外部 MTP（2–3 周）
-
-**目标**：DeepSeek 风格 MTP head 可用。
-
-**任务**：
-
-1. `MtpLayout`、`MtpWeights`、`MtpSpeculator`。
-2. GGUF/MLX/Model Optimizer 的 head 提取。
-3. alignment 与外部 head 安装。
-4. MTP 状态与 KV 提交。
-5. 测试：A8、MTP golden、不匹配回退。
-
-**验收**：内置与外部 MTP 各跑通一个模型；缺 head 时回退。
-
-### P3：DSpark（3–4 周）
+### P2：DSpark（3–4 周）
 
 **目标**：实验性 DSpark bundle 可用。
 
@@ -1560,7 +1457,7 @@ Speculation: none (autoregressive; no compatible draft found: unsupported_draft_
 
 **验收**：在 release prompts 上 acceptance 不低于 DFlash2，才转正。
 
-### P4：family pack 与模型扩展（持续）
+### P3：family pack 与模型扩展（持续）
 
 **目标**：Tier B 家族零引擎改动接入。
 
@@ -1577,12 +1474,12 @@ Speculation: none (autoregressive; no compatible draft found: unsupported_draft_
 ### 依赖图
 
 ```text
-P0 ──► P1 ──► P2 ──► P3
+P0 ──► P1 ──► P2
  │
- └────► P4（可与 P2/P3 并行）
+ └────► P3（可与 P1/P2 并行）
 ```
 
-P0 是硬前置；P1 可与 P2 部分并行；P3 依赖 P2 的 state 抽象；P4 依赖 P0 的
+P0 是硬前置；P1 可与 P2 部分并行；P2 依赖 P1 的 state 抽象；P3 依赖 P0 的
 无 draft 路径。
 
 ---
@@ -1595,7 +1492,6 @@ P0 是硬前置；P1 可与 P2 部分并行；P3 依赖 P2 的 state 抽象；P4
 | 解码图 8 行浪费导致 `none` 性能差 | 高 | 中 | P0 接受；P1 评估 1 行 arena |
 | 状态可选化引入内存/缓存 bug | 中 | 高 | 零值单测、缓存命名空间隔离 |
 | GGUF draft 类型覆盖不足 | 中 | 中 | 首批限定类型；明确回退 |
-| MTP head 张量命名差异 | 高 | 中 | 每家族映射表 + 严格校验 |
 | DSpark ABI 不稳定 | 高 | 中 | 实验开关、版本拒绝 |
 | 旧引擎读新 record 失败 | 中 | 中 | 发布顺序、清晰错误 |
 | 模型范围扩张带来质量回归 | 中 | 高 | Tier 分级、`auto` 不选 Tier C |
@@ -1627,11 +1523,10 @@ P0 是硬前置；P1 可与 P2 部分并行；P3 依赖 P2 的 state 抽象；P4
 ## 18. 开放问题
 
 1. `none` 是否值得单独缩小 decode arena（1 行）？还是 P0 先用 8 行物理形状？
-2. `--verify-rows` 对 `none`/MTP 是否保留？建议变成 provider 选项或忽略。
+2. `--verify-rows` 对 `none` 是否保留？建议变成 provider 选项或忽略。
 3. `tokenizer_digest` 是否对外部 DFlash2 也强制？
 4. `z-lab` 的官方镜像列表由 registry 维护，还是只允许显式 `--draft-model`？
 5. DSpark 的 Markov 状态放 `CompositeStateLayout`，还是复用 draft window？
-6. MTP 的 `proposal_rows` 上限是否固定 8，还是按 head 的 `k` 动态？
 7. 无 draft 的持久缓存是否应该默认关闭（因为没有复用价值）？
 8. 桌面 App 的默认值：`auto` 还是 `none`？
 
@@ -1705,7 +1600,7 @@ error: the model's record version 2 requires a newer engine; rebuild it with mak
 
 - **已实现（P0 的大部分）**：
   - `model.json` version 2 的 `speculation` 对象，provider `none`；
-  - 安装器 `--no-draft` / `--speculation none` / `--require-draft`；
+  - 安装器 `--no-draft` / `--speculation none`（均为 `auto` 的旧拼写）/ `--require-draft`；
   - `auto` 在 draft 不可解析时告警并降级为 `none`；
   - 引擎读取 v2 记录、可选 `draft/`、`SpeculationPlan::none`；
   - 零 draft 状态布局、内存计划与审计；
@@ -1718,19 +1613,11 @@ error: the model's record version 2 requires a newer engine; rebuild it with mak
   - `install/draftgguf.py`：安装时把 BF16/F16/F32/Q8_0 的 DFlash2 GGUF 转成
     引擎读取的 BF16 safetensors，`draft/config.json` 保留为 sidecar；
   - 安装器自动识别 draft 仓库中的 GGUF，无需额外参数。
-- **P2 已开始（计划、元数据与界面）**：
-  - GGUF 的 `nextn_predict_layers` 与 MLX 的 `num_nextn_predict_layers`
-    会记录到 `model.json` 的 `mtp: {"layers": N}`；
-  - `--speculation mtp` 接受带内置 MTP 头的目标，记录
-    `provider: mtp`、`source.kind: builtin`，但不加载 head；
-  - 该计划按 `none` 服务，`/status` 报告
-    `speculation.provider: mtp` 与 `fallback_reason: mtp execution is not implemented...`；
-  - 桌面 App 的 Live 卡片显示“内置 MTP N 层”与回退原因；
-  - 外部 MTP 头目录/仓库会作为 plan 数据安装到 `draft/`，其 `alignment`
-    会与 target 校验，但同样不执行；
-  - MTP head 的实际加载与提议尚未实现。
+- **内置/外部 MTP（原 P2）已移除**：其计划（`--speculation mtp`、`model.json`
+  的 `mtp` 记录、内置头计数与外部 head 安装）已删除。GGUF 的 NextN 预测层
+  仍从目标层数中扣除，不加载。
 - **未实现（P1 剩余 / P2 起）**：其它量化 GGUF draft（Q4_K/Q6_K 等）的直接
-  读取、MTP 执行、DSpark、family pack。
+  读取、DSpark、family pack。
 - **已知取舍**：`none` 仍复用 8 行物理 decode arena 与 1 行 verify；draft
   状态布局为零但 `CompositeStateLayout` 的接口未改成 optional；这些是 P1
   的性能优化点，不影响正确性。

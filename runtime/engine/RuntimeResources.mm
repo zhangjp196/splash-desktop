@@ -996,10 +996,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
         aneFfnBytes + mixerBytes,
         loaded.streamedTable() ? loaded.streamedTable()->committedBytes() : 0,
         loaded.descriptor.hasDraft(),
-        loaded.descriptor.mtpLayers,
-        loaded.descriptor.speculation.kind == model::SpeculationKind::Mtp
-            ? "mtp"
-            : loaded.descriptor.hasDraft() ? "dflash2" : "none",
+        loaded.descriptor.hasDraft() ? "dflash2" : "none",
     };
     // A lane's prefill command writes a group of chunks where the routed
     // experts stream (model::RuntimeGeometry::prefillChunks).

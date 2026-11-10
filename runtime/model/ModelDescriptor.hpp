@@ -44,7 +44,7 @@ enum class VisionSource : uint8_t { Safetensors = 1, Gguf, None };
 // How a model proposes tokens beside its target. None is plain autoregressive
 // decoding: the target alone is a complete model, and no draft weights, state
 // or cache namespace belong to it.
-enum class SpeculationKind : uint8_t { None = 1, DFlash2, Mtp, DSpark };
+enum class SpeculationKind : uint8_t { None = 1, DFlash2, DSpark };
 // The container of a draft's weights. None when the plan has no draft.
 enum class DraftFormat : uint8_t { None = 1, Safetensors, Gguf };
 
@@ -57,9 +57,7 @@ struct SpeculationPlan final {
   DraftFormat format = DraftFormat::None;
   uint32_t proposalRows = 1;
 
-  // Only a DFlash2 plan loads a draft today. An MTP plan is recorded and
-  // reported, but its head has no runtime yet, so the descriptor serves the
-  // target alone and /status names the fallback.
+  // A DFlash2 plan loads a draft; every other plan serves the target alone.
   [[nodiscard]] constexpr bool hasDraft() const noexcept {
     return kind == SpeculationKind::DFlash2;
   }
@@ -76,10 +74,6 @@ struct ModelDescriptor final {
   // means a missing installation.
   DFlashDraftLayout draft;
   SpeculationPlan speculation;
-  // The target's built-in MTP layers, recorded by the installer. They are not
-  // loaded yet (P2); the count lets the status and the panel say the head is
-  // there, and the plan can name it when the provider lands.
-  uint32_t mtpLayers = 0;
   ops::VisionLayout vision;
   ModelCapabilities capabilities;
   kv::Layout targetKvLayout;

@@ -984,46 +984,28 @@ ModelDescriptor inspectModelRoot(const std::filesystem::path &root) {
       NSDictionary *speculation = requireObject(record, @"speculation", "speculation plan");
       provider = requireString(speculation, @"provider", "speculation provider");
       format = requireString(speculation, @"format", "speculation format");
-      if (*provider != "none" && *provider != "dflash2" && *provider != "mtp")
+      if (*provider != "none" && *provider != "dflash2")
         throw std::invalid_argument("speculation provider " + *provider +
                                     " is not one this engine implements");
       if (*provider == "dflash2" && *format != "safetensors")
         throw std::invalid_argument("speculation format " + *format +
                                     " is not one this engine loads for DFlash2");
-      if (*provider == "mtp" && *format != "none" && *format != "gguf" && *format != "safetensors")
-        throw std::invalid_argument("an MTP plan has no such draft format");
     }
     NSDictionary *draft = nil;
     const bool draftDirectory = std::filesystem::exists(root / "draft");
     if (provider && *provider == "none") {
       if (draftDirectory)
         throw std::invalid_argument("a plan without a draft holds a draft/ directory");
-    } else if (provider && *provider == "mtp") {
-      // An external MTP head is installed as data; this build reports it but
-      // has no loader for it yet, so it never reads draft/.
     } else if (draftDirectory) {
       draft = readObject(root / "draft" / "config.json", "draft config");
     } else if (recordVersion == 2 && provider && *provider == "dflash2") {
       throw std::invalid_argument("the model's root holds no draft/ for its DFlash2 plan");
     }
     ModelDescriptor result = describeSourceModel(std::move(name), targetFormat, visionFormat, config, draft);
-    if (NSDictionary *mtp = record[@"mtp"]) {
-      if (![mtp isKindOfClass:[NSDictionary class]])
-        throw std::invalid_argument("mtp must be an object");
-      result.mtpLayers = requireWhole(mtp[@"layers"], "mtp layers");
-    }
-    if (recordVersion == 2) {
-      if (*provider == "none")
-        result.speculation = {};
-      else if (*provider == "mtp")
-        result.speculation = {
-            SpeculationKind::Mtp,
-            *format == "gguf" ? DraftFormat::Gguf
-                              : *format == "safetensors" ? DraftFormat::Safetensors : DraftFormat::None,
-            1};
-      else
-        result.speculation = {SpeculationKind::DFlash2, DraftFormat::Safetensors, 8};
-    }
+    if (recordVersion == 2)
+      result.speculation = *provider == "none"
+                               ? SpeculationPlan{}
+                               : SpeculationPlan{SpeculationKind::DFlash2, DraftFormat::Safetensors, 8};
     result.sourceIdentity = std::move(sourceIdentity);
     if (!result.valid()) throw std::invalid_argument("incompatible target and draft model");
     return result;

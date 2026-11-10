@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import assembly, draftgguf, families, gguf, hub, models, mtp, tied
+from . import assembly, draftgguf, families, gguf, hub, models, tied
 
 # The tokenizer files an MLX target may supply, linked when present.
 TOKENIZER_FILES = (
@@ -72,17 +72,12 @@ class Target:
     # serves (the layout in assembly.py). A GGUF's configuration and tokenizer
     # are derived from it at installation instead.
     files: dict[str, str]
-    # The target's built-in MTP layers, which are not loaded yet
-    # (docs/speculation.zh.md P2): a positive count is a model whose
-    # checkpoint carries a head the engine can learn to use later.
-    mtp_layers: int = 0
 
 
 def root_ggufs(files):
     """The GGUF files at a repository's root, named *.gguf as the native
     loader finds a target. Files in a subfolder count only as the parts of a
-    split GGUF in its VARIANT/ folder (split_gguf); others (MTP heads) never
-    do."""
+    split GGUF in its VARIANT/ folder (split_gguf); others never do."""
     return sorted(n for n in files if "/" not in n and n.endswith(".gguf"))
 
 
@@ -353,19 +348,6 @@ def _gguf_target(repo, variant, language_only, scratch, projector=select_vision)
     return target
 
 
-def _mtp_layers(config: Path) -> int:
-    """The built-in MTP layers a target configuration declares
-    (num_nextn_predict_layers), zero for a model without any. The installer
-    records the count; the engine reports it until P2 can run the head."""
-    try:
-        value = json.loads(config.read_text())
-    except (OSError, ValueError):
-        return 0
-    text = value.get("text_config", value) if isinstance(value, dict) else {}
-    layers = text.get("num_nextn_predict_layers", 0) if isinstance(text, dict) else 0
-    return layers if type(layers) is int and layers > 0 else 0
-
-
 def gguf_target(repo, names, scratch, *, projector=None):
     """The GGUF target whose files in repo are names, one or a split GGUF's
     parts in split order, its configuration and metadata written into
@@ -400,10 +382,7 @@ def gguf_target(repo, names, scratch, *, projector=None):
             raise models.VisionError(f"vision projector {name}: {error}") from None
         files[assembly.GGUF_VISION] = name
         vision_format = "gguf"
-    return Target(
-        "gguf", vision_format, config, metadata, family, files,
-        _mtp_layers(config),
-    )
+    return Target("gguf", vision_format, config, metadata, family, files)
 
 
 def mlx_target(repo, language_only):
@@ -456,7 +435,7 @@ def mlx_target(repo, language_only):
             raise models.VisionError(str(error)) from None
         files["vision/config.json"] = "config.json"
         files |= {"vision/" + n: n for n in shards}
-    return Target("mlx-affine", vision_format, config, None, family, files, _mtp_layers(config))
+    return Target("mlx-affine", vision_format, config, None, family, files)
 
 
 def describes_vision(config):
@@ -584,9 +563,6 @@ def prepare(selection):
         with hub.as_model_errors(f"cannot install {selection.model}"):
             manifest = models.read_json(target.file("manifest.json"))
         models.refuse_package(selection.model, manifest)
-    if selection.speculation == "mtp":
-        _prepare_without_draft(selection, target, installed)
-        return
     if installed is not None and target.revision == installed_commit:
         _start_installed(selection, target, installed)
     else:
@@ -649,9 +625,6 @@ def prepare_local(selection):
             installed = assembly.verify(selection.link)
         except (models.ModelError, OSError) as error:
             print(f"Reinstalling {selection.model}: {error}", flush=True)
-    if selection.speculation == "mtp":
-        _prepare_without_draft(selection, repo, installed, projector=projector)
-        return
     if selection.draft_model is None:
         # No draft named: the family's DFlash2 release stands in, which
         # _install resolves from the Hub and downloads when it is missing.
@@ -668,21 +641,6 @@ def prepare_local(selection):
             return
         print(f"Reinstalling {selection.model}: {replaced}", flush=True)
     _install(selection, repo, installed, draft, projector)
-
-
-def _prepare_without_draft(selection, repo, installed, **options):
-    """Start or install a plan without an external draft, the target's
-    built-in MTP head, reusing an installed one."""
-    if installed is not None and installed.get("speculation", {}).get("provider") == "mtp":
-        if (replaced := _retain_installed(selection)) is None:
-            print(
-                f"Splash model {selection.model} is already installed in "
-                f"{selection.link}",
-                flush=True,
-            )
-            return
-        print(f"Reinstalling {selection.model}: {replaced}", flush=True)
-    _install(selection, repo, installed, **options)
 
 
 def _local_draft(selection, installed):
@@ -822,8 +780,7 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
     and publish the assembly at the selection link. draft is the draft's
     repository as this start resolved it, or None to resolve it here, asking
     the Hub only when it answered for repo. projector names the target's
-    vision projector (select_vision). A selection with --speculation mtp
-    publishes the target's built-in head as plan data."""
+    vision projector (select_vision)."""
     # Every Hub request (header reads, downloads) happens here.
     with (
         hub.as_model_errors(f"cannot install {selection.model}"),
@@ -832,17 +789,7 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
         target = inspect_target(
             repo, selection.variant, selection.language_only, Path(scratch), projector
         )
-        provider = "mtp" if selection.speculation == "mtp" else "dflash2"
-        if provider == "mtp" and selection.draft_model is None and target.mtp_layers <= 0:
-            raise models.ModelError(
-                f"{selection.model} has no built-in MTP head "
-                f"(num_nextn_predict_layers is zero)"
-            )
-        if provider == "mtp":
-            # An external MTP head is installed as data; this build reports it
-            # but does not run it yet.
-            draft = _local_draft(selection, installed) if selection.draft_model else None
-        elif draft is None:
+        if draft is None:
             try:
                 draft = _resolve_draft(target.family, selection, installed, repo)
             except models.ModelError as error:
@@ -852,22 +799,8 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
                     models.warn(f"serving without speculation: {error}")
                 draft = None
         files = {}
-        alignment = None
-        if provider == "mtp" and draft is not None:
-            downloaded = draft.download(set(draft.files))
-            if "config.json" not in downloaded:
-                raise models.ModelError(
-                    f"{draft.name} has no config.json for its MTP head"
-                )
-            alignment = mtp.validate(
-                target.config, downloaded["config.json"], target.family.name
-            )
-            files = {"draft/" + name: path for name, path in downloaded.items()}
-        elif draft is not None:
+        if draft is not None:
             draft, files = _draft(target, installed, draft, selection.models_root)
-        elif provider == "dflash2":
-            # Auto could not resolve a draft: the published plan is none.
-            provider = "none"
         vision = "disabled" if target.vision_format == "none" else "enabled"
         draft_name = draft.name if draft is not None else "none"
         print(
@@ -882,52 +815,25 @@ def _install(selection, repo, installed, draft=None, projector=select_vision):
     publish(
         selection.models_root,
         selection.link,
-        assembly_record(selection.model, target, repo, draft, provider, alignment),
+        assembly_record(selection.model, target, repo, draft),
         files,
     )
 
 
-def assembly_record(model, target, repo, draft, provider="dflash2", alignment=None):
+def assembly_record(model, target, repo, draft):
     """The record of model's assembly of target, inspected in repo, and the
     draft repository draft, if any, but for the files it links (publish). A
-    plan without a draft writes provider none and no draft source; provider
-    mtp records the target's built-in head, which this build reports but does
-    not run yet."""
+    plan without a draft writes provider none and no draft source."""
     # A draft installation keeps the version 1 record every release reads;
-    # only a plan without a draft, or an MTP plan, needs version 2.
-    if draft is not None and provider != "mtp":
+    # only a plan without a draft needs version 2.
+    if draft is not None:
         return {
             "version": 1,
             "model": model,
             "family": target.family.name,
             "target_format": target.format,
             "vision_format": target.vision_format,
-            "mtp": {"layers": target.mtp_layers},
             "sources": {"target": repo.identity(), "draft": draft.identity()},
-        }
-    sources = {"target": repo.identity()}
-    if provider == "mtp" and draft is not None:
-        sources["draft"] = draft.identity()
-        format = "gguf" if any(name.endswith(".gguf") for name in draft.files) else "safetensors"
-        speculation = {
-            "version": 1,
-            "provider": "mtp",
-            "format": format,
-            "source": {"kind": "external"},
-            "proposal_rows": alignment["proposal_rows"] if alignment else 1,
-            "state": "mtp-cache",
-            "fallback": "none",
-            "alignment": alignment,
-        }
-    else:
-        speculation = {
-            "version": 1,
-            "provider": provider,
-            "format": "none",
-            "source": {"kind": "none" if provider == "none" else "builtin"},
-            "proposal_rows": 1,
-            "state": "none" if provider == "none" else "mtp-cache",
-            "fallback": "none",
         }
     return {
         "version": 2,
@@ -935,9 +841,16 @@ def assembly_record(model, target, repo, draft, provider="dflash2", alignment=No
         "family": target.family.name,
         "target_format": target.format,
         "vision_format": target.vision_format,
-        "mtp": {"layers": target.mtp_layers},
-        "speculation": speculation,
-        "sources": sources,
+        "speculation": {
+            "version": 1,
+            "provider": "none",
+            "format": "none",
+            "source": {"kind": "none"},
+            "proposal_rows": 1,
+            "state": "none",
+            "fallback": "none",
+        },
+        "sources": {"target": repo.identity()},
     }
 
 

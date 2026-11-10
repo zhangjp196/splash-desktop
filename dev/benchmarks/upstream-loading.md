@@ -72,7 +72,7 @@ parity check.
 
 Both GGUFs declare `gpt2/qwen35`: 248,320 vocabulary entries, 247,587 merges,
 27 control tokens, six user-defined tokens and 243 unused entries. The 27B file
-declares 65 blocks including one MTP layer; the derived configuration describes
+declares 65 blocks including one NextN layer; the derived configuration describes
 64 target layers.
 
 Each tokenizer built from GGUF metadata was compared with the MLX Qwen tokenizer,

@@ -70,7 +70,7 @@ ENTRY_STAGING = ".loading-"
 # The speculation modes a selection names. auto takes the draft the
 # configuration provides (the family's release or --draft-model) and serves
 # without one when there is none; a provider names the draft's implementation.
-SPECULATION_MODES = ("auto", "dflash2", "mtp", "dspark")
+SPECULATION_MODES = ("auto", "dflash2", "dspark")
 
 
 class ModelError(RuntimeError):
@@ -84,7 +84,7 @@ def speculation_mode(value):
     if mode not in SPECULATION_MODES:
         raise ModelError(
             f"speculation {value} is not one this release implements; "
-            "use auto, dflash2, mtp or dspark"
+            "use auto, dflash2 or dspark"
         )
     return mode
 
@@ -586,14 +586,10 @@ def parse_args(argv=None):
         args.speculation = speculation_mode(args.speculation)
     except ModelError as error:
         parser.error(str(error))
-    if args.speculation == "mtp" and args.require_draft:
-        parser.error("MTP execution is not implemented; --require-draft is not available for it")
-    if args.speculation == "mtp" and args.draft_model is not None:
-        parser.error("external MTP heads are not implemented; omit --draft-model")
     if args.speculation == "dspark":
         parser.error(
             "--speculation dspark is not implemented by this release; "
-            "use auto, dflash2 or mtp"
+            "use auto or dflash2"
         )
     return args
 

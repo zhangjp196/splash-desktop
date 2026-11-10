@@ -79,7 +79,7 @@ struct ServerSettings: Codable, Equatable {
     static let draftModes = ["none", "folder", "hub"]
     /// How decode proposes tokens: automatic (a compatible DFlash2 draft,
     /// else none), none (autoregressive), or DFlash2 explicitly.
-    static let speculationModes = ["auto", "dflash2", "mtp"]
+    static let speculationModes = ["auto", "dflash2"]
     static let stateFormats = ["fp32", "bf16"]
     static let verifyRowsOptions = ["auto", "all"]
     /// The eviction presets by level, and the policies a custom one picks.

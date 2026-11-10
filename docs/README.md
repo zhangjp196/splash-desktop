@@ -12,8 +12,8 @@ These documents run from using Splash to working on it:
   trellis expert formats, chat templates, local model files, Splash packages and
   local model directories.
 - [Speculation roadmap](speculation.md): the proposal that makes a draft
-  optional, adds GGUF and `z-lab` DFlash2 checkpoints, built-in and external
-  MTP, DSpark, and a wider model range.
+  optional, adds GGUF and `z-lab` DFlash2 checkpoints, DSpark, and a wider
+  model range.
 - [推测解码完整方案](speculation.zh.md): the same design in Chinese, with the
   record schema, provider specifications, file-level changes, phases, tests
   and risks.

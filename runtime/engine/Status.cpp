@@ -621,11 +621,7 @@ std::string runtimeStatusJson(
       << ",\"proposal_rows\":"
       << (plan.speculationProvider() == "dflash2" ? 8 : 1)
       << ",\"draft_weights_bytes\":" << plan.breakdown().draftWeightsBytes
-      << ",\"available_mtp_layers\":" << plan.mtpLayers()
-      << ",\"fallback_reason\":"
-      << (plan.speculationProvider() == "mtp"
-              ? json::quote("mtp execution is not implemented in this build; serving without speculation")
-              : "null")
+      << ",\"fallback_reason\":null"
       << "}"
       // Model-lifetime timings include warmup; request metrics do not.
       << ",\"model_timing\":{\"scope\":\"model_lifetime\""

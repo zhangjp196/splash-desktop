@@ -351,9 +351,6 @@ def model_config(metadata, vision=None):
         model_type=architecture.model_type,
         vocab_size=len(metadata.require("tokenizer.ggml.tokens", list)),
     )
-    mtp = mtp_layers(metadata, arch)
-    if mtp:
-        text["num_nextn_predict_layers"] = mtp
     if architecture.text_config is not None:
         text.update(architecture.text_config(metadata, arch))
     if architecture.flat:
@@ -390,19 +387,19 @@ def scalar_metadata(metadata):
     return typed
 
 
-def mtp_layers(metadata, arch):
-    """The target's MTP layers, which are never loaded."""
+def nextn_layers(metadata, arch):
+    """The target's built-in NextN prediction layers, which are not loaded."""
     layers = metadata.positive(arch + ".block_count")
-    mtp = metadata.values.get(arch + ".nextn_predict_layers", 0)
-    if type(mtp) is not int or not 0 <= mtp < layers:
-        raise ModelError("invalid GGUF MTP layer count")
-    return mtp
+    nextn = metadata.values.get(arch + ".nextn_predict_layers", 0)
+    if type(nextn) is not int or not 0 <= nextn < layers:
+        raise ModelError("invalid GGUF NextN layer count")
+    return nextn
 
 
 def loaded_layers(metadata, arch):
-    """The target's layer count without its MTP layers, which are never
-    loaded."""
-    return metadata.positive(arch + ".block_count") - mtp_layers(metadata, arch)
+    """The target's layer count without its NextN prediction layers, which
+    are not loaded."""
+    return metadata.positive(arch + ".block_count") - nextn_layers(metadata, arch)
 
 
 def dense_layers(metadata, arch):
@@ -819,8 +816,9 @@ ARCHITECTURES = {
 
 def loaded_tensors(metadata):
     """Each tensor the native loader reads from the target that metadata
-    describes, with the types it accepts. MTP layers are not loaded; in a
-    hybrid every full_attention_interval-th layer is full attention, the
+    describes, with the types it accepts. Built-in NextN prediction layers
+    are not loaded; in a hybrid every full_attention_interval-th layer is
+    full attention, the
     others GDN, and otherwise every layer is attention. A MoE target's
     leading dense layers (dense_layers) read a dense FFN, and a MoE layer
     whose header lists the fused gate/up experts tensor reads it in place of

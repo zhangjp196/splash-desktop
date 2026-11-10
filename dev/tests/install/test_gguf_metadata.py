@@ -337,8 +337,8 @@ class GgufMetadataTests(unittest.TestCase):
         self.assertIn("blk.3.attn_q.weight", tensors)
         self.assertNotIn("blk.2.attn_q.weight", tensors)
         # GDN alpha and beta may be of any one quantized format, F32 or of two
-        # types, and the MTP layer (block 40) is never loaded, so its types do
-        # not matter.
+        # types, and the NextN layer (block 40) is never loaded, so its types
+        # do not matter.
         tensors |= {"blk.0.ssm_alpha.weight": GGML["IQ4_XS"]}
         tensors |= {"blk.0.ssm_beta.weight": GGML["IQ4_XS"]}
         tensors |= {"blk.1.ssm_alpha.weight": GGML["F32"]}
@@ -497,15 +497,15 @@ class GgufMetadataTests(unittest.TestCase):
         # One quantized projection or expert is enough: the routed experts
         # alone, as llmfan46's Qwen3.6-35B-A3B NVFP4-Experts-Only file has.
         screen(moe, bf16 | {n: GGML["NVFP4"] for n in bf16 if "_exps." in n})
-        # A file of the MTP layer alone lacks the target's tensors, which are
-        # listed instead.
-        mtp = {
+        # A file of the NextN layer alone lacks the target's tensors, which
+        # are listed instead.
+        nextn = {
             n.replace("blk.3.", "blk.64."): found
             for n, found in converted(dense, "BF16").items()
             if n.startswith("blk.3.")
         }
         with self.assertRaisesRegex(models.ModelError, "cannot load: .*missing"):
-            screen(dense, mtp)
+            screen(dense, nextn)
 
     def test_screening_reads_flash_next_as_the_native_loader_does(self):
         values = fixture(family=FLASH_NEXT)
@@ -532,7 +532,7 @@ class GgufMetadataTests(unittest.TestCase):
             screen(values, missing)
         # The arrays the engine's model check does not see are refused before
         # download unless they are the planner's: a compress ratio for each
-        # loaded layer (an MTP layer's after them is not read) and the PLE
+        # loaded layer (a NextN layer's after them is not read) and the PLE
         # layer alone. One refusal names each array that differs.
         compress = "qwen4exp.attention.compress_ratios"
         ratios = values[compress]
@@ -657,13 +657,13 @@ class GgufMetadataTests(unittest.TestCase):
             {"indexerBlockTokens": qwen4.qsa_block, "pleLayer": qwen4.ple_layer},
         )
 
-    def test_builtin_mtp_layers_are_recorded_but_not_loaded(self):
+    def test_builtin_nextn_layers_are_not_target_layers(self):
         values = fixture(native=True)
         values["qwen35moe.nextn_predict_layers"] = 1
         text = gguf.model_config(self.metadata(values))["text_config"]
-        self.assertEqual(text["num_nextn_predict_layers"], 1)
-        # The MTP layer is not a target layer: the engine never sees it.
+        # The prediction layer is not a target layer: the engine never sees it.
         self.assertEqual(text["num_hidden_layers"], 39)
+        self.assertNotIn("num_nextn_predict_layers", text)
 
     def test_every_derivation_names_an_unsupported_architecture(self):
         values = fixture()
@@ -761,7 +761,7 @@ class GgufMetadataTests(unittest.TestCase):
             },
         )
 
-    def test_config_uses_metadata_and_subtracts_only_mtp_layers(self):
+    def test_config_uses_metadata_and_subtracts_only_nextn_layers(self):
         values = fixture()
         values["qwen35moe.block_count"] = 41
         values["qwen35moe.nextn_predict_layers"] = 1
@@ -770,15 +770,15 @@ class GgufMetadataTests(unittest.TestCase):
         self.assertEqual(text["hidden_size"], 2048)
         self.assertEqual(text["max_position_embeddings"], 262144)
         # Tensor screening reads the layer count first, and rejects an
-        # invalid MTP count as configuration derivation does.
-        for mtp in (41, "1"):
-            values["qwen35moe.nextn_predict_layers"] = mtp
+        # invalid prediction layer count as configuration derivation does.
+        for nextn in (41, "1"):
+            values["qwen35moe.nextn_predict_layers"] = nextn
             metadata = self.metadata(values)
             for derive in (gguf.require_loadable, gguf.model_config):
                 with (
-                    self.subTest(mtp=mtp, derive=derive.__name__),
+                    self.subTest(nextn=nextn, derive=derive.__name__),
                     self.assertRaisesRegex(
-                        models.ModelError, "invalid GGUF MTP layer count"
+                        models.ModelError, "invalid GGUF NextN layer count"
                     ),
                 ):
                     derive(metadata)

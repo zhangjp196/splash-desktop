@@ -16,7 +16,6 @@ struct LiveStatus: Equatable {
     var speculationProvider: String?
     var speculationRows: Int?
     var speculationFallback: String?
-    var availableMTPLayers: Int?
     /// The engine's request latency histograms, in milliseconds. `samples` is
     /// the window the percentiles cover; zero means the engine has not
     /// completed a request since it started.
@@ -889,7 +888,7 @@ final class AppModel: ObservableObject {
         if speculation != "auto" {
             arguments += ["--speculation", speculation]
         }
-        if requireDraft && speculation != "mtp" {
+        if requireDraft {
             arguments.append("--require-draft")
         }
         // The DFlash2 draft is a local folder, like any other model the panel
@@ -1490,7 +1489,6 @@ final class AppModel: ObservableObject {
             status.speculationProvider = speculation["provider"] as? String
             status.speculationRows = speculation["proposal_rows"] as? Int
             status.speculationFallback = speculation["fallback_reason"] as? String
-            status.availableMTPLayers = speculation["available_mtp_layers"] as? Int
         }
         if let metrics = object["metrics"] as? [String: Any] {
             status.decodeTokensPerSecond = metrics["decode_tokens_per_second"] as? Double

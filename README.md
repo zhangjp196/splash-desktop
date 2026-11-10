@@ -59,8 +59,8 @@ dashboard in the menu bar.
   KV and recurrent-state precision, the neural engine, admission, prefill
   pacing and thinking defaults. It also chooses how decode speculates —
   **Auto** (the draft the configuration provides, or the target alone when
-  there is none), **DFlash2**, or **MTP** (a built-in head this release
-  reports but does not run yet) — and whether a draft is required. The editor keeps its sections in
+  there is none) or **DFlash2** — and whether a draft is required. The
+  editor keeps its sections in
   a rail beside card-style rows, with the explanation under each field and a
   strip at the foot showing what Start would use.
 - **Settings** — the app's own **Application** preferences (appearance,

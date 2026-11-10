@@ -297,7 +297,6 @@ struct SettingsEditor: View {
                 Picker("", selection: $settings.speculation) {
                     Text(verbatim: L10n.string("speculation.auto")).tag("auto")
                     Text(verbatim: L10n.string("speculation.dflash2")).tag("dflash2")
-                    Text(verbatim: L10n.string("speculation.mtp")).tag("mtp")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -313,8 +312,6 @@ struct SettingsEditor: View {
                     prompt: L10n.string("field.draft.prompt")
                 )
             }
-            .disabled(settings.speculation == "mtp")
-            .opacity(settings.speculation == "mtp" ? 0.55 : 1)
             rowDivider
             SettingRow(
                 title: L10n.string("field.require_draft"),
@@ -326,8 +323,6 @@ struct SettingsEditor: View {
                     .toggleStyle(.switch)
                     .tint(SplashPalette.violet)
             }
-            .disabled(settings.speculation == "mtp")
-            .opacity(settings.speculation == "mtp" ? 0.55 : 1)
             rowDivider
             SettingRow(
                 title: L10n.string("field.verify_rows"),
@@ -341,13 +336,6 @@ struct SettingsEditor: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
-        }
-        if settings.speculation == "mtp" {
-            EditorNote(
-                text: L10n.string("help.speculation.mtp"),
-                tone: SplashPalette.muted,
-                systemImage: "info.circle"
-            )
         }
     }
 

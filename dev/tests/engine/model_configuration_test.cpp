@@ -73,7 +73,7 @@ constexpr std::string_view kMoeGgufConfig =
     R"("max_position_embeddings":262144,"num_attention_heads":16,"num_key_value_heads":2,)"
     R"("head_dim":256,"num_experts":256,"num_hidden_layers":40,"vocab_size":248320}})";
 // Qwen3.5-122B-A10B's, of the same model type, from unsloth's
-// Ornith-1.5-122B GGUF (its MTP layer left out of the layers).
+// Ornith-1.5-122B GGUF (its NextN layer left out of the layers).
 constexpr std::string_view kLargeMoeGgufConfig =
     R"({"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":3072,)"
     R"("max_position_embeddings":262144,"num_attention_heads":32,"num_key_value_heads":2,)"
@@ -89,14 +89,6 @@ model::ModelDescriptor inspect(const SourceModel &model) {
   return model::inspectModelRoot(root.path());
 }
 
-// The descriptor of a model whose plan holds no draft directory.
-model::ModelDescriptor inspectWithoutDraft(const SourceModel &model) {
-  const test::TemporaryDirectory root("splash-source-model");
-  test::writeFile(root.path() / "model.json", model.record);
-  test::writeFile(root.path() / "config.json", model.config);
-  return model::inspectModelRoot(root.path());
-}
-
 void refuses(const SourceModel &model, std::string_view error, const std::string &message) {
   rejects([&] { static_cast<void>(inspect(model)); }, error, message);
 }
@@ -106,25 +98,6 @@ void refuses(const SourceModel &model, std::string_view error, const std::string
 void testFamilies(const std::filesystem::path &fixtures) {
   const SourceModel dense = mlxModel(fixtures, "qwen3.8-27b");
   const model::ModelDescriptor denseDescriptor = inspect(dense);
-  // The record's MTP head is metadata: a count the status reports, which does
-  // not change the descriptor's validity before P2 runs it.
-  require(inspect(dense.with(&SourceModel::record, R"("version":1)",
-                             R"("version":1,"mtp":{"layers":2})"))
-              .mtpLayers == 2,
-          "an MTP layer count was not read from the record");
-  // An MTP plan is recorded without a draft: the head has no runtime yet, so
-  // the descriptor serves the target alone and the status names the fallback.
-  const SourceModel mtp = dense.with(
-      &SourceModel::record, R"({"version":1)", R"({"version":2)").with(
-      &SourceModel::record, R"("model":)",
-      R"("speculation":{"version":1,"provider":"mtp","format":"none",)"
-      R"("source":{"kind":"builtin"},"proposal_rows":1,"state":"mtp-cache",)"
-      R"("fallback":"none"},"mtp":{"layers":1},"model":)");
-  const model::ModelDescriptor mtpDescriptor = inspectWithoutDraft(mtp);
-  require(mtpDescriptor.valid() && !mtpDescriptor.hasDraft() &&
-              mtpDescriptor.speculation.kind == model::SpeculationKind::Mtp &&
-              mtpDescriptor.mtpLayers == 1,
-          "an MTP plan without a draft was not a valid descriptor");
   require(denseDescriptor.name == "community/fine-tune" &&
               std::holds_alternative<model::Qwen3_8Layout>(denseDescriptor.target) &&
               denseDescriptor.targetSource == model::TargetSource::Safetensors && !denseDescriptor.hasVision() &&
