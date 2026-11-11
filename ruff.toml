@@ -1,0 +1,8 @@
+# The lint gate for this checkout. dev/ruff.toml repeats it for the dev tree;
+# this root file covers server/ and install/, which have no config of their
+# own, so running ruff from the checkout root checks them with the same rules
+# instead of ruff's own defaults.
+target-version = "py313"
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I"]

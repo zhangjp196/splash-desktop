@@ -224,12 +224,15 @@ def _well_formed(record):
     return (
         set(record) <= keys | OPTIONAL_RECORD_KEYS
         and keys <= set(record)
-        and (mtp is None or (
-            isinstance(mtp, dict)
-            and set(mtp) == {"layers"}
-            and type(mtp["layers"]) is int
-            and mtp["layers"] >= 0
-        ))
+        and (
+            mtp is None
+            or (
+                isinstance(mtp, dict)
+                and set(mtp) == {"layers"}
+                and type(mtp["layers"]) is int
+                and mtp["layers"] >= 0
+            )
+        )
         and type(version) is int
         and isinstance(record["model"], str)
         and isinstance(record["family"], str)
@@ -284,7 +287,10 @@ def _speculation_well_formed(speculation, sources):
         return False
     if type(speculation["version"]) is not int or speculation["version"] != 1:
         return False
-    if type(speculation["proposal_rows"]) is not int or not 1 <= speculation["proposal_rows"] <= 8:
+    if (
+        type(speculation["proposal_rows"]) is not int
+        or not 1 <= speculation["proposal_rows"] <= 8
+    ):
         return False
     if provider == "none":
         return (

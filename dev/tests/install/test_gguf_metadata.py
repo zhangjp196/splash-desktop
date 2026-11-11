@@ -1107,9 +1107,7 @@ class GgufMetadataTests(unittest.TestCase):
                 "no DFlash2 draft is released for Qwen3.8-Flash-Next; "
                 "name one with --draft-model",
             ):
-                self.prepare(
-                    selection(self.root, repo + ":Q2_0", require_draft=True)
-                )
+                self.prepare(selection(self.root, repo + ":Q2_0", require_draft=True))
 
     def test_a_layer_count_no_family_has_is_rejected_before_screening(self):
         # Screening lists every tensor of every layer a header claims; only

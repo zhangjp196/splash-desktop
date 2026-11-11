@@ -20,7 +20,9 @@ class DraftGgufTests(unittest.TestCase):
         self.root = Path(temporary.name)
 
     def gguf(self, name, tensors):
-        return fixture_files.write_gguf(self.root / name, {"general.alignment": 32}, tensors)
+        return fixture_files.write_gguf(
+            self.root / name, {"general.alignment": 32}, tensors
+        )
 
     def test_release_names(self):
         for source, expected in {
@@ -49,7 +51,12 @@ class DraftGgufTests(unittest.TestCase):
         source = self.gguf(
             "draft.gguf",
             [
-                ("draft.fc.weight", [2, 2], GGML["BF16"], struct.pack("<4H", 0, 1, 2, 3)),
+                (
+                    "draft.fc.weight",
+                    [2, 2],
+                    GGML["BF16"],
+                    struct.pack("<4H", 0, 1, 2, 3),
+                ),
                 (
                     "draft.mask_embedding",
                     [2],
@@ -59,7 +66,9 @@ class DraftGgufTests(unittest.TestCase):
             ],
         )
         files = draftgguf.convert(source, self.root / "out")
-        self.assertEqual(set(files), {"model.safetensors", "mask_embedding.safetensors"})
+        self.assertEqual(
+            set(files), {"model.safetensors", "mask_embedding.safetensors"}
+        )
         weights = (self.root / "out" / "model.safetensors").read_bytes()
         header_bytes = struct.unpack("<Q", weights[:8])[0]
         header = json.loads(weights[8 : 8 + header_bytes])

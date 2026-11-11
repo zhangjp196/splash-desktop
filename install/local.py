@@ -98,14 +98,26 @@ def prepare_local_model(
     models_root = Path(models_dir).expanduser().resolve()
     try:
         return _prepare(
-            target, draft, mmproj, language_only, models_root, speculation, require_draft
+            target,
+            draft,
+            mmproj,
+            language_only,
+            models_root,
+            speculation,
+            require_draft,
         )
     except ModelError as error:
         raise type(error)(f"cannot prepare {target}: {error}") from None
 
 
 def _prepare(
-    target, draft, mmproj, language_only, models_root, speculation="auto", require_draft=False
+    target,
+    draft,
+    mmproj,
+    language_only,
+    models_root,
+    speculation="auto",
+    require_draft=False,
 ):
     """prepare_local_model, of its paths made absolute."""
     speculation = models.speculation_mode(speculation)

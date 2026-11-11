@@ -94,15 +94,15 @@ class LauncherTests(unittest.TestCase):
         # configuration decides now, so the old spellings name auto.
         for options in (["--no-draft"], ["--speculation", "none"]):
             with self.subTest(options=options):
-                args = launcher.parse_args(
-                    ["serve", "--model", MODEL_ID, *options]
-                )
+                args = launcher.parse_args(["serve", "--model", MODEL_ID, *options])
                 self.assertEqual(args.speculation, "auto")
         with (
             mock.patch("sys.stderr", io.StringIO()) as error,
             self.assertRaises(SystemExit) as refused,
         ):
-            launcher.parse_args(["serve", "--model", MODEL_ID, "--speculation", "bogus"])
+            launcher.parse_args(
+                ["serve", "--model", MODEL_ID, "--speculation", "bogus"]
+            )
         self.assertEqual(refused.exception.code, 2)
         self.assertIn("is not one this release implements", error.getvalue())
 

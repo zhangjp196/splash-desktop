@@ -46,10 +46,12 @@ def tensor_name(name: str) -> str:
     `selector.` as `candidate_selector.`."""
     if name.startswith("draft."):
         name = name[len("draft.") :]
-    if name.startswith("model.layers.") or name.startswith("model.fc.") or name.startswith(
-        "model.norm."
-    ) or name.startswith("model.hidden_norm.") or name.startswith(
-        "model.candidate_selector."
+    if (
+        name.startswith("model.layers.")
+        or name.startswith("model.fc.")
+        or name.startswith("model.norm.")
+        or name.startswith("model.hidden_norm.")
+        or name.startswith("model.candidate_selector.")
     ):
         name = name[len("model.") :]
     if name.startswith("blk."):
@@ -153,7 +155,13 @@ def convert(source, directory: Path) -> dict[str, Path]:
             alignment = header.values.get("general.alignment", GGUF_ALIGNMENT)
             if type(alignment) is not int or alignment <= 0:
                 raise ModelError("invalid GGUF alignment in the draft")
-            streams.append((header, path.open("rb"), header.consumed + (-header.consumed % alignment)))
+            streams.append(
+                (
+                    header,
+                    path.open("rb"),
+                    header.consumed + (-header.consumed % alignment),
+                )
+            )
         for header, stream, data_start in streams:
             for name, kind_id in header.tensors.items():
                 kind = gguf.TENSOR_TYPES.get(kind_id)

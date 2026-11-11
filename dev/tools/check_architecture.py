@@ -464,7 +464,11 @@ def family_names(path: Path) -> list[tuple[str, str]]:
     return [
         (
             family.args[0].value,
-            family.args[1].value if len(family.args) > 1 and isinstance(family.args[1], ast.Constant) and isinstance(family.args[1].value, str) else "",
+            family.args[1].value
+            if len(family.args) > 1
+            and isinstance(family.args[1], ast.Constant)
+            and isinstance(family.args[1].value, str)
+            else "",
         )
         for family in families.elts
     ]

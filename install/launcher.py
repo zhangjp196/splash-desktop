@@ -142,7 +142,10 @@ def _ensure_installed(selection):
         ("--revision", selection.revision),
         ("--draft-model", selection.draft_model),
         ("--mmproj", selection.mmproj),
-        ("--speculation", selection.speculation if selection.speculation != "auto" else None),
+        (
+            "--speculation",
+            selection.speculation if selection.speculation != "auto" else None,
+        ),
     ):
         if value is not None:
             command += [flag, str(value)]

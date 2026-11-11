@@ -289,7 +289,14 @@ def selection_link(
     ):
         return _hashed_link(
             models,
-            [model_id, revision, language_only, draft_model, speculation, require_draft],
+            [
+                model_id,
+                revision,
+                language_only,
+                draft_model,
+                speculation,
+                require_draft,
+            ],
         )
     if variant is None:
         return models / repo_id

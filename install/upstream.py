@@ -631,7 +631,10 @@ def prepare_local(selection):
         _install(selection, repo, installed, projector=projector)
         return
     draft = _local_draft(selection, installed)
-    if installed is not None and (installed or {}).get("sources", {}).get("draft") == draft.identity():
+    if (
+        installed is not None
+        and (installed or {}).get("sources", {}).get("draft") == draft.identity()
+    ):
         if (replaced := _retain_installed(selection)) is None:
             print(
                 f"Splash model {selection.model} is already installed in "
@@ -1055,9 +1058,7 @@ def _draft_ggufs(files):
     return sorted(
         name
         for name in files
-        if "/" not in name
-        and name.endswith(".gguf")
-        and "mmproj" not in name.lower()
+        if "/" not in name and name.endswith(".gguf") and "mmproj" not in name.lower()
     )
 
 
@@ -1170,7 +1171,9 @@ def draft_files(repo, target, models_root=None):
         chosen = _select_draft_gguf(gguf_names)
         downloaded = repo.download({"config.json", *chosen})
         converted = _converted_draft(
-            [downloaded[name] for name in chosen], downloaded["config.json"], models_root
+            [downloaded[name] for name in chosen],
+            downloaded["config.json"],
+            models_root,
         )
         files = {"draft/config.json": downloaded["config.json"]}
         files |= {"draft/" + name: path for name, path in converted.items()}
