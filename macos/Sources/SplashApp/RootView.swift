@@ -190,8 +190,17 @@ struct RootView: View {
             case .about: AboutPane()
             }
         }
-        .id(section)
+        // The language joins the identity, which rebuilds the pane when it
+        // changes: the panels that skip redraws while their data is equal
+        // read L10n when they do draw, so without it a language change leaves
+        // their text in the old one until the data moves.
+        .id(PaneIdentity(section: section, language: model.language))
         .transition(.opacity)
+    }
+
+    private struct PaneIdentity: Hashable {
+        let section: Section
+        let language: AppModel.InterfaceLanguage
     }
 
     /// The detail's toolbar: the search palette, the appearance, the language,

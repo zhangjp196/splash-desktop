@@ -442,7 +442,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                 self._json(200, stored.response)
             return
         if path == "/v1/models" or path.startswith("/v1/models/"):
-            speculation = self.app.backend.status().get("speculation")
+            speculation = self.app.backend.status(cached=True).get("speculation")
             models = [
                 {
                     "id": name,

@@ -23,16 +23,24 @@ final class ChatBridge: ObservableObject {
 
     func apply(_ payload: [String: Any]) {
         guard payload["type"] as? String == "state" else { return }
-        title = payload["title"] as? String ?? ""
-        activeID = payload["active"] as? String
-        running = payload["running"] as? Bool ?? false
-        canUndo = payload["canUndo"] as? Bool ?? false
+        let title = payload["title"] as? String ?? ""
+        let activeID = payload["active"] as? String
+        let running = payload["running"] as? Bool ?? false
+        let canUndo = payload["canUndo"] as? Bool ?? false
         let rows = payload["recents"] as? [[String: Any]] ?? []
-        recents = rows.compactMap { row in
+        let recents: [ChatSummary] = rows.compactMap { row in
             guard let id = row["id"] as? String, let title = row["title"] as? String
             else { return nil }
             return ChatSummary(id: id, title: title)
         }
+        // The page posts its state whenever it changes, and repeats what the
+        // band already shows between changes: assign only what differs, so a
+        // streamed reply's frames do not publish the same history each time.
+        if self.title != title { self.title = title }
+        if self.activeID != activeID { self.activeID = activeID }
+        if self.running != running { self.running = running }
+        if self.canUndo != canUndo { self.canUndo = canUndo }
+        if self.recents != recents { self.recents = recents }
     }
 
     func open(_ id: String) { run("window.splash && window.splash.open(\(Self.quoted(id)))") }
