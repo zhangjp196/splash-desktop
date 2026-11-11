@@ -1,35 +1,5 @@
-# Splash documentation
+# 文档
 
-These documents run from using Splash to working on it:
+- [待办与遗留](remaining-work.md):1.9.3 代码整理与性能优化之后尚未完成的工作,以及复现每个问题的方法。
 
-- [Server](server.md): building and running Splash, its server's options, where
-  models are kept, API model aliases, reasoning and thinking settings, the
-  reasoning loop guard and context compaction, agent launchers, and upgrading.
-- [API](api.md): the endpoints, request fields and limits, sampling, streaming,
-  tool calls, structured output, images and PDFs, heat and noise, status and
-  errors.
-- [Models](models.md): the model formats Splash loads, drafts, vision, Gyro's
-  trellis expert formats, chat templates, local model files, Splash packages and
-  local model directories.
-- [Speculation roadmap](speculation.md): the proposal that makes a draft
-  optional, adds GGUF and `z-lab` DFlash2 checkpoints, DSpark, and a wider
-  model range.
-- [推测解码完整方案](speculation.zh.md): the same design in Chinese, with the
-  record schema, provider specifications, file-level changes, phases, tests
-  and risks.
-- [Internals](internals.md): the code's boundaries, installation, weight
-  loading, kernels, sparse attention, Neural Engine prefill, host steps,
-  residency, admission and eviction, sliding windows, the disk tier, the native
-  protocol, and failures.
-- [Validate](validate.md): the checks, the release check and local benchmarks.
-- [Package](package.md): the release archive and bottle, the desktop app, its
-  updates and releases, private test releases, and the macOS app and disk image.
-- [Performance](performance.md): measurements and how they were made.
-- [Open work](remaining-work.md): what the 1.9.3 organization and performance
-  pass left open, with the evidence and the command that shows it.
-
-Building from source needs Apple Silicon with macOS 26.4+, Xcode 26 or newer,
-Python 3.12–3.14, and a Metal 4 compiler with `uint4b_format` tensor support.
-The macOS 26.2 SDK can compile the host code, but Xcode 26.2's default Metal
-component cannot compile the kernels; select a newer Metal toolchain when
-using that SDK. Packaged users need none of these development tools.
+本目录在 2026-11-11 清空后重建。此前的文档(server、api、models、internals、validate、package、performance、speculation)仍保留在 git 历史中,需要时可从 `68ce4e29` 之前的提交取回。
