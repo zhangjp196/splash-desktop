@@ -100,8 +100,12 @@ struct ChatPane: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 9)
             .background {
+                // A flat translucent wash, not a Material: the header sits
+                // over the conversation for the chat's whole life, and a
+                // backdrop blur under it would re-sample the web view's
+                // scene every frame.
                 ZStack {
-                    Rectangle().fill(.ultraThinMaterial)
+                    Rectangle().fill(SplashPalette.surface.opacity(0.72))
                     LinearGradient(
                         colors: [
                             SplashPalette.cyan.opacity(0.08),

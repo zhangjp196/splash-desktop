@@ -112,6 +112,11 @@ enum SmartLevel: String, CaseIterable, Identifiable {
 /// that trades prompt speed for quiet. The control belongs to the app rather
 /// than to a model configuration, and a change reaches a running engine at
 /// once through /v1/thermal, so nothing needs a restart.
+///
+/// The page splits by how often its parts move: the ladder is the user's own
+/// choice and changes when they act, while the readings follow /status every
+/// second. The readings are their own Equatable view over the status alone,
+/// so a poll that moved no sensor leaves the ladder and the header alone.
 struct ThermalPane: View {
     @EnvironmentObject private var model: AppModel
 
@@ -125,16 +130,8 @@ struct ThermalPane: View {
                 )
                 ladder
                 if model.live.updated {
-                    MetricSection(
-                        title: L10n.string("thermal.heat"),
-                        systemImage: "thermometer.medium",
-                        cards: heatCards
-                    )
-                    MetricSection(
-                        title: L10n.string("thermal.pacing"),
-                        systemImage: "metronome.fill",
-                        cards: pacingCards
-                    )
+                    ThermalReadings(live: model.live)
+                        .equatable()
                 } else {
                     PaneEmpty(
                         title: L10n.string("thermal.empty.title"),
@@ -212,17 +209,6 @@ struct ThermalPane: View {
         .glassPanel(tint: SplashPalette.amber, raised: true)
     }
 
-    /// The duty a mode carries in effect, for its button's label: the mode's
-    /// own for `auto`, the chosen level's for `fixed`, and none for `smart`,
-    /// whose duty is computed from the fans and temperatures.
-    private func effectiveDuty(for rung: ThermalRung) -> Double? {
-        switch rung {
-        case .auto: return rung.duty
-        case .smart: return nil
-        case .fixed: return model.fixedLevel.duty
-        }
-    }
-
     /// The smart mode's levels, with the one in effect marked and what it
     /// decides, in the same words the rungs use for their duty: the fan band
     /// this level allows before prefill gives way.
@@ -290,6 +276,42 @@ struct ThermalPane: View {
         return L10n.format("thermal.cost.paced", 100 / duty)
     }
 
+    /// The duty a mode carries in effect, for its button's label: the mode's
+    /// own for `auto`, the chosen level's for `fixed`, and none for `smart`,
+    /// whose duty is computed from the fans and temperatures.
+    private func effectiveDuty(for rung: ThermalRung) -> Double? {
+        switch rung {
+        case .auto: return rung.duty
+        case .smart: return nil
+        case .fixed: return model.fixedLevel.duty
+        }
+    }
+}
+
+/// The page's read-only half: the heat the Mac reports and what the pacing has
+/// cost, drawn from one `/status` reading. It is Equatable over that reading
+/// alone, so a poll that moved no sensor, fan or counter skips both sections
+/// instead of redrawing them beside an untouched ladder.
+private struct ThermalReadings: View, Equatable {
+    let live: LiveStatus
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            MetricSection(
+                title: L10n.string("thermal.heat"),
+                systemImage: "thermometer.medium",
+                cards: heatCards
+            )
+            .equatable()
+            MetricSection(
+                title: L10n.string("thermal.pacing"),
+                systemImage: "metronome.fill",
+                cards: pacingCards
+            )
+            .equatable()
+        }
+    }
+
     /// The Mac's heat in one row: the fans as a single block — the fastest
     /// against what it can do, the rest of the pack in its caption — then one
     /// block per part (CPU, GPU, IO and the disk), each the hottest of the SMC
@@ -304,7 +326,6 @@ struct ThermalPane: View {
     /// answer the same question, and the row is read by comparing the parts of
     /// the Mac, not one fan against another.
     private var fanCard: MetricCard {
-        let live = model.live
         guard live.fansAvailable, !live.fanSpeeds.isEmpty else {
             return MetricCard(title: L10n.string("thermal.fans"),
                               value: L10n.string("thermal.unavailable"),
@@ -325,7 +346,7 @@ struct ThermalPane: View {
 
     /// "2 fans, 1342–3197 RPM", or the count alone when the SMC gave no range.
     private func fanCaption() -> String {
-        let speeds = model.live.fanSpeeds
+        let speeds = live.fanSpeeds
         guard let low = speeds.min(), let high = speeds.max(), speeds.count > 1 else {
             return speeds.count > 1
                 ? L10n.format("thermal.fan.count", speeds.count)
@@ -335,7 +356,7 @@ struct ThermalPane: View {
     }
 
     private var temperatureCards: [MetricCard] {
-        let readings = model.live.temperatures
+        let readings = live.temperatures
         let hottest = TemperatureGroup.hottest(readings)?.group
         return TemperatureGroup.allCases.map { group in
             let celsius = TemperatureGroup.peak(readings, in: group)
@@ -363,7 +384,6 @@ struct ThermalPane: View {
     /// the duty the engine holds with the backoff the Mac's thermal state
     /// leaves of it, and the waits that pacing has cost so far.
     private var pacingCards: [MetricCard] {
-        let live = model.live
         let scale = live.thermalScale
         let backoff = scale.map { L10n.format("thermal.scale.caption", $0) }
         return [
@@ -380,7 +400,7 @@ struct ThermalPane: View {
     }
 
     private var waitsCaption: String {
-        guard let waited = model.live.pacedWaitMilliseconds, waited > 0 else {
+        guard let waited = live.pacedWaitMilliseconds, waited > 0 else {
             return L10n.string("thermal.waits.none")
         }
         return L10n.format("thermal.waits.caption", seconds(waited / 1000))
@@ -424,17 +444,11 @@ private struct RungButton: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 9)
             .background(
+                // A flat tint wash rather than a gradient: the ladder is a
+                // three-state choice, and a gradient fill would blend an
+                // extra layer for a state that changes a few times a day.
                 selected
-                    ? AnyShapeStyle(
-                        LinearGradient(
-                            colors: [
-                                SplashPalette.blue.opacity(0.24),
-                                SplashPalette.cyan.opacity(0.09),
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                    ? AnyShapeStyle(SplashPalette.blue.opacity(0.20))
                     : AnyShapeStyle(SplashPalette.surface.opacity(0.38)),
                 in: RoundedRectangle(cornerRadius: 10, style: .continuous)
             )

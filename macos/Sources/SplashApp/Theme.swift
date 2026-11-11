@@ -130,40 +130,32 @@ enum AppAppearance: String, CaseIterable, Identifiable {
     }
 }
 
-/// The window's backdrop: the canvas, three slow aurora blooms, and a fine
-/// grid. It sits under every pane, so switching pages never changes the
-/// atmosphere; only the content on top moves.
+/// The window's backdrop: the canvas, four aurora blooms, and a fine grid. It
+/// sits under every pane, so switching pages never changes the atmosphere;
+/// only the content on top moves. The blooms hold still and carry no blur —
+/// the radial gradient already fades smoothly — so the backdrop renders once
+/// and the glass panels above it never re-sample a moving scene.
 struct AuroraBackground: View {
     var tint: Color = SplashPalette.blue
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var drift = false
 
     var body: some View {
         ZStack {
             SplashPalette.canvas
 
             bloom(SplashPalette.blue, size: 620, x: -180, y: -300, opacity: 0.22)
-                .offset(x: drift ? 60 : -30, y: drift ? 30 : -20)
             bloom(SplashPalette.cyan, size: 520, x: 320, y: 360, opacity: 0.14)
-                .offset(x: drift ? -40 : 30, y: drift ? -30 : 20)
             bloom(SplashPalette.violet, size: 460, x: 520, y: -80, opacity: 0.12)
-                .offset(x: drift ? -20 : 20, y: drift ? 40 : -10)
             bloom(tint, size: 500, x: 330, y: -300, opacity: 0.10)
-                .offset(x: drift ? -30 : 15, y: drift ? 25 : -15)
 
             grid
                 .opacity(scheme == .dark ? 0.05 : 0.035)
         }
-        .animation(.easeInOut(duration: 1.2), value: tint)
+        // No crossfade on the tint: the stage colour changes every second or
+        // two while the engine serves, and an animated gradient would keep
+        // the whole backdrop re-rendering for a shade nobody tracks.
         .ignoresSafeArea()
         .allowsHitTesting(false)
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 16).repeatForever(autoreverses: true)) {
-                drift = true
-            }
-        }
     }
 
     private func bloom(
@@ -179,7 +171,6 @@ struct AuroraBackground: View {
                 )
             )
             .frame(width: size, height: size)
-            .blur(radius: 34)
             .offset(x: x, y: y)
     }
 
@@ -207,6 +198,12 @@ struct AuroraBackground: View {
 /// The shared glass surface: a translucent card with a fine gradient edge, a
 /// top sheen, and a soft shadow. Panes pass a tint when the card belongs to
 /// one reading, so the board reads in colour rather than in boxes.
+///
+/// The fill is a plain translucent colour, not a `Material`: a backdrop blur
+/// re-samples the scene under every card on every frame, and the live board
+/// stacks two dozen of them, which is the heaviest thing the window did. The
+/// aurora behind the panes already carries the atmosphere, so the cards read
+/// as glass with the tint, the sheen and the border alone.
 struct GlassPanel: ViewModifier {
     var radius: CGFloat = Theme.cardRadius
     var tint: Color?
@@ -216,15 +213,13 @@ struct GlassPanel: ViewModifier {
     private var isDark: Bool { scheme == .dark }
 
     func body(content: Content) -> some View {
-        content
+        let card = content
             .background {
                 ZStack {
                     RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
                         .fill(
                             SplashPalette.surface.opacity(
-                                isDark ? (raised ? 0.72 : 0.52) : (raised ? 0.90 : 0.74)
+                                isDark ? (raised ? 0.80 : 0.62) : (raised ? 0.94 : 0.80)
                             )
                         )
                     if let tint {
@@ -276,12 +271,19 @@ struct GlassPanel: ViewModifier {
                         lineWidth: 0.9
                     )
             }
-            .shadow(
-                color: .black.opacity(isDark ? (raised ? 0.28 : 0.18) : (raised ? 0.10 : 0.06)),
-                radius: raised ? 22 : 14,
+        // One shadow per card, and only where the card floats over others:
+        // a shadow is an offscreen pass, so the flat tiles keep their edge
+        // from the border alone.
+        if raised {
+            card.shadow(
+                color: .black.opacity(isDark ? 0.24 : 0.08),
+                radius: 14,
                 x: 0,
-                y: raised ? 12 : 7
+                y: 7
             )
+        } else {
+            card
+        }
     }
 }
 
@@ -349,7 +351,6 @@ struct SectionLabel: View {
             RoundedRectangle(cornerRadius: 2, style: .continuous)
                 .fill(tint)
                 .frame(width: 3, height: 14)
-                .shadow(color: tint.opacity(0.6), radius: 5)
             Image(systemName: systemImage)
                 .font(.system(size: 10.5, weight: .bold))
                 .foregroundStyle(tint)
@@ -389,7 +390,6 @@ struct PaneEmpty: View {
                         )
                     )
                     .frame(width: 76, height: 76)
-                    .blur(radius: 1)
                 Image(systemName: systemImage)
                     .font(.system(size: 29, weight: .light))
                     .foregroundStyle(SplashPalette.gradient)
@@ -409,7 +409,6 @@ struct PaneEmpty: View {
                         .padding(.horizontal, 18)
                         .padding(.vertical, 9)
                         .background(SplashPalette.accentFill, in: Capsule())
-                        .shadow(color: SplashPalette.blue.opacity(0.4), radius: 12, y: 5)
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 6)
@@ -440,34 +439,25 @@ struct Pill: View {
     }
 }
 
-/// A beacon for a live state: the dot breathes while the server is up.
+/// A beacon for a live state: a quiet halo dot while the server is up. The
+/// halo is a flat ring — no glow shadow, which would cost an offscreen pass
+/// for a two-pixel effect.
 struct StatusBeacon: View {
     var color: Color
     var active = true
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var pulse = false
 
     var body: some View {
         ZStack {
             if active {
                 Circle()
-                    .fill(color.opacity(0.35))
-                    .frame(width: 16, height: 16)
-                    .scaleEffect(pulse ? 1.35 : 0.6)
-                    .opacity(pulse ? 0 : 0.8)
+                    .fill(color.opacity(0.22))
+                    .frame(width: 14, height: 14)
             }
             Circle()
                 .fill(color)
                 .frame(width: 7, height: 7)
-                .shadow(color: color.opacity(0.8), radius: 4)
         }
         .frame(width: 16, height: 16)
-        .onAppear {
-            guard active, !reduceMotion else { return }
-            withAnimation(.easeOut(duration: 1.8).repeatForever(autoreverses: false)) {
-                pulse = true
-            }
-        }
     }
 }
 

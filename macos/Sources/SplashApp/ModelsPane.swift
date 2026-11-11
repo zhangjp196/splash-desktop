@@ -219,7 +219,6 @@ private struct ConfigTile: View {
         .frame(width: 172)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
         .onTapGesture { if canStart { start() } }
         .contextMenu {
             Button(L10n.string("models.start")) { start() }.disabled(!canStart)
@@ -315,13 +314,10 @@ private struct ConfigTile: View {
 
     private var fill: AnyShapeStyle {
         if isServing {
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [SplashPalette.mint.opacity(0.16), SplashPalette.cyan.opacity(0.05)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
+            // A flat tint wash rather than a gradient: the serving mark is a
+            // two-state fill, and a gradient would blend an extra layer for
+            // it.
+            return AnyShapeStyle(SplashPalette.mint.opacity(0.14))
         }
         return AnyShapeStyle(SplashPalette.surface.opacity(hovering ? 0.62 : 0.42))
     }
@@ -505,7 +501,6 @@ private struct ConfigEditor: View {
                     .padding(.horizontal, 18)
                     .padding(.vertical, 7)
                     .background(SplashPalette.accentFill, in: Capsule())
-                    .shadow(color: SplashPalette.blue.opacity(0.35), radius: 8, y: 3)
                     .opacity(canSave ? 1 : 0.4)
             }
             .buttonStyle(.plain)

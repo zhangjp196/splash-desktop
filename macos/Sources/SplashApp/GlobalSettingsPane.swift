@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The groups the app-wide settings page switches between. They describe the
 /// server every configuration shares, not the model one configuration serves.
-enum GlobalSection: String, CaseIterable, Identifiable {
+enum GlobalSection: String, CaseIterable, Identifiable, RailSection {
     case application, connection, access, storage
 
     var id: String { rawValue }
@@ -146,7 +146,7 @@ struct GlobalSettingsPane: View {
                 .padding(.bottom, 7)
 
             ForEach(GlobalSection.allCases) { item in
-                GlobalRailItem(
+                RailItem(
                     section: item,
                     selected: section == item
                 ) {
@@ -175,14 +175,12 @@ struct GlobalSettingsPane: View {
                 .foregroundStyle(.white)
                 .frame(width: 34, height: 34)
                 .background(
-                    LinearGradient(
-                        colors: [section.tint, section.tint.opacity(0.68)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
+                    // A flat tint fill rather than a gradient: the header
+                    // re-renders on every section switch, and a gradient
+                    // would blend an extra layer for a two-state chip.
+                    section.tint.opacity(0.85),
                     in: RoundedRectangle(cornerRadius: 9, style: .continuous)
                 )
-                .shadow(color: section.tint.opacity(0.35), radius: 7, y: 3)
             VStack(alignment: .leading, spacing: 2) {
                 Text(section.title)
                     .font(.system(size: 19, weight: .bold, design: .rounded))
@@ -601,62 +599,5 @@ struct GlobalSettingsPane: View {
         Rectangle()
             .fill(SplashPalette.hairline.opacity(0.55))
             .frame(height: 0.6)
-    }
-}
-
-/// One section in the Settings page's rail: an icon, a name and a one-line
-/// explanation. Unlike the configuration editor's rail there is no "changed"
-/// dot: these values are saved as they are edited and belong to no draft.
-private struct GlobalRailItem: View {
-    let section: GlobalSection
-    let selected: Bool
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: section.systemImage)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(selected ? .white : section.tint)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        selected
-                            ? AnyShapeStyle(
-                                LinearGradient(
-                                    colors: [section.tint, section.tint.opacity(0.72)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            : AnyShapeStyle(section.tint.opacity(0.13)),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    )
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(section.title)
-                        .font(.system(size: 12, weight: selected ? .semibold : .medium))
-                        .foregroundStyle(.primary)
-                    Text(section.summary)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(SplashPalette.muted)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(
-                selected
-                    ? section.tint.opacity(0.10)
-                    : (hovering ? SplashPalette.surface.opacity(0.28) : .clear),
-                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }

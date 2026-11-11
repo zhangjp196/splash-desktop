@@ -129,10 +129,11 @@ struct CommandPalette: View {
             }
             .frame(width: 560)
             .background {
+                // A flat translucent fill, not a Material: the palette floats
+                // over the whole window, and a backdrop blur under it would
+                // re-sample the entire scene every frame while it is open.
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(SplashPalette.surface.opacity(0.82))
+                    .fill(SplashPalette.surface.opacity(0.96))
             }
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)

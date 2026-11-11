@@ -64,10 +64,16 @@ struct MenuBarView: View {
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(SplashPalette.faint)
                     Spacer(minLength: 0)
-                    if let uptime = model.uptimeText {
-                        Text(L10n.format("sidebar.uptime", uptime))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(SplashPalette.faint)
+                    // The uptime ticks on a clock of its own: the model no
+                    // longer publishes every second (an idle engine must not
+                    // wake the whole interface), so this line re-reads the
+                    // running time on a one-second TimelineView instead.
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        if let uptime = model.uptimeText {
+                            Text(L10n.format("sidebar.uptime", uptime))
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(SplashPalette.faint)
+                        }
                     }
                 }
             }
@@ -157,7 +163,6 @@ struct MenuBarView: View {
                     .font(.system(size: 17, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(tint)
-                    .contentTransition(.numericText())
                 Text(unit)
                     .font(.system(size: 7.5))
                     .foregroundStyle(SplashPalette.faint)

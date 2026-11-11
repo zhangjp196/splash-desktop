@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 /// The groups the configuration editor's rail switches between. Each one owns
 /// a short description, so the rail explains the form instead of only naming
 /// it.
-enum SettingsSection: String, CaseIterable, Identifiable {
+enum SettingsSection: String, CaseIterable, Identifiable, RailSection {
     case model, draft, memory, serving
 
     var id: String { rawValue }
@@ -148,14 +148,12 @@ struct SettingsEditor: View {
                 .foregroundStyle(.white)
                 .frame(width: 34, height: 34)
                 .background(
-                    LinearGradient(
-                        colors: [section.tint, section.tint.opacity(0.68)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
+                    // A flat tint fill rather than a gradient: the header
+                    // re-renders on every section switch, and a gradient
+                    // would blend an extra layer for a two-state chip.
+                    section.tint.opacity(0.85),
                     in: RoundedRectangle(cornerRadius: 9, style: .continuous)
                 )
-                .shadow(color: section.tint.opacity(0.35), radius: 7, y: 3)
             VStack(alignment: .leading, spacing: 2) {
                 Text(section.title)
                     .font(.system(size: 19, weight: .bold, design: .rounded))
@@ -604,78 +602,6 @@ struct ReviewStat: View {
     }
 }
 
-// MARK: - Rail
-
-/// One section in the editor's rail: an icon, a name, a one-line explanation,
-/// and a dot when the section differs from the configuration it opened on.
-private struct RailItem: View {
-    let section: SettingsSection
-    let selected: Bool
-    let changed: Bool
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: section.systemImage)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(selected ? .white : section.tint)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        selected
-                            ? AnyShapeStyle(
-                                LinearGradient(
-                                    colors: [section.tint, section.tint.opacity(0.72)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            : AnyShapeStyle(section.tint.opacity(0.13)),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    )
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(section.title)
-                        .font(.system(size: 12, weight: selected ? .semibold : .medium))
-                        .foregroundStyle(.primary)
-                    Text(section.summary)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(SplashPalette.muted)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-                Spacer(minLength: 0)
-                if changed {
-                    Circle()
-                        .fill(section.tint)
-                        .frame(width: 5, height: 5)
-                        .shadow(color: section.tint.opacity(0.7), radius: 3)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 7)
-            .background(
-                selected
-                    ? AnyShapeStyle(section.tint.opacity(0.14))
-                    : AnyShapeStyle(hovering ? SplashPalette.surface.opacity(0.5) : Color.clear),
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(
-                        selected ? section.tint.opacity(0.38) : Color.clear,
-                        lineWidth: 0.8
-                    )
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
-    }
-}
-
 // MARK: - Cards and rows
 
 /// A titled card in the form: a small section label above a stack of rows.
@@ -822,10 +748,6 @@ private struct EditorFieldShell: ViewModifier {
                             : SplashPalette.border.opacity(0.55),
                         lineWidth: focused ? 1.2 : 0.8
                     )
-            )
-            .shadow(
-                color: focused ? SplashPalette.blue.opacity(0.18) : .clear,
-                radius: 4
             )
     }
 }

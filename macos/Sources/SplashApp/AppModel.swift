@@ -1,214 +1,7 @@
 import AppKit
+import Combine
 import Darwin
 import Foundation
-
-/// What the live panel shows, taken from `/status` on a one-second loop.
-struct LiveStatus: Equatable {
-    var updated = false
-    var ready = false
-    var modelID: String?
-    var contextTokens: Int?
-    var decodeTokensPerSecond: Double?
-    var prefillTokensPerSecond: Double?
-    var draftAcceptanceRate: Double?
-    /// The installed speculation plan the engine runs: provider, proposal
-    /// rows, and why a requested one fell back to none.
-    var speculationProvider: String?
-    var speculationRows: Int?
-    var speculationFallback: String?
-    /// The engine's request latency histograms, in milliseconds. `samples` is
-    /// the window the percentiles cover; zero means the engine has not
-    /// completed a request since it started.
-    var ttftP50Milliseconds: Double?
-    var ttftP95Milliseconds: Double?
-    var ttftSamples = 0
-    var itlP50Milliseconds: Double?
-    var itlP95Milliseconds: Double?
-    var itlSamples = 0
-    /// The fastest the engine has been seen to run since it started: the peak
-    /// behind each rate above, kept by the panel because /status reports the
-    /// engine's lifetime average, not its best batch.
-    var peakDecodeTokensPerSecond: Double?
-    var peakPrefillTokensPerSecond: Double?
-    var peakDraftAcceptanceRate: Double?
-    var submitted = 0
-    var completed = 0
-    var failed = 0
-    var cancelled = 0
-    var pending = 0
-    var pendingLimit = 0
-    var currentBytes: UInt64?
-    var peakBytes: UInt64?
-    /// Host memory the engine actually occupies; the allocated bytes above
-    /// are address space whose weight pages the host reclaims when idle.
-    var physicalBytes: UInt64?
-    var peakPhysicalBytes: UInt64?
-    /// The budget the memory governor holds the engine to, and the ceiling the
-    /// panel named for it (`--max-memory`): nil while the budget is automatic.
-    var governorLimitBytes: UInt64?
-    var configuredMemoryLimitBytes: UInt64?
-    /// The weights' idle release: whether their memory is released now,
-    /// whether a request is taking it back, and the timer that does it
-    /// (nil for `--idle-release off`).
-    var weightsKnown = false
-    var weightsReleased = false
-    var weightsRestoring = false
-    var weightsRestores = 0
-    var idleReleaseSeconds: Double?
-    var cacheHitRate: Double?
-    var kvDiskHitTokens: Int?
-    /// The share of the tokens requests reused that came back from the disk
-    /// tier: `kv_disk_hit_rate`, the token-level reading `hit_rate` cannot
-    /// give, since it counts requests.
-    var kvDiskHitRate: Double?
-    /// What requests resumed from, the denominator of the rate above.
-    var reusedTokens: Int?
-    /// States a lookup found on the disk tier (`state.disk_hits`).
-    var stateDiskHits: Int?
-    var waiting = 0
-    var waitingMemory = 0
-    var waitingConcurrency = 0
-    var suspended = 0
-    var diskUsedBytes: UInt64?
-    var diskCapacityBytes: UInt64?
-    var idleOffloadPasses = 0
-    var idleOffloadBytes: UInt64?
-    var restarts = 0
-    var capacityFailures = 0
-    var metalFailures = 0
-    /// The engine's fans as `/status` reports them, read-only: what the Mac is
-    /// doing about the heat, which is what the thermal rungs trade against.
-    var fansAvailable = false
-    var fanSpeeds: [Int] = []
-    var fanMinimums: [Int] = []
-    var fanMaximums: [Int] = []
-    /// The sensors the engine read, as it reported them, hottest first.
-    var temperatures: [TemperatureReading] = []
-    /// The prefill pacer: the duty the engine holds, the backoff the Mac's
-    /// thermal state applies to it, and what the pacing has cost in waits.
-    var dutyPercent: Double?
-    var thermalScale: Double?
-    var pacedWaits: Int?
-    var pacedWaitMilliseconds: Double?
-}
-
-/// What the engine appears to be doing right now, inferred from the counters
-/// between two `/status` polls: a submitted request lights prefill, a completed
-/// batch lights decode, a pending queue lights the queue, and a quiet engine
-/// settles to idle. The polling interval is one second, so the view holds a
-/// stage for a moment after its edge instead of flickering.
-enum RequestStage: String, CaseIterable, Identifiable {
-    case idle, queued, prefilling, decoding
-
-    var id: String { rawValue }
-
-    var title: String { L10n.string("stage." + rawValue) }
-
-    var systemImage: String {
-        switch self {
-        case .idle: return "pause.fill"
-        case .queued: return "hourglass"
-        case .prefilling: return "arrow.down.to.line"
-        case .decoding: return "bolt.fill"
-        }
-    }
-}
-
-/// One request outcome the live board remembers for a few minutes, so the
-/// dashboard has a short history of what happened rather than only totals.
-struct RequestEvent: Identifiable, Equatable {
-    enum Kind: String {
-        case completed, failed, cancelled
-    }
-
-    let id = UUID()
-    let date: Date
-    let kind: Kind
-    let count: Int
-    let tokensPerSecond: Double?
-}
-
-/// One temperature sensor's reading: the engine reads them from the SMC, so
-/// they are what the fans themselves answer to.
-struct TemperatureReading: Equatable, Identifiable {
-    var sensor: String
-    var celsius: Double
-    var id: String { sensor }
-}
-
-/// The four temperatures the panel shows, each aggregated from the SMC keys
-/// that belong to one part of the Mac: the CPU clusters (`Tp`, `Te`), the GPU
-/// (`Tg`), the IO fabric (`Tf`), and the storage (`Ts`). A Mac that reports
-/// none of a group's keys leaves that row without a reading.
-enum TemperatureGroup: String, CaseIterable, Identifiable {
-    case cpu, gpu, io, disk
-
-    var id: String { rawValue }
-
-    var title: String { L10n.string("thermal.sensor." + rawValue) }
-
-    func contains(_ sensor: String) -> Bool {
-        switch self {
-        case .cpu: return sensor.hasPrefix("Tp") || sensor.hasPrefix("Te")
-        case .gpu: return sensor.hasPrefix("Tg")
-        case .io: return sensor.hasPrefix("Tf")
-        case .disk: return sensor.hasPrefix("Ts")
-        }
-    }
-
-    /// The hottest sensor of this group, or nil when the Mac reports none.
-    static func peak(_ readings: [TemperatureReading], in group: TemperatureGroup) -> Double? {
-        readings.lazy
-            .filter { group.contains($0.sensor) }
-            .map(\.celsius)
-            .max()
-    }
-
-    /// The group whose hottest sensor is the hottest of the sample.
-    static func hottest(
-        _ readings: [TemperatureReading]
-    ) -> (group: TemperatureGroup, celsius: Double)? {
-        allCases
-            .compactMap { group in peak(readings, in: group).map { (group, $0) } }
-            .max { $0.celsius < $1.celsius }
-    }
-}
-
-/// One `/status` fetch and the model id `/v1/models` reports, both decoded in
-/// the background so the live panel never blocks the main thread.
-struct LiveSnapshot {
-    let status: [String: Any]
-    let modelID: String?
-}
-
-/// Fetches the engine's `/status` and the served model id in the background.
-actor LiveStatusFetcher {
-    func fetch(port: Int) async -> LiveSnapshot? {
-        guard let status = await json(at: "/status", port: port) else { return nil }
-        var modelID: String?
-        if let models = await json(at: "/v1/models", port: port),
-           let data = models["data"] as? [[String: Any]],
-           let first = data.first {
-            modelID = first["id"] as? String
-        }
-        return LiveSnapshot(status: status, modelID: modelID)
-    }
-
-    private func json(at path: String, port: Int) async -> [String: Any]? {
-        guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else { return nil }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 2
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return nil }
-            return object
-        } catch {
-            return nil
-        }
-    }
-}
 
 /// Owns the server subprocess and the settings the control panel edits.
 /// The app never loads a model itself: it starts `install/launcher.py serve`
@@ -237,27 +30,75 @@ final class AppModel: ObservableObject {
     }
 
     @Published var phase: Phase = .idle
-    @Published var log = ""
-    @Published var contextTokens: Int?
-    @Published var live = LiveStatus()
+    /// The server's transcript, one entry per line. Lines rather than one
+    /// growing string: the log pane renders rows lazily, so a chunk of
+    /// output appends instead of copying and re-laying-out the whole
+    /// transcript, and the retention cap below counts rows. A reader that
+    /// wants the old single block joins the lines.
+    @Published var logLines: [String] = []
+    /// The line still being written: what arrived since the last newline.
+    /// Published beside the lines so a carriage-return progress bar grows
+    /// in place instead of waiting for a newline that may be seconds away.
+    @Published var logPendingLine = ""
+    /// Characters the retained transcript holds, for the pane's size
+    /// readout. Kept incrementally so the header never walks the lines.
+    @Published var logCharacterCount = 0
+    // The per-second live board is the engine's: the fields live on
+    // `liveEngine` and are forwarded here, so the views keep reading the app
+    // model they observe. The bridge in init re-announces each engine change
+    // on this object's `objectWillChange`, so a poll wakes exactly the
+    // observers it woke before the split.
 
-    // The dashboard's short memory: the last minute of the rates the live
-    // board draws as sparklines. The engine reports only its current reading,
-    // so the panel keeps the shape of the minute itself.
-    @Published var decodeHistory: [Double] = []
-    @Published var prefillHistory: [Double] = []
-    @Published var acceptanceHistory: [Double] = []
-    @Published var memoryHistory: [Double] = []
-    /// The last few completed, failed and cancelled requests, newest last.
-    @Published var recentEvents: [RequestEvent] = []
-    /// Processes with an established connection to the inference port, scanned
-    /// every few seconds while the server is up.
-    @Published var connectedClients: [ConnectedClient] = []
-    /// What the engine looks to be doing right now.
-    @Published var stage: RequestStage = .idle
-    /// When the current server first answered as ready, for the uptime line.
-    @Published var readySince: Date?
-    @Published var statusUpdatedAt: Date?
+    /// The poll, the parsed `/status`, the histories and the client scan.
+    /// See `LiveEngine`.
+    let liveEngine = LiveEngine()
+    /// The live board's reading, polled once a second by the engine.
+    var live: LiveStatus {
+        get { liveEngine.live }
+        set { liveEngine.live = newValue }
+    }
+    var contextTokens: Int? {
+        get { liveEngine.contextTokens }
+        set { liveEngine.contextTokens = newValue }
+    }
+    var decodeHistory: [Double] {
+        get { liveEngine.decodeHistory }
+        set { liveEngine.decodeHistory = newValue }
+    }
+    var prefillHistory: [Double] {
+        get { liveEngine.prefillHistory }
+        set { liveEngine.prefillHistory = newValue }
+    }
+    var acceptanceHistory: [Double] {
+        get { liveEngine.acceptanceHistory }
+        set { liveEngine.acceptanceHistory = newValue }
+    }
+    var memoryHistory: [Double] {
+        get { liveEngine.memoryHistory }
+        set { liveEngine.memoryHistory = newValue }
+    }
+    var recentEvents: [RequestEvent] {
+        get { liveEngine.recentEvents }
+        set { liveEngine.recentEvents = newValue }
+    }
+    var connectedClients: [ConnectedClient] {
+        get { liveEngine.connectedClients }
+        set { liveEngine.connectedClients = newValue }
+    }
+    var stage: RequestStage {
+        get { liveEngine.stage }
+        set { liveEngine.stage = newValue }
+    }
+    var readySince: Date? {
+        get { liveEngine.readySince }
+        set { liveEngine.readySince = newValue }
+    }
+    /// Deliberately off the published surface: the header badge reads it on a
+    /// clock of its own. See `LiveEngine.statusUpdatedAt`.
+    var statusUpdatedAt: Date? {
+        get { liveEngine.statusUpdatedAt }
+        set { liveEngine.statusUpdatedAt = newValue }
+    }
 
     // The first-launch values live in ServerSettings; the store replaces them
     // below before the window is shown.
@@ -356,15 +197,15 @@ final class AppModel: ObservableObject {
     private static let smartLevelKey = "splash.smart-level"
     private static let fixedLevelKey = "splash.fixed-level"
 
-    private var process: Process?
-    private var poll: Task<Void, Never>?
-    private var stopping = false
+    // The process, the stopping flag and the last pushed duty are internal:
+    // the engine reads the process's pid for the client scan, clears the flag
+    // when a foreign server goes silent, and feeds the duty the smart mode
+    // pushed.
+    var process: Process?
+    var stopping = false
     /// The last duty the smart mode pushed, so the poll pushes only when the
     /// fans and temperatures have moved it, not once a second forever.
-    private var lastSmartDuty: Double?
-    /// How long the inferred stage may sit at its last edge before a quiet
-    /// engine settles back to idle.
-    private var stageHoldUntil = Date.distantPast
+    var lastSmartDuty: Double?
     /// True while stored settings are being applied, so the assignments do not
     /// read as edits and schedule a save of what was just loaded.
     private var restoring = false
@@ -374,16 +215,17 @@ final class AppModel: ObservableObject {
     // A server the app found already running on the configured port (its PID
     // from the launcher's serve-<port>.lock), shown and stoppable like its own.
     var foreignPID: pid_t?
-    private var offlineCount = 0
-    private let statusFetcher = LiveStatusFetcher()
-    private let clientScanner = ClientScanner()
-    /// Counts status polls so the connection table is read every fourth
-    /// second rather than every one.
-    private var clientTick = 0
+    /// Re-announces each of the engine's publishes on this object, so the
+    /// views observing the app model see the poll's changes as before.
+    private var liveEngineSubscription: AnyCancellable?
 
     let catalogIDs = Runtime.catalog
 
     init() {
+        liveEngine.attach(to: self)
+        liveEngineSubscription = liveEngine.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         if let raw = UserDefaults.standard.string(forKey: Self.languageKey),
            let stored = InterfaceLanguage(rawValue: raw) {
             language = stored
@@ -701,7 +543,7 @@ final class AppModel: ObservableObject {
     /// Changes the duty of the running engine in place, through /v1/thermal.
     /// Nothing to do while no server is ready: the rung is the next start's
     /// too, which is what its command line carries.
-    private func pushThermalDuty(_ duty: Double) async {
+    func pushThermalDuty(_ duty: Double) async {
         guard isRunning, phase == .ready,
               let url = URL(string: "http://127.0.0.1:\(global.port)/v1/thermal") else { return }
         var request = URLRequest(url: url)
@@ -1060,7 +902,7 @@ final class AppModel: ObservableObject {
             phase = .failed(L10n.string("error.no_runtime"))
             return
         }
-        log = ""
+        resetLog()
         contextTokens = nil
         live = LiveStatus()
         decodeHistory = []
@@ -1069,7 +911,7 @@ final class AppModel: ObservableObject {
         memoryHistory = []
         recentEvents = []
         connectedClients = []
-        clientTick = 0
+        liveEngine.clientTick = 0
         stage = .idle
         readySince = nil
         statusUpdatedAt = nil
@@ -1119,7 +961,7 @@ final class AppModel: ObservableObject {
         self.process = process
         phase = .starting
         runningConfigID = activeConfigID
-        pollStatus()
+        liveEngine.pollStatus()
     }
 
     func stop() {
@@ -1128,8 +970,7 @@ final class AppModel: ObservableObject {
             stopping = true
             // The launcher execs into the server, so one SIGINT shuts it down.
             process.interrupt()
-            poll?.cancel()
-            poll = nil
+            liveEngine.stopPolling()
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
                 if process.isRunning {
@@ -1159,7 +1000,7 @@ final class AppModel: ObservableObject {
     }
 
     func clearLog() {
-        log = ""
+        resetLog()
     }
 
     func openInBrowser() {
@@ -1172,7 +1013,7 @@ final class AppModel: ObservableObject {
     /// A server a previous session left running is taken over on launch: the
     /// header shows it ready with a working Stop, and the live panel reads it.
     func detectRunningServer() async {
-        guard let snapshot = await statusFetcher.fetch(port: global.port),
+        guard let snapshot = await liveEngine.statusFetcher.fetch(port: global.port),
               snapshot.status["maximum_context_tokens"] is Int else { return }
         foreignPID = servePID(port: global.port)
         if let tokens = snapshot.status["maximum_context_tokens"] as? Int {
@@ -1180,7 +1021,7 @@ final class AppModel: ObservableObject {
         }
         append(L10n.format("log.attached", foreignPID ?? 0) + "\n")
         phase = .ready
-        pollStatus()
+        liveEngine.pollStatus()
     }
 
 
@@ -1201,8 +1042,10 @@ final class AppModel: ObservableObject {
         append("Launch: " + shown.joined(separator: " ") + "\n")
     }
 
-    /// The PID the launcher records in `serve-<port>.lock`, or nil.
-    private func servePID(port: Int) -> pid_t? {
+    /// The PID the launcher records in `serve-<port>.lock`, or nil. The
+    /// engine reads it too, to leave the server's own connections out of the
+    /// client scan.
+    func servePID(port: Int) -> pid_t? {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let lock = home.appendingPathComponent(
             "Library/Application Support/Splash/runtime/serve-\(port).lock"
@@ -1220,8 +1063,7 @@ final class AppModel: ObservableObject {
         // Flush a debounced edit before the process goes away, so quitting in
         // the middle of typing still keeps what was typed.
         _ = saveSettings()
-        poll?.cancel()
-        poll = nil
+        liveEngine.stopPolling()
         stopping = true
         if let process, process.isRunning {
             process.interrupt()
@@ -1247,8 +1089,7 @@ final class AppModel: ObservableObject {
 
     private func exited(_ finished: Process) {
         process = nil
-        poll?.cancel()
-        poll = nil
+        liveEngine.stopPolling()
         settle()
         if stopping {
             stopping = false
@@ -1269,199 +1110,115 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // The transcript's plumbing. Chunks land in a private buffer and the
+    // published values are refreshed at most once per flush window: the
+    // launcher can emit many chunks a second while loading a model, and
+    // every publish wakes each observer of the model, so a burst shares
+    // one refresh. The window is a trailing debounce scheduled by the
+    // first chunk of its burst, which also means the last chunk is always
+    // flushed — an idle log publishes nothing and loses nothing.
+
+    /// How many lines the transcript keeps. Rendering is lazy now, so the
+    /// cap is for memory and scroll-back sanity, not for draw cost: two
+    /// thousand lines is several times the launcher's chattiest load
+    /// output and far past what anyone scrolls back to read.
+    private static let logLineLimit = 2_000
+    /// A carriage-return progress line is rewritten in place rather than
+    /// newline-terminated, so left alone it would grow by a frame per
+    /// refresh. Past this length the oldest frames are dropped.
+    private static let logPendingLineLimit = 4_000
+    /// The flush window, in nanoseconds: chunks inside it share a publish.
+    private static let logFlushWindow: UInt64 = 100_000_000
+
+    /// Complete lines not yet published.
+    private var logBuffer: [String] = []
+    /// What arrived since the last newline, from any chunk.
+    private var logPartial = ""
+    /// Whether the buffer holds anything the published values lack.
+    private var logDirty = false
+    /// Whether a flush is already scheduled for the running window.
+    private var logFlushScheduled = false
+
     private func append(_ text: String) {
-        log += text
-        // Bound the transcript; a long prefill emits progress lines forever.
-        if log.count > 200_000 {
-            log.removeFirst(log.count - 160_000)
+        // A chunk may end mid-line: its tail joins the line the previous
+        // chunk left open, and the newline that closes it may arrive in a
+        // later chunk. Everything up to the last newline is complete.
+        let incoming = logPartial + text
+        logPartial = ""
+        if let cut = incoming.lastIndex(of: "\n") {
+            let head = incoming[incoming.startIndex..<cut]
+            logPartial = String(incoming[incoming.index(after: cut)...])
+            // A lone newline closes an empty line, and blank lines are
+            // kept: the transcript should read as the server wrote it.
+            if head.isEmpty {
+                logBuffer.append("")
+            } else {
+                logBuffer.append(
+                    contentsOf: head.split(separator: "\n", omittingEmptySubsequences: false)
+                        .map(String.init)
+                )
+            }
+        } else {
+            logPartial = incoming
+        }
+        if logPartial.count > Self.logPendingLineLimit {
+            logCharacterCount -= logPartial.count - Self.logPendingLineLimit
+            logPartial = String(logPartial.suffix(Self.logPendingLineLimit))
+        }
+        logCharacterCount += text.count
+        if logBuffer.count > Self.logLineLimit {
+            let dropped = logBuffer.count - Self.logLineLimit
+            // The newline each dropped line ended with leaves with it.
+            logCharacterCount -= logBuffer[..<dropped].reduce(0) { $0 + $1.count + 1 }
+            logBuffer.removeFirst(dropped)
+        }
+        logDirty = true
+        scheduleLogFlush()
+    }
+
+    private func scheduleLogFlush() {
+        guard !logFlushScheduled else { return }
+        logFlushScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.logFlushWindow)
+            guard let self else { return }
+            self.logFlushScheduled = false
+            self.flushLog()
         }
     }
 
-    private func pollStatus() {
-        poll?.cancel()
-        poll = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                await self?.refreshStatus()
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-        }
+    /// Publish what the buffer holds. Runs only when a chunk arrived since
+    /// the last flush, so an idle log never wakes the views.
+    private func flushLog() {
+        guard logDirty else { return }
+        logDirty = false
+        logLines = logBuffer
+        logPendingLine = logPartial
     }
 
-    private func refreshStatus() async {
-        guard let snapshot = await statusFetcher.fetch(port: global.port) else {
-            offlineCount += 1
-            // A foreign server we asked to stop has gone silent: done.
-            if offlineCount >= 3, phase == .stopping {
-                phase = .idle
-                stopping = false
-                foreignPID = nil
-                poll?.cancel()
-                poll = nil
-                settle()
-            }
-            return
-        }
-        offlineCount = 0
-        applyStatus(snapshot)
-        if phase == .ready {
-            clientTick += 1
-            if clientTick % 4 == 1 {
-                await refreshClients()
-            }
-        }
+    /// Empty the transcript: a start begins a new server's output, and the
+    /// pane's trash button asks for the same on demand.
+    private func resetLog() {
+        logBuffer.removeAll()
+        logPartial = ""
+        logCharacterCount = 0
+        logDirty = true
+        flushLog()
+    }
+
+    /// A stopped server has no live stage and no uptime, but keeps the last
+    /// minute of history so the dashboard does not blank between runs. The
+    /// engine clears what is its own; this adds the configuration the running
+    /// server was started with.
+    func settle() {
+        liveEngine.settle()
+        runningConfigID = nil
     }
 
     /// Re-read the connection table on demand, for the clients panel's refresh
     /// button.
     func refreshConnectedClients() {
-        Task { @MainActor [weak self] in
-            await self?.refreshClients()
-        }
-    }
-
-    private func refreshClients() async {
-        guard phase == .ready else {
-            connectedClients = []
-            return
-        }
-        var excluding = Set<Int32>()
-        excluding.insert(getpid())
-        if let pid = process?.processIdentifier { excluding.insert(pid) }
-        if let pid = foreignPID { excluding.insert(pid) }
-        if let pid = servePID(port: global.port) { excluding.insert(pid) }
-        let scanned = await clientScanner.scan(port: global.port, excluding: excluding)
-        guard phase == .ready else { return }
-        if scanned != connectedClients {
-            connectedClients = scanned
-        }
-    }
-
-    /// The rate of the engine's most recent completed batch of one kind, when
-    /// it has one: `/status` reports it as `current_*_batch`.
-    private func batchRate(_ value: Any?) -> Double? {
-        guard let batch = value as? [String: Any],
-              (batch["valid"] as? Bool) ?? false,
-              let rate = batch["tokens_per_second"] as? Double,
-              rate > 0
-        else { return nil }
-        return rate
-    }
-
-    /// The share of the draft tokens a completed decode batch had accepted:
-    /// `current_decode_batch` reports both counts, so a single good batch is a
-    /// peak the lifetime ratio averages away.
-    private func batchAcceptance(_ value: Any?) -> Double? {
-        guard let batch = value as? [String: Any],
-              (batch["valid"] as? Bool) ?? false,
-              let drafted = batch["drafted_tokens"] as? Int, drafted > 0,
-              let accepted = batch["accepted_draft_tokens"] as? Int
-        else { return nil }
-        return Double(accepted) / Double(drafted)
-    }
-
-    /// The larger of a fresh reading and what has been seen before.
-    private func peak(_ value: Double?, _ previous: Double?) -> Double? {
-        switch (value, previous) {
-        case (nil, nil): return nil
-        case (let value?, nil): return value
-        case (nil, let previous?): return previous
-        case (let value?, let previous?): return max(value, previous)
-        }
-    }
-
-    /// Keep one minute of a reading, so the board draws its shape as well as
-    /// its current value. A metric the engine has not reported yet enters as
-    /// zero rather than widening the y-axis with a stale guess.
-    private func record(
-        _ value: Double?,
-        in path: ReferenceWritableKeyPath<AppModel, [Double]>
-    ) {
-        var series = self[keyPath: path]
-        series.append(max(0, value ?? 0))
-        if series.count > 60 {
-            series.removeFirst(series.count - 60)
-        }
-        self[keyPath: path] = series
-    }
-
-    /// The share of the memory budget in use, for the ring and its history.
-    private func memoryFraction(_ status: LiveStatus) -> Double? {
-        let limit = status.configuredMemoryLimitBytes ?? status.governorLimitBytes
-        guard let used = status.physicalBytes, let limit, limit > 0 else { return nil }
-        return min(1, Double(used) / Double(limit))
-    }
-
-    /// Turn the counter deltas into the live board's short activity feed. The
-    /// first sample of a server is skipped: it reports totals from before the
-    /// panel started watching, which are not events of this session.
-    private func recordEvents(from previous: LiveStatus, to next: LiveStatus) {
-        guard previous.updated else { return }
-        func append(_ kind: RequestEvent.Kind, _ count: Int, rate: Double? = nil) {
-            guard count > 0 else { return }
-            recentEvents.append(
-                RequestEvent(
-                    date: Date(),
-                    kind: kind,
-                    count: count,
-                    tokensPerSecond: rate
-                )
-            )
-        }
-        append(.completed, next.completed - previous.completed,
-               rate: next.decodeTokensPerSecond)
-        append(.failed, next.failed - previous.failed)
-        append(.cancelled, next.cancelled - previous.cancelled)
-        if recentEvents.count > 8 {
-            recentEvents.removeFirst(recentEvents.count - 8)
-        }
-    }
-
-    /// Read the counters that changed since the last poll, with a short hold so
-    /// a live stage does not blink between one-second samples. The engine's
-    /// `submitted - completed - failed - cancelled` is what is in flight; a
-    /// rising prefill rate names prompt ingestion, a rising decode rate names
-    /// generation, and a queue is a request waiting before it starts.
-    private func advanceStage(from previous: LiveStatus, to next: LiveStatus) {
-        let now = Date()
-        let active = max(0, next.submitted - next.completed - next.failed - next.cancelled)
-        if active > 0 {
-            let prefillRose = (next.prefillTokensPerSecond ?? 0) > (previous.prefillTokensPerSecond ?? 0) + 0.5
-            let decodeRose = (next.decodeTokensPerSecond ?? 0) > (previous.decodeTokensPerSecond ?? 0) + 0.5
-            if prefillRose {
-                setStage(.prefilling, hold: 3)
-            } else if decodeRose || stage == .decoding {
-                setStage(.decoding, hold: 3)
-            } else {
-                setStage(.prefilling, hold: 3)
-            }
-        } else if next.pending > 0 || next.waiting > 0 {
-            setStage(.queued)
-        } else if now < stageHoldUntil {
-            return
-        } else {
-            setStage(.idle)
-        }
-    }
-
-    private func setStage(_ new: RequestStage, hold: TimeInterval = 0) {
-        if stage != new {
-            stage = new
-        }
-        if hold > 0 {
-            stageHoldUntil = Date().addingTimeInterval(hold)
-        }
-    }
-
-    /// A stopped server has no live stage and no uptime, but keeps the last
-    /// minute of history so the dashboard does not blank between runs.
-    private func settle() {
-        stage = .idle
-        readySince = nil
-        statusUpdatedAt = nil
-        stageHoldUntil = .distantPast
-        runningConfigID = nil
-        connectedClients = []
-        clientTick = 0
+        liveEngine.refreshConnectedClients()
     }
 
     /// The time the current server has been ready, in words for the sidebar.
@@ -1475,167 +1232,4 @@ final class AppModel: ObservableObject {
         return String(format: "%dh %02dm", seconds / 3600, (seconds % 3600) / 60)
     }
 
-    private func applyStatus(_ snapshot: LiveSnapshot) {
-        let object = snapshot.status
-        var status = LiveStatus()
-        status.modelID = snapshot.modelID
-        status.ready = (object["ready"] as? Bool) ?? false
-        if let tokens = object["maximum_context_tokens"] as? Int {
-            status.contextTokens = tokens
-            contextTokens = tokens
-            if phase == .starting { phase = .ready }
-        }
-        if let speculation = object["speculation"] as? [String: Any] {
-            status.speculationProvider = speculation["provider"] as? String
-            status.speculationRows = speculation["proposal_rows"] as? Int
-            status.speculationFallback = speculation["fallback_reason"] as? String
-        }
-        if let metrics = object["metrics"] as? [String: Any] {
-            status.decodeTokensPerSecond = metrics["decode_tokens_per_second"] as? Double
-            status.prefillTokensPerSecond = metrics["prefill_tokens_per_second"] as? Double
-            status.draftAcceptanceRate = metrics["draft_acceptance_rate"] as? Double
-            if let ttft = metrics["ttft_ms"] as? [String: Any] {
-                status.ttftP50Milliseconds = ttft["p50"] as? Double
-                status.ttftP95Milliseconds = ttft["p95"] as? Double
-                status.ttftSamples = ttft["samples"] as? Int ?? 0
-            }
-            if let itl = metrics["itl_ms"] as? [String: Any] {
-                status.itlP50Milliseconds = itl["p50"] as? Double
-                status.itlP95Milliseconds = itl["p95"] as? Double
-                status.itlSamples = itl["samples"] as? Int ?? 0
-            }
-            status.capacityFailures = metrics["capacity_failures"] as? Int ?? 0
-            status.metalFailures = metrics["metal_failures"] as? Int ?? 0
-            // The peaks: the fastest completed batch the engine has reported
-            // since the panel started watching it, falling back to the lifetime
-            // averages while no batch has completed. They are what the Mac can
-            // reach, which the averages beside them hide.
-            let decode = batchRate(metrics["current_decode_batch"])
-                ?? status.decodeTokensPerSecond
-            let prefill = batchRate(metrics["current_prefill_batch"])
-                ?? status.prefillTokensPerSecond
-            let acceptance = batchAcceptance(metrics["current_decode_batch"])
-                ?? status.draftAcceptanceRate
-            status.peakDecodeTokensPerSecond = peak(decode, live.peakDecodeTokensPerSecond)
-            status.peakPrefillTokensPerSecond = peak(prefill, live.peakPrefillTokensPerSecond)
-            status.peakDraftAcceptanceRate = peak(acceptance, live.peakDraftAcceptanceRate)
-        }
-        if let requests = object["requests"] as? [String: Any] {
-            status.submitted = requests["submitted"] as? Int ?? 0
-            status.completed = requests["completed"] as? Int ?? 0
-            status.failed = requests["failed"] as? Int ?? 0
-            status.cancelled = requests["cancelled"] as? Int ?? 0
-        }
-        if let transport = object["transport"] as? [String: Any] {
-            status.pending = transport["pending"] as? Int ?? 0
-            status.pendingLimit = transport["pending_limit"] as? Int ?? 0
-            status.restarts = transport["restarts"] as? Int ?? 0
-        }
-        if let memory = object["memory_actual"] as? [String: Any] {
-            status.currentBytes = memory["current_bytes"] as? UInt64
-            status.peakBytes = memory["peak_bytes"] as? UInt64
-            status.physicalBytes = memory["physical_bytes"] as? UInt64
-            status.peakPhysicalBytes = memory["peak_physical_bytes"] as? UInt64
-        }
-        if let governor = object["memory_governor"] as? [String: Any] {
-            status.governorLimitBytes = governor["limit_bytes"] as? UInt64
-        }
-        if let weights = object["weights"] as? [String: Any] {
-            status.weightsKnown = true
-            status.weightsReleased = weights["released"] as? Bool ?? false
-            status.weightsRestoring = weights["restoring"] as? Bool ?? false
-            status.weightsRestores = weights["restores"] as? Int ?? 0
-            // null in /status is no idle release at all (--idle-release off).
-            if let seconds = weights["idle_release_seconds"] as? Double {
-                status.idleReleaseSeconds = seconds
-            } else if let seconds = weights["idle_release_seconds"] as? Int {
-                status.idleReleaseSeconds = Double(seconds)
-            }
-        }
-        if let plan = object["memory_plan"] as? [String: Any],
-           let budget = plan["budget"] as? [String: Any] {
-            let configured = budget["configured_memory_limit_bytes"] as? UInt64
-            status.configuredMemoryLimitBytes = (configured ?? 0) > 0 ? configured : nil
-        }
-        if let cache = object["cache"] as? [String: Any] {
-            status.cacheHitRate = cache["hit_rate"] as? Double
-            status.kvDiskHitTokens = cache["kv_disk_hit_tokens"] as? Int
-            status.kvDiskHitRate = cache["kv_disk_hit_rate"] as? Double
-            status.reusedTokens = cache["reused_tokens"] as? Int
-        }
-        if let state = object["state"] as? [String: Any] {
-            status.stateDiskHits = state["disk_hits"] as? Int
-        }
-        if let admission = object["admission"] as? [String: Any] {
-            status.waiting = admission["waiting"] as? Int ?? 0
-            status.waitingMemory = admission["waiting_memory"] as? Int ?? 0
-            status.waitingConcurrency = admission["waiting_concurrency"] as? Int ?? 0
-            status.suspended = admission["suspended"] as? Int ?? 0
-        }
-        if let disk = object["disk"] as? [String: Any] {
-            status.diskUsedBytes = disk["used_bytes"] as? UInt64
-            // The tier's own quota is what a used figure is a share of; the
-            // volume's capacity is the size of the whole disk, not of the
-            // cache, so a cache that names no quota shows no bar.
-            let quota = disk["limit_bytes"] as? UInt64
-            status.diskCapacityBytes = (quota ?? 0) > 0 ? quota : nil
-        }
-        if let offload = object["idle_offload"] as? [String: Any] {
-            status.idleOffloadPasses = offload["passes"] as? Int ?? 0
-            status.idleOffloadBytes = offload["bytes"] as? UInt64
-        }
-        if let fans = object["fans"] as? [String: Any] {
-            status.fansAvailable = fans["available"] as? Bool ?? false
-            status.fanSpeeds = fans["speeds_rpm"] as? [Int] ?? []
-            status.fanMinimums = fans["minimum_rpm"] as? [Int] ?? []
-            status.fanMaximums = fans["maximum_rpm"] as? [Int] ?? []
-            let readings = fans["temperatures"] as? [[String: Any]] ?? []
-            status.temperatures = readings
-                .compactMap { entry in
-                    guard let sensor = entry["sensor"] as? String,
-                          let celsius = entry["celsius"] as? Double
-                    else { return nil }
-                    return TemperatureReading(sensor: sensor, celsius: celsius)
-                }
-                .sorted { $0.celsius > $1.celsius }
-        }
-        if let throttle = object["throttle"] as? [String: Any] {
-            status.dutyPercent = throttle["duty_percent"] as? Double
-            status.thermalScale = throttle["thermal_scale"] as? Double
-            status.pacedWaits = throttle["paced_waits"] as? Int
-            status.pacedWaitMilliseconds = throttle["paced_wait_ms"] as? Double
-        }
-        status.updated = true
-        let previous = live
-        statusUpdatedAt = Date()
-        if status.ready {
-            if readySince == nil { readySince = Date() }
-        } else {
-            readySince = nil
-        }
-        record(status.decodeTokensPerSecond, in: \.decodeHistory)
-        record(status.prefillTokensPerSecond, in: \.prefillHistory)
-        record((status.draftAcceptanceRate ?? 0) * 100, in: \.acceptanceHistory)
-        record(memoryFraction(status), in: \.memoryHistory)
-        recordEvents(from: previous, to: status)
-        advanceStage(from: previous, to: status)
-        live = status
-        // The smart mode is the app's own pacer: each poll it reads the fans
-        // and temperatures the engine just reported and takes the engine's
-        // duty to them, so the Mac stays as loud as it needs to be and no
-        // louder. A push only when the reading has moved the duty, so the
-        // engine is not asked to change a duty it already holds.
-        if thermalRung == .smart, phase == .ready {
-            let duty = smartDuty()
-            if let last = lastSmartDuty, abs(last - duty) < 1.0 {
-                return
-            }
-            lastSmartDuty = duty
-            Task { @MainActor [weak self] in
-                await self?.pushThermalDuty(duty)
-            }
-        } else {
-            lastSmartDuty = nil
-        }
-    }
 }

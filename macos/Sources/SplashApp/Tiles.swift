@@ -15,7 +15,7 @@ enum TileMetrics {
     static let corner: CGFloat = 16
 }
 
-struct MetricSection: View {
+struct MetricSection: View, Equatable {
     let title: String
     let systemImage: String
     let cards: [MetricCard]
@@ -36,7 +36,10 @@ struct MetricSection: View {
     }
 }
 
-struct MetricCard: View, Identifiable {
+/// Equatable over its plain data, so a poll that left a card's figures alone
+/// skips its body — on a board of dozens, most cards are unchanged most
+/// seconds.
+struct MetricCard: View, Identifiable, Equatable {
     /// The title is stable across polls; a fresh UUID would restart every
     /// animation on each refresh.
     var id: String { title + systemImage }
@@ -54,8 +57,6 @@ struct MetricCard: View, Identifiable {
     /// A fixed top for the history chart, for a reading already on a 0–100
     /// scale; nil lets the card scale to its own peak.
     var chartMax: Double?
-
-    @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -83,8 +84,6 @@ struct MetricCard: View, Identifiable {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.55)
-                    .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.28), value: value)
                 if !unit.isEmpty {
                     Text(unit)
                         .font(.system(size: 10, weight: .medium))
@@ -114,11 +113,9 @@ struct MetricCard: View, Identifiable {
         .frame(maxWidth: .infinity, minHeight: TileMetrics.cardHeight,
                maxHeight: TileMetrics.cardHeight, alignment: .topLeading)
         .glassPanel(radius: TileMetrics.corner, tint: tint)
-        .scaleEffect(hovering ? 1.012 : 1)
-        .offset(y: hovering ? -2 : 0)
-        .shadow(color: tint.opacity(hovering ? 0.18 : 0), radius: 16, y: 8)
-        .animation(.spring(response: 0.34, dampingFraction: 0.82), value: hovering)
-        .onHover { hovering = $0 }
+        // No hover lift: a scale, an offset and an animated shadow would put
+        // every card into an offscreen pass twice a second on a board of
+        // dozens, for an effect only the pointer follows.
     }
 }
 
@@ -141,11 +138,9 @@ struct Meter: View {
                         )
                     )
                     .frame(width: max(3, proxy.size.width * min(1, max(0, fraction))))
-                    .shadow(color: tint.opacity(0.55), radius: 5)
             }
         }
         .frame(height: 5)
-        .animation(.easeOut(duration: 0.35), value: fraction)
     }
 }
 
@@ -153,7 +148,8 @@ struct Meter: View {
 /// icon and label stay quiet around it. `history` draws the last minute behind
 /// the number; `note` is one quiet line under it, for the figure the headline
 /// hides — the peak behind an average.
-struct HeroCard: View {
+/// Equatable like the card it headlines, for the same reason.
+struct HeroCard: View, Equatable {
     let title: String
     let value: String
     let unit: String
@@ -163,8 +159,6 @@ struct HeroCard: View {
     var note = ""
     var history: [Double] = []
     var chartMax: Double?
-
-    @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -199,11 +193,8 @@ struct HeroCard: View {
                     .font(.system(size: 38, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(tint)
-                    .shadow(color: tint.opacity(0.35), radius: 12)
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
-                    .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.28), value: value)
                 Text(unit)
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(SplashPalette.faint)
@@ -226,9 +217,6 @@ struct HeroCard: View {
         .frame(maxWidth: .infinity, minHeight: TileMetrics.heroHeight,
                maxHeight: TileMetrics.heroHeight, alignment: .topLeading)
         .glassPanel(radius: Theme.cardRadius, tint: tint, raised: true)
-        .scaleEffect(hovering ? 1.008 : 1)
-        .animation(.spring(response: 0.36, dampingFraction: 0.82), value: hovering)
-        .onHover { hovering = $0 }
     }
 }
 
@@ -286,7 +274,9 @@ struct Sparkline: View {
                 with: .color(tint)
             )
         }
-        .animation(.easeOut(duration: 0.3), value: values.last)
+        // No value animation: the Canvas redraws the whole line each sample
+        // anyway, and an animated Canvas would snapshot and blend two draws
+        // every second on every card that keeps a history.
     }
 }
 
@@ -316,8 +306,6 @@ struct RingGauge: View {
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
-                .shadow(color: tint.opacity(0.55), radius: 7)
-                .animation(.easeOut(duration: 0.7), value: clamped)
 
             VStack(spacing: 2) {
                 if let label {
@@ -326,7 +314,6 @@ struct RingGauge: View {
                         .monospacedDigit()
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
-                        .contentTransition(.numericText())
                 }
                 if let detail {
                     Text(detail)
