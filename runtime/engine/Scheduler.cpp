@@ -316,6 +316,13 @@ std::optional<BatchPlan> Scheduler::next(std::span<const uint64_t> excluded) con
 }
 
 std::optional<BatchPlan> Scheduler::nextPrefill(std::span<const uint64_t> excluded) const {
+  // A cycle that decodes only, the common one, has no request in the
+  // prefill phase at all; one pass over the requests says so without
+  // building the ready vector the planning below sorts.
+  if (std::none_of(requests_.begin(), requests_.end(), [](const auto &entry) {
+        return entry.second.phase == Phase::Prefill;
+      }))
+    return std::nullopt;
   // A command between its passes goes on before any other prefill, whose
   // rows would take the model's prefill memory its rows' work is in.
   for (const auto &[id, request] : requests_) {

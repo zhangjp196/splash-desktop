@@ -172,6 +172,14 @@ struct ComputeDispatch {
   DispatchSize threadgroups;
   DispatchSize threadsPerThreadgroup;
   IndirectGrid indirectThreadgroups = {};
+  // The dispatch's parameter bytes, which its bytes bindings point into. The
+  // storage rides with the dispatch, so a command graph that rebuilds its
+  // dispatches in place reuses it instead of allocating it again per cycle.
+  // A copy would leave its bytes bindings pointing at the source's storage,
+  // which is why a graph holding dispatches is move-only. Last, so that a
+  // dispatch written member by member keeps its meaning, and with a default
+  // so that the ones that leave it unset need no more.
+  std::vector<std::byte> params = {};
 };
 
 // A host step's round trip on the host clock (AwakeClock, the time base of

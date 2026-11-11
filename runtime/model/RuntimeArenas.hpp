@@ -465,6 +465,7 @@ public:
     }
     if (cursor != baseBytes)
       throw std::logic_error("decode arena mismatch");
+    buildViews();
     // Sampled rows' draws return their arrival counts to zero; they start
     // there.
     const metal::MetalBuffer arrivals =
@@ -517,8 +518,7 @@ public:
     // both, so no dummy allocation is needed for the inactive operator.
     if (!sizes_[index])
       return {};
-    return backend_.view(base_, offsets_[index],
-                         uint64_t{lanes} * sizes_[index]);
+    return batchViews_[index][lanes];
   }
 
   [[nodiscard]] ops::MoeScratch moeScratch(uint32_t lanes) const {
@@ -581,8 +581,52 @@ private:
                                                    uint32_t layer, uint32_t lanes) const {
     const uint32_t index = static_cast<uint32_t>(base);
     const uint64_t stride = sizes_[index] / layers;
-    return backend_.view(base_, offsets_[index] + uint64_t{layer} * kLaneCount * stride,
-                         uint64_t{lanes} * stride);
+    // The constructor filled the cache for every layer-major tensor with
+    // bytes; a geometry without them has no slices to return, and the view
+    // below keeps the empty tensor's out-of-range error.
+    const std::vector<metal::MetalBuffer> &views =
+        layerViews_[layerMajorSlot(base)];
+    if (views.empty())
+      return backend_.view(base_, offsets_[index] + uint64_t{layer} * kLaneCount * stride,
+                           uint64_t{lanes} * stride);
+    return views[uint64_t{layer} * (kLaneCount + 1) + lanes];
+  }
+
+  // Which of the two layer-major tensors' caches `tensor` reads.
+  static uint32_t layerMajorSlot(DecodeTensor tensor) noexcept {
+    return tensor == DecodeTensor::ChunkKeysBase ? 0 : 1;
+  }
+
+  // Makes every view the arena hands out against a batch width once: a
+  // decode cycle asks for the same (tensor, width) slices tens of times,
+  // and each backend view is a fresh buffer object. The views share the
+  // base's allocation, so they die with the arena and neither dangle when
+  // its memory is released nor turn stale when it is restored, which reads
+  // the same allocation a new buffer.
+  void buildViews() {
+    for (uint32_t tensor = 0; tensor < decodeTensorCount; ++tensor) {
+      if (!sizes_[tensor] ||
+          isLayerMajorTensor(static_cast<DecodeTensor>(tensor)))
+        continue;
+      for (uint32_t lanes = 1; lanes <= kLaneCount; ++lanes)
+        batchViews_[tensor][lanes] = backend_.view(
+            base_, offsets_[tensor], uint64_t{lanes} * sizes_[tensor]);
+    }
+    const uint32_t layers = geometry_.target.kvLayout.attentionLayers;
+    for (uint32_t tensor = 0; tensor < decodeTensorCount; ++tensor) {
+      if (!sizes_[tensor] ||
+          !isLayerMajorTensor(static_cast<DecodeTensor>(tensor)) || !layers)
+        continue;
+      std::vector<metal::MetalBuffer> &views =
+          layerViews_[layerMajorSlot(static_cast<DecodeTensor>(tensor))];
+      views.assign(uint64_t{layers} * (kLaneCount + 1), {});
+      const uint64_t stride = sizes_[tensor] / layers;
+      for (uint32_t layer = 0; layer < layers; ++layer)
+        for (uint32_t lanes = 1; lanes <= kLaneCount; ++lanes)
+          views[uint64_t{layer} * (kLaneCount + 1) + lanes] = backend_.view(
+              base_, offsets_[tensor] + uint64_t{layer} * kLaneCount * stride,
+              uint64_t{lanes} * stride);
+    }
   }
 
   metal::MetalBackend &backend_;
@@ -591,6 +635,11 @@ private:
   std::array<std::array<metal::MetalBuffer, decodeTensorCount>, kLaneCount> tensors_{};
   std::array<uint64_t, decodeTensorCount> offsets_{};
   std::array<uint64_t, decodeTensorCount> sizes_{};
+  // The cached views of batchSlice and layerBatchSlice; entry zero of each
+  // width row stays empty, as a width of zero is invalid.
+  std::array<std::array<metal::MetalBuffer, kLaneCount + 1>, decodeTensorCount>
+      batchViews_{};
+  std::array<std::vector<metal::MetalBuffer>, 2> layerViews_{};
   metal::MetalBuffer gateScratch_;
   ops::LinearScratch linearScratch_;
   uint64_t bytes_ = 0;

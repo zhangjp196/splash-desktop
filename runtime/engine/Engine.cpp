@@ -321,6 +321,13 @@ bool Engine::tick(double now) {
     if (active.lane && active.resourceWait.pending && !resourceRetryReady(active, now))
       excluded.push_back(id);
   }
+  // The plan loop's items and captures, kept across its plans and cleared
+  // for each: prepare() appends to both, and a plan that waits leaves them
+  // for the next one to fill again. Nothing past the command's submission
+  // holds them: the ticket copies the items and the pending command moves
+  // the captures.
+  std::vector<ModelBatchItem> items;
+  std::vector<std::vector<Capture>> captures;
   while (auto plan = scheduler_.next(excluded)) {
     // A prefill command the pacer has no credit for waits for the next turn.
     // It is the one that pins the GPU for seconds and heats the Mac with it,
@@ -332,8 +339,8 @@ bool Engine::tick(double now) {
         excluded.push_back(item.requestId);
       continue;
     }
-    std::vector<ModelBatchItem> items;
-    std::vector<std::vector<Capture>> captures;
+    items.clear();
+    captures.clear();
     switch (prepare(*plan, items, captures, now)) {
     case Prepared::Runnable: {
       std::unique_ptr<ModelBatchTicket> ticket =

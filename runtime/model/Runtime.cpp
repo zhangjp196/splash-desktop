@@ -420,6 +420,15 @@ struct Runtime::Impl {
   QwenStateStorage &states;
   std::unique_ptr<PrefillArena> prefillArena;
   std::unique_ptr<DecodeArena> decodeArena;
+  // The decode cycle's command graph, rebuilt over its own storage every
+  // cycle (CommandGraph::reuseStorage): a cycle encodes the same kernels
+  // over the same tensors as the one before, and rebuilding into fresh
+  // containers allocated a binding vector, a parameter buffer and a
+  // pipeline-name string per dispatch, hundreds of times per cycle, on the
+  // thread the GPU waits behind. The graph lives with the model, whose
+  // tensors and plans its slots bind, and is touched by the submitting
+  // thread alone, as the backend requires of everything it encodes.
+  CommandGraph decodeGraph;
   // Every state lane's penalty words, bound whole: a batch lane reads the row
   // of its request's state lane, which need not be its own.
   MetalBuffer penaltyTable;
@@ -3360,7 +3369,8 @@ Runtime::decodeAsync(const BatchPlan &plan,
   const std::span<Impl::Request *const> entries(requests.data(), width);
   const uint32_t ropeRows = width * kDecodeRows;
   const uint32_t draftRopeRows = ropeRows;
-  CommandGraph commandGraph;
+  CommandGraph &commandGraph = impl_->decodeGraph;
+  commandGraph.reuseStorage();
   impl_->addRopeTables(
       commandGraph,
       impl_->decodeArena->batchSlice(DecodeTensor::Positions, width), ropeRows,

@@ -663,14 +663,17 @@ struct HostSteps {
 // its own: for each step it waits for the step's event to reach its value, runs
 // the step and raises the event, then the release counter, past it. The
 // value shows 15-40 us after the GPU ended the buffer before the step; the
-// runner spins on it for up to kHostStepSpin, longer than the GPU work
-// between two decode steps (about 1 ms), so it takes a step up as soon as the
-// value shows, and past that blocks on the event (long prefill work), which
-// wakes it 30-60 us later: at most 1% of a step behind more than 5 ms of GPU
-// work. Streamed decode runs 4% faster than with a runner that blocks at once
-// (M5 Max, ISTA Q2_0 with 16G of experts: pickup 26 against 70 us), for
-// about half a core while a streamed command runs; waking through
-// MTLSharedEventListener took about 0.3 ms. Once stopping it no longer waits:
+// runner spins on it for up to kHostStepSpin, about as long as that pickup
+// ever takes, so it takes a step up as soon as the value shows, and past
+// that blocks on the event, which wakes it 30-60 us later: at most 1% of a
+// step behind more GPU work than the spin covers. The spin stays short
+// because a decode whose K/V spills runs one host step per attention layer,
+// and a spin outlasting the GPU work between two steps would busy-spin the
+// runner's whole core through work it cannot shorten; blocking costs only
+// its wake. Streamed decode still runs 4% faster than with a runner that
+// blocks at once (M5 Max, ISTA Q2_0 with 16G of experts: pickup 26 against
+// 70 us); waking through MTLSharedEventListener took about 0.3 ms. Once
+// stopping it no longer waits:
 // a step whose work before it has completed still runs, and the others are
 // raised without running, so their commands drain; it waits for the work of a
 // step that is running, which nothing can interrupt.
@@ -698,7 +701,10 @@ public:
     }
 
 private:
-    static constexpr auto kHostStepSpin = std::chrono::milliseconds(5);
+    // How long the runner spins for a step's value before it blocks on the
+    // event: the pickup the value takes after the GPU ended the buffer,
+    // with a margin, and no more.
+    static constexpr auto kHostStepSpin = std::chrono::microseconds(100);
     // How often a blocked runner looks whether it is stopping.
     static constexpr uint64_t kStopCheckMilliseconds = 10;
 
@@ -1017,6 +1023,20 @@ struct MetalBackend::Impl {
         std::make_shared<AllocationAccounting>();
     std::shared_ptr<BackendAsyncState> asyncState;
 
+    // One slot of the set prepare() deduplicates a command's bound
+    // allocations into: the allocation, and the binding that named it, whose
+    // shared pointer the ticket's retention copies. Submissions reuse the
+    // set, which a decode command's shape keeps the size of: its thousands
+    // of bindings name a few hundred allocations, and sorting them cost
+    // O(n log n) comparisons through a pointer each, on the submitting
+    // thread the GPU waits behind. Half the slots stay empty, so an
+    // allocation is found at its hash or next to it.
+    struct BoundAllocation {
+        const MetalAllocation *allocation = nullptr;
+        const std::shared_ptr<MetalAllocation> *owner = nullptr;
+    };
+    std::vector<BoundAllocation> boundAllocations;
+
     void sampleDeviceMemory() const noexcept {
         asyncState->sampleDeviceMemory();
     }
@@ -1180,26 +1200,47 @@ struct MetalBackend::Impl {
             }
         }
 
-        // Each allocation the command binds, once.
-        std::vector<const std::shared_ptr<MetalAllocation> *> bound;
-        bound.reserve(bindings);
+        // Each allocation the command binds, once: the ticket retains them
+        // until its result is consumed. The set is sized for this command's
+        // bindings at half load and zeroed per submission, which together
+        // cost less than the sort the set replaced.
+        size_t slots = 16;
+        while (slots < bindings * 2) slots *= 2;
+        if (boundAllocations.size() < slots)
+            boundAllocations.assign(slots, {});
+        else
+            std::memset(boundAllocations.data(), 0,
+                        boundAllocations.size() * sizeof(BoundAllocation));
+        const size_t mask = boundAllocations.size() - 1;
+        const size_t shift = 64 - static_cast<size_t>(std::countr_zero(
+                                       boundAllocations.size()));
+        size_t unique = 0;
+        const auto bind =
+            [&](const std::shared_ptr<MetalAllocation> &allocation) {
+                const MetalAllocation *key = allocation.get();
+                size_t slot = (reinterpret_cast<uintptr_t>(key) *
+                               0x9E3779B97F4A7C15ull) >> shift;
+                for (;;) {
+                    BoundAllocation &entry = boundAllocations[slot];
+                    if (!entry.allocation) {
+                        entry = {key, &allocation};
+                        ++unique;
+                        return;
+                    }
+                    if (entry.allocation == key) return;
+                    slot = (slot + 1) & mask;
+                }
+            };
         for (const ComputeDispatch &dispatch : dispatches) {
             for (const BufferBinding &binding : dispatch.buffers)
-                bound.push_back(&binding.buffer.impl_->allocation);
+                bind(binding.buffer.impl_->allocation);
             if (dispatch.indirectThreadgroups.buffer)
-                bound.push_back(
-                    &dispatch.indirectThreadgroups.buffer.impl_->allocation);
+                bind(dispatch.indirectThreadgroups.buffer.impl_->allocation);
         }
-        const auto allocation =
-            [](const std::shared_ptr<MetalAllocation> *owner) {
-                return owner->get();
-            };
-        std::ranges::sort(bound, {}, allocation);
-        const auto repeated = std::ranges::unique(bound, {}, allocation);
-        bound.erase(repeated.begin(), repeated.end());
-        command.retainedAllocations.reserve(bound.size());
-        for (const std::shared_ptr<MetalAllocation> *owner : bound)
-            command.retainedAllocations.push_back(*owner);
+        command.retainedAllocations.reserve(unique);
+        for (const BoundAllocation &entry : boundAllocations)
+            if (entry.allocation)
+                command.retainedAllocations.push_back(*entry.owner);
         return command;
     }
 
