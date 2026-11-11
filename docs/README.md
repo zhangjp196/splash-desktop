@@ -25,6 +25,8 @@ These documents run from using Splash to working on it:
 - [Package](package.md): the release archive and bottle, the desktop app, its
   updates and releases, private test releases, and the macOS app and disk image.
 - [Performance](performance.md): measurements and how they were made.
+- [Open work](remaining-work.md): what the 1.9.3 organization and performance
+  pass left open, with the evidence and the command that shows it.
 
 Building from source needs Apple Silicon with macOS 26.4+, Xcode 26 or newer,
 Python 3.12–3.14, and a Metal 4 compiler with `uint4b_format` tensor support.
