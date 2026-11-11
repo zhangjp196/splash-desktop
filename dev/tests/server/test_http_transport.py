@@ -10,6 +10,7 @@ from unittest import mock
 
 from dev.tests.server_fixtures import FakeRuntime, HarnessTestCase, Plan, chat_body
 from server import connections, serve_options
+from server import http_handler as handler_api
 from server import server as api
 
 
@@ -235,7 +236,7 @@ class HttpTransportTests(HarnessTestCase):
         with mock.patch.object(
             harness.app, "prepare", side_effect=RuntimeError("test")
         ):
-            with mock.patch.object(api, "log_unexpected"):
+            with mock.patch.object(handler_api, "log_unexpected"):
                 self.assertEqual(
                     harness.request("POST", "/v1/chat/completions", chat_body())[0], 500
                 )

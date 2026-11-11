@@ -25,9 +25,11 @@ from dev.tests.server_fixtures import (
     stream_events,
     tool_request,
 )
-from server import frontend, json_codec
+from server import http_handler as handler_api
+from server import json_codec
 from server import server as api
 from server.dialects import anthropic, openai, responses
+from server.response_store import ResponseStore
 
 TEXT = '中文 café e\u0301 🌍 "quoted" C:\\Users\\file\n\r\t\x00 NEL\x85 LS\u2028 PS\u2029 end'
 
@@ -220,7 +222,7 @@ class JsonResponseTests(unittest.TestCase):
         )
 
     def test_stored_response_roundtrip_and_atomic_failures(self):
-        store = frontend.ResponseStore()
+        store = ResponseStore()
         for value in (TEXT, "\ud800", "\udfff"):
             response = {"id": "resp_test", "value": value}
             history = [{"role": "assistant", "content": value}]
@@ -261,7 +263,9 @@ class JsonResponseTests(unittest.TestCase):
             for stream in (False, True):
                 with (
                     self.subTest(path=path, stream=stream),
-                    mock.patch.object(api, "log_unexpected", lambda _error: None),
+                    mock.patch.object(
+                        handler_api, "log_unexpected", lambda _error: None
+                    ),
                 ):
                     if stream:
                         # Poison the complete event before any part of it is written.
@@ -316,7 +320,7 @@ class JsonResponseTests(unittest.TestCase):
                 mock.patch.object(
                     harness.server, "status", return_value={"value": math.inf}
                 ),
-                mock.patch.object(api, "log_unexpected", lambda _error: None),
+                mock.patch.object(handler_api, "log_unexpected", lambda _error: None),
             ):
                 status, content_type, payload = harness.request(method, "/status")
                 self.assertEqual(status, 500)
@@ -492,7 +496,9 @@ class JsonResponseTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(json_codec, "encode", side_effect=encode),
-                    mock.patch.object(api, "log_unexpected", lambda _error: None),
+                    mock.patch.object(
+                        handler_api, "log_unexpected", lambda _error: None
+                    ),
                     concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool,
                 ):
                     failing = pool.submit(

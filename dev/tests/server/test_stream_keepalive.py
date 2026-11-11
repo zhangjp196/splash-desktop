@@ -14,6 +14,7 @@ from dev.tests.server_fixtures import (
     responses_body,
 )
 from server import backend as backend_api
+from server import http_handler as handler_api
 from server import protocol as native_wire
 from server import server as api
 from server import tool_schema
@@ -25,7 +26,7 @@ class StreamKeepaliveTests(HarnessTestCase):
     def test_stream_sends_keepalive_while_native_is_idle(self):
         plan = Plan([[4]], block=True)
         harness = self.harness(FakeRuntime(plan))
-        with mock.patch.object(api, "SSE_KEEPALIVE_SECONDS", 0.02):
+        with mock.patch.object(handler_api, "SSE_KEEPALIVE_SECONDS", 0.02):
             connection, response = harness.open_stream(
                 "/v1/chat/completions",
                 chat_body(stream=True, reasoning_effort="none"),
@@ -44,7 +45,7 @@ class StreamKeepaliveTests(HarnessTestCase):
     def test_stream_keepalive_is_a_comment_until_the_role_chunk(self):
         plan = Plan([[4]], before_start=True)
         harness = self.harness(FakeRuntime(plan))
-        with mock.patch.object(api, "SSE_KEEPALIVE_SECONDS", 0.02):
+        with mock.patch.object(handler_api, "SSE_KEEPALIVE_SECONDS", 0.02):
             connection, response = harness.open_stream(
                 "/v1/chat/completions",
                 chat_body(stream=True, reasoning_effort="none"),
@@ -79,7 +80,7 @@ class StreamKeepaliveTests(HarnessTestCase):
             with self.subTest(path=path):
                 plan = Plan([[4]], before_start=True, block=True)
                 harness = self.harness(FakeRuntime(plan))
-                with mock.patch.object(api, "SSE_KEEPALIVE_SECONDS", 0.02):
+                with mock.patch.object(handler_api, "SSE_KEEPALIVE_SECONDS", 0.02):
                     connection, response = harness.open_stream(path, body)
                     try:
                         # A comment until the request starts, then a chunk
@@ -120,7 +121,7 @@ class StreamKeepaliveTests(HarnessTestCase):
             payload = json.loads(next_sse_data(response))
             return payload["type"], payload
 
-        with mock.patch.object(api, "SSE_KEEPALIVE_SECONDS", 0.02):
+        with mock.patch.object(handler_api, "SSE_KEEPALIVE_SECONDS", 0.02):
             connection, response = harness.open_stream(
                 "/v1/responses",
                 responses_body(stream=True, reasoning={"effort": "none"}),
@@ -301,7 +302,7 @@ class StreamKeepaliveTests(HarnessTestCase):
     def test_anthropic_stream_pings_during_prefill_and_decode_waits(self):
         plan = Plan([[4]], before_start=True, block=True)
         harness = self.harness(FakeRuntime(plan))
-        with mock.patch.object(api, "SSE_KEEPALIVE_SECONDS", 0.02):
+        with mock.patch.object(handler_api, "SSE_KEEPALIVE_SECONDS", 0.02):
             connection, response = harness.open_stream(
                 "/v1/messages",
                 anthropic_body(stream=True),

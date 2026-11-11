@@ -2,8 +2,6 @@
 
 import hashlib
 import json
-import os
-import queue
 import secrets
 import threading
 from contextlib import contextmanager
@@ -13,10 +11,10 @@ from pathlib import Path
 
 from jinja2 import TemplateError
 
-from . import compaction, json_codec, judgments
+from . import compaction, generation_options, image_prompts, judgments
 from . import images as image_input
 from . import protocol as wire
-from .backend import Job, ReasoningRequest, remaining_request_time
+from .backend import Job, remaining_request_time
 from .chat_format import THINK_END, THINK_START, TOOL_CALL_OPEN
 from .chat_messages import (
     IMAGE_PAD_TOKEN,
@@ -37,10 +35,10 @@ from .errors import (
     RequestValidationError,
     field_error,
 )
+from .job import ReasoningRequest
 from .latency import LatencyMetrics
-from .lru import LRUCache
 from .metrics import is_finite_number
-from .output import MAX_STOP_CHARACTERS
+from .response_store import ResponseStore
 from .serve_options import REASONING_EFFORTS, parse_served_model_name
 from .tokenization import PromptTokenizer, tokenizable
 from .tool_schema import (
@@ -53,81 +51,10 @@ from .tool_schema import (
 
 PREPARATION_WAIT_SECONDS = 30.0
 
-# The priority a request names, by its lowercase wire name.
-_PRIORITIES = {priority.name.lower(): priority for priority in wire.RequestPriority}
-
-
-MIN_FLOAT32_SUBNORMAL = float.fromhex("0x1p-149")
-FLOAT32_MAX = float.fromhex("0x1.fffffep127")
-# vLLM raises a nonzero temperature below this to it (_MAX_TEMP in
-# vllm/sampling_params.py); Splash does the same.
-MIN_SAMPLING_TEMPERATURE = 0.01
-
-# The sampling numbers a request may set: each with its default (Qwen's
-# generation config for temperature and top_p, and otherwise the value that
-# leaves the logits unchanged, as in vLLM), the values the engine accepts and
-# how a 400 names them. A nonzero top_p or repetition_penalty must not round
-# to zero in the engine's float32, which would make the value invalid.
-SAMPLING_NUMBERS = {
-    "temperature": (
-        1.0,
-        lambda value: 0 <= value <= 2,
-        "a number in [0, 2]",
-    ),
-    "top_p": (
-        0.95,
-        lambda value: MIN_FLOAT32_SUBNORMAL <= value <= 1,
-        "a number in (0, 1]",
-    ),
-    "presence_penalty": (0.0, lambda value: -2 <= value <= 2, "a number in [-2, 2]"),
-    "frequency_penalty": (0.0, lambda value: -2 <= value <= 2, "a number in [-2, 2]"),
-    "repetition_penalty": (
-        1.0,
-        lambda value: MIN_FLOAT32_SUBNORMAL <= value <= FLOAT32_MAX,
-        "a positive number",
-    ),
-    "min_p": (0.0, lambda value: 0 <= value <= 1, "a number in [0, 1]"),
-}
-# top_k's default, from Qwen's generation config as temperature's and top_p's
-# are. With it, the table covers every sampling option the frame carries.
-TOP_K_DEFAULT = 20
-assert set(SAMPLING_NUMBERS) | {"top_k"} == set(wire.SAMPLING_FIELDS)
-
-
-def _preparation_checkpoint(deadline, disconnected):
-    """A check that a request's preparation may go on: its deadline has not
-    passed, and its client has not left."""
-
-    def checkpoint():
-        remaining_request_time(deadline)
-        if disconnected():
-            raise ConnectionResetError("client disconnected during preparation")
-
-    return checkpoint
-
 
 # Text completions' output budget when max_tokens is omitted: OpenAI's
 # default for the endpoint, which vLLM and SGLang also use.
 COMPLETION_DEFAULT_MAX_TOKENS = 16
-
-
-# --compact-at: the room a reply keeps before a request compacts, and the
-# reply a request that names no output limit is assumed to want.
-COMPACT_RESERVE_TOKENS = 1024
-COMPACT_DEFAULT_REPLY_TOKENS = 4096
-# The most the note's own generation may produce, and what it is asked for.
-COMPACT_MAX_NOTE_TOKENS = 1024
-COMPACT_INSTRUCTION = (
-    "Summarize the conversation below into a note for yourself, so you can "
-    "continue the work: the goal, the constraints, what has been done, the "
-    "decisions and why, the immediate next steps, and the exact names, "
-    "numbers and file paths it mentions. Reply with the note alone, with no "
-    "preamble and no advice to the user."
-)
-
-
-# A stable marker lets repeated image requests reuse the compiled template.
-IMAGE_RENDER_MARKER = f"__splash_image_{secrets.token_hex(16)}__"
 
 
 def _generation_prompt(probed, rendered, tokens):
@@ -146,63 +73,6 @@ def _generation_prompt(probed, rendered, tokens):
         text.rfind(THINK_START) > text.rfind(THINK_END),
         count if count < len(tokens) and tuple(tokens[-count:]) == ids else 0,
     )
-
-
-@dataclass(frozen=True, slots=True)
-class StoredResponse:
-    response_json: bytes
-    history_json: bytes
-
-    @property
-    def size(self):
-        return len(self.response_json) + len(self.history_json)
-
-    @property
-    def response(self):
-        return json_codec.loads(self.response_json)
-
-
-class ResponseStore:
-    """Process-local Responses state with one strict byte-budgeted LRU."""
-
-    BUDGET_BYTES = 64 * 1024 * 1024
-
-    def __init__(self):
-        self.records = LRUCache(self.BUDGET_BYTES)
-        self.hits = 0
-        self.misses = 0
-        self.lock = threading.Lock()
-
-    def get(self, response_id):
-        with self.lock:
-            record = self.records.get(response_id)
-            if record is None:
-                self.misses += 1
-            else:
-                self.hits += 1
-        return record
-
-    def put(self, response, history_items):
-        record = StoredResponse(
-            json_codec.encode(response), json_codec.encode(history_items)
-        )
-        with self.lock:
-            return self.records.put(response["id"], record, record.size)
-
-    def delete(self, response_id):
-        with self.lock:
-            return self.records.pop(response_id) is not None
-
-    def stats(self):
-        with self.lock:
-            return {
-                "entries": len(self.records),
-                "bytes": self.records.bytes,
-                "budget_bytes": self.records.budget_bytes,
-                "evictions": self.records.evictions,
-                "hits": self.hits,
-                "misses": self.misses,
-            }
 
 
 @dataclass
@@ -232,24 +102,6 @@ class RenderedPrompt:
     thinking: bool
     # Images precede the generation prompt; expanding them keeps this count.
     generation_prompt_tokens: int
-
-
-@dataclass(frozen=True)
-class GenerationOptions:
-    """Sampling, stop and scheduling options, validated alike by every
-    generation API."""
-
-    sampling: wire.SamplingParameters
-    stop_sequences: tuple[str, ...]
-    ignore_eos: bool
-    seed: int
-    priority: wire.RequestPriority
-    cache_salt: int
-    # The thinking tokens of a request that thinks, after which its thinking
-    # closes; None for no cap.
-    thinking_token_budget: int | None
-    # Raw-logit adjustments, token id to value.
-    logit_bias: tuple[tuple[int, float], ...] = ()
 
 
 class Frontend:
@@ -385,8 +237,10 @@ class Frontend:
             reasoning["default"] = template.effort_names.get(effort)
         return reasoning
 
-    def status(self):
-        status = self.backend.status()
+    def status(self, cached=False):
+        # The cache is the backend's decision; a probe without the flag is
+        # the plain live status it always was.
+        status = self.backend.status(cached=True) if cached else self.backend.status()
         status["vision"] = self.vision
         status["input_modalities"] = self.input_modalities
         status["reasoning_switch"] = self.chat_format.reasoning_switch
@@ -405,42 +259,9 @@ class Frontend:
         return status
 
     def _prepare_images(self, messages, deadline, *, check_context=True):
-        """Prepared images in template render order: content parts in message
-        order, images in document order."""
-        parts = [
-            part
-            for message in messages
-            if isinstance(message.get("content"), list)
-            for part in message["content"]
-            if part.get("type") == "image_url"
-        ]
-        limit = wire.MAX_IMAGE_SPANS
-        if len(parts) > limit:
-            raise APIError(400, f"requests support at most {limit} images")
-        prepared = self.images.request_batch()
-        tokens = pixel_bytes = 0
-        for part in parts:
-            # An image can take a few hundred milliseconds to decode; an
-            # expired request starts no more of them.
-            remaining_request_time(deadline)
-            try:
-                payload = image_input.decode_data_url(part["image_url"]["url"])
-                image = self.images.prepare(payload, self.max_image_pixels)
-                tokens += image.tokens
-                pixel_bytes += len(image.pixels)
-                self._check_image_request_size(
-                    tokens,
-                    len(prepared) + 1,
-                    pixel_bytes,
-                    check_context=check_context,
-                    image_tokens_only=True,
-                )
-                prepared.append(image)
-            except image_input.ImageCapacityError as error:
-                raise APIError(503, str(error), "frontend_overloaded") from error
-            except image_input.ImageError as error:
-                raise APIError(400, str(error)) from error
-        return prepared
+        return image_prompts.prepare_images(
+            self, messages, deadline, check_context=check_context
+        )
 
     def _check_image_request_size(
         self,
@@ -451,97 +272,23 @@ class Frontend:
         check_context=True,
         image_tokens_only=False,
     ):
-        if check_context and tokens >= self.max_context:
-            raise ContextLengthError(
-                tokens, self.max_context - 1, image_tokens_only=image_tokens_only
-            )
-        # A thinking budget's end tokens follow, at most this many.
-        frame_bytes = (
-            wire.REQUEST_FIXED_BYTES
-            + 4 * tokens
-            + wire.IMAGE_SPAN_BYTES * image_count
-            + pixel_bytes
-            + 4 * wire.MAX_THINKING_END_TOKENS
+        return image_prompts.check_image_request_size(
+            self,
+            tokens,
+            image_count,
+            pixel_bytes,
+            check_context=check_context,
+            image_tokens_only=image_tokens_only,
         )
-        if frame_bytes > wire.MAX_FRAME_PAYLOAD_BYTES:
-            raise APIError(400, "images exceed the request size limit")
 
     def _render_image_tokens(self, messages, template):
-        """Track placeholders emitted by the template, not quoted in input text.
-
-        A temporary render marker is removed before tokenization, so the pinned
-        template's final text and token IDs remain unchanged. Token offsets tie
-        each real image to its placeholder even when a coding agent has read
-        documentation or source containing literal vision tokens.
-        """
-        rendered = self._apply_chat_template(
-            messages,
-            {
-                **template,
-                "tokenize": False,
-                "chat_template": template["chat_template"].replace(
-                    IMAGE_PAD_TOKEN, IMAGE_RENDER_MARKER
-                ),
-            },
-        )
-        parts = rendered.split(IMAGE_RENDER_MARKER)
-        image_offsets = set()
-        offset = 0
-        for part in parts[:-1]:
-            offset += len(part)
-            image_offsets.add((offset, offset + len(IMAGE_PAD_TOKEN)))
-            offset += len(IMAGE_PAD_TOKEN)
-        rendered = IMAGE_PAD_TOKEN.join(parts)
-        encoded = self._tokenize(
-            rendered,
-            add_special_tokens=False,
-            return_offsets_mapping=True,
-        )
-        positions = [
-            index
-            for index, span in enumerate(encoded["offset_mapping"])
-            if tuple(span) in image_offsets
-        ]
-        return list(encoded["input_ids"]), positions, rendered
+        return image_prompts.render_image_tokens(self, messages, template)
 
     def _image_token_count(self, prompt_tokens, prepared, positions):
-        pad_id = self.tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN)
-        if len(positions) != len(prepared) or any(
-            prompt_tokens[position] != pad_id for position in positions
-        ):
-            raise APIError(400, "image count does not match the rendered template")
-        return len(prompt_tokens) + sum(image.tokens - 1 for image in prepared)
+        return image_prompts.image_token_count(self, prompt_tokens, prepared, positions)
 
     def _expand_image_pads(self, prompt_tokens, prepared, positions):
-        """Widens the template's single placeholder per image to the image's
-        merged token count and returns the spans the engine injects into."""
-        token_count = self._image_token_count(prompt_tokens, prepared, positions)
-        # Validate lengths before expanding tokens or copying repeated pixels.
-        # HTTP body and image-cache limits do not bound decoded request size.
-        self._check_image_request_size(
-            token_count,
-            len(prepared),
-            sum(len(image.pixels) for image in prepared),
-        )
-        expanded, spans, cursor = [], [], 0
-        pad_id = self.tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN)
-        for position, image in zip(positions, prepared):
-            expanded.extend(prompt_tokens[cursor:position])
-            spans.append(
-                wire.ImageSpan(
-                    len(expanded),
-                    image.tokens,
-                    image.grid_height,
-                    image.grid_width,
-                    image.digest_lo,
-                    image.digest_hi,
-                )
-            )
-            expanded.extend([pad_id] * image.tokens)
-            cursor = position + 1
-        expanded.extend(prompt_tokens[cursor:])
-        pixels = b"".join(image.pixels for image in prepared)
-        return expanded, tuple(spans), pixels
+        return image_prompts.expand_image_pads(self, prompt_tokens, prepared, positions)
 
     def request_deadline(self, body, started_at):
         timeout = body.get("timeout")
@@ -740,198 +487,15 @@ class Frontend:
             remaining_request_time(deadline)
             return text
 
-    def _priority(self, body):
-        priority_name = body.get("priority", "normal")
-        if not isinstance(priority_name, str) or priority_name not in _PRIORITIES:
-            raise APIError(400, "priority must be foreground, normal, or background")
-        return _PRIORITIES[priority_name]
-
-    @staticmethod
-    def _cache_salt(body):
-        """The request's cache_salt as the engine keys its cache: 128 bits of
-        its hash, zero without one. A request shares cached prompts only with
-        requests of the same salt."""
-        salt = body.get("cache_salt")
-        if salt is None:
-            return 0
-        if not isinstance(salt, str) or not salt:
-            raise APIError(400, "cache_salt must be a non-empty string")
-        digest = hashlib.blake2b(
-            salt.encode("utf-8", "surrogatepass"), digest_size=16, person=b"splash-salt"
-        ).digest()
-        return int.from_bytes(digest, "little")
-
-    def _score_job(
-        self,
-        prompt_tokens,
-        slot_ids,
-        deadline,
-        priority,
-        prompt_sha256,
-        cache_salt,
-    ):
-        return Job(
-            request_id=next(self.ids),
-            prompt_tokens=prompt_tokens,
-            max_new_tokens=0,
-            seed=0,
-            sampling=wire.SamplingParameters(),
-            deadline=deadline,
-            priority=priority,
-            score_tokens=tuple(slot_ids),
-            public_id=secrets.token_hex(16),
-            prompt_sha256=prompt_sha256,
-            cache_salt=cache_salt,
-        )
-
-    def _encode_score_prompt(self, messages, labels, admit, checkpoint, what):
-        """The tokens, answer-slot token ids and text of a scoring prompt. The
-        request's input drives the render, so a failure is its error."""
-        try:
-            return judgments.encode_prompt(
-                self.prompt_tokenizer,
-                self.chat_templates.select(None).source,
-                messages,
-                labels,
-                chat_format=self.chat_format,
-                admit=admit,
-                checkpoint=checkpoint,
-            )
-        except judgments.ScoringUnsupported as error:
-            raise APIError(500, str(error), "scoring_unsupported") from error
-        except (APIError, ConnectionResetError):
-            # The request's own limits, deadline and client end preparation.
-            raise
-        except Exception as error:
-            raise APIError(400, f"{what} prompt could not be rendered") from error
-
     def prepare_judgment(self, body, *, deadline, disconnected):
-        unknown = sorted(
-            set(body)
-            - {
-                "id",
-                "state",
-                "question",
-                "options",
-                "model",
-                "timeout",
-                "priority",
-                "cache_salt",
-            }
+        return judgments.prepare_judgment(
+            self, body, deadline=deadline, disconnected=disconnected
         )
-        if unknown:
-            raise APIError(400, f"unsupported fields: {', '.join(unknown)}")
-        if not self.accepts_model(body.get("model")):
-            raise APIError(404, f"model {body['model']} not found", "model_not_found")
-        try:
-            judgments.validate_row(body)
-        except ValueError as error:
-            raise APIError(400, str(error)) from error
-        priority = self._priority(body)
-        cache_salt = self._cache_salt(body)
-        checkpoint = _preparation_checkpoint(deadline, disconnected)
-        with self._preparation(deadline):
-
-            def admit(prompt_tokens):
-                checkpoint()
-                if prompt_tokens > self.max_context:
-                    raise ContextLengthError(prompt_tokens, self.max_context)
-
-            tokens, slots, prompt = self._encode_score_prompt(
-                judgments.judgment_messages(body),
-                judgments.LETTERS[: len(body["options"])],
-                admit,
-                checkpoint,
-                "judgment",
-            )
-            checkpoint()
-            job = self._score_job(
-                tokens,
-                slots,
-                deadline,
-                priority,
-                judgments.digest(prompt),
-                cache_salt,
-            )
-        return job, body
 
     def prepare_systemone(self, body, *, deadline, disconnected):
-        details = []
-        model = body.get("model")
-        if not isinstance(model, str) or not model:
-            details.append(field_error(["model"], "field required", "missing"))
-        elif not self.accepts_model(model):
-            details.append(
-                field_error(["model"], f"model {model} is not served by this endpoint")
-            )
-        state, specs, question_details = judgments.validate_systemone(body)
-        details.extend(question_details)
-        try:
-            priority = self._priority(body)
-        except APIError as error:
-            details.append(field_error(["priority"], error.message))
-        try:
-            cache_salt = self._cache_salt(body)
-        except APIError as error:
-            details.append(field_error(["cache_salt"], error.message))
-        if details:
-            raise RequestValidationError(details)
-        jobs = []
-        total_tokens = 0
-        checkpoint = _preparation_checkpoint(deadline, disconnected)
-        with self._preparation(deadline):
-            for qid, spec in specs:
-                if spec.deterministic:
-                    jobs.append((qid, spec, None))
-                    continue
-                slots = judgments.slot_labels(self.tokenizer)
-                if len(spec.labels) > len(slots):
-                    raise RequestValidationError(
-                        [
-                            field_error(
-                                ["questions", qid, "criteria"],
-                                f"the served tokenizer supports "
-                                f"{len(slots)} answer slots; "
-                                f"{len(spec.labels)} were requested",
-                            )
-                        ]
-                    )
-                labels = slots[: len(spec.labels)]
-
-                def admit(prompt_tokens, qid=qid, prepared=total_tokens):
-                    checkpoint()
-                    if prompt_tokens > self.max_context:
-                        raise ContextLengthError(prompt_tokens, self.max_context)
-                    if prepared + prompt_tokens > judgments.MAX_SYSTEMONE_TOTAL_TOKENS:
-                        raise RequestValidationError(
-                            [
-                                field_error(
-                                    ["questions", qid],
-                                    "total prepared question tokens exceed "
-                                    f"{judgments.MAX_SYSTEMONE_TOTAL_TOKENS}",
-                                )
-                            ]
-                        )
-
-                tokens, slot_ids, _ = self._encode_score_prompt(
-                    judgments.systemone_messages(state, spec, labels),
-                    labels,
-                    admit,
-                    checkpoint,
-                    "question",
-                )
-                checkpoint()
-                total_tokens += len(tokens)
-                jobs.append(
-                    (
-                        qid,
-                        spec,
-                        self._score_job(
-                            tokens, slot_ids, deadline, priority, None, cache_salt
-                        ),
-                    )
-                )
-        return jobs
+        return judgments.prepare_systemone(
+            self, body, deadline=deadline, disconnected=disconnected
+        )
 
     def apply_template(self, body, *, deadline):
         add_generation_prompt = body.get("add_generation_prompt", True)
@@ -1276,6 +840,10 @@ class Frontend:
         remaining_request_time(deadline)
         tools_signature = None
         if tools:
+            # The signature needs key-sorted canonical JSON, which the
+            # strict codec's encoder does not offer; the tools are request
+            # JSON that json_codec.loads already validated, so stdlib
+            # encoding here is only a digest, never a payload.
             digest = hashlib.sha1(
                 json.dumps(tools, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()[:8]
@@ -1349,102 +917,7 @@ class Frontend:
         ]
 
     def _generation_options(self, body):
-        numbers = {}
-        for name, (default, accepts, requirement) in SAMPLING_NUMBERS.items():
-            value = body.get(name, default)
-            if not is_finite_number(value) or not accepts(value):
-                raise APIError(400, f"{name} must be {requirement}")
-            numbers[name] = float(value)
-        if 0 < numbers["temperature"] < MIN_SAMPLING_TEMPERATURE:
-            numbers["temperature"] = MIN_SAMPLING_TEMPERATURE
-        # A top_k of 0 or -1 keeps every token, which the frame says with 0. A
-        # top_k past the vocabulary keeps every token too, so one past the
-        # frame's u32 is sent as its largest value.
-        top_k = body.get("top_k", TOP_K_DEFAULT)
-        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < -1:
-            raise APIError(
-                400, "top_k must be 0 or -1 (disabled) or a positive integer"
-            )
-        top_k = min(max(top_k, 0), 0xFFFFFFFF)
-        stop = body.get("stop")
-        if stop in (None, []):
-            stop_sequences = ()
-        elif isinstance(stop, str) and stop:
-            stop_sequences = (stop,)
-        elif (
-            isinstance(stop, list)
-            and 1 <= len(stop) <= 4
-            and all(isinstance(value, str) and value for value in stop)
-        ):
-            stop_sequences = tuple(stop)
-        else:
-            raise APIError(400, "stop must be a string or up to four strings")
-        if len(stop_sequences) > 4:
-            raise APIError(400, "stop must be a string or up to four strings")
-        if any(len(value) > MAX_STOP_CHARACTERS for value in stop_sequences):
-            raise APIError(
-                400,
-                f"each of stop must be at most {MAX_STOP_CHARACTERS} characters",
-            )
-        raw_bias = body.get("logit_bias")
-        logit_bias = []
-        if raw_bias is not None:
-            if not isinstance(raw_bias, dict):
-                raise APIError(400, "logit_bias must be an object")
-            if len(raw_bias) > 256:
-                raise APIError(400, "logit_bias takes at most 256 entries")
-            for key, value in raw_bias.items():
-                try:
-                    token = int(key)
-                except (TypeError, ValueError):
-                    raise APIError(400, "logit_bias keys must be token ids") from None
-                if str(token) != key or not 0 <= token < self.chat_format.vocabulary:
-                    raise APIError(
-                        400, f"logit_bias token {key} is outside the vocabulary"
-                    )
-                if (
-                    isinstance(value, bool)
-                    or not is_finite_number(value)
-                    or not -100.0 <= value <= 100.0
-                ):
-                    raise APIError(
-                        400, "logit_bias values must be numbers in [-100, 100]"
-                    )
-                logit_bias.append((token, float(value)))
-        ignore_eos = body.get("ignore_eos", False)
-        if not isinstance(ignore_eos, bool):
-            raise APIError(400, "ignore_eos must be a boolean")
-        seed = body.get("seed", -1)
-        if (
-            not isinstance(seed, int)
-            or isinstance(seed, bool)
-            or not -(2**63) <= seed < 2**64
-        ):
-            raise APIError(400, "seed must be a 64-bit integer")
-        # -1 asks for a random seed, and another negative one is taken as
-        # its 64 bits.
-        seed = secrets.randbits(64) if seed == -1 else seed % 2**64
-        # -1 sets no cap; an absent or null budget takes the server's.
-        budget = body.get("thinking_token_budget")
-        if budget is None:
-            budget = self.default_thinking_token_budget
-        elif not isinstance(budget, int) or isinstance(budget, bool) or budget < -1:
-            raise APIError(
-                400,
-                "thinking_token_budget must be a non-negative integer or -1 for no cap",
-            )
-        elif budget == -1:
-            budget = None
-        return GenerationOptions(
-            wire.SamplingParameters(top_k=top_k, **numbers),
-            stop_sequences,
-            ignore_eos,
-            seed,
-            self._priority(body),
-            self._cache_salt(body),
-            budget,
-            tuple(logit_bias),
-        )
+        return generation_options.from_request(self, body)
 
     def _output_budget(self, requested, prompt_tokens, field):
         """The output token budget requested under the API's field name. It is
@@ -1459,166 +932,7 @@ class Frontend:
         return min(max_new, remaining)
 
     def _compact(self, prompt, rendered, deadline, requested):
-        """The request's prompt after `--compact-at`: the newest turns and a
-        note in place of the older ones, or the prompt unchanged. Returns the
-        prompt, its render, and the note's report (compaction.py)."""
-        if self.compact_at is None:
-            return prompt, rendered, None
-        reply = (
-            requested
-            if isinstance(requested, int) and not isinstance(requested, bool)
-            else COMPACT_DEFAULT_REPLY_TOKENS
-        )
-        if not compaction.should_compact(
-            len(rendered.tokens),
-            reply,
-            self.max_context,
-            COMPACT_RESERVE_TOKENS,
-            self.compact_at,
-        ):
-            return prompt, rendered, None
-        messages = prompt.messages
-        budget = compaction.keep_budget(self.max_context, self.compact_keep)
-
-        def count(candidate):
-            trial = replace(prompt, messages=candidate)
-            return len(self._render_prompt(trial, deadline, check_context=False).tokens)
-
-        cut = compaction.choose_cut(messages, count, budget)
-        start = compaction.leading_system_end(messages)
-        if cut <= start or cut >= len(messages):
-            return prompt, rendered, None
-        removed = messages[start:cut]
-        text = compaction.transcript(removed)
-        digest = hashlib.sha256(text.encode()).hexdigest()
-        key = self._compaction_key(messages)
-        note = self._read_note(key, digest)
-        if note is None:
-            note = self._summarize(text, deadline)
-            self._write_note(key, digest, note)
-        compacted = replace(
-            prompt, messages=compaction.compacted_messages(messages, cut, note)
-        )
-        final = self._render_prompt(compacted, deadline)
-        report = compaction.Compaction(
-            note, cut - start, len(rendered.tokens), len(final.tokens)
-        )
-        return compacted, final, report
-
-    def _summarize(self, text, deadline):
-        """The note's own generation: the removed turns and one instruction,
-        greedy and at background priority."""
-        text = self._fit_transcript(text, deadline)
-        prompt = Prompt(
-            messages=[{"role": "user", "content": f"{COMPACT_INSTRUCTION}\n\n{text}"}],
-            tools=None,
-            tool_policy=None,
-            reasoning_effort="none",
-        )
-        rendered = self._render_prompt(prompt, deadline, check_context=False)
-        max_new = min(
-            COMPACT_MAX_NOTE_TOKENS,
-            max(1, self.max_context - len(rendered.tokens) - COMPACT_RESERVE_TOKENS),
-        )
-        options = GenerationOptions(
-            sampling=wire.SamplingParameters(temperature=0.0),
-            stop_sequences=(),
-            ignore_eos=False,
-            seed=0,
-            priority=wire.RequestPriority.BACKGROUND,
-            cache_salt=0,
-            thinking_token_budget=None,
-        )
-        job = self._generation_job(options, rendered.tokens, max_new, deadline)
-        self.backend.submit(job)
-        parts = []
-        while True:
-            try:
-                kind, value = job.events.get(timeout=remaining_request_time(deadline))
-            except queue.Empty:
-                self.backend.cancel(job)
-                raise APIError(504, "request timed out", "request_timeout") from None
-            if kind == "text":
-                parts.append(value)
-            elif kind == "done":
-                break
-            elif kind == "error":
-                raise value
-        return "".join(parts).strip()
-
-    def _fit_transcript(self, text, deadline):
-        """The transcript shortened to fit the note's own prompt, keeping its
-        start (the goal) and its end (the newest progress)."""
-        limit = max(
-            256, self.max_context - COMPACT_RESERVE_TOKENS - COMPACT_MAX_NOTE_TOKENS
-        )
-        for _ in range(8):
-            tokens = self._tokenize(
-                f"{COMPACT_INSTRUCTION}\n\n{text}", add_special_tokens=False
-            )["input_ids"]
-            if len(tokens) <= limit:
-                return text
-            keep = max(1, int(len(text) * limit / max(1, len(tokens)) * 0.9))
-            head = int(keep * 0.6)
-            tail = keep - head
-            text = f"{text[:head]}\n\n[...]\n\n{text[-tail:]}" if tail else text[:head]
-        return text
-
-    @staticmethod
-    def _compaction_key(messages):
-        """A conversation's key for --compact-memory: its leading system text
-        and its first user message, which later turns keep."""
-        system = (
-            messages[0].get("content", "")
-            if messages and messages[0].get("role") == "system"
-            else ""
-        )
-        first_user = next(
-            (
-                message.get("content", "")
-                for message in messages
-                if message.get("role") == "user"
-            ),
-            "",
-        )
-        seed = f"{system}\0{first_user}"
-        return hashlib.sha256(seed.encode()).hexdigest()
-
-    def _read_note(self, key, digest):
-        """The note --compact-memory kept for this conversation and this run
-        of removed turns, or None."""
-        if self.compact_memory is None:
-            return None
-        try:
-            data = json.loads(
-                (self.compact_memory / f"{key}.json").read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            return None
-        note = data.get("note") if isinstance(data, dict) else None
-        return note if isinstance(note, str) and data.get("removed") == digest else None
-
-    def _write_note(self, key, digest, note):
-        """Keep a compaction's note for a later identical compaction; a
-        failure leaves the reply alone."""
-        if self.compact_memory is None:
-            return
-        path = self.compact_memory / f"{key}.json"
-        temporary = path.with_name(f".{path.name}.tmp")
-        try:
-            descriptor = os.open(
-                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
-            )
-            with os.fdopen(descriptor, "w", encoding="utf-8") as target:
-                json.dump({"removed": digest, "note": note}, target, ensure_ascii=False)
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(temporary, path)
-        except OSError:
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
+        return compaction.compact(self, prompt, rendered, deadline, requested)
 
     def _generation_job(self, options, prompt_tokens, max_new, deadline, **fields):
         """The job for a prepared prompt, with the endpoint's own fields."""

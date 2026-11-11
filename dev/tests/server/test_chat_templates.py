@@ -11,7 +11,6 @@ from transformers import PreTrainedTokenizerFast
 
 from dev.tests import server_fixtures as fixtures
 from server import chat_messages, chat_templates
-from server import frontend as request_frontend
 from server.chat_templates import (
     LATER_SYSTEM_UNSUPPORTED,
     NATIVE,
@@ -29,6 +28,7 @@ from server.dialects import (
     responses as responses_dialect,
 )
 from server.errors import APIError
+from server.image_prompts import IMAGE_RENDER_MARKER
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/chat_templates"
 UPSTREAM = ("qwen36", "qwen38", "qwen36_gguf", "qwen38_gguf")
@@ -567,9 +567,7 @@ class ChatTemplateFrontendTests(unittest.TestCase):
         # Image rendering swaps the pad token for a marker in that template.
         chosen_sources = {
             chosen.source,
-            chosen.source.replace(
-                chat_messages.IMAGE_PAD_TOKEN, request_frontend.IMAGE_RENDER_MARKER
-            ),
+            chosen.source.replace(chat_messages.IMAGE_PAD_TOKEN, IMAGE_RENDER_MARKER),
         }
         for path, render in (
             (

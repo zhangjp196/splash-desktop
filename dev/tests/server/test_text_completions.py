@@ -7,6 +7,7 @@ from unittest import mock
 from openai import OpenAI
 
 from dev.tests.server_fixtures import FakeRuntime, FakeTokenizer, Harness, Plan
+from server import http_handler as handler_api
 from server import protocol as wire
 from server import server as api
 
@@ -413,7 +414,7 @@ class TextCompletionLifecycleTests(unittest.TestCase):
             with self.subTest(before_start=before_start):
                 plan = Plan([[4]], block=True, before_start=before_start)
                 harness, _ = self.harness(plan)
-                with mock.patch.object(api, "SSE_KEEPALIVE_SECONDS", 0.02):
+                with mock.patch.object(handler_api, "SSE_KEEPALIVE_SECONDS", 0.02):
                     connection, response = harness.open_stream(
                         COMPLETION[0], {**COMPLETION[1], "stream": True}
                     )

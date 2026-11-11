@@ -8,6 +8,7 @@ from unittest import mock
 
 from dev.tests.server_fixtures import FakeRuntime, HarnessTestCase, chat_body
 from server import diagnostics
+from server import http_handler as handler_api
 from server import server as api
 
 
@@ -37,7 +38,7 @@ class DiagnosticsTests(HarnessTestCase):
         for method in ("GET", "POST", "DELETE"):
             with (
                 self.subTest(method=method),
-                mock.patch.object(api, "print_status") as output,
+                mock.patch.object(handler_api, "print_status") as output,
             ):
                 status, _, _ = harness.request(
                     method, "/missing?token=private-query", {"private-body": "secret"}
@@ -46,7 +47,7 @@ class DiagnosticsTests(HarnessTestCase):
                 output.assert_called_once_with(
                     f"Error · not_found · {method} /missing", error=True
                 )
-        with mock.patch.object(api, "print_status") as output:
+        with mock.patch.object(handler_api, "print_status") as output:
             status, _, _ = harness.request("POST", "/v1/messages?beta=true", {})
             self.assertEqual(status, 400)
             output.assert_called_once_with(

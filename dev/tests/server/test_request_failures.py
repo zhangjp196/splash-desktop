@@ -20,6 +20,7 @@ from dev.tests.server_fixtures import (
     response_events,
     responses_body,
 )
+from server import http_handler as handler_api
 from server import server as api
 from server.dialects import openai, responses
 
@@ -374,7 +375,7 @@ class RequestFailureTests(HarnessTestCase):
         self.assertRegex(
             stderr.getvalue(),
             r"^\d{2}:\d{2}:\d{2} Error · internal_server_error · RuntimeError · "
-            r"server/(?:server|output|dialects/\w+)\.py:\d+\n$",
+            r"server/(?:http_handler|server|output|dialects/\w+)\.py:\d+\n$",
         )
         self.assertNotIn("boom", stderr.getvalue())
 
@@ -408,7 +409,7 @@ class RequestFailureTests(HarnessTestCase):
                         mock.patch.object(
                             harness.backend, "cancel", wraps=harness.backend.cancel
                         ) as cancel,
-                        mock.patch.object(api, "log_unexpected") as logged,
+                        mock.patch.object(handler_api, "log_unexpected") as logged,
                     ):
                         status, _, payload = harness.request("POST", path, body)
                     self.assertEqual(status, 500, payload)
@@ -451,7 +452,7 @@ class RequestFailureTests(HarnessTestCase):
         self.assertRegex(
             stderr.getvalue(),
             r"^\d{2}:\d{2}:\d{2} Error · internal_server_error · RuntimeError · "
-            r"server/(?:server|output|dialects/\w+)\.py:\d+\n$",
+            r"server/(?:http_handler|server|output|dialects/\w+)\.py:\d+\n$",
         )
 
     def test_streamer_end_error_does_not_kill_backend(self):

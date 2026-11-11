@@ -26,6 +26,7 @@ from dev.tests.server_fixtures import (
 from server import backend as backend_api
 from server import protocol as wire
 from server import runtime as engine_runtime
+from server import serve as serve_api
 from server import server as api
 
 
@@ -848,14 +849,18 @@ class ServerRecoveryTests(HarnessTestCase):
             with self.subTest(reason=reason):
                 factory = FakeFactory(initial_output=initial_output)
                 with (
-                    mock.patch.object(api, "parse_args", return_value=main_args()),
+                    mock.patch.object(
+                        serve_api, "parse_args", return_value=main_args()
+                    ),
                     unprepared_hold(),
-                    mock.patch.object(api, "load_thinking_key", return_value=None),
+                    mock.patch.object(
+                        serve_api, "load_thinking_key", return_value=None
+                    ),
                     mock.patch.object(
                         api.AutoTokenizer, "from_pretrained", return_value=object()
                     ),
-                    mock.patch.object(api, "validate_tokenizer"),
-                    mock.patch.object(api, "ChatTemplates"),
+                    mock.patch.object(serve_api, "validate_tokenizer"),
+                    mock.patch.object(serve_api, "ChatTemplates"),
                     mock.patch.object(
                         api.engine_runtime,
                         "MultiplexedRuntime",
@@ -863,7 +868,7 @@ class ServerRecoveryTests(HarnessTestCase):
                             process_factory=factory, **options
                         ),
                     ),
-                    mock.patch.object(api, "FrontendServer"),
+                    mock.patch.object(serve_api, "FrontendServer"),
                     mock.patch.object(api.signal, "signal"),
                     mock.patch("sys.stdout", new_callable=io.StringIO),
                     mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,

@@ -11,6 +11,7 @@ from dev.tests.server_fixtures import main_args, unprepared_hold
 from install import families
 from server import diagnostics
 from server import protocol as native_wire
+from server import serve as serve_api
 from server import server as api
 from server.origins import ANY_ORIGIN
 
@@ -52,23 +53,25 @@ class ServerMainTests(unittest.TestCase):
         runtime.wait_ready.side_effect = lambda: order.append("runtime") or True
         server.serve_forever.side_effect = serve
         with (
-            mock.patch.object(api, "parse_args", return_value=args),
+            mock.patch.object(serve_api, "parse_args", return_value=args),
             unprepared_hold(),
-            mock.patch.object(api, "load_thinking_key", return_value=None),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
                 api.AutoTokenizer, "from_pretrained", return_value=tokenizer
             ),
-            mock.patch.object(api, "validate_tokenizer"),
-            mock.patch.object(api, "ChatTemplates"),
+            mock.patch.object(serve_api, "validate_tokenizer"),
+            mock.patch.object(serve_api, "ChatTemplates"),
             mock.patch.object(
                 api.engine_runtime, "MultiplexedRuntime", return_value=runtime
             ) as runtime_type,
             mock.patch.object(
-                api, "NativeBackend", return_value=backend
+                serve_api, "NativeBackend", return_value=backend
             ) as backend_type,
-            mock.patch.object(api, "ConstraintFactory", return_value=object()),
-            mock.patch.object(api, "Frontend", return_value=mock.Mock()) as app_type,
-            mock.patch.object(api, "FrontendServer", side_effect=bind),
+            mock.patch.object(serve_api, "ConstraintFactory", return_value=object()),
+            mock.patch.object(
+                serve_api, "Frontend", return_value=mock.Mock()
+            ) as app_type,
+            mock.patch.object(serve_api, "FrontendServer", side_effect=bind),
             mock.patch.object(api.signal, "signal", side_effect=install),
             mock.patch("sys.stdout", new_callable=io.StringIO),
         ):
@@ -121,29 +124,31 @@ class ServerMainTests(unittest.TestCase):
                 runtime = mock.Mock()
                 runtime.readiness = native_wire.ReadyEvent(4, 131072, vision)
                 with (
-                    mock.patch.object(api, "parse_args", return_value=args),
+                    mock.patch.object(serve_api, "parse_args", return_value=args),
                     unprepared_hold(),
-                    mock.patch.object(api, "load_thinking_key", return_value=None),
+                    mock.patch.object(
+                        serve_api, "load_thinking_key", return_value=None
+                    ),
                     mock.patch.object(
                         api.AutoTokenizer, "from_pretrained", return_value=object()
                     ),
-                    mock.patch.object(api, "validate_tokenizer"),
-                    mock.patch.object(api, "ChatTemplates") as templates_type,
+                    mock.patch.object(serve_api, "validate_tokenizer"),
+                    mock.patch.object(serve_api, "ChatTemplates") as templates_type,
                     mock.patch.object(
                         api.engine_runtime,
                         "MultiplexedRuntime",
                         return_value=runtime,
                     ),
-                    mock.patch.object(api, "NativeBackend"),
-                    mock.patch.object(api, "ConstraintFactory"),
-                    mock.patch.object(api, "Frontend") as app_type,
+                    mock.patch.object(serve_api, "NativeBackend"),
+                    mock.patch.object(serve_api, "ConstraintFactory"),
+                    mock.patch.object(serve_api, "Frontend") as app_type,
                     mock.patch.object(
-                        api,
+                        serve_api,
                         "FrontendServer",
                         return_value=mock.Mock(server_port=8000),
                     ),
                     mock.patch.object(api.signal, "signal"),
-                    mock.patch.object(api, "print_status") as status,
+                    mock.patch.object(serve_api, "print_status") as status,
                 ):
                     api.main()
                 self.assertIs(app_type.call_args.kwargs["vision"], vision)
@@ -183,28 +188,32 @@ class ServerMainTests(unittest.TestCase):
                 runtime.readiness = native_wire.ReadyEvent(4, window, False)
                 with (
                     mock.patch.object(
-                        api,
+                        serve_api,
                         "parse_args",
                         return_value=main_args(max_context=max_context),
                     ),
                     unprepared_hold(),
-                    mock.patch.object(api, "load_thinking_key", return_value=None),
+                    mock.patch.object(
+                        serve_api, "load_thinking_key", return_value=None
+                    ),
                     mock.patch.object(
                         api.AutoTokenizer, "from_pretrained", return_value=object()
                     ),
-                    mock.patch.object(api, "validate_tokenizer"),
-                    mock.patch.object(api, "ChatTemplates"),
+                    mock.patch.object(serve_api, "validate_tokenizer"),
+                    mock.patch.object(serve_api, "ChatTemplates"),
                     mock.patch.object(
                         api.engine_runtime, "MultiplexedRuntime", return_value=runtime
                     ),
-                    mock.patch.object(api, "NativeBackend"),
-                    mock.patch.object(api, "ConstraintFactory"),
-                    mock.patch.object(api, "Frontend") as app_type,
+                    mock.patch.object(serve_api, "NativeBackend"),
+                    mock.patch.object(serve_api, "ConstraintFactory"),
+                    mock.patch.object(serve_api, "Frontend") as app_type,
                     mock.patch.object(
-                        api, "FrontendServer", return_value=mock.Mock(server_port=8000)
+                        serve_api,
+                        "FrontendServer",
+                        return_value=mock.Mock(server_port=8000),
                     ),
                     mock.patch.object(api.signal, "signal"),
-                    mock.patch.object(api, "print_status") as status,
+                    mock.patch.object(serve_api, "print_status") as status,
                 ):
                     if served:
                         api.main()
@@ -236,32 +245,34 @@ class ServerMainTests(unittest.TestCase):
                 )
                 with (
                     mock.patch.object(
-                        api,
+                        serve_api,
                         "parse_args",
                         return_value=main_args(allowed_origin=origins, api_key=key),
                     ),
                     unprepared_hold(),
-                    mock.patch.object(api, "load_thinking_key", return_value=None),
+                    mock.patch.object(
+                        serve_api, "load_thinking_key", return_value=None
+                    ),
                     mock.patch.object(
                         api.AutoTokenizer, "from_pretrained", return_value=object()
                     ),
-                    mock.patch.object(api, "validate_tokenizer"),
-                    mock.patch.object(api, "ChatTemplates"),
+                    mock.patch.object(serve_api, "validate_tokenizer"),
+                    mock.patch.object(serve_api, "ChatTemplates"),
                     mock.patch.object(
                         api.engine_runtime,
                         "MultiplexedRuntime",
                         return_value=runtime,
                     ),
-                    mock.patch.object(api, "NativeBackend"),
-                    mock.patch.object(api, "ConstraintFactory"),
-                    mock.patch.object(api, "Frontend"),
+                    mock.patch.object(serve_api, "NativeBackend"),
+                    mock.patch.object(serve_api, "ConstraintFactory"),
+                    mock.patch.object(serve_api, "Frontend"),
                     mock.patch.object(
-                        api,
+                        serve_api,
                         "FrontendServer",
                         return_value=mock.Mock(server_port=8000),
                     ) as server_type,
                     mock.patch.object(api.signal, "signal"),
-                    mock.patch.object(api, "print_status") as status,
+                    mock.patch.object(serve_api, "print_status") as status,
                 ):
                     api.main()
                 self.assertEqual(
@@ -276,19 +287,19 @@ class ServerMainTests(unittest.TestCase):
         backend = mock.Mock()
         server = mock.Mock()
         with (
-            mock.patch.object(api, "parse_args", return_value=args),
+            mock.patch.object(serve_api, "parse_args", return_value=args),
             unprepared_hold(),
-            mock.patch.object(api, "load_thinking_key", return_value=None),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
                 api.AutoTokenizer, "from_pretrained", return_value=object()
             ),
-            mock.patch.object(api, "validate_tokenizer"),
-            mock.patch.object(api, "ChatTemplates"),
+            mock.patch.object(serve_api, "validate_tokenizer"),
+            mock.patch.object(serve_api, "ChatTemplates"),
             mock.patch.object(
                 api.engine_runtime, "MultiplexedRuntime", return_value=runtime
             ),
-            mock.patch.object(api, "NativeBackend", return_value=backend),
-            mock.patch.object(api, "FrontendServer", return_value=server),
+            mock.patch.object(serve_api, "NativeBackend", return_value=backend),
+            mock.patch.object(serve_api, "FrontendServer", return_value=server),
             mock.patch.object(api.signal, "signal"),
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
             self.assertRaisesRegex(SystemExit, "1"),
@@ -303,17 +314,17 @@ class ServerMainTests(unittest.TestCase):
     def test_main_rejects_an_unservable_chat_template_before_starting_native(self):
         server = mock.Mock()
         with (
-            mock.patch.object(api, "parse_args", return_value=main_args()),
+            mock.patch.object(serve_api, "parse_args", return_value=main_args()),
             unprepared_hold(),
-            mock.patch.object(api, "load_thinking_key", return_value=None),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
                 api.AutoTokenizer,
                 "from_pretrained",
                 return_value=SimpleNamespace(chat_template=None),
             ),
-            mock.patch.object(api, "validate_tokenizer"),
+            mock.patch.object(serve_api, "validate_tokenizer"),
             mock.patch.object(api.engine_runtime, "MultiplexedRuntime") as runtime,
-            mock.patch.object(api, "FrontendServer", return_value=server),
+            mock.patch.object(serve_api, "FrontendServer", return_value=server),
             mock.patch.object(api.signal, "signal"),
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
             self.assertRaisesRegex(SystemExit, "1"),
@@ -331,8 +342,8 @@ class ServerMainTests(unittest.TestCase):
         server = mock.Mock()
         server.server_bind.side_effect = OSError(48, "Address already in use")
         with (
-            mock.patch.object(api, "parse_args", return_value=args),
-            mock.patch.object(api, "FrontendServer", return_value=server),
+            mock.patch.object(serve_api, "parse_args", return_value=args),
+            mock.patch.object(serve_api, "FrontendServer", return_value=server),
             mock.patch.object(api.AutoTokenizer, "from_pretrained") as tokenizer,
             mock.patch.object(api.engine_runtime, "MultiplexedRuntime") as runtime,
             mock.patch.object(api.signal, "signal"),
@@ -365,9 +376,9 @@ class ServerMainTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                api, "parse_args", return_value=main_args(model_root=str(link))
+                serve_api, "parse_args", return_value=main_args(model_root=str(link))
             ),
-            mock.patch.object(api, "load_thinking_key", return_value=None),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
                 api.AutoTokenizer, "from_pretrained", return_value=object()
             ) as tokenizer,
@@ -375,19 +386,19 @@ class ServerMainTests(unittest.TestCase):
             mock.patch.object(
                 api.assembly, "family", return_value=families.named("Qwen3.8-27B")
             ),
-            mock.patch.object(api, "validate_tokenizer"),
-            mock.patch.object(api, "ChatTemplates"),
+            mock.patch.object(serve_api, "validate_tokenizer"),
+            mock.patch.object(serve_api, "ChatTemplates"),
             mock.patch.object(
                 api.engine_runtime, "MultiplexedRuntime", side_effect=start
             ) as runtime_type,
-            mock.patch.object(api, "NativeBackend"),
-            mock.patch.object(api, "ConstraintFactory"),
-            mock.patch.object(api, "Frontend"),
+            mock.patch.object(serve_api, "NativeBackend"),
+            mock.patch.object(serve_api, "ConstraintFactory"),
+            mock.patch.object(serve_api, "Frontend"),
             mock.patch.object(
-                api, "FrontendServer", return_value=mock.Mock(server_port=8000)
+                serve_api, "FrontendServer", return_value=mock.Mock(server_port=8000)
             ),
             mock.patch.object(api.signal, "signal"),
-            mock.patch.object(api, "print_status"),
+            mock.patch.object(serve_api, "print_status"),
         ):
             api.main()
         self.assertEqual(held, [True])
@@ -450,10 +461,12 @@ class ServerMainTests(unittest.TestCase):
         server = mock.Mock()
         with (
             mock.patch.object(
-                api, "parse_args", return_value=main_args(model_root=str(directory))
+                serve_api,
+                "parse_args",
+                return_value=main_args(model_root=str(directory)),
             ),
-            mock.patch.object(api, "load_thinking_key", return_value=None),
-            mock.patch.object(api, "FrontendServer", return_value=server),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
+            mock.patch.object(serve_api, "FrontendServer", return_value=server),
             mock.patch.object(api.AutoTokenizer, "from_pretrained") as tokenizer,
             mock.patch.object(api.engine_runtime, "MultiplexedRuntime") as runtime,
             mock.patch.object(api.signal, "signal"),

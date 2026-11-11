@@ -8,8 +8,8 @@ from unittest import mock
 
 from dev.tests import native_peer
 from dev.tests.server_fixtures import RELEASED_WEIGHTS, FakeRuntime, HarnessTestCase
+from server import http_handler as handler_api
 from server import runtime as engine_runtime
-from server import server as api
 
 # The weights section the engine answers a release request with when it keeps
 # the weights, in each case native_engine_loop_test.cpp checks it reports, and
@@ -111,7 +111,7 @@ class MemoryReleaseTests(HarnessTestCase):
             runtime.release_event = native_peer.status_event(weights=weights)
             with (
                 self.subTest(case),
-                mock.patch.object(api, "print_status") as console,
+                mock.patch.object(handler_api, "print_status") as console,
             ):
                 status, payload = self.post(harness, {})
                 self.assertEqual((status, payload["error"]["code"]), (409, code))

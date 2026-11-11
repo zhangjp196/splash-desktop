@@ -12,6 +12,7 @@ from unittest import mock
 from dev.tests import server_fixtures as fixtures
 from server import frontend
 from server.dialects import responses as responses_dialect
+from server.response_store import ResponseStore
 
 
 class ResponseLifecycleTests(unittest.TestCase):
@@ -188,10 +189,8 @@ class ResponseLifecycleTests(unittest.TestCase):
                 gc.enable()
 
     def test_response_store_is_strictly_byte_bounded_lru(self):
-        self.enterContext(
-            mock.patch.object(frontend.ResponseStore, "BUDGET_BYTES", 2048)
-        )
-        store = frontend.ResponseStore()
+        self.enterContext(mock.patch.object(ResponseStore, "BUDGET_BYTES", 2048))
+        store = ResponseStore()
         for index in range(10):
             response = {
                 "id": f"resp_{index}",
@@ -204,18 +203,14 @@ class ResponseLifecycleTests(unittest.TestCase):
         self.assertGreater(stats["evictions"], 0)
         self.assertIsNone(store.get("resp_0"))
         self.assertIsNotNone(store.get("resp_9"))
-        with mock.patch.object(frontend.ResponseStore, "BUDGET_BYTES", 64):
+        with mock.patch.object(ResponseStore, "BUDGET_BYTES", 64):
             self.assertFalse(
-                frontend.ResponseStore().put(
-                    {"id": "resp_large", "text": "x" * 128}, []
-                )
+                ResponseStore().put({"id": "resp_large", "text": "x" * 128}, [])
             )
 
     def test_response_store_concurrent_churn_remains_bounded(self):
-        self.enterContext(
-            mock.patch.object(frontend.ResponseStore, "BUDGET_BYTES", 8192)
-        )
-        store = frontend.ResponseStore()
+        self.enterContext(mock.patch.object(ResponseStore, "BUDGET_BYTES", 8192))
+        store = ResponseStore()
         errors = []
 
         def churn(shard):

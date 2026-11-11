@@ -1,6 +1,5 @@
 """Native request submission, cancellation, recovery and completion ownership."""
 
-import copy
 import functools
 import hashlib
 import math
@@ -10,19 +9,14 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 
-from tokenizers.decoders import DecodeStream
-
 from . import json_codec
 from . import protocol as wire
 from . import runtime as engine_runtime
-from .chat_format import THINK_END, ChatFormat
-from .constraints import TokenConstraint
+from .chat_format import THINK_END
 from .diagnostics import print_status
 from .errors import APIError, ConstraintError
-from .latency import RequestLatency
-from .metrics import metrics_dict
-from .output import StopSearch
-from .tool_schema import ToolPolicy
+from .job import CacheInfo, Job, NativeResult
+from .streamer import CallbackStreamer
 
 # A failure counts toward a crash loop unless its engine served this long.
 CRASH_LOOP_WINDOW_SECONDS = 60.0
@@ -98,6 +92,18 @@ def request_fingerprint(job):
 
 # Control requests use a short live probe and explicitly label stale snapshots.
 STATUS_REFRESH_TIMEOUT_SECONDS = 0.05
+# How long a status answer from a serving engine stands in for the frequent
+# probes (/ready, /metrics) before one of them asks the engine again. Half a
+# second is well under the one-second Retry-After every SDK honors and under
+# any scraper's interval, so a readiness flip shows at the next probe after
+# it, while a burst of probes costs one native round trip instead of one
+# each. The cache answers only while the engine document says ready and the
+# transport is live and owes no relaunch or refresh: an engine that has
+# failed, is recovering, or has gone quiet is probed live, so no flip out of
+# readiness hides behind the TTL. What it does mask, for at most the TTL, is
+# an engine turning not-ready under memory pressure or a Metal fault while
+# it keeps serving.
+STATUS_CACHE_TTL_SECONDS = 0.5
 
 
 class ThinkingEndError(ValueError):
@@ -138,255 +144,6 @@ def remaining_request_time(deadline):
     # Callers wait this long, and waits reject a timeout above TIMEOUT_MAX;
     # a request without a deadline has infinite time left.
     return min(remaining, threading.TIMEOUT_MAX)
-
-
-@dataclass(frozen=True)
-class CacheInfo:
-    status: str = "unknown"
-    matched_tokens: int = 0
-    lane: int = -1
-    # Tokens whose KV the request read from cached blocks another request
-    # computed, past its cached prefix; known once it is done.
-    deduplicated_tokens: int = 0
-
-
-@dataclass(frozen=True)
-class ReasoningRequest:
-    """How a chat request asked to reason: the reasoning effort it sent, None
-    when absent; the effort its template rendered with, the server's default
-    for an absent one and None for the template's own; and its
-    chat_template_kwargs enable_thinking, None when unset."""
-
-    sent: str | None
-    effort: str | None
-    enable_thinking: bool | None
-
-
-@dataclass
-class NativeResult:
-    reason: str
-    prompt_tokens: int
-    completion_tokens: int
-    start_to_first_token_ms: float
-    first_token_to_done_ms: float
-    request_wall_ms: float
-    prefill_tokens: int = 0
-    cache: CacheInfo = field(default_factory=CacheInfo)
-    stop_sequence: str | None = None
-    first_token_batch_tokens: int = 0
-    # Raw option logits for score-only jobs, in requested token order.
-    option_logits: tuple = ()
-    drafted_tokens: int = 0
-    accepted_draft_tokens: int = 0
-    draft_cycles: int = 0
-    # The engine ended the response at a bound of its own, short of
-    # max_new_tokens: what the SSD cache or memory holds of its context.
-    bounded: bool = False
-    # Per generated token: its id, log probability and top (token, logprob)
-    # pairs, aligned with the streamer's token ids.
-    logprobs: tuple = ()
-
-    @functools.cached_property
-    def metrics(self):
-        """The per-request metrics every response and log record reports."""
-        return metrics_dict(self)
-
-
-@dataclass
-class Job:
-    request_id: int
-    prompt_tokens: list
-    max_new_tokens: int
-    seed: int
-    sampling: wire.SamplingParameters
-    deadline: float
-    priority: wire.RequestPriority = wire.RequestPriority.NORMAL
-    stop_sequences: tuple[str, ...] = ()
-    thinking: bool = False
-    # A chat request's reasoning options, which its Started line shows; None
-    # for a request without a chat template.
-    reasoning: ReasoningRequest | None = None
-    # The format a chat request's output is read in; None for a request
-    # without a chat template.
-    chat_format: ChatFormat | None = None
-    # The thinking tokens the job may select before its thinking closes, set
-    # only where that comes before the output limit; None for no cap.
-    thinking_token_budget: int | None = None
-    thinking_display: str = "summarized"
-    reasoning_tokens: int = 0
-    events: queue.Queue = field(default_factory=queue.Queue)
-    cancelled: threading.Event = field(default_factory=threading.Event)
-    tool_policy: ToolPolicy | None = None
-    response_validator: object | None = None
-    response_format: dict | None = None
-    constraint: TokenConstraint | None = None
-    cache: CacheInfo = field(default_factory=CacheInfo)
-    # Image placeholder spans with their grids and digests, plus the
-    # concatenated resized pixels the engine encodes during prefill.
-    image_spans: tuple = ()
-    image_pixels: bytes = b""
-    image_owner: object | None = None
-    public_id: str = ""
-    created_at: int = field(default_factory=lambda: int(time.time()))
-    response_store: bool = False
-    # (count, short hash) of the normalized tool list, so the console shows
-    # when a client's tool block changes between turns and breaks its prefix.
-    tools_signature: tuple | None = None
-    response_previous_id: str | None = None
-    response_history_items: list | None = None
-    # --compact-at: the note a compaction wrote and what it replaced, or None
-    # (compaction.Compaction). The response may report it.
-    compaction: object | None = None
-    # Option token ids for score-only jobs; empty means ordinary generation.
-    score_tokens: tuple = ()
-    # How many independent choices the request asks for (Chat and text
-    # completions' n); one for every other endpoint.
-    n: int = 1
-    # Tokens above each generated token in its logprobs; 0 disables them.
-    top_logprobs: int = 0
-    # Return each generated token's log probability (chosen only when
-    # top_logprobs is 0).
-    logprobs: bool = False
-    # Raw-logit adjustments, token id to value.
-    logit_bias: tuple = ()
-    # Trailing prompt tokens of the chat template's generation prompt; zero
-    # when unknown.
-    generation_prompt_tokens: int = 0
-    flags: wire.RequestFlag = wire.RequestFlag(0)
-    # The request asked for more output than the context leaves, and
-    # max_new_tokens was lowered to what it leaves.
-    output_clamped_to_context: bool = False
-    # The digest of a judgment's rendered prompt, which its response reports.
-    prompt_sha256: str | None = None
-    # The request's cache_salt hashed to 128 bits; zero without one.
-    cache_salt: int = 0
-    latency: RequestLatency | None = None
-
-    @property
-    def may_call_tools(self):
-        """Whether the output may call a tool: tools are offered under a
-        choice other than none."""
-        return self.tool_policy is not None and bool(self.tool_policy.schemas)
-
-
-class CallbackStreamer:
-    def __init__(self, tokenizer, callback, stop_sequences=(), on_stop=None):
-        self.tokenizer = tokenizer
-        self.callback = callback
-        self.stops = StopSearch(stop_sequences) if stop_sequences else None
-        self.on_stop = on_stop
-        self.backend = tokenizer.backend_tokenizer
-        self.decode_stream = DecodeStream(skip_special_tokens=True)
-        self.token_ids = []
-        self.emitted = []
-        self.pending_text = ""
-        self.stop_sequence = None
-
-    def _send(self, text):
-        if text:
-            self.callback(text)
-            self.emitted.append(text)
-
-    def _emit(self, text):
-        if not text or self.stop_sequence is not None:
-            return
-        if self.stops is None:
-            self._send(text)
-            return
-        self.pending_text += text
-        found = self.stops.search(text)
-        if found is not None:
-            self.stop_sequence, back = found
-            self._send(self.pending_text[: len(self.pending_text) - back])
-            self.pending_text = ""
-            if self.on_stop is not None:
-                self.on_stop()
-            return
-
-        retained = self.stops.held
-        ready = self.pending_text[:-retained] if retained else self.pending_text
-        self.pending_text = self.pending_text[-retained:] if retained else ""
-        self._send(ready)
-
-    def put_tokens(self, token_ids):
-        if self.stop_sequence is not None:
-            return
-        for token_id in token_ids:
-            token_id = int(token_id)
-            self.token_ids.append(token_id)
-            if self.decode_stream is None:
-                continue
-            try:
-                text = self.decode_stream.step(self.backend, token_id)
-            except Exception as error:
-                # tokenizers raises a plain Exception with this message when an
-                # incremental decode cannot continue; fall back to decoding the
-                # whole sequence at the end.
-                if not str(error).startswith("Invalid prefix encountered"):
-                    raise
-                self.decode_stream = None
-                continue
-            if text:
-                self._emit(text)
-                if self.stop_sequence is not None:
-                    break
-
-    def end(self):
-        if self.stop_sequence is not None:
-            return
-        decoded = self.tokenizer.decode(
-            self.token_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        handled = "".join(self.emitted) + self.pending_text
-        if not decoded.startswith(handled):
-            raise RuntimeError("incremental tokenizer output diverged")
-        # Bytes of a multi-byte character the output ends inside decode to
-        # U+FFFD; DecodeStream held them back for the rest. Drop the trailing
-        # U+FFFD, as vLLM's detokenizer does; one that text follows stays.
-        self._emit(decoded[len(handled) :].rstrip("\ufffd"))
-        if self.stop_sequence is None:
-            self._send(self.pending_text)
-            self.pending_text = ""
-
-    def count_reasoning_tokens(self, chat_format, thinking, tool_calls=False):
-        """The reasoning's tokens, as ReasoningSplitter reads the text: from
-        the start of the output where the generation prompt opened the
-        reasoning (thinking), or after the model's own opening of it
-        (chat_format.think_start_id), to its close or, where a call may follow
-        and a call's opening ends the reasoning, a call's opening; none for
-        a request without a chat format."""
-        if chat_format is None:
-            return 0
-        if thinking:
-            start = 0
-        elif chat_format.think_start_id is not None and self.token_ids[:1] == [
-            chat_format.think_start_id
-        ]:
-            start = 1
-        else:
-            return 0
-        calls_end = tool_calls and chat_format.calls_end_reasoning
-        for index in range(start, len(self.token_ids)):
-            token = self.token_ids[index]
-            if token == chat_format.think_end_id or (
-                calls_end
-                and token == chat_format.call_open_id
-                and self._opens_call(index, chat_format.call_syntax.call_open)
-            ):
-                return index - start
-        return len(self.token_ids) - start
-
-    def _opens_call(self, index, call_open):
-        """Whether the text from the call-open token at `index` on begins
-        call_open, decoded from as few tokens as decide it."""
-        text = ""
-        for end in range(index + 1, len(self.token_ids) + 1):
-            text = self.tokenizer.decode(self.token_ids[index:end])
-            if len(text) >= len(call_open) or not call_open.startswith(text):
-                break
-        return text.startswith(call_open)
 
 
 @dataclass
@@ -684,7 +441,7 @@ class NativeBackend:
 
     def is_ready(self):
         # The engine's own ready folds in memory pressure and Metal health.
-        return self.status()["ready"] is True
+        return self.status(cached=True)["ready"] is True
 
     @staticmethod
     def _decode_status_event(event):
@@ -710,7 +467,11 @@ class NativeBackend:
                 or self.runtime.restart_count != restarts
             ):
                 return False
-            self.status_snapshot = copy.deepcopy(snapshot)
+            # A shallow copy serves: every later change to a snapshot is a
+            # top-level key assignment (`ready`, `transport`), never a write
+            # into a nested document, so the cache shares the engine's
+            # sections with the copies handed out.
+            self.status_snapshot = dict(snapshot)
             self.status_snapshot_at = time.monotonic()
             self.status_unanswered_since = None
             restarted = self.engine_error is not None
@@ -719,7 +480,25 @@ class NativeBackend:
             print_status("Engine restarted")
         return True
 
-    def status(self, timeout=STATUS_REFRESH_TIMEOUT_SECONDS):
+    def status(self, timeout=STATUS_REFRESH_TIMEOUT_SECONDS, cached=False):
+        if cached:
+            # A fresh answer from a serving engine is evidence enough for a
+            # probe; the transport accounting below is still read live.
+            with self.lock:
+                snapshot = self.status_snapshot
+                captured_at = self.status_snapshot_at
+                if (
+                    snapshot is not None
+                    and captured_at is not None
+                    and time.monotonic() - captured_at < STATUS_CACHE_TTL_SECONDS
+                    and snapshot.get("ready") is True
+                    and not self.closing
+                    and self.runtime.ready
+                    and self.restart_due is None
+                    and not self.refresh_due
+                ):
+                    age_ms = (time.monotonic() - captured_at) * 1000.0
+                    return self._add_transport(dict(snapshot), None, age_ms)
         stale_error = None
         stale_age_ms = None
         with self.lock:
@@ -741,7 +520,14 @@ class NativeBackend:
             busy = isinstance(error, TimeoutError)
             now = time.monotonic()
             with self.lock:
-                snapshot = copy.deepcopy(self.status_snapshot)
+                # Shallow like the cache itself: the caller's changes land on
+                # top-level keys, and the engine's sections are read-only.
+                # No cache yet copies as no cache at all.
+                snapshot = (
+                    dict(self.status_snapshot)
+                    if self.status_snapshot is not None
+                    else None
+                )
                 captured_at = self.status_snapshot_at
                 transport_ready = not self.closing and self.runtime.ready
                 # A probe skipped behind the refresh sent nothing to answer.
@@ -775,6 +561,13 @@ class NativeBackend:
         else:
             if not self._cache_status(snapshot, restarts):
                 snapshot["ready"] = False
+        return self._add_transport(snapshot, stale_error, stale_age_ms)
+
+    def _add_transport(self, snapshot, stale_error, age_ms):
+        """The transport accounting every status answer carries, read live
+        however the engine document behind it was obtained. `age_ms` is how
+        old the engine document is: zero for one answered now, the cache's
+        age for one a probe reused."""
         with self.lock:
             transport_ready = not self.closing and self.runtime.ready
             engine_error = self.engine_error
@@ -788,9 +581,7 @@ class NativeBackend:
             "restarts": self.runtime.restart_count,
             "last_crash_trace": self.runtime.last_crash_trace,
             "status_stale": stale_error is not None,
-            "status_age_ms": (
-                0.0 if stale_error is None or stale_age_ms is None else stale_age_ms
-            ),
+            "status_age_ms": 0.0 if age_ms is None else age_ms,
         }
         if stale_error is not None:
             snapshot["transport"]["error"] = engine_error or str(stale_error)

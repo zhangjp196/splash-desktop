@@ -17,6 +17,8 @@ from PIL import Image
 
 from dev.tests import server_fixtures as fixtures
 from server import frontend, json_codec, serve_options
+from server import http_handler as handler_api
+from server import http_server as server_api
 from server import server as api
 from server.dialects import responses as responses_dialect
 from server.errors import RequestValidationError
@@ -147,7 +149,7 @@ class HttpBodyBudgetTests(unittest.TestCase):
                 )
 
     def test_shared_budget_rejects_before_reading_and_recovers_on_disconnect(self):
-        with mock.patch.object(api, "DEFAULT_REQUEST_BODY_BUDGET", 256):
+        with mock.patch.object(server_api, "DEFAULT_REQUEST_BODY_BUDGET", 256):
             harness = self.harness(max_request_bytes=128, queue_size=16)
         uploads = [self.headers(harness, 128) for _ in range(2)]
         self.wait_bytes(harness, 256)
@@ -212,7 +214,7 @@ class HttpBodyBudgetTests(unittest.TestCase):
 
     def test_a_refusal_reaches_a_client_that_uploads_in_chunks(self):
         size = 256 * 1024
-        with mock.patch.object(api, "DEFAULT_REQUEST_BODY_BUDGET", 2 * size):
+        with mock.patch.object(server_api, "DEFAULT_REQUEST_BODY_BUDGET", 2 * size):
             harness = self.harness(max_request_bytes=size, queue_size=4, timeout=15)
         held = [self.headers(harness, size) for _ in range(2)]
         self.wait_bytes(harness, 2 * size)
@@ -241,7 +243,7 @@ class HttpBodyBudgetTests(unittest.TestCase):
         self.wait_connections(harness, 0, 2)
 
     def test_parsed_bodies_stay_charged_while_preparation_is_pending(self):
-        with mock.patch.object(api, "DEFAULT_REQUEST_BODY_BUDGET", 4096):
+        with mock.patch.object(server_api, "DEFAULT_REQUEST_BODY_BUDGET", 4096):
             harness = self.harness(max_request_bytes=1024, queue_size=8)
         body = {"messages": [{"role": "user", "content": "hello"}], "extra": "x" * 850}
         size = len(json.dumps(body).encode())
@@ -293,7 +295,7 @@ class HttpBodyBudgetTests(unittest.TestCase):
         ):
             with (
                 mock.patch.object(harness.app, "prepare", side_effect=error),
-                mock.patch.object(api, "log_unexpected"),
+                mock.patch.object(handler_api, "log_unexpected"),
             ):
                 self.assertEqual(
                     harness.request("POST", "/v1/chat/completions", body)[0], status
@@ -503,7 +505,7 @@ class HttpBodyBudgetTests(unittest.TestCase):
                     handler._body_reservation.release()
                 self.assertEqual(handler.server.request_bodies.active, 0)
 
-    @mock.patch.object(api, "HTTP_UPLOAD_BYTES_PER_SECOND", 20)
+    @mock.patch.object(handler_api, "HTTP_UPLOAD_BYTES_PER_SECOND", 20)
     def test_active_upload_can_outlast_idle_timeout(self):
         harness = self.harness(io_timeout=2, timeout=15)
         payload = json.dumps({"content": "hello"}).encode().ljust(100)
@@ -516,9 +518,9 @@ class HttpBodyBudgetTests(unittest.TestCase):
         response.read()
         self.wait_bytes(harness, 0)
 
-    @mock.patch.object(api, "HTTP_UPLOAD_BYTES_PER_SECOND", 256)
+    @mock.patch.object(handler_api, "HTTP_UPLOAD_BYTES_PER_SECOND", 256)
     def test_drip_uploads_expire_and_restore_shared_capacity(self):
-        with mock.patch.object(api, "DEFAULT_REQUEST_BODY_BUDGET", 256):
+        with mock.patch.object(server_api, "DEFAULT_REQUEST_BODY_BUDGET", 256):
             harness = self.harness(max_request_bytes=128, io_timeout=0.4, timeout=4)
         uploads = [self.headers(harness, 128, "/tokenize") for _ in range(2)]
         self.wait_bytes(harness, 256)

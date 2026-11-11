@@ -29,6 +29,7 @@ from server import backend as backend_api
 from server import constraints, tool_schema
 from server import output as model_output
 from server import protocol as wire
+from server import serve as serve_api
 from server import server as api
 from server.chat_format import FLINT, GLM_ARGS, QWEN, QWEN_XML, ToolCallSyntax
 from server.chat_templates import NATIVE, ChatTemplates
@@ -828,25 +829,27 @@ class ServedFamilyTests(unittest.TestCase):
         runtime.readiness = wire.ReadyEvent(4, 131072, False)
         tokenizer = object()
         with (
-            mock.patch.object(api, "parse_args", return_value=fixtures.main_args()),
+            mock.patch.object(
+                serve_api, "parse_args", return_value=fixtures.main_args()
+            ),
             fixtures.unprepared_hold(family),
-            mock.patch.object(api, "load_thinking_key", return_value=None),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
                 api.AutoTokenizer, "from_pretrained", return_value=tokenizer
             ),
-            mock.patch.object(api, "validate_tokenizer") as validate,
-            mock.patch.object(api, "ChatTemplates"),
+            mock.patch.object(serve_api, "validate_tokenizer") as validate,
+            mock.patch.object(serve_api, "ChatTemplates"),
             mock.patch.object(
                 api.engine_runtime, "MultiplexedRuntime", return_value=runtime
             ) as runtime_type,
-            mock.patch.object(api, "NativeBackend"),
-            mock.patch.object(api, "ConstraintFactory") as factory_type,
-            mock.patch.object(api, "Frontend") as app_type,
+            mock.patch.object(serve_api, "NativeBackend"),
+            mock.patch.object(serve_api, "ConstraintFactory") as factory_type,
+            mock.patch.object(serve_api, "Frontend") as app_type,
             mock.patch.object(
-                api, "FrontendServer", return_value=mock.Mock(server_port=8000)
+                serve_api, "FrontendServer", return_value=mock.Mock(server_port=8000)
             ),
             mock.patch.object(api.signal, "signal"),
-            mock.patch.object(api, "print_status") as status,
+            mock.patch.object(serve_api, "print_status") as status,
         ):
             try:
                 api.main()

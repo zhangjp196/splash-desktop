@@ -4,6 +4,7 @@ from unittest import mock
 
 from dev.tests.server_fixtures import unprepared_hold
 from server import constraints as generation_constraints
+from server import serve as serve_api
 from server import server
 from server.chat_format import QWEN
 
@@ -67,14 +68,14 @@ class TokenizerContractTests(unittest.TestCase):
         tokenizer.get_vocab()["</think>"] = 0
         http = mock.Mock()
         with (
-            mock.patch.object(server, "parse_args", return_value=args),
+            mock.patch.object(serve_api, "parse_args", return_value=args),
             unprepared_hold(),
             mock.patch.object(server.signal, "signal"),
-            mock.patch.object(server, "load_thinking_key", return_value=None),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
                 server.AutoTokenizer, "from_pretrained", return_value=tokenizer
             ),
-            mock.patch.object(server, "FrontendServer", return_value=http),
+            mock.patch.object(serve_api, "FrontendServer", return_value=http),
             mock.patch.object(server.engine_runtime, "MultiplexedRuntime") as native,
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
             mock.patch("sys.stdout", new_callable=io.StringIO),

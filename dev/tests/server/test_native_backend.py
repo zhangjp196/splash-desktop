@@ -763,29 +763,32 @@ class NativeBackendContractTests(unittest.TestCase):
 
     def test_native_ready_is_authoritative_and_malformed_status_fails_closed(self):
         transport, runtime = self.make_transport()
-        runtime.status_event = wire.StatusJsonEvent(1, b"[]")
-        self.assertFalse(transport.is_ready())
+        # Each call must reach the engine, so the probes' short-TTL cache
+        # stands down for the test.
+        with mock.patch.object(backend_api, "STATUS_CACHE_TTL_SECONDS", 0.0):
+            runtime.status_event = wire.StatusJsonEvent(1, b"[]")
+            self.assertFalse(transport.is_ready())
 
-        # Native ready already folds in memory pressure and Metal health.
-        runtime.status_event = native_peer.status_event(
-            ready=False, memory_pressure="critical"
-        )
-        self.assertFalse(transport.is_ready())
+            # Native ready already folds in memory pressure and Metal health.
+            runtime.status_event = native_peer.status_event(
+                ready=False, memory_pressure="critical"
+            )
+            self.assertFalse(transport.is_ready())
 
-        runtime.status_event = native_peer.status_event(ready="false")
-        self.assertFalse(transport.is_ready())
+            runtime.status_event = native_peer.status_event(ready="false")
+            self.assertFalse(transport.is_ready())
 
-        runtime.status_event = native_peer.status_event(memory_pressure=None)
-        self.assertTrue(transport.is_ready())
+            runtime.status_event = native_peer.status_event(memory_pressure=None)
+            self.assertTrue(transport.is_ready())
 
-        runtime.status_event = native_peer.status_event()
-        self.assertTrue(transport.is_ready())
-        self.assertEqual(runtime.status_calls, 5)
+            runtime.status_event = native_peer.status_event()
+            self.assertTrue(transport.is_ready())
+            self.assertEqual(runtime.status_calls, 5)
 
-        runtime.status_event = wire.StatusJsonEvent(1, b'{"schema_version":3}')
-        status = transport.status()
-        self.assertFalse(status["ready"])
-        self.assertIn("error", status["transport"])
+            runtime.status_event = wire.StatusJsonEvent(1, b'{"schema_version":3}')
+            status = transport.status()
+            self.assertFalse(status["ready"])
+            self.assertIn("error", status["transport"])
 
     def test_status_adds_only_transport_accounting(self):
         transport, runtime = self.make_transport()

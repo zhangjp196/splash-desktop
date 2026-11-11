@@ -6,6 +6,7 @@ from unittest import mock
 
 from dev.tests import server_fixtures as fixtures
 from server import protocol as wire
+from server import serve as serve_api
 from server import server
 from server.backend import ThinkingEndError, thinking_end_tokens
 from server.chat_format import QWEN
@@ -392,15 +393,15 @@ class ThinkingEndTextTests(unittest.TestCase):
         )
         http = mock.Mock()
         with (
-            mock.patch.object(server, "parse_args", return_value=args),
+            mock.patch.object(serve_api, "parse_args", return_value=args),
             fixtures.unprepared_hold(),
             mock.patch.object(server.signal, "signal"),
-            mock.patch.object(server, "load_thinking_key", return_value=None),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
                 server.AutoTokenizer, "from_pretrained", return_value=self.tokenizer()
             ),
-            mock.patch.object(server, "validate_tokenizer"),
-            mock.patch.object(server, "FrontendServer", return_value=http),
+            mock.patch.object(serve_api, "validate_tokenizer"),
+            mock.patch.object(serve_api, "FrontendServer", return_value=http),
             mock.patch.object(server.engine_runtime, "MultiplexedRuntime") as native,
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
             mock.patch("sys.stdout", new_callable=io.StringIO),

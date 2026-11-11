@@ -12,6 +12,7 @@ from unittest import mock
 from cryptography.fernet import Fernet
 
 from dev.tests.server_fixtures import FakeRuntime, Harness, Plan, main_args
+from server import serve as serve_api
 from server import server as api
 from server.thinking import ThinkingCodec, ThinkingKeyError, load_thinking_key
 
@@ -144,11 +145,11 @@ class ThinkingKeyTests(unittest.TestCase):
     def test_main_reports_key_error_before_model_loading(self):
         server = mock.Mock()
         with (
-            mock.patch.object(api, "parse_args", return_value=main_args()),
+            mock.patch.object(serve_api, "parse_args", return_value=main_args()),
             mock.patch.object(api.signal, "signal"),
-            mock.patch.object(api, "FrontendServer", return_value=server),
+            mock.patch.object(serve_api, "FrontendServer", return_value=server),
             mock.patch.object(
-                api,
+                serve_api,
                 "load_thinking_key",
                 side_effect=ThinkingKeyError("invalid key file"),
             ),

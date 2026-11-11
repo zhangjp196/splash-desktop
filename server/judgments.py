@@ -35,14 +35,23 @@ import hashlib
 import itertools
 import json
 import math
+import secrets
 import string
 import weakref
 from dataclasses import dataclass
 
+from .backend import remaining_request_time
 from .chat_format import THINK_END, THINK_START
 from .chat_templates import render_chat_template, template_options
-from .errors import field_error
-from .protocol import MAX_SCORE_TOKENS
+from .errors import (
+    APIError,
+    ContextLengthError,
+    RequestValidationError,
+    field_error,
+)
+from .generation_options import cache_salt, priority
+from .job import Job
+from .protocol import MAX_SCORE_TOKENS, SamplingParameters
 from .tokenization import tokenizable
 
 LETTERS = "ABCDEFGHIJKLMNOP"
@@ -490,3 +499,200 @@ def systemone_answer(spec, probabilities):
 def deterministic_answer(spec):
     """A singleton option domain has one certain answer; no inference."""
     return systemone_answer(spec, [1.0])
+
+
+def preparation_checkpoint(deadline, disconnected):
+    """A check that a request's preparation may go on: its deadline has not
+    passed, and its client has not left."""
+
+    def checkpoint():
+        remaining_request_time(deadline)
+        if disconnected():
+            raise ConnectionResetError("client disconnected during preparation")
+
+    return checkpoint
+
+
+def score_job(
+    frontend,
+    prompt_tokens,
+    slot_ids,
+    deadline,
+    priority_value,
+    prompt_sha256,
+    cache_salt_value,
+):
+    return Job(
+        request_id=next(frontend.ids),
+        prompt_tokens=prompt_tokens,
+        max_new_tokens=0,
+        seed=0,
+        sampling=SamplingParameters(),
+        deadline=deadline,
+        priority=priority_value,
+        score_tokens=tuple(slot_ids),
+        public_id=secrets.token_hex(16),
+        prompt_sha256=prompt_sha256,
+        cache_salt=cache_salt_value,
+    )
+
+
+def encode_score_prompt(frontend, messages, labels, admit, checkpoint, what):
+    """The tokens, answer-slot token ids and text of a scoring prompt. The
+    request's input drives the render, so a failure is its error."""
+    try:
+        return encode_prompt(
+            frontend.prompt_tokenizer,
+            frontend.chat_templates.select(None).source,
+            messages,
+            labels,
+            chat_format=frontend.chat_format,
+            admit=admit,
+            checkpoint=checkpoint,
+        )
+    except ScoringUnsupported as error:
+        raise APIError(500, str(error), "scoring_unsupported") from error
+    except (APIError, ConnectionResetError):
+        # The request's own limits, deadline and client end preparation.
+        raise
+    except Exception as error:
+        raise APIError(400, f"{what} prompt could not be rendered") from error
+
+
+def prepare_judgment(frontend, body, *, deadline, disconnected):
+    unknown = sorted(
+        set(body)
+        - {
+            "id",
+            "state",
+            "question",
+            "options",
+            "model",
+            "timeout",
+            "priority",
+            "cache_salt",
+        }
+    )
+    if unknown:
+        raise APIError(400, f"unsupported fields: {', '.join(unknown)}")
+    if not frontend.accepts_model(body.get("model")):
+        raise APIError(404, f"model {body['model']} not found", "model_not_found")
+    try:
+        validate_row(body)
+    except ValueError as error:
+        raise APIError(400, str(error)) from error
+    priority_value = priority(body)
+    cache_salt_value = cache_salt(body)
+    checkpoint = preparation_checkpoint(deadline, disconnected)
+    with frontend._preparation(deadline):
+
+        def admit(prompt_tokens):
+            checkpoint()
+            if prompt_tokens > frontend.max_context:
+                raise ContextLengthError(prompt_tokens, frontend.max_context)
+
+        tokens, slots, prompt = encode_score_prompt(
+            frontend,
+            judgment_messages(body),
+            LETTERS[: len(body["options"])],
+            admit,
+            checkpoint,
+            "judgment",
+        )
+        checkpoint()
+        job = score_job(
+            frontend,
+            tokens,
+            slots,
+            deadline,
+            priority_value,
+            digest(prompt),
+            cache_salt_value,
+        )
+    return job, body
+
+
+def prepare_systemone(frontend, body, *, deadline, disconnected):
+    details = []
+    model = body.get("model")
+    if not isinstance(model, str) or not model:
+        details.append(field_error(["model"], "field required", "missing"))
+    elif not frontend.accepts_model(model):
+        details.append(
+            field_error(["model"], f"model {model} is not served by this endpoint")
+        )
+    state, specs, question_details = validate_systemone(body)
+    details.extend(question_details)
+    try:
+        priority_value = priority(body)
+    except APIError as error:
+        details.append(field_error(["priority"], error.message))
+    try:
+        cache_salt_value = cache_salt(body)
+    except APIError as error:
+        details.append(field_error(["cache_salt"], error.message))
+    if details:
+        raise RequestValidationError(details)
+    jobs = []
+    total_tokens = 0
+    checkpoint = preparation_checkpoint(deadline, disconnected)
+    with frontend._preparation(deadline):
+        for qid, spec in specs:
+            if spec.deterministic:
+                jobs.append((qid, spec, None))
+                continue
+            slots = slot_labels(frontend.tokenizer)
+            if len(spec.labels) > len(slots):
+                raise RequestValidationError(
+                    [
+                        field_error(
+                            ["questions", qid, "criteria"],
+                            f"the served tokenizer supports "
+                            f"{len(slots)} answer slots; "
+                            f"{len(spec.labels)} were requested",
+                        )
+                    ]
+                )
+            labels = slots[: len(spec.labels)]
+
+            def admit(prompt_tokens, qid=qid, prepared=total_tokens):
+                checkpoint()
+                if prompt_tokens > frontend.max_context:
+                    raise ContextLengthError(prompt_tokens, frontend.max_context)
+                if prepared + prompt_tokens > MAX_SYSTEMONE_TOTAL_TOKENS:
+                    raise RequestValidationError(
+                        [
+                            field_error(
+                                ["questions", qid],
+                                "total prepared question tokens exceed "
+                                f"{MAX_SYSTEMONE_TOTAL_TOKENS}",
+                            )
+                        ]
+                    )
+
+            tokens, slot_ids, _ = encode_score_prompt(
+                frontend,
+                systemone_messages(state, spec, labels),
+                labels,
+                admit,
+                checkpoint,
+                "question",
+            )
+            checkpoint()
+            total_tokens += len(tokens)
+            jobs.append(
+                (
+                    qid,
+                    spec,
+                    score_job(
+                        frontend,
+                        tokens,
+                        slot_ids,
+                        deadline,
+                        priority_value,
+                        None,
+                        cache_salt_value,
+                    ),
+                )
+            )
+    return jobs

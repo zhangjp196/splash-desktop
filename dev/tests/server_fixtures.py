@@ -30,6 +30,7 @@ from server import backend as backend_api
 from server import chat_messages, documents, images, serve_options
 from server import errors as api_errors
 from server import frontend as request_frontend
+from server import http_handler as handler_api
 from server import protocol as wire
 from server import runtime as engine_runtime
 from server import server as api
@@ -982,7 +983,9 @@ class Harness:
         # never leaves it patched.
         self._io_timeout = None
         if io_timeout is not None:
-            self._io_timeout = mock.patch.object(api, "HTTP_IO_TIMEOUT", io_timeout)
+            self._io_timeout = mock.patch.object(
+                handler_api, "HTTP_IO_TIMEOUT", io_timeout
+            )
             self._io_timeout.start()
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()

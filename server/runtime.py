@@ -234,9 +234,15 @@ class RuntimeCall:
         self._client._cancel_call(self)
         return True
 
-    def _emit(self, message: wire.EngineEvent) -> None:
-        with self._lock:
-            callback = self._on_event
+    def _emit(self, message: wire.EngineEvent, callback: EventCallback | None = None):
+        """Deliver `message` to the event callback. A caller that already
+        holds `self._lock` passes the callback it read there, so delivering
+        a token costs one lock instead of two; without one, the callback is
+        read here. The callback only ever goes from set to None, so a read
+        of None is final."""
+        if callback is None:
+            with self._lock:
+                callback = self._on_event
         if callback is None:
             return
         try:
@@ -260,7 +266,8 @@ class RuntimeCall:
             if self._event.is_set() or self._start is not None:
                 return False
             self._start = event
-        self._emit(event)
+            callback = self._on_event
+        self._emit(event, callback)
         return True
 
     def _record_progress(self, event: wire.PromptProgressEvent) -> str | None:
@@ -281,7 +288,8 @@ class RuntimeCall:
             ):
                 return "prompt progress moved backwards or repeated"
             self._progress = event
-        self._emit(event)
+            callback = self._on_event
+        self._emit(event, callback)
         return None
 
     def _record_tokens(self, event: wire.TokensEvent) -> str | None:
@@ -307,7 +315,8 @@ class RuntimeCall:
                     f"maximum {self._logical_max}"
                 )
             self._next_token_offset = next_offset
-        self._emit(event)
+            callback = self._on_event
+        self._emit(event, callback)
         return None
 
     def _record_logprobs(self, event: wire.LogprobsEvent) -> str | None:
@@ -321,7 +330,8 @@ class RuntimeCall:
                     f"LogprobsEvent offset {event.sequence_offset} does not "
                     f"match the next token {self._next_token_offset}"
                 )
-        self._emit(event)
+            callback = self._on_event
+        self._emit(event, callback)
         return None
 
     def _record_mask_error(self, error: MaskComputationFailed) -> None:
@@ -1232,6 +1242,29 @@ class MultiplexedRuntime:
                 and message.failure_class is wire.FailureClass.ENGINE_UNHEALTHY
             ):
                 raise ProtocolFatal("native event arrived before ReadyEvent")
+            # The event's call is found under this same hold: the per-token
+            # path used to take the lock a second time in _require_call, and
+            # the reader thread contends with every token. The gate and the
+            # lookup are one decision made atomically now, which only
+            # narrows what a caller between the two holds could have seen.
+            if isinstance(
+                message,
+                (
+                    wire.StartEvent,
+                    wire.PromptProgressEvent,
+                    wire.TokensEvent,
+                    wire.LogprobsEvent,
+                    wire.MaskRequestEvent,
+                    wire.DoneEvent,
+                ),
+            ):
+                call = self._pending.get(message.request_id)
+                if call is None or call.generation != generation:
+                    raise ProtocolFatal(
+                        f"native event references unknown request {message.request_id}"
+                    )
+            else:
+                call = None
 
         if isinstance(message, wire.StatusJsonEvent):
             self._dispatch_status(message)
@@ -1240,27 +1273,22 @@ class MultiplexedRuntime:
             self._dispatch_error(generation, message)
             return
         if isinstance(message, wire.StartEvent):
-            call = self._require_call(generation, message.request_id)
             if not call._record_start(message):
                 raise ProtocolFatal("duplicate or late StartEvent")
             return
         if isinstance(message, wire.PromptProgressEvent):
-            call = self._require_call(generation, message.request_id)
             if issue := call._record_progress(message):
                 raise ProtocolFatal(issue)
             return
         if isinstance(message, wire.TokensEvent):
-            call = self._require_call(generation, message.request_id)
             if issue := call._record_tokens(message):
                 raise ProtocolFatal(issue)
             return
         if isinstance(message, wire.LogprobsEvent):
-            call = self._require_call(generation, message.request_id)
             if issue := call._record_logprobs(message):
                 raise ProtocolFatal(issue)
             return
         if isinstance(message, wire.MaskRequestEvent):
-            call = self._require_call(generation, message.request_id)
             if call.mask_provider is None:
                 raise ProtocolFatal(
                     "native requested a token mask for an unconstrained request"
@@ -1268,7 +1296,6 @@ class MultiplexedRuntime:
             self._submit_mask(call, message)
             return
         if isinstance(message, wire.DoneEvent):
-            call = self._require_call(generation, message.request_id)
             result = call._check_done(message)
             if error := call._terminal_mask_error():
                 self._finish_call(call, error=error)
@@ -1280,6 +1307,8 @@ class MultiplexedRuntime:
         )
 
     def _require_call(self, generation: int, request_id: int) -> RuntimeCall:
+        """The call of an event whose gate `_dispatch_message` already
+        passed; the error path, which is not the per-token path, uses it."""
         with self._state_lock:
             call = self._pending.get(request_id)
             if call is None or call.generation != generation:

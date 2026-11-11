@@ -29,6 +29,7 @@ from dev.tests.server_fixtures import (
 )
 from install import launcher
 from server import protocol as native_wire
+from server import serve as serve_api
 from server import serve_options
 from server import server as api
 
@@ -340,25 +341,25 @@ class ServedModelNamesTests(unittest.TestCase):
         runtime.readiness = native_wire.ReadyEvent(4, 131072, False)
         args = main_args(served_model_name=["local"], announce_served_name=True)
         with (
-            mock.patch.object(api, "parse_args", return_value=args),
+            mock.patch.object(serve_api, "parse_args", return_value=args),
             unprepared_hold(),
-            mock.patch.object(api, "load_thinking_key", return_value=None),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
                 api.AutoTokenizer, "from_pretrained", return_value=object()
             ),
-            mock.patch.object(api, "validate_tokenizer"),
-            mock.patch.object(api, "ChatTemplates"),
+            mock.patch.object(serve_api, "validate_tokenizer"),
+            mock.patch.object(serve_api, "ChatTemplates"),
             mock.patch.object(
                 api.engine_runtime, "MultiplexedRuntime", return_value=runtime
             ),
-            mock.patch.object(api, "NativeBackend"),
-            mock.patch.object(api, "ConstraintFactory"),
-            mock.patch.object(api, "Frontend") as app_type,
+            mock.patch.object(serve_api, "NativeBackend"),
+            mock.patch.object(serve_api, "ConstraintFactory"),
+            mock.patch.object(serve_api, "Frontend") as app_type,
             mock.patch.object(
-                api, "FrontendServer", return_value=mock.Mock(server_port=8000)
+                serve_api, "FrontendServer", return_value=mock.Mock(server_port=8000)
             ),
             mock.patch.object(api.signal, "signal"),
-            mock.patch.object(api, "print_status"),
+            mock.patch.object(serve_api, "print_status"),
         ):
             api.main()
         self.assertEqual(app_type.call_args.kwargs["served_model_names"], ["local"])

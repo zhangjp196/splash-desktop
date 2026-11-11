@@ -13,8 +13,8 @@ from dev.tests.server_fixtures import (
     responses_body,
 )
 from server import backend as backend_api
-from server import frontend as request_frontend
 from server import protocol as native_wire
+from server.generation_options import SAMPLING_NUMBERS, TOP_K_DEFAULT
 
 
 class SamplingTests(HarnessTestCase):
@@ -177,7 +177,7 @@ class SamplingTests(HarnessTestCase):
 
     def test_sampling_field_lists_follow_the_wire_dataclass(self):
         self.assertEqual(
-            set(request_frontend.SAMPLING_NUMBERS) | {"top_k"},
+            set(SAMPLING_NUMBERS) | {"top_k"},
             set(native_wire.SAMPLING_FIELDS),
         )
         runtime = FakeRuntime()
@@ -193,7 +193,7 @@ class SamplingTests(HarnessTestCase):
             native_wire.SamplingParameters(
                 temperature=1.0,
                 top_p=0.95,
-                top_k=request_frontend.TOP_K_DEFAULT,
+                top_k=TOP_K_DEFAULT,
             ),
         )
 
