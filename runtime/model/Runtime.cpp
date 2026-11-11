@@ -1183,7 +1183,9 @@ struct Runtime::Impl {
             d(DecodeTensor::TargetVocabularyRanges),
             d(DecodeTensor::TargetVocabularyArrivals),
             d(DecodeTensor::BiasTokens),
-            d(DecodeTensor::BiasValues)};
+            d(DecodeTensor::BiasValues),
+            d(DecodeTensor::LogprobPartialMasses),
+            d(DecodeTensor::LogprobRowMasses)};
   }
 
   std::span<uint32_t> penaltyWords(uint32_t stateLane) const {
@@ -1278,28 +1280,55 @@ struct Runtime::Impl {
   // One selected token's log probability from the logits row that selected
   // it, after the penalties the sampling kernels applied in place and at the
   // request's temperature (greedy reads at temperature 1), and the tokens
-  // above it the request asked for. Ties order by the lower token id.
+  // above it the request asked for. Ties order by the lower token id. A path
+  // without a logprob mass from the GPU scans the row for its maximum and
+  // denominator here.
   [[nodiscard]] TokenLogprob logprobAt(const float *row, uint32_t token,
                                       uint32_t topK,
                                       float temperature) const {
-    TokenLogprob result;
-    result.token = token;
-    const uint32_t vocabulary = geometry.target.vocabularySize;
     const float scale =
         temperature > 0.0F ? 1.0F / temperature : 1.0F;
+    const uint32_t vocabulary = geometry.target.vocabularySize;
     float maximum = -std::numeric_limits<float>::infinity();
     for (uint32_t id = 0; id < vocabulary; ++id) {
       if (std::isfinite(row[id]))
         maximum = std::max(maximum, row[id]);
     }
-    if (!std::isfinite(maximum)) {
-      result.logprob = -std::numeric_limits<float>::infinity();
-      return result;
-    }
+    if (!std::isfinite(maximum))
+      return logprobFrom(row, token, topK, maximum, scale, 0.0);
     double sum = 0.0;
     for (uint32_t id = 0; id < vocabulary; ++id) {
       if (std::isfinite(row[id]))
         sum += std::exp(double(row[id] - maximum) * scale);
+    }
+    return logprobFrom(row, token, topK, maximum, scale, sum);
+  }
+
+  // The same log probability from the maximum and softmax denominator a
+  // logprob kernel computed (decode_logprob_mass): the row's whole vocabulary
+  // is already summed there, so only its top tokens remain to scan. A row
+  // whose mass is not a usable softmax has no log probability, as the CPU
+  // scan below reports.
+  [[nodiscard]] TokenLogprob logprobAt(const float *row, uint32_t token,
+                                      uint32_t topK, float temperature,
+                                      float maximum, float sum) const {
+    const float scale =
+        temperature > 0.0F ? 1.0F / temperature : 1.0F;
+    return logprobFrom(row, token, topK, maximum, scale, double(sum));
+  }
+
+  // A row's log probability of `token` and its top tokens, from a maximum and
+  // denominator the caller scanned or the GPU merged. Both callers agree on
+  // the maximum's selection and the scale, so the two paths differ only in
+  // the denominator's precision (double on the CPU, float in the kernel).
+  [[nodiscard]] TokenLogprob logprobFrom(const float *row, uint32_t token,
+                                         uint32_t topK, float maximum,
+                                         float scale, double sum) const {
+    TokenLogprob result;
+    result.token = token;
+    if (!std::isfinite(maximum)) {
+      result.logprob = -std::numeric_limits<float>::infinity();
+      return result;
     }
     if (!(sum > 0.0) || !std::isfinite(sum)) {
       result.logprob = -std::numeric_limits<float>::infinity();
@@ -1310,6 +1339,7 @@ struct Runtime::Impl {
     if (!topK)
       return result;
 
+    const uint32_t vocabulary = geometry.target.vocabularySize;
     struct Candidate final {
       float value;
       uint32_t token;
@@ -2296,6 +2326,24 @@ struct Runtime::Impl {
         {penaltyTable, std::span(stateLanes).first(lanes)},
         {buffers.biasTokens, buffers.biasValues,
          std::span(biasCounts).first(lanes)});
+    // The verify rows' softmax denominators, which finalizeDecode's logprobs
+    // divide by: every verify row of a lane that asked for them, since the
+    // count acceptance retains is known only after the command. It runs
+    // after the selection, whose penalties rewrote the logits in place, and
+    // admits every token, unlike a sampled row's mass.
+    LogprobParams logprobParams{};
+    logprobParams.vocabulary = geometry.target.vocabularySize;
+    logprobParams.logits_row = 0;
+    for (uint32_t lane = 0; lane < lanes; ++lane) {
+      const Request &entry = *entries[lane];
+      logprobParams.scale[lane] =
+          entry.sampling.temperature > 0.0F
+              ? 1.0F / entry.sampling.temperature
+              : 1.0F;
+      if (entry.logprobs)
+        logprobParams.logprob_mask |= uint32_t{1} << lane;
+    }
+    sampling.addLogprobMass(graph, logprobParams, buffers);
   }
 
   void encodeDraftStateCommitBatch(CommandGraph &graph,
@@ -2515,24 +2563,38 @@ struct Runtime::Impl {
             decodeArena->get(lane, DecodeTensor::Logits), "logits");
         const uint32_t vocabulary = geometry.target.vocabularySize;
         const float temperature = entry.sampling.temperature;
+        // The cycle's logprob kernel summed each row over the whole
+        // vocabulary; the host reads its maximum and denominator and scans
+        // only for the top tokens. Row s is lane * kDecodeRows + s.
+        const LogprobRowMass *laneMasses =
+            contents<LogprobRowMass>(
+                decodeArena->batchSlice(
+                    DecodeTensor::LogprobRowMasses,
+                    static_cast<uint32_t>(items.size())),
+                "logprob masses") +
+            uint64_t{lane} * kDecodeRows;
         outputLogprobs.reserve(output.size() + 1);
         if (entry.pendingLogprob) {
           outputLogprobs.push_back(*entry.pendingLogprob);
         } else {
           // A restored state can reach the cycle without the selection that
           // chose its anchor; the row that would have chosen it is gone.
-          outputLogprobs.push_back(
-              logprobAt(rows, output.front(), entry.topLogprobs, temperature));
+          outputLogprobs.push_back(logprobAt(
+              rows, output.front(), entry.topLogprobs, temperature,
+              laneMasses[0].maximum, laneMasses[0].sum));
         }
         for (uint32_t index = 1; index < output.size(); ++index) {
+          const LogprobRowMass &mass = laneMasses[index - 1];
           outputLogprobs.push_back(
               logprobAt(rows + uint64_t(index - 1) * vocabulary, output[index],
-                        entry.topLogprobs, temperature));
+                        entry.topLogprobs, temperature, mass.maximum,
+                        mass.sum));
         }
+        const LogprobRowMass &lastMass = laneMasses[laneResult.retained - 1];
         entry.pendingLogprob = logprobAt(
             rows + uint64_t(laneResult.retained - 1) * vocabulary,
             targetTokens[laneResult.retained - 1], entry.topLogprobs,
-            temperature);
+            temperature, lastMass.maximum, lastMass.sum);
       }
 
       states.swapDecodeParity(entry.stateLane, laneResult.retained);

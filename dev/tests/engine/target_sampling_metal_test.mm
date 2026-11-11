@@ -180,7 +180,9 @@ Batch makeBatch(MetalBackend &backend, uint32_t vocabulary, uint32_t lanes) {
                            sizeof(uint32_t)),
               allocate(backend,
                        uint64_t{lanes} * SPLASH_MAXIMUM_LOGIT_BIAS *
-                           sizeof(float))},
+                           sizeof(float)),
+              allocate(backend, space.logprobPartialMassesBytes),
+              allocate(backend, space.logprobRowMassesBytes)},
           vocabulary, rows};
 }
 
@@ -2612,6 +2614,80 @@ void penaltyLifecycle() {
 
 } // namespace
 
+
+// A logprob row's mass: the largest finite logit and the sum of
+// exp((logit - maximum) * scale) over the whole vocabulary, with no
+// constraint mask and no stop token removed, which finalizeDecode's logprob
+// divides by. The CPU's double scan is the reference: the kernel's maximum
+// must match exactly, and its float denominator to float precision. A row
+// with no finite logit has no maximum and a zero sum, the host's -infinity
+// logprob.
+void logprobMassesMatchCpu(MetalBackend &backend) {
+  const uint32_t vocabulary = 1003;
+  for (const uint32_t lanes : {1U, 2U, kLanes}) {
+    Batch batch = makeBatch(backend, vocabulary, lanes);
+    Random random(0x6c6f6770 + lanes);
+    for (uint32_t row = 0; row < batch.rows; ++row) {
+      float *values = batch.row(row);
+      for (uint32_t token = 0; token < vocabulary; ++token)
+        values[token] = -6.0F + 4.0F * random.unit();
+      // A non-finite logit weighs nothing, wherever the scan meets it.
+      values[random.next() % vocabulary] =
+          std::numeric_limits<float>::quiet_NaN();
+      values[random.next() % vocabulary] =
+          std::numeric_limits<float>::infinity();
+      values[random.next() % vocabulary] =
+          -std::numeric_limits<float>::infinity();
+    }
+    // One row of a single finite logit and one of none: the maximum is that
+    // logit, or none at all.
+    std::fill_n(batch.row(0), vocabulary,
+                -std::numeric_limits<float>::infinity());
+    batch.row(0)[7] = -1.5F;
+    std::fill_n(batch.row(1), vocabulary,
+                std::numeric_limits<float>::quiet_NaN());
+
+    LogprobParams params{};
+    params.vocabulary = vocabulary;
+    params.logits_row = 0;
+    for (uint32_t lane = 0; lane < lanes; ++lane) {
+      params.scale[lane] = lane % 2 ? 1.0F : 1.0F / 0.7F;
+      params.logprob_mask |= uint32_t{1} << lane;
+    }
+    Sampling sampling(vocabulary);
+    CommandGraph graph;
+    sampling.addLogprobMass(graph, params, batch.buffers);
+    static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
+    const auto *masses = static_cast<const LogprobRowMass *>(
+        batch.buffers.logprobRowMasses.contents());
+    for (uint32_t row = 0; row < batch.rows; ++row) {
+      const float scale = params.scale[row / kRows];
+      const float *values = batch.row(row);
+      float maximum = -std::numeric_limits<float>::infinity();
+      for (uint32_t token = 0; token < vocabulary; ++token)
+        if (std::isfinite(values[token]))
+          maximum = std::max(maximum, values[token]);
+      double sum = 0.0;
+      for (uint32_t token = 0; token < vocabulary; ++token)
+        if (std::isfinite(values[token]))
+          sum += std::exp(double(values[token] - maximum) * scale);
+      const std::string label = "logprob mass B" + std::to_string(lanes) +
+                                " row " + std::to_string(row);
+      if (std::isfinite(maximum)) {
+        require(masses[row].maximum == maximum,
+                label + ": the maximum differs");
+        require(std::abs(double(masses[row].sum) - sum) <= 2e-5 * sum,
+                label + ": the denominator differs");
+      } else {
+        require(!std::isfinite(masses[row].maximum),
+                label + ": a row without a finite logit has a maximum");
+        require(masses[row].sum == 0.0F,
+                label + ": a row without a finite logit has a sum");
+      }
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   std::string stage = "setup";
   try {
@@ -2649,6 +2725,8 @@ int main(int argc, char **argv) {
     extremeSearches(backend);
     stage = "unconstrained rows ignore masks";
     unconstrainedRowsIgnoreMasks(backend);
+    stage = "logprob masses";
+    logprobMassesMatchCpu(backend);
     for (const uint32_t vocabulary : {1003U, 248320U}) {
       uint32_t changedSelections = 0;
       for (uint32_t lanes = 1; lanes <= kLanes; ++lanes) {

@@ -91,6 +91,36 @@ struct TargetShardMass {
 static_assert(sizeof(TargetShardMass) == 12,
               "Target shard masses are 12 bytes on both sides");
 
+// The logprobs of a decode batch (ops::Sampling::addLogprobMass): the lanes
+// whose requests asked for them and the logits scale each lane reads (1 /
+// temperature, 1 for a greedy lane, Runtime.cpp logprobAt). Row s is lane
+// s / SPLASH_TARGET_VERIFY_ROWS at index s % SPLASH_TARGET_VERIFY_ROWS, whose
+// logits row is lane * SPLASH_TARGET_VERIFY_ROWS + logits_row + index. Logprob
+// rows admit every token: unlike a sampling row's mass, they read no
+// constraint mask and exclude no stop token.
+struct LogprobParams {
+  uint32_t vocabulary;
+  uint32_t logits_row;
+  float scale[SPLASH_MAXIMUM_BATCH_WIDTH];
+  uint32_t logprob_mask;
+};
+
+static_assert(sizeof(LogprobParams) == 28,
+              "Logprob parameters are 28 bytes on both sides");
+
+// A logprob row's softmax over the whole vocabulary: its largest finite logit
+// and the sum of exp((logit - maximum) * scale), the denominator the host's
+// logprob divides by. A row with no finite logit has no maximum (the kernels
+// write -infinity) and a sum of 0, which the host reads as a -infinity
+// logprob.
+struct LogprobRowMass {
+  float maximum;
+  float sum;
+};
+
+static_assert(sizeof(LogprobRowMass) == 8,
+              "Logprob row masses are 8 bytes on both sides");
+
 // A sampled row's selection over the whole vocabulary. The search records
 // the row's largest admitted logit and where its min-p/top-k/top-p
 // distribution ends in the order of the logits (the key and id of its last

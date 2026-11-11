@@ -152,6 +152,106 @@ kernel void decode_sample_mass_sharded(
              group_masses, thread_index, lane, simd_group);
 }
 
+// Whether a logit has weight in a logprob row's softmax. The test is on the
+// bits, which Metal's fast math keeps: a row's mass skips NaN and either
+// infinity, as the host's logprobAt does, not just the -inf a sampling row
+// skips.
+inline bool finite_logit(float value) {
+  return (as_type<uint>(value) & 0x7fffffffu) < 0x7f800000u;
+}
+
+// Shares of a logprob row's softmax denominator combined in order: their
+// largest maximum, then their sums rescaled to it by the row's scale. It is
+// merge_masses without the admitted count (logprobs filter no token) and with
+// the scale the host's logprob multiplies the logit difference by, rather
+// than a temperature it divides by, so both sides round the same way.
+template <class Shares>
+inline TargetShardMass merge_logprob_shares(Shares shares, uint count,
+                                           float scale) {
+  TargetShardMass total{-FLT_MAX, 0.0f, 0};
+  for (uint index = 0; index < count; ++index)
+    total.maximum = max(total.maximum, shares[index].maximum);
+  for (uint index = 0; index < count; ++index) {
+    const TargetShardMass share = shares[index];
+    if (share.sum > 0.0f)
+      total.sum += share.sum * exp((share.maximum - total.maximum) * scale);
+  }
+  return total;
+}
+
+// One shard of each logprob row of the lanes that asked for logprobs, over
+// the row's whole vocabulary: every token weighs, whatever its lane's
+// constraints or stop tokens. Each thread keeps a running maximum and sum (an
+// online softmax), combined in a fixed order like the sampling mass, so a row
+// needs one read of its logits and yields the same sum on every run.
+kernel void decode_logprob_mass(
+    device const float *logits [[buffer(0)]],
+    device TargetShardMass *partial_masses [[buffer(1)]],
+    constant LogprobParams &params [[buffer(2)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint thread_index [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]) {
+  constexpr uint Shards = SPLASH_TARGET_SAMPLING_SHARDS;
+  constexpr uint Threads = 256;
+  threadgroup TargetShardMass group_masses[8];
+  const uint s = group / Shards;
+  const uint batch = s / SPLASH_TARGET_VERIFY_ROWS;
+  if ((params.logprob_mask & (1u << batch)) == 0)
+    return;
+  const float scale = params.scale[batch];
+  device const float *values =
+      logits + (ulong(batch) * SPLASH_TARGET_VERIFY_ROWS + params.logits_row +
+                s % SPLASH_TARGET_VERIFY_ROWS) *
+                   params.vocabulary;
+  TargetShardMass mass{-FLT_MAX, 0.0f, 0};
+  for (uint token = (group % Shards) * Threads + thread_index;
+       token < params.vocabulary; token += Shards * Threads) {
+    const float value = values[token];
+    if (!finite_logit(value))
+      continue;
+    if (value > mass.maximum) {
+      // The first finite logit replaces the sentinel maximum, which weighs
+      // nothing.
+      mass.sum = mass.sum * exp((mass.maximum - value) * scale) + 1.0f;
+      mass.maximum = value;
+    } else {
+      mass.sum += exp((value - mass.maximum) * scale);
+    }
+  }
+  const float simd_maximum = simd_max(mass.maximum);
+  const float scaled =
+      mass.sum > 0.0f
+          ? mass.sum * exp((mass.maximum - simd_maximum) * scale)
+          : 0.0f;
+  const float simd_total = simd_sum(scaled);
+  if (lane == 0)
+    group_masses[simd_group] = {simd_maximum, simd_total, 0};
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (thread_index == 0)
+    partial_masses[group] = merge_logprob_shares(group_masses, 8, scale);
+}
+
+// Each logprob row's shards merged in shard order into the row's maximum and
+// sum, which the host reads once the command completes. A row with no finite
+// logit has no maximum, the -infinity the host's own scan leaves and reports
+// as a -infinity logprob.
+kernel void decode_logprob_mass_reduce(
+    device const TargetShardMass *partial_masses [[buffer(0)]],
+    device LogprobRowMass *row_masses [[buffer(1)]],
+    constant LogprobParams &params [[buffer(2)]],
+    uint s [[threadgroup_position_in_grid]],
+    uint thread_index [[thread_index_in_threadgroup]]) {
+  const uint batch = s / SPLASH_TARGET_VERIFY_ROWS;
+  if ((params.logprob_mask & (1u << batch)) == 0 || thread_index != 0)
+    return;
+  const TargetShardMass total = merge_logprob_shares(
+      partial_masses + ulong(s) * SPLASH_TARGET_SAMPLING_SHARDS,
+      SPLASH_TARGET_SAMPLING_SHARDS, params.scale[batch]);
+  row_masses[s] = total.sum > 0.0f ? LogprobRowMass{total.maximum, total.sum}
+                                   : LogprobRowMass{-INFINITY, 0.0f};
+}
+
 // The groups that search and draw a sampled row.
 constant constexpr uint kVocabularyThreads = SPLASH_TARGET_VOCABULARY_THREADS;
 constant constexpr uint kVocabularySimdgroups = kVocabularyThreads / 32;

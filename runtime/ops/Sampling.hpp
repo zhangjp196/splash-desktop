@@ -96,6 +96,9 @@ struct SamplingWorkspace final {
   uint64_t vocabularyRowsBytes = 0;
   uint64_t vocabularyRangesBytes = 0;
   uint64_t vocabularyArrivalsBytes = 0;
+  // The logprob rows' shard shares and their merged masses (addLogprobMass).
+  uint64_t logprobPartialMassesBytes = 0;
+  uint64_t logprobRowMassesBytes = 0;
 };
 
 struct SamplingBuffers final {
@@ -129,6 +132,12 @@ struct SamplingBuffers final {
   // Per request lane, up to kMaximumLogitBias token ids and values.
   metal::MetalBuffer biasTokens;
   metal::MetalBuffer biasValues;
+  // Per logprob row (lane * SPLASH_TARGET_VERIFY_ROWS + row), its shards'
+  // shares of the row's softmax denominator (TargetShardMass) and the row's
+  // merged maximum and sum (LogprobRowMass), which addLogprobMass alone
+  // writes.
+  metal::MetalBuffer logprobPartialMasses;
+  metal::MetalBuffer logprobRowMasses;
 };
 
 // A request lane's logit_bias entries; the counts are per lane of the batch.
@@ -208,6 +217,14 @@ public:
       std::span<const uint32_t> maximumRetained,
       std::span<const SamplingPolicy> policies,
       const StopTokens &stopTokens) const;
+  // Each logprob row's maximum and softmax denominator over the whole
+  // vocabulary, in the row's LogprobRowMass, for the host to read once the
+  // command completes. Nothing is filtered: logprobs are of every token the
+  // row holds, whatever the lanes' constraints or stop tokens. It runs after
+  // the selection, whose penalties rewrote the logits in place. A batch no
+  // lane of which asks for logprobs dispatches nothing.
+  void addLogprobMass(metal::CommandGraph &graph, const LogprobParams &params,
+                      const SamplingBuffers &buffers) const;
   // After the draft's selection and before the verify reads its proposals,
   // the proposals of each lane whose thinking cutoff is at row 0, and whose
   // end does not wait for its mask, take the end tokens its verify rows will

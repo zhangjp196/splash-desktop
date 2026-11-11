@@ -275,6 +275,12 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
       samplingWorkspace.vocabularyRangesBytes);
   put(DecodeTensor::TargetVocabularyArrivals,
       samplingWorkspace.vocabularyArrivalsBytes);
+  // A logprob row is a lane's verify block's, so the sampling workspace's
+  // rows (kDecodeRows) hold every row of every lane.
+  put(DecodeTensor::LogprobPartialMasses,
+      samplingWorkspace.logprobPartialMassesBytes);
+  put(DecodeTensor::LogprobRowMasses,
+      samplingWorkspace.logprobRowMassesBytes);
   put(DecodeTensor::SamplingUniforms, bytesFor<float>(kSamplingUniformCount));
   put(DecodeTensor::ConstraintMasks,
       bytesFor<uint32_t>(uint64_t{ExecutionLimits::maximumStepTokens} *

@@ -407,6 +407,11 @@ enum class DecodeTensor : uint32_t {
   // One tensor per ops::kMoeScratchFields entry, in its order (moeScratchTensor).
   MoeScratch,
   MoeScratchLast = MoeScratch + ops::kMoeScratchFields.size() - 1,
+  // Per logprob row (lane * kDecodeRows + row), the shards' shares of its
+  // softmax denominator and its merged maximum and sum, which
+  // ops::Sampling::addLogprobMass writes for the host to read.
+  LogprobPartialMasses,
+  LogprobRowMasses,
   Count,
 };
 

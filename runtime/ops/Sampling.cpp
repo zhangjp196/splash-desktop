@@ -94,7 +94,9 @@ SamplingWorkspace Sampling::workspace(uint32_t rows) {
           uint64_t{rows} * sizeof(TargetVocabularyRow),
           uint64_t{rows} * SPLASH_TARGET_VOCABULARY_RANGES *
               sizeof(TargetVocabularyRange),
-          uint64_t{rows} * sizeof(uint32_t)};
+          uint64_t{rows} * sizeof(uint32_t),
+          shards * sizeof(TargetShardMass),
+          uint64_t{rows} * sizeof(LogprobRowMass)};
 }
 
 void Sampling::rebuildPenaltyWords(std::span<uint32_t> words,
@@ -217,6 +219,46 @@ void Sampling::addVerify(metal::CommandGraph &graph,
                 stopTokens);
   addPenalties(graph, policies, buffers, penalties, 0, true);
   addSelection(graph, params, policies, buffers);
+}
+
+void Sampling::addLogprobMass(metal::CommandGraph &graph,
+                              const LogprobParams &params,
+                              const SamplingBuffers &buffers) const {
+  if (params.vocabulary != vocabulary_)
+    throw std::invalid_argument("logprob vocabulary does not match the sampler");
+  if (!params.logprob_mask)
+    return;
+  if (params.logprob_mask >= (uint32_t{1} << kMaximumLanes))
+    throw std::invalid_argument("logprob lane is outside the batch");
+  // Rows past the last lane that asks for logprobs are not dispatched; the
+  // lanes below it that do not ask return at once.
+  const uint64_t lanes = std::bit_width(params.logprob_mask);
+  const uint64_t rows = lanes * SPLASH_TARGET_VERIFY_ROWS;
+  for (uint32_t lane = 0; lane < lanes; ++lane) {
+    if ((params.logprob_mask & (uint32_t{1} << lane)) && !(params.scale[lane] > 0.0F))
+      throw std::invalid_argument("logprob lane has no positive scale");
+  }
+  // The last row the kernels read, as row s of a lane's verify block at
+  // logits_row (metal/abi/Sampling.h LogprobParams). A logits_row that would
+  // reach past a lane's block needs the rows after it, which a batch view of
+  // a lane's rows does not hold.
+  const uint64_t logitsRows =
+      (lanes - 1) * SPLASH_TARGET_VERIFY_ROWS + params.logits_row +
+      SPLASH_TARGET_VERIFY_ROWS;
+  requireBytes(buffers.logits, logitsRows * vocabulary_ * sizeof(float),
+               "logprob logits");
+  requireBytes(buffers.logprobPartialMasses,
+               rows * kTargetShards * sizeof(TargetShardMass),
+               "logprob shard mass");
+  requireBytes(buffers.logprobRowMasses, rows * sizeof(LogprobRowMass),
+               "logprob row mass");
+  // A shard of every row, then the shards of each row merged in shard order.
+  graph.add("decode_logprob_mass",
+            {buffers.logits, buffers.logprobPartialMasses}, params,
+            {rows * kTargetShards, 1, 1});
+  graph.add("decode_logprob_mass_reduce",
+            {buffers.logprobPartialMasses, buffers.logprobRowMasses}, params,
+            {rows, 1, 1}, {32, 1, 1});
 }
 
 void Sampling::addBias(metal::CommandGraph &graph,
