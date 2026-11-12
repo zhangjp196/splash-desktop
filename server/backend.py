@@ -224,6 +224,9 @@ class NativeBackend:
         # Why the engine cannot serve: its failure, the last failed restart or
         # why restarts stopped.
         self.engine_error = None
+        # Called once when the engine stops for good, with the reason: the
+        # serving process ends there rather than answer 500s (serve.main).
+        self.on_engine_stopped = None
         # What the finalizer runs, in order: requests' Started lines and
         # terminals, which must not hold up the runtime's reader thread.
         self.finalizer_queue = queue.Queue()
@@ -297,6 +300,7 @@ class NativeBackend:
         print_status(f"{event} · {error}", error=True)
         if stopped is not None:
             print_status(f"Engine stopped · {stopped}", error=True)
+            self._engine_stopped(stopped)
 
     @staticmethod
     def _wanted_memory(error, served_seconds):
@@ -340,6 +344,21 @@ class NativeBackend:
         self.restart_due = None
         self.fatal_error = message
         self.engine_error = message
+
+    def _engine_stopped(self, reason):
+        """The engine stopped for good: tell the process's supervisor, which
+        ends the server with EX_UNAVAILABLE rather than leave it answering
+        500s to every request. A server with no listener (a test, or an
+        embedding) keeps serving its refusals."""
+        listener = self.on_engine_stopped
+        if listener is None:
+            return
+        try:
+            listener(reason)
+        except Exception:
+            # A supervisor that cannot be told must not take the server down
+            # with it; the refusals still say why.
+            pass
 
     def _ensure_recovery_locked(self):
         """Start the recovery worker when work is owed and none runs.

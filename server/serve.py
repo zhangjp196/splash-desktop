@@ -11,6 +11,7 @@ import math
 import os
 import resource
 import signal
+import threading
 from pathlib import Path
 
 from transformers import AutoTokenizer
@@ -18,9 +19,9 @@ from transformers import AutoTokenizer
 from install import assembly
 from install.models import ModelError
 
+from . import diagnostics, serve_options, serve_record
 from . import images as image_input
 from . import runtime as engine_runtime
-from . import serve_options, serve_record
 from .backend import NativeBackend, ThinkingEndError, thinking_end_tokens
 from .chat_templates import ChatTemplateError, ChatTemplates
 from .constraints import ConstraintFactory, validate_tokenizer
@@ -199,6 +200,18 @@ class ListenError(Exception):
     """The HTTP server cannot listen at its address."""
 
 
+class EngineStopped(Exception):
+    """The engine stopped for good: no relaunch can serve, so the process
+    ends and leaves the restart to its supervisor (the launcher or the app)
+    instead of answering 500s to every request."""
+
+
+# The exit status of a server whose engine stopped for good: sysexits'
+# EX_UNAVAILABLE, "a service is unavailable", which a supervisor reads as
+# "restart me" rather than as a crash of the server itself.
+EX_UNAVAILABLE = 69
+
+
 def _start_failed(args, error, failure):
     """End a start that failed, saying why in the log and, for the app, in
     the launcher's serve record (serve_record)."""
@@ -222,6 +235,9 @@ def main():
         # imported arrives here and ends the startup cleanly.
         signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
         _raise_descriptor_limit()
+        # From here the process serves: its console becomes a bounded writer
+        # that a request thread or the engine's reader never waits on.
+        diagnostics.start_console()
         # Bind before loading the tokenizer or model so duplicates fail early.
         # Activate only after the runtime is ready, keeping a partially started
         # service from receiving requests.
@@ -336,7 +352,34 @@ def main():
         )
         mode = "" if readiness.vision else " · text only"
         print_status(f"Ready · {args.model} · context {context}{mode} · {address}")
+        # The engine stopping for good ends the process: a server that can
+        # only answer 500s is worse than one its supervisor restarts.
+        stopped = threading.Event()
+        stop_reason = []
+
+        def engine_stopped(reason):
+            stop_reason.append(reason)
+            stopped.set()
+            # shutdown() blocks until serve_forever returns, so it runs on a
+            # thread of its own.
+            threading.Thread(
+                target=server.shutdown,
+                name="splash-engine-stopped",
+                daemon=True,
+            ).start()
+
+        backend.on_engine_stopped = engine_stopped
         server.serve_forever()
+        if stopped.is_set():
+            raise EngineStopped(stop_reason[0] if stop_reason else "engine stopped")
+    except EngineStopped as error:
+        # The record says why, so the app words it instead of a bare status;
+        # the exit status tells a supervisor to start a new server.
+        serve_record.failed(
+            args.serve_record, serve_record.failure(serve_record.ENGINE, str(error))
+        )
+        print_status(f"Error · {error}", error=True)
+        raise SystemExit(EX_UNAVAILABLE) from None
     except ListenError as error:
         _start_failed(args, error, serve_record.failure(serve_record.PORT, str(error)))
     except (
@@ -385,3 +428,6 @@ def main():
             signal.signal(signal.SIGINT, signal.SIG_IGN)
             if server is not None:
                 server.server_close()
+            # The last lines the console holds reach it before the process
+            # ends; after this a print writes in place again.
+            diagnostics.close_console()

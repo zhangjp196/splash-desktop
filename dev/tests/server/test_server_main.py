@@ -9,7 +9,7 @@ from unittest import mock
 
 from dev.tests.server_fixtures import main_args, unprepared_hold
 from install import families
-from server import diagnostics
+from server import diagnostics, serve_record
 from server import protocol as native_wire
 from server import serve as serve_api
 from server import server as api
@@ -310,6 +310,62 @@ class ServerMainTests(unittest.TestCase):
         server.server_close.assert_called_once_with()
         backend.close.assert_called_once()
         self.assertIn("Error · late", stderr.getvalue())
+
+    def test_main_ends_with_ex_unavailable_when_the_engine_stops_for_good(self):
+        # The engine stopped and cannot serve again: the process ends with
+        # EX_UNAVAILABLE, which a supervisor reads as "restart me", and the
+        # record says why, so the app words it rather than a bare status.
+        args = main_args(
+            serve_record=Path(self.enterContext(tempfile.TemporaryDirectory()))
+            / "serve-8000.json"
+        )
+        backend = mock.Mock()
+        backend.fatal_error = None
+        server = mock.Mock()
+        stopped = []
+
+        def serve_forever():
+            # The engine stops while the server serves.
+            backend.on_engine_stopped("the engine failed 6 times in a row")
+            stopped.append(backend.on_engine_stopped)
+
+        server.serve_forever.side_effect = serve_forever
+        runtime = mock.Mock()
+        runtime.readiness = native_wire.ReadyEvent(4, 131072, False)
+        runtime.wait_ready.return_value = True
+        with (
+            mock.patch.object(serve_api, "parse_args", return_value=args),
+            unprepared_hold(),
+            mock.patch.object(serve_api, "load_thinking_key", return_value=None),
+            mock.patch.object(
+                api.AutoTokenizer, "from_pretrained", return_value=object()
+            ),
+            mock.patch.object(serve_api, "validate_tokenizer"),
+            mock.patch.object(serve_api, "ChatTemplates"),
+            mock.patch.object(
+                api.engine_runtime, "MultiplexedRuntime", return_value=runtime
+            ),
+            mock.patch.object(serve_api, "NativeBackend", return_value=backend),
+            mock.patch.object(serve_api, "ConstraintFactory"),
+            mock.patch.object(serve_api, "Frontend"),
+            mock.patch.object(serve_api, "FrontendServer", return_value=server),
+            mock.patch.object(api.signal, "signal"),
+            mock.patch.object(serve_record, "failed") as failed,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaisesRegex(SystemExit, str(serve_api.EX_UNAVAILABLE)),
+        ):
+            api.main()
+        self.assertEqual(stopped, [backend.on_engine_stopped])
+        failed.assert_called_once_with(
+            args.serve_record,
+            {
+                "kind": serve_record.ENGINE,
+                "message": "the engine failed 6 times in a row",
+            },
+        )
+        self.assertIn("the engine failed 6 times in a row", stderr.getvalue())
+        server.server_close.assert_called_once_with()
+        backend.close.assert_called_once()
 
     def test_main_rejects_an_unservable_chat_template_before_starting_native(self):
         server = mock.Mock()

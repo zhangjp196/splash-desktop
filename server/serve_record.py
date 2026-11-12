@@ -32,6 +32,9 @@ PORT = "port"
 UPGRADE = "upgrade"
 # The model's download or verification failed.
 INSTALL = "install"
+# The engine stopped for good after serving: the process ends with
+# EX_UNAVAILABLE for its supervisor to restart (serve.EngineStopped).
+ENGINE = "engine"
 
 
 class NotRecorded(Exception):

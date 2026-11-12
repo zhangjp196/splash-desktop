@@ -239,6 +239,27 @@ class ServerRecoveryTests(HarnessTestCase):
             ],
         )
 
+    def test_a_stop_for_good_tells_the_supervisor_once(self):
+        # The engine stopped and cannot serve again: the server ends with
+        # EX_UNAVAILABLE for its supervisor to restart, rather than answer
+        # 500s to every request. A server with no listener keeps its
+        # refusals, so the reason still reaches a client that asks.
+        runtime = RecoveringRuntime()
+        backend = self.backend(runtime)
+        told = []
+        backend.on_engine_stopped = told.append
+        with mock.patch.object(backend_api, "print_status"):
+            for _ in range(6):
+                runtime.fail(backend, served=1.0)
+            self.wait_until(lambda: backend.fatal_error is not None)
+        self.assertEqual(told, [backend.fatal_error])
+        runtime.fail(backend, served=1.0)
+        self.assertEqual(told, [backend.fatal_error])
+        # A listener that raises must not take the server down with it.
+        backend.on_engine_stopped = mock.Mock(side_effect=OSError("gone"))
+        runtime.fail(backend, served=1.0)
+        self.assertEqual(told, [backend.fatal_error])
+
     def test_changed_ready_limits_stop_restarting_at_once(self):
         factory = FakeFactory(handler=answer_status)
         runtime = engine_runtime.MultiplexedRuntime(
