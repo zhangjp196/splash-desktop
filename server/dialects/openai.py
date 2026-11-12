@@ -19,19 +19,13 @@ def finish_reason(result, called):
     return result.reason
 
 
-def completion_response(model, job, result, message, called):
+def completion_response(model, job, result, choice):
     response = {
         "id": f"chatcmpl-{job.public_id}",
         "object": "chat.completion",
         "created": job.created_at,
         "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": message,
-                "finish_reason": finish_reason(result, called),
-            }
-        ],
+        "choices": [choice],
         "usage": usage_dict(result, job),
         "metrics": result.metrics,
         "timings": timings_dict(result),
@@ -41,20 +35,13 @@ def completion_response(model, job, result, message, called):
     return response
 
 
-def text_completion_response(model, job, result, text):
+def text_completion_response(model, job, result, choice):
     response = {
         "id": f"cmpl-{job.public_id}",
         "object": "text_completion",
         "created": job.created_at,
         "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "text": text,
-                "logprobs": None,
-                "finish_reason": result.reason,
-            }
-        ],
+        "choices": [choice],
         "usage": usage_dict(result, job),
         "metrics": result.metrics,
         "timings": timings_dict(result),
@@ -62,6 +49,66 @@ def text_completion_response(model, job, result, text):
     if (compaction := compaction_dict(job)) is not None:
         response["compaction"] = compaction
     return response
+
+
+def chat_choice(exchange, job, index):
+    """One choice of a Chat completion: the assistant message the job
+    generated, its finish reason and, asked for, its logprobs. The response
+    envelope is the caller's, so an n>1 request builds it once rather than
+    once per choice."""
+    collected = exchange.collect(job)
+    message = {"role": "assistant", "content": collected.content or None}
+    if collected.reasoning:
+        message["reasoning_content"] = collected.reasoning
+    if collected.tool_calls:
+        message["tool_calls"] = collected.tool_calls
+    choice = {
+        "index": index,
+        "message": message,
+        "finish_reason": finish_reason(collected.result, collected.called),
+    }
+    if job.logprobs:
+        choice["logprobs"] = exchange.chat_logprobs(collected.result, collected.content)
+    return choice, collected
+
+
+def text_choice(exchange, job, index):
+    """One choice of a text completion: the text the job generated and its
+    finish reason."""
+    collected = exchange.collect(job)
+    return (
+        {
+            "index": index,
+            "text": collected.content,
+            "logprobs": None,
+            "finish_reason": collected.result.reason,
+        },
+        collected,
+    )
+
+
+def choices_answer(exchange, jobs, choice_of, envelope):
+    """One response with one choice per job. The envelope is the first job's
+    (its metrics, timings and compaction), the usage the jobs' prompt maximum
+    and completion sum; no later choice builds an envelope, which an n>1
+    request used to pay for and throw away."""
+    choices = []
+    prompt_tokens = 0
+    completion_tokens = 0
+    first = None
+    for index, job in enumerate(jobs):
+        choice, collected = choice_of(exchange, job, index)
+        usage = usage_dict(collected.result, job)
+        prompt_tokens = max(prompt_tokens, usage["prompt_tokens"])
+        completion_tokens += usage["completion_tokens"]
+        if first is None:
+            first = envelope(job, collected.result, choice)
+        choices.append(choice)
+    first["choices"] = choices
+    first["usage"]["prompt_tokens"] = prompt_tokens
+    first["usage"]["completion_tokens"] = completion_tokens
+    first["usage"]["total_tokens"] = prompt_tokens + completion_tokens
+    exchange.send_json(200, first)
 
 
 def _chunk(
@@ -143,95 +190,43 @@ def text_completion_chunk(
 
 
 def complete(exchange, job):
-    collected = exchange.collect(job)
-    message = {"role": "assistant", "content": collected.content or None}
-    if collected.reasoning:
-        message["reasoning_content"] = collected.reasoning
-    if collected.tool_calls:
-        message["tool_calls"] = collected.tool_calls
-    response = completion_response(
-        exchange.app.response_model,
-        job,
-        collected.result,
-        message,
-        collected.called,
+    choice, collected = chat_choice(exchange, job, 0)
+    exchange.send_json(
+        200,
+        completion_response(exchange.app.response_model, job, collected.result, choice),
     )
-    if job.logprobs:
-        response["choices"][0]["logprobs"] = exchange.chat_logprobs(
-            collected.result, collected.content
-        )
-    exchange.send_json(200, response)
 
 
 def complete_choices(exchange, jobs):
-    choices = []
-    first = None
-    prompt_tokens = 0
-    completion_tokens = 0
-    for index, job in enumerate(jobs):
-        collected = exchange.collect(job)
-        message = {"role": "assistant", "content": collected.content or None}
-        if collected.reasoning:
-            message["reasoning_content"] = collected.reasoning
-        if collected.tool_calls:
-            message["tool_calls"] = collected.tool_calls
-        response = completion_response(
-            exchange.app.response_model,
-            job,
-            collected.result,
-            message,
-            collected.called,
-        )
-        if job.logprobs:
-            response["choices"][0]["logprobs"] = exchange.chat_logprobs(
-                collected.result, collected.content
-            )
-        if first is None:
-            first = response
-        choice = response["choices"][0]
-        choice["index"] = index
-        choices.append(choice)
-        prompt_tokens = max(prompt_tokens, response["usage"]["prompt_tokens"])
-        completion_tokens += response["usage"]["completion_tokens"]
-    first["choices"] = choices
-    first["usage"]["prompt_tokens"] = prompt_tokens
-    first["usage"]["completion_tokens"] = completion_tokens
-    first["usage"]["total_tokens"] = prompt_tokens + completion_tokens
-    exchange.send_json(200, first)
+    choices_answer(
+        exchange,
+        jobs,
+        chat_choice,
+        lambda job, result, choice: completion_response(
+            exchange.app.response_model, job, result, choice
+        ),
+    )
 
 
 def text_completion(exchange, job):
-    collected = exchange.collect(job)
+    choice, collected = text_choice(exchange, job, 0)
     exchange.send_json(
         200,
         text_completion_response(
-            exchange.app.response_model, job, collected.result, collected.content
+            exchange.app.response_model, job, collected.result, choice
         ),
     )
 
 
 def text_completion_choices(exchange, jobs):
-    choices = []
-    first = None
-    prompt_tokens = 0
-    completion_tokens = 0
-    for index, job in enumerate(jobs):
-        collected = exchange.collect(job)
-        response = text_completion_response(
-            exchange.app.response_model, job, collected.result, collected.content
-        )
-        if first is None:
-            first = response
-        choice = response["choices"][0]
-        choice["index"] = index
-        choices.append(choice)
-        prompt_tokens = max(prompt_tokens, response["usage"]["prompt_tokens"])
-        completion_tokens += response["usage"]["completion_tokens"]
-    first["choices"] = choices
-    first["usage"]["prompt_tokens"] = prompt_tokens
-    first["usage"]["completion_tokens"] = completion_tokens
-    first["usage"]["total_tokens"] = prompt_tokens + completion_tokens
-    exchange.send_json(200, first)
+    choices_answer(
+        exchange,
+        jobs,
+        text_choice,
+        lambda job, result, choice: text_completion_response(
+            exchange.app.response_model, job, result, choice
+        ),
+    )
 
 
 def stream(exchange, job, stream_options, *, chat):

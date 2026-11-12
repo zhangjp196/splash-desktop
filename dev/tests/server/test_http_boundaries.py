@@ -363,19 +363,16 @@ class HttpBoundaryTests(HarnessTestCase):
         self.assertEqual((first_job.request_id, second_job.request_id), (1, 1))
         self.assertNotEqual(first_job.public_id, second_job.public_id)
         result = backend_api.NativeResult("stop", 2, 1, 1, 1, 1)
-        first_id = openai.completion_response(
-            "test-model",
-            first_job,
-            result,
-            {"role": "assistant", "content": "x"},
-            False,
-        )["id"]
+        choice = {
+            "index": 0,
+            "message": {"role": "assistant", "content": "x"},
+            "finish_reason": "stop",
+        }
+        first_id = openai.completion_response("test-model", first_job, result, choice)[
+            "id"
+        ]
         second_id = openai.completion_response(
-            "test-model",
-            second_job,
-            result,
-            {"role": "assistant", "content": "x"},
-            False,
+            "test-model", second_job, result, choice
         )["id"]
         self.assertNotEqual(first_id, second_id)
         self.assertEqual(
