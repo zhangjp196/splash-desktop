@@ -142,8 +142,12 @@ kernel void block_indexer_pool(device const BlockIndexerBlock *blocks [[buffer(0
   float sum = 0.0f;
   for (uint t = 0; t < kBlock; ++t) {
     const uint position = block.position + t;
+    // The block's last token is one of the step's rows, so a token before
+    // the lane's first row is one of the open block's first kPending keys,
+    // and past them the step's keys hold the token: the clamp keeps the
+    // read of the keys the token does not come from in bounds either way.
     sum += float(position >= first ? lane_keys[ulong(position - first) * kDimension + tid]
-                                   : pending[t * kDimension + tid]);
+                                   : pending[min(t, kPending - 1) * kDimension + tid]);
   }
   const float mean = sum / kBlock;
   const float scale = indexer_rms_scale(mean, scratch, lane, sg);

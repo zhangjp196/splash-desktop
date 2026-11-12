@@ -4,20 +4,11 @@
 
 ## 1. block indexer 的 pool 竞态
 
-位置:`runtime/metal/kernels/shared/block_indexer.metal`(`block_indexer_pool`,自第 106 行起)。现象:池化的 key 没有旋转到 block 起点;rollback 场景下,被拒绝行已完成的 block 会丢失下一 step 的 key。
+位置:`runtime/metal/kernels/shared/block_indexer.metal`(`block_indexer_pool`)。现象:验证环境(`MTL_SHADER_VALIDATION=1`,dev/native.mk:581)下,池化 key 读回**全 0**——pool 对 extent(经 index table 条目里的 GPU 地址)的写没有落地;无验证时同一测试通过。失败在多次运行间非确定(pool 各例有时全过、有时全零),rollback 一例则稳定失败。
 
-该问题只在原生门禁所用的验证环境(`MTL_SHADER_VALIDATION=1`,dev/native.mk:581)下出现:
+已修的一处(2026-11-12):pool 对 pending keys 的读越界——循环的 `t` 跑到 `kBlock - 1 = 3`,而 pending 只有 `kPending = 3` 个槽。语义上 t=3 的读总被丢弃(完成的 block 末 token 必是本步的行,`position >= first`),但边界检查门禁会为此中止 dispatch。已按 `min(t, kPending - 1)` 收住;无验证的门禁通过。
 
-```bash
-# 通过
-./build/engine-tests/qwen4-kernels build/engine-tests/production-and-test.metallib
-
-# 10 个失败
-MTL_SHADER_VALIDATION=1 ./build/engine-tests/qwen4-kernels \
-    build/engine-tests/production-and-test.metallib
-```
-
-结果依赖验证层,说明是**同步缺陷**而非 kernel 算术错误:最可能是某行完成 block 的写入与下一步读取的旋转之间缺少 `threadgroup_barrier`,或读取了同一命令中后续 dispatch 才写入的内存。相关 kernel 由 Qwen3.8-Flash-Next(d6003397)与 YaRN(40470bbd)引入,可缩小排查范围。
+仍未定位:验证层中止 dispatch 的那一次访问。已排除:pool 对每个绑定缓冲的读(逐一对过测试的缓冲大小,含 records、keys、pending、index table、inverse frequencies)、threadgroup 屏障的成对性、早退的组一致性、同命令内跨 dispatch 的读写序、extent 的对齐与驻留。一个探针的结果与"addressed 写被拒"不符:同一 dispatch 里,对绑定缓冲的写与对 extent 的写,一次运行中前者未落地而后者落地。下一步:拿到验证层自己的报告(os_log 未捕获到,试 Console.app 或 `MTL_SHADER_VALIDATION` 的其他档位),或对 kernel 的访存逐个二分(每次改一处重编 metallib 跑一遍)。相关 kernel 由 Qwen3.8-Flash-Next(d6003397)与 YaRN(40470bbd)引入,可缩小排查范围。
 
 ## 2. 已测量但未动的引擎项
 
