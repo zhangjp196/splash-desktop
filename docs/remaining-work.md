@@ -35,7 +35,7 @@
 
 尚未实现,按提案的阶段:
 
-- **P1 剩余——其它量化的 GGUF draft**(Q4_K/Q6_K 等):现在量化 draft 被 `install/draftgguf.py:168` 按名拒绝,只有上述四类会转换。需要 draft kernel 对这些投影的覆盖与每类型受支持列表,拒绝时给出类型名。
+- **P1 剩余——其它量化的 GGUF draft**:Q4_K、Q5_K、Q6_K 已于 2026-11-12 落地(`install/draftgguf.py` 的 `_q4_k`/`_q5_k`/`_q6_k`,安装时去量化为 bf16,kernel 不变;布局经 ggml 公式、gguf 包的 dequantize 与 SipLLM 的 quant.cpp 三方核对)。仍按名拒绝的:Q2_K/Q3_K(更粗的 K-quant)、IQ 系列、Q4_0/Q4_1/Q5_0/Q5_1(旧式仿射)——按提案的"每类型受支持列表"继续按名拒绝,除非有真实 draft 用它们。
 - **P3——family pack**:声明式注册表与 Tier B 通用布局,出口是"加一个 Tier B 家族不改引擎源码"。
 
 DSpark(提案的 P2)已从本发布移除:安装器不再把 `dspark` 当作一个模式(`install/models.py` 的 `SPECULATION_MODES`),schema 不再接受它的 plan 与 state(`install/assembly.py` 的 `PROVIDERS`),引擎的 `SpeculationKind` 只剩 `None` 与 `DFlash2`,桌面 app 不再显示它的名字。提案原文里的 DSpark 章节随历史保留,不再是待办。
