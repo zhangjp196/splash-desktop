@@ -70,7 +70,7 @@ ENTRY_STAGING = ".loading-"
 # The speculation modes a selection names. auto takes the draft the
 # configuration provides (the family's release or --draft-model) and serves
 # without one when there is none; a provider names the draft's implementation.
-SPECULATION_MODES = ("auto", "dflash2", "dspark")
+SPECULATION_MODES = ("auto", "dflash2")
 
 
 class ModelError(RuntimeError):
@@ -84,7 +84,7 @@ def speculation_mode(value):
     if mode not in SPECULATION_MODES:
         raise ModelError(
             f"speculation {value} is not one this release implements; "
-            "use auto, dflash2 or dspark"
+            "use auto or dflash2"
         )
     return mode
 
@@ -372,7 +372,7 @@ class Selection:
     # installer selects from the directory and the Hub.
     mmproj: Path | None = None
     # auto (the draft the configuration provides, else none) or a provider
-    # this release implements. DSpark is refused until its provider lands.
+    # this release implements.
     speculation: str = "auto"
     require_draft: bool = False
 
@@ -593,11 +593,6 @@ def parse_args(argv=None):
         args.speculation = speculation_mode(args.speculation)
     except ModelError as error:
         parser.error(str(error))
-    if args.speculation == "dspark":
-        parser.error(
-            "--speculation dspark is not implemented by this release; "
-            "use auto or dflash2"
-        )
     return args
 
 

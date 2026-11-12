@@ -15,7 +15,6 @@ extension LivePane {
         switch provider {
         case "dflash2": return "DFlash2"
         case "none": return L10n.string("speculation.target_only")
-        case "dspark": return "DSpark"
         default: return provider ?? "—"
         }
     }

@@ -72,7 +72,7 @@ SPECULATION_KEYS = {
 # A release before this one recorded an external MTP head's alignment and
 # the target's built-in count; neither is read any more.
 SPECULATION_OPTIONAL_KEYS = {"alignment"}
-PROVIDERS = {"none", "dflash2", "dspark"}
+PROVIDERS = {"none", "dflash2"}
 DRAFT_FORMATS = {"none", "safetensors", "gguf"}
 SOURCE_KINDS = {"none", "builtin", "external"}
 FILE_RECORD_KEYS = {"path", "bytes", "mtime_ns", "ctime_ns", "digest"}
@@ -278,7 +278,7 @@ def _speculation_well_formed(speculation, sources):
         return False
     if speculation["format"] not in DRAFT_FORMATS:
         return False
-    if speculation["state"] not in {"none", "draft-rings", "dspark-state"}:
+    if speculation["state"] not in {"none", "draft-rings"}:
         return False
     if speculation["fallback"] not in {"none", "required"}:
         return False
@@ -306,9 +306,7 @@ def _speculation_well_formed(speculation, sources):
             and speculation["proposal_rows"] == 8
             and speculation["state"] == "draft-rings"
         )
-    # A DSpark plan is accepted by the schema; the engine refuses it until its
-    # provider lands, with a plan check that names it.
-    return True
+    return False
 
 
 def pins(record):

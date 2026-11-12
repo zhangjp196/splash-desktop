@@ -573,11 +573,6 @@ def parse_args(argv=None):
             args.speculation = model_artifacts.speculation_mode(args.speculation)
         except model_artifacts.ModelError as error:
             parser.error(str(error))
-        if args.speculation == "dspark":
-            parser.error(
-                "--speculation dspark is not implemented by this release; "
-                "use auto or dflash2"
-            )
         serve_options.check_serve_arguments(parser, args)
     if client_args and args.command == "serve":
         parser.error("arguments after -- are only supported for coding clients")

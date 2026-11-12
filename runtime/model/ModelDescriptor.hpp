@@ -44,7 +44,7 @@ enum class VisionSource : uint8_t { Safetensors = 1, Gguf, None };
 // How a model proposes tokens beside its target. None is plain autoregressive
 // decoding: the target alone is a complete model, and no draft weights, state
 // or cache namespace belong to it.
-enum class SpeculationKind : uint8_t { None = 1, DFlash2, DSpark };
+enum class SpeculationKind : uint8_t { None = 1, DFlash2 };
 // The container of a draft's weights. None when the plan has no draft.
 enum class DraftFormat : uint8_t { None = 1, Safetensors, Gguf };
 
