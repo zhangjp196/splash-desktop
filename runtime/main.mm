@@ -331,7 +331,9 @@ int runNative(const engine::NativeArguments &arguments) {
   auto statusProvider = [&] {
     return published->statusJson(
         metrics.snapshot(),
-        engine::NativeLoopTiming{transport.maxTickMilliseconds()});
+        engine::NativeLoopTiming{transport.maxTickMilliseconds(),
+                                 transport.meanTickMilliseconds(),
+                                 transport.tickCount()});
   };
 
   engine::StartupRetryWindow recovery(engine::kStartupMemoryRecoveryTimeout);

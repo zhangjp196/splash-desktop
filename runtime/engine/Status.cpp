@@ -403,7 +403,9 @@ std::string runtimeStatusJson(
       << ",\"suspended\":" << resourceWait.suspended
       << ",\"draining\":" << boolean(resourceWait.draining)
       << ",\"oldest_wait_ms\":" << resourceWait.oldestWaitMilliseconds << "}"
-      << ",\"loop\":{\"max_tick_ms\":" << loop.maxTickMilliseconds << "}"
+      << ",\"loop\":{\"max_tick_ms\":" << loop.maxTickMilliseconds
+      << ",\"mean_tick_ms\":" << loop.meanTickMilliseconds
+      << ",\"ticks\":" << loop.tickCount << "}"
       << ",\"identity\":{\"cache\":{"
       << "\"loaded_model_layout_sha256\":"
       << json::quote(cacheIdentity.modelLayoutSha256)

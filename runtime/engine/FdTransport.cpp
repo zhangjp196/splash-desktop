@@ -335,6 +335,8 @@ NativeProcessExit FdTransport::run(NativeRuntime &loop) {
     const double tickMilliseconds = millisecondsSince(stepStarted);
     if (tickMilliseconds > maxTickMilliseconds_)
       maxTickMilliseconds_ = tickMilliseconds;
+    tickMillisecondsTotal_ += tickMilliseconds;
+    ++tickCount_;
     if (progressed)
       continue;
     if (loop.connectionMustClose())
@@ -384,6 +386,14 @@ bool FdTransport::shutdownRequested() const noexcept {
 
 double FdTransport::maxTickMilliseconds() const noexcept {
   return maxTickMilliseconds_;
+}
+
+double FdTransport::meanTickMilliseconds() const noexcept {
+  return tickCount_ == 0 ? 0.0 : tickMillisecondsTotal_ / tickCount_;
+}
+
+long long FdTransport::tickCount() const noexcept {
+  return tickCount_;
 }
 
 const std::string &FdTransport::failure() const noexcept { return failure_; }

@@ -63,12 +63,16 @@ public:
   // An output write the signal interrupts fails instead of resuming.
   void requestShutdown() noexcept;
   [[nodiscard]] bool shutdownRequested() const noexcept;
-  // The longest one control pass and one tick of run() have taken. Read on
-  // the loop thread (status). The reader keeps reading input meanwhile, so a
-  // stalled request write shows only that the process stopped reading; a
-  // stuck loop is detected by the server's status round trip
-  // (server/runtime.py `_probe_liveness`).
+  // The longest one control pass and one tick of run() have taken, and the
+  // mean and count of the ticks, whose share of a decode cycle decides the
+  // graph-reuse work (docs/remaining-work.md). Read on the loop thread
+  // (status). The reader keeps reading input meanwhile, so a stalled request
+  // write shows only that the process stopped reading; a stuck loop is
+  // detected by the server's status round trip (server/runtime.py
+  // `_probe_liveness`).
   [[nodiscard]] double maxTickMilliseconds() const noexcept;
+  [[nodiscard]] double meanTickMilliseconds() const noexcept;
+  [[nodiscard]] long long tickCount() const noexcept;
   // Why run() ended with IoFailure, or with EngineFailure when the input
   // reader ran out of memory, or why runFlush() could not wait; empty when
   // the loop chose the exit.
@@ -85,6 +89,8 @@ private:
   std::shared_ptr<LoopWake> wake_;
   ControlHandler controlHandler_;
   double maxTickMilliseconds_ = 0.0;
+  double tickMillisecondsTotal_ = 0.0;
+  long long tickCount_ = 0;
   std::string failure_;
 };
 

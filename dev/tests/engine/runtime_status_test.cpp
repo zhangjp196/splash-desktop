@@ -604,13 +604,16 @@ void testResourceWaitDiagnostics() {
   require(json.find("\"admission\":{\"waiting\":3,\"waiting_memory\":2,"
                     "\"waiting_concurrency\":1,\"held_behind_refusal\":4,\"restoring\":1,"
                     "\"suspended\":1,\"draining\":true,"
-                    "\"oldest_wait_ms\":1250},\"loop\":{\"max_tick_ms\":0}") !=
+                    "\"oldest_wait_ms\":1250},\"loop\":{\"max_tick_ms\":0,"
+                    "\"mean_tick_ms\":0,\"ticks\":0}") !=
               std::string::npos,
           "resource wait summary is missing or inaccurate");
   const std::string ticked = runtimeStatusJson(
       memoryPlan, {}, {}, {}, {}, {}, {}, {}, {}, true, {}, wait,
-      NativeLoopTiming{1843.25}, {}, {}, {}, {});
-  require(ticked.find("\"loop\":{\"max_tick_ms\":1843.25}") != std::string::npos &&
+      NativeLoopTiming{1843.25, 12.5, 7}, {}, {}, {}, {});
+  require(ticked.find("\"loop\":{\"max_tick_ms\":1843.25,\"mean_tick_ms\":12.5,"
+                      "\"ticks\":7}") !=
+              std::string::npos &&
               ticked.find("\"schema_version\":8") != std::string::npos,
           "the loop's longest tick is missing, or changed the status schema");
 }

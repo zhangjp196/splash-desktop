@@ -263,9 +263,13 @@ inline double RuntimeMetrics::percentile(const std::deque<double> &samples,
   return sorted[std::min(index, sorted.size() - 1)];
 }
 
-// The native loop's own timing, which its transport measures.
+// The native loop's own timing, which its transport measures. The mean and
+// count of the ticks, beside the max, are what decides whether the loop's
+// serial tail is worth parallelizing (docs/remaining-work.md).
 struct NativeLoopTiming {
   double maxTickMilliseconds = 0.0;
+  double meanTickMilliseconds = 0.0;
+  long long tickCount = 0;
 };
 
 // The model's weights as the native loop releases and restores them
