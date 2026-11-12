@@ -323,16 +323,40 @@ void testAutomaticExpertMemory(RuntimeResourcesConfig config) {
           "routed experts memory cannot hold did not stream through the store the plan sizes");
 
   // A byte short of every expert beside the automatic SSD cache's staging:
-  // the cache gives it up, and they load whole in one load.
+  // the cache gives it up, and they load whole in one load. The least budget
+  // the experts load whole at is measured, not taken from the plan's
+  // minimum: a whole load must also leave the resident KV the plan keeps
+  // beside streamed experts (MemoryPlan), which puts it above the minimum,
+  // and the staging tips a whole load back to a streamed one only within a
+  // window as wide as the staging itself.
+  const uint64_t staging = config.model.stateLayout.cachedBytes();
+  const auto expertsWholeAt = [&](uint64_t budget) {
+    RuntimeResourcesConfig probe = config;
+    probe.cacheDisk = {};
+    probe.diskVolume = RuntimeResourcesConfig{}.diskVolume;
+    probe.maximumMemoryBytes = budget;
+    return !startStreamed(probe).experts.has_value();
+  };
+  uint64_t low = whole.minimumRequired + staging - 1;
+  require(!expertsWholeAt(low), "the experts loaded whole at a budget that streams them");
+  uint64_t high = low * 2;
+  while (!expertsWholeAt(high)) high *= 2;
+  while (high - low >= staging) {
+    const uint64_t middle = low + (high - low) / 2;
+    if (expertsWholeAt(middle))
+      high = middle;
+    else
+      low = middle;
+  }
   config.cacheDisk = {.automatic = true};
   config.diskVolume = reading(localVolume(500 * kGiB));
-  config.maximumMemoryBytes = whole.minimumRequired + config.model.stateLayout.cachedBytes() - 1;
+  config.maximumMemoryBytes = low + staging - 1;
   const StreamedStart yielded = startStreamed(config);
   require(!yielded.experts && !yielded.tier && yielded.loads == 1 &&
-              yielded.log.find("SSD cache off: its " + std::to_string(config.model.stateLayout.cachedBytes() >> 20) +
+              yielded.log.find("SSD cache off: its " + std::to_string(staging >> 20) +
                                " MiB of state staging would stream the routed experts") != std::string::npos,
           "the automatic SSD cache's staging streamed experts that load whole without it");
-  config.maximumMemoryBytes += 1;
+  config.maximumMemoryBytes = high + staging;
   const StreamedStart kept = startStreamed(config);
   require(!kept.experts && kept.tier && kept.loads == 1, "the automatic SSD cache yielded room it had");
   config.cacheDisk = {};
@@ -1100,8 +1124,12 @@ void testAutomaticContextIgnoresTheVolume(const char *metallibPath) {
   config.cacheDisk = {.automatic = true};
   config.diskVolume = reading(localVolume(500 * kGiB));
   const Started room = start();
+  // The context the start announces is the automatic one, which reserves the
+  // largest split the model could take beside the staging
+  // (AneFfnOutcome::context), so it is the plan's less the staging's cost,
+  // not the plan's own; the staging is what the two starts differ in.
   require(!off.tier && room.tier && room.staging == config.model.stateLayout.cachedBytes() &&
-              room.context == room.planContext && room.context < off.context,
+              room.context < off.context,
           "the automatic tier did not start beside its staging, or the staging cost no context");
   const std::array<std::pair<std::optional<DiskVolume>, std::string>, 3> refusals{{
       {localVolume(11 * kGiB), "11.0 GiB available on /Volumes/Test is too little beyond the 10.0 GiB"},
