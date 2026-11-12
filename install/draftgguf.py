@@ -9,9 +9,11 @@ renames them to the release's names, and writes one `model.safetensors` (and
 installation links the converted files under `draft/`; the source repository
 and commit stay in `model.json` as `sources.draft`.
 
-Only the types a draft is published in are converted: BF16, F16 and F32. A
-quantized draft GGUF is refused by name rather than silently dequantized here;
-that is a later provider, not an installation accident.
+The runtime's draft loader reads BF16 alone, so a quantized draft is
+dequantized here, at install time, as ggml's own dequantizers unpack it: the
+Q8_0 blocks and the K-quant super-blocks (Q4_K, Q5_K, Q6_K). A draft
+published in another quantization is refused by name; that is a later
+provider, not an installation accident.
 """
 
 from __future__ import annotations
@@ -30,12 +32,16 @@ VERSION = 1
 MASK_EMBEDDING = "mask_embedding"
 # kind -> (block elements, block bytes). BF16, F16 and F32 are one element and
 # their bytes; Q8_0 is llama.cpp's 32-element block, one half d and 32 int8
-# codes.
+# codes; the K-quants are super-blocks of QK_K = 256 weights, in the layouts
+# ggml-common.h declares (Q4_K 144, Q5_K 176, Q6_K 210 bytes).
 SUPPORTED = {
     "BF16": (1, 2),
     "F16": (1, 2),
     "F32": (1, 4),
     "Q8_0": (32, 34),
+    "Q4_K": (256, 144),
+    "Q5_K": (256, 176),
+    "Q6_K": (256, 210),
 }
 GGUF_ALIGNMENT = 32
 
@@ -86,7 +92,98 @@ def _bf16(raw: bytes, kind: str) -> bytes:
             for code in struct.unpack("<32b", block[2:]):
                 out.extend(_float_to_bf16(scale * code))
         return bytes(out)
+    if kind == "Q4_K":
+        return _q4_k(raw)
+    if kind == "Q5_K":
+        return _q5_k(raw)
+    if kind == "Q6_K":
+        return _q6_k(raw)
     raise ModelError(f"unsupported draft GGUF tensor type {kind}")
+
+
+def _scale_min_k4(scales: bytes) -> tuple[list[int], list[int]]:
+    """The eight 6-bit scales and mins of a Q4_K or Q5_K block's 12 bytes, as
+    ggml's get_scale_min_k4 unpacks them: the low four sub-blocks' values in
+    the low six bits of the first eight bytes, the high four's low nibble in
+    the last four bytes and high bits in the first eight's top two."""
+    d, m, md = scales[0:4], scales[4:8], scales[8:12]
+    sc = [d[i] & 0x3F for i in range(4)]
+    sc += [(md[i] & 0x0F) | ((d[i] >> 2) & 0x30) for i in range(4)]
+    mn = [m[i] & 0x3F for i in range(4)]
+    mn += [(md[i] >> 4) | ((m[i] >> 2) & 0x30) for i in range(4)]
+    return sc, mn
+
+
+def _q4_k(raw: bytes) -> bytes:
+    """Q4_K's 144-byte super-blocks of 256 weights as bf16: two fp16 scales,
+    twelve bytes of packed 6-bit scales and mins, and 256 four-bit codes that
+    eight 32-weight sub-blocks share two apiece."""
+    out = bytearray()
+    for at in range(0, len(raw), 144):
+        block = raw[at : at + 144]
+        if len(block) != 144:
+            raise ModelError("truncated Q4_K draft block")
+        (d,) = struct.unpack_from("<e", block, 0)
+        (dmin,) = struct.unpack_from("<e", block, 2)
+        sc, mn = _scale_min_k4(block[4:16])
+        qs = block[16:]
+        for sub in range(8):
+            dsc = d * sc[sub]
+            dmn = dmin * mn[sub]
+            shift = 4 * (sub % 2)
+            for code in range(32):
+                q = (qs[(sub // 2) * 32 + code] >> shift) & 0xF
+                out.extend(_float_to_bf16(dsc * q - dmn))
+    return bytes(out)
+
+
+def _q5_k(raw: bytes) -> bytes:
+    """Q5_K's 176-byte super-blocks of 256 weights as bf16: Q4_K's layout with
+    one more bit per weight, in 32 bytes between the scales and the codes."""
+    out = bytearray()
+    for at in range(0, len(raw), 176):
+        block = raw[at : at + 176]
+        if len(block) != 176:
+            raise ModelError("truncated Q5_K draft block")
+        (d,) = struct.unpack_from("<e", block, 0)
+        (dmin,) = struct.unpack_from("<e", block, 2)
+        sc, mn = _scale_min_k4(block[4:16])
+        qh = block[16:48]
+        qs = block[48:]
+        for sub in range(8):
+            dsc = d * sc[sub]
+            dmn = dmin * mn[sub]
+            shift = 4 * (sub % 2)
+            for code in range(32):
+                q = (qs[(sub // 2) * 32 + code] >> shift) & 0xF
+                # The fifth bit of element `code` of every sub-block lives in
+                # byte `code`, one bit per sub-block (ggml's
+                # dequantize_row_q5_K).
+                h = (qh[code] >> sub) & 1
+                out.extend(_float_to_bf16(dsc * (q + (h << 4)) - dmn))
+    return bytes(out)
+
+
+def _q6_k(raw: bytes) -> bytes:
+    """Q6_K's 210-byte super-blocks of 256 weights as bf16: 128 bytes of low
+    nibbles, 64 of high two-bit pairs, sixteen int8 scales and one fp16 scale;
+    the six-bit code is the pair past 32."""
+    out = bytearray()
+    for at in range(0, len(raw), 210):
+        block = raw[at : at + 210]
+        if len(block) != 210:
+            raise ModelError("truncated Q6_K draft block")
+        ql = block[0:128]
+        qh = block[128:192]
+        scales = struct.unpack("<16b", block[192:208])
+        (d,) = struct.unpack_from("<e", block, 208)
+        for j in range(256):
+            c, rem = j // 128, j % 128
+            nib = (ql[c * 64 + rem % 64] >> (rem // 64 * 4)) & 0xF
+            high = (qh[c * 32 + rem % 32] >> (rem // 32 * 2)) & 3
+            q = (nib | (high << 4)) - 32
+            out.extend(_float_to_bf16(d * scales[j // 16] * q))
+    return bytes(out)
 
 
 def _float_to_bf16(value: float) -> bytes:
@@ -167,8 +264,8 @@ def convert(source, directory: Path) -> dict[str, Path]:
                 kind = gguf.TENSOR_TYPES.get(kind_id)
                 if kind not in SUPPORTED:
                     raise ModelError(
-                        f"draft GGUF tensor {name} is {kind or f'type {kind_id}'}; "
-                        "a draft GGUF must be BF16, F16, F32 or Q8_0"
+                        f"draft GGUF tensor {name} is {kind or f'type {kind_id}'}; a draft "
+                        "GGUF must be BF16, F16, F32, Q8_0, Q4_K, Q5_K or Q6_K"
                     )
                 extents = header.extents[name]
                 shape = tuple(reversed(extents))
