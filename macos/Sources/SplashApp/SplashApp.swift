@@ -4,7 +4,11 @@ import SwiftUI
 /// The menu bar controls: a small live dashboard, start and stop without
 /// opening the window, and a way back to the window after it is closed.
 struct MenuBarView: View {
-    @EnvironmentObject private var model: AppModel
+    /// The menu bar's walking-pace snapshot, not the app model: a re-render
+    /// here rebuilds the menu host's items, and one per second for days is
+    /// the churn a re-entrant menu update recursed in
+    /// (`MenuBarModel` holds the account).
+    @EnvironmentObject private var menu: MenuBarModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -14,42 +18,42 @@ struct MenuBarView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(verbatim: "Splash")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
-                    Text(model.statusText)
+                    Text(menu.statusText)
                         .font(.system(size: 9))
                         .foregroundStyle(SplashPalette.faint)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 4)
-                StatusBeacon(color: indicator, active: model.isRunning)
-                Text(model.stage.title.uppercased())
+                StatusBeacon(color: indicator, active: menu.isRunning)
+                Text(menu.stage.title.uppercased())
                     .font(.system(size: 8, weight: .bold))
                     .tracking(0.7)
-                    .foregroundStyle(stageColor(model.stage))
+                    .foregroundStyle(stageColor(menu.stage))
             }
 
-            if model.phase == .ready {
+            if menu.phase == .ready {
                 HStack(spacing: 8) {
                     metric(
                         L10n.string("live.decode"),
-                        model.live.decodeTokensPerSecond.map { String(format: "%.0f", $0) } ?? "—",
+                        menu.decodeTokensPerSecond.map { String(format: "%.0f", $0) } ?? "—",
                         L10n.string("live.caption.tokens_per_second"),
                         SplashPalette.mint
                     )
                     metric(
                         L10n.string("live.prefill"),
-                        model.live.prefillTokensPerSecond.map { String(format: "%.0f", $0) } ?? "—",
+                        menu.prefillTokensPerSecond.map { String(format: "%.0f", $0) } ?? "—",
                         L10n.string("live.caption.tokens_per_second"),
                         SplashPalette.cyan
                     )
                     metric(
                         L10n.string("live.pending"),
-                        "\(model.live.pending)",
+                        "\(menu.pending)",
                         L10n.string("live.caption.queue_short"),
                         SplashPalette.amber
                     )
                 }
 
-                Sparkline(values: model.decodeHistory, tint: SplashPalette.mint)
+                Sparkline(values: menu.decodeHistory, tint: SplashPalette.mint)
                     .frame(height: 26)
 
                 HStack(spacing: 5) {
@@ -58,22 +62,16 @@ struct MenuBarView: View {
                         .frame(width: 5, height: 5)
                     Text(L10n.format(
                         "menu.memory",
-                        bytes(model.live.physicalBytes),
-                        bytes(model.live.configuredMemoryLimitBytes ?? model.live.governorLimitBytes)
+                        bytes(menu.physicalBytes),
+                        bytes(menu.memoryLimitBytes)
                     ))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(SplashPalette.faint)
                     Spacer(minLength: 0)
-                    // The uptime ticks on a clock of its own: the model no
-                    // longer publishes every second (an idle engine must not
-                    // wake the whole interface), so this line re-reads the
-                    // running time on a one-second TimelineView instead.
-                    TimelineView(.periodic(from: .now, by: 1)) { _ in
-                        if let uptime = model.uptimeText {
-                            Text(L10n.format("sidebar.uptime", uptime))
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(SplashPalette.faint)
-                        }
+                    if let uptime = menu.uptimeText {
+                        Text(L10n.format("sidebar.uptime", uptime))
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(SplashPalette.faint)
                     }
                 }
             }
@@ -87,33 +85,33 @@ struct MenuBarView: View {
             }
             .buttonStyle(.plain)
 
-            if model.isRunning {
+            if menu.isRunning {
                 Button {
-                    model.openInBrowser()
+                    AppModel.shared.openInBrowser()
                 } label: {
                     menuRow(L10n.string("menu.open"), "safari.fill", SplashPalette.cyan)
                 }
                 .buttonStyle(.plain)
                 Button {
-                    model.copyToClipboard(model.apiBaseURL)
+                    AppModel.shared.copyToClipboard(AppModel.shared.apiBaseURL)
                 } label: {
                     menuRow(L10n.string("menu.copy_api"), "doc.on.doc.fill", SplashPalette.blue)
                 }
                 .buttonStyle(.plain)
                 Button {
-                    model.stop()
+                    AppModel.shared.stop()
                 } label: {
                     menuRow(L10n.string("menu.stop"), "stop.fill", SplashPalette.rose)
                 }
                 .buttonStyle(.plain)
             } else {
                 Button {
-                    model.start()
+                    AppModel.shared.start()
                 } label: {
                     menuRow(L10n.string("menu.start"), "play.fill", SplashPalette.mint)
                 }
                 .buttonStyle(.plain)
-                .disabled(!model.canStart)
+                .disabled(!menu.canStart)
             }
 
             Divider()
@@ -196,7 +194,7 @@ struct MenuBarView: View {
     }
 
     private var indicator: Color {
-        switch model.phase {
+        switch menu.phase {
         case .ready: return SplashPalette.mint
         case .starting, .stopping: return SplashPalette.amber
         case .failed: return SplashPalette.rose
@@ -205,8 +203,8 @@ struct MenuBarView: View {
     }
 
     private var memoryTint: Color {
-        guard let used = model.live.physicalBytes,
-              let limit = model.live.configuredMemoryLimitBytes ?? model.live.governorLimitBytes,
+        guard let used = menu.physicalBytes,
+              let limit = menu.memoryLimitBytes,
               limit > 0 else { return SplashPalette.muted }
         let share = Double(used) / Double(limit)
         return share > 0.85 ? SplashPalette.rose : SplashPalette.blue
@@ -313,6 +311,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct SplashApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel.shared
+    /// The menu bar's snapshot, observed here for the status item's icon:
+    /// the label changes when the phase or stage does, not on every poll.
+    @ObservedObject private var menuBar = AppModel.shared.menuBar
 
     var body: some Scene {
         WindowGroup("Splash Desktop", id: "main") {
@@ -337,9 +338,9 @@ struct SplashApp: App {
         }
 
         MenuBarExtra {
-            MenuBarView().environmentObject(model)
+            MenuBarView().environmentObject(menuBar)
         } label: {
-            Image(systemName: model.menuBarSymbol)
+            Image(systemName: menuBar.symbol)
         }
     }
 }

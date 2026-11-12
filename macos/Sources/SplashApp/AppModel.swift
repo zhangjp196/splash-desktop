@@ -52,6 +52,10 @@ final class AppModel: ObservableObject {
     /// The poll, the parsed `/status`, the histories and the client scan.
     /// See `LiveEngine`.
     let liveEngine = LiveEngine()
+    /// The menu bar's walking-pace snapshot of this model. The menu bar
+    /// reads it, not this object, so a poll no longer rebuilds the menu
+    /// host's items once a second (`MenuBarModel`).
+    let menuBar = MenuBarModel()
     /// The live board's reading, polled once a second by the engine.
     var live: LiveStatus {
         get { liveEngine.live }
@@ -217,6 +221,9 @@ final class AppModel: ObservableObject {
     /// Re-announces each of the engine's publishes on this object, so the
     /// views observing the app model see the poll's changes as before.
     private var liveEngineSubscription: AnyCancellable?
+    /// Re-announces this object's publishes on the menu bar's snapshot, so
+    /// the menu bar reads a walking pace of changes instead of every one.
+    private var menuBarSubscription: AnyCancellable?
 
     let catalogIDs = Runtime.catalog
 
@@ -224,6 +231,11 @@ final class AppModel: ObservableObject {
         liveEngine.attach(to: self)
         liveEngineSubscription = liveEngine.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
+        }
+        menuBarSubscription = objectWillChange.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.menuBar.scheduleRefresh()
+            }
         }
         if let raw = UserDefaults.standard.string(forKey: Self.languageKey),
            let stored = InterfaceLanguage(rawValue: raw) {
