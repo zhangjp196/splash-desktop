@@ -8,7 +8,7 @@
 
 已修的一处(2026-11-12):pool 对 pending keys 的读越界——循环的 `t` 跑到 `kBlock - 1 = 3`,而 pending 只有 `kPending = 3` 个槽。语义上 t=3 的读总被丢弃(完成的 block 末 token 必是本步的行,`position >= first`),但边界检查门禁会为此中止 dispatch。已按 `min(t, kPending - 1)` 收住;无验证的门禁通过。
 
-仍未定位:验证层中止 dispatch 的那一次访问。已排除:pool 对每个绑定缓冲的读(逐一对过测试的缓冲大小,含 records、keys、pending、index table、inverse frequencies)、threadgroup 屏障的成对性、早退的组一致性、同命令内跨 dispatch 的读写序、extent 的对齐与驻留。一个探针的结果与"addressed 写被拒"不符:同一 dispatch 里,对绑定缓冲的写与对 extent 的写,一次运行中前者未落地而后者落地。下一步:拿到验证层自己的报告(os_log 未捕获到,试 Console.app 或 `MTL_SHADER_VALIDATION` 的其他档位),或对 kernel 的访存逐个二分(每次改一处重编 metallib 跑一遍)。相关 kernel 由 Qwen3.8-Flash-Next(d6003397)与 YaRN(40470bbd)引入,可缩小排查范围。
+2026-11-12 的二分把症状钉死了:验证下 pool 的 kernel **完整执行**(dispatch 末尾落在绑定缓冲里的标记读得到),但它对 extent 的 addressed 写**整体不落地**——extent 读回全 0,无验证时同一测试通过,`MTL_SHADER_VALIDATION=2` 同样。已排除:pending 读越界(已修)、对齐、extent 大小、barrier 与写函数的形态(换成直接写仍被丢)、addressed 写机制本身(store kernel 经地址写 KV,attention-variants 在验证下通过)、绑定顺序、setTableReach(无人调用,store 也不靠它)。结论方向:验证层对这个 dispatch 的 addressed 写的丢弃,是 Metal 验证层的伪影而非 kernel 缺陷;下一步是给 Apple 的最小复现(qwen4-kernels 的 pool 一例即可),或把该例的 extent 改经 `HostKvExtents` 分配对照一次。相关 kernel 由 Qwen3.8-Flash-Next(d6003397)与 YaRN(40470bbd)引入。
 
 ## 2. 已测量但未动的引擎项
 
