@@ -12,8 +12,9 @@
 
 ## 2. 已测量但未动的引擎项
 
-- **spilled-KV decode 的逐层 host step**(`runtime/model/KvBlockCache.cpp:359`、`runtime/model/QwenTarget.cpp:448`):每个注意力层把命令拆成独立 buffer,满宽度下每周期约 96 个额外 buffer、48 次 runner 唤醒,外加逐层目录查找。`KvReadStats`(`KvBlockCache.cpp:398-401`)已记录 resolve/pickup/resume 分布——**先测量再动**,因为 block list 由每层 indexer 在注意力之前产出。
-- **在 GPU 运行时预构建下一周期的图**(`Engine.cpp:324-340`):命令完成后的调度、准入、建图、编码、提交全部串行,GPU 在此期间空闲。要做需要双份 arena lane 或参数延迟绑定。
+- **spilled-KV decode 的逐层 host step**(`runtime/model/KvBlockCache.cpp:341`、`runtime/model/QwenTarget.cpp:448`):每层一个 resolve host step(`SpilledKvReads::verify` → `KvBlockCache::addResolve`),结构账已对上——awake host step 一个加 2 个命令 buffer(`MetalBackend.mm` 的 `addedBuffers`),48 层的 decode 命令占队列 512 个里的 97 个、48 次 runner 唤醒,与原记的"约 96 个额外 buffer、48 次唤醒"相符。host step 串行:GPU 等每层的 resolve 返回才跑下一层,每层的往返是 pickup + work + resume。
+  **决策规则(模型环境一次读 /status 即可判)**:每周期 host step 成本 = `model.attention_layers` × (`kv_spill.blockCache.host_steps.pickup_ms.p50` + `work_ms.p50` + `resume_ms.p50`),与 `metrics.decode_cycle_ms` 比;占比小就不动。后端测试给的下限:pickup 9.4 µs + resume 68.7 µs 一步(metal-backend 的 host step 测量),按 48 层算 ≈ 3.7 ms 一周期;resume 里下一 kernel 的启动占大头,能砍多少要靠实测的 resume 分布说。**显然的改法被结构挡住**:block list 由每层 indexer 在该层注意力之前产出,resolve 无法并成每周期一个 host step;替代方案是把目录搬上 GPU 做成 kernel,或把 miss 的读挪到后台(改变失败语义,`SsdReaders::runBatch` 的注释是现成的对照)。`work_ms` 里 miss 的 SSD 读占大头时,先看 `read_ms` 与 `resolve_ms` 的差。
+- **在 GPU 运行时预构建下一周期的图**(`Engine.cpp:324-350`):命令完成后的 sweep、调度、准入、建图、编码、提交全部串行,GPU 在此期间空闲。**决策规则**:`loop.max_tick_ms`(串行尾的实测)与 `decode_cycle_ms` 比;占比小就不动。要做的两条路仍是原记的双份 arena lane(内存换并行,arena 是各命令共享的缓冲,下一命令的编码不能复用当前命令正在用的)与参数延迟绑定(复杂度换并行);前者先量 arena 的字节(`memory_plan` 的 `shared_prefill_bytes` + `shared_decode_bytes` 是每命令一份,翻倍就是这么多)。
 
 ## 3. 只能在模型环境验证的项
 
