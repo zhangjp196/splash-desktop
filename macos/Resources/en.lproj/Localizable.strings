@@ -43,8 +43,6 @@
 "help.max_context" = "The context the engine plans for: 204800 by default, up to 1M.";
 "field.expert_memory" = "Routed experts";
 "help.expert_memory" = "How much of a MoE target's routed expert store stays in memory. Empty plans automatically; off loads every expert.";
-"field.expert_memory_grow" = "Grow into spare memory";
-"help.expert_memory_grow" = "A size fixes the expert store; on, it may still grow into spare memory, with the size it was given as its floor.";
 "field.ple_memory" = "PLE table";
 "help.ple_memory" = "Qwen3.8-Flash-Next's PLE table: a size such as 2G, off to load it whole, or empty to plan.";
 "field.sparse_kv_memory" = "KV read-back";
@@ -237,6 +235,7 @@
 "field.show_key" = "Show API key";
 "field.hide_key" = "Hide API key";
 "size.auto" = "auto";
+"memory.cap" = "Up to %@";
 "unit.seconds" = "s";
 "unit.milliseconds" = "ms";
 

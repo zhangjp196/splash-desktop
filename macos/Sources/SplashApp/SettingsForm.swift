@@ -123,7 +123,6 @@ struct SettingsEditor: View {
         case .memory:
             return s.maxMemory != b.maxMemory || s.maxContext != b.maxContext
                 || s.expertMemory != b.expertMemory
-                || s.expertMemoryGrow != b.expertMemoryGrow
                 || s.pleMemory != b.pleMemory
                 || s.sparseKvMemory != b.sparseKvMemory
         case .serving:
@@ -347,7 +346,7 @@ struct SettingsEditor: View {
         ) {
             SettingColumns {
                 FieldColumn(title: L10n.string("field.max_memory"), help: L10n.string("help.max_memory")) {
-                    SizeField(text: $settings.maxMemory, prompt: "28G")
+                    MemorySizeField(text: $settings.maxMemory, cap: .budget, prompt: "28G")
                 }
                 FieldColumn(title: L10n.string("field.max_context"), help: L10n.string("help.max_context")) {
                     EditorField(text: $settings.maxContext, prompt: "204800", monospaced: true)
@@ -365,31 +364,18 @@ struct SettingsEditor: View {
             SettingColumns {
                 if profile.experts {
                     FieldColumn(title: L10n.string("field.expert_memory"), help: L10n.string("help.expert_memory")) {
-                        SizeField(text: $settings.expertMemory, prompt: L10n.string("size.auto"))
+                        MemorySizeField(text: $settings.expertMemory, cap: .experts, prompt: L10n.string("size.auto"))
                     }
                 }
                 if profile.ple {
                     FieldColumn(title: L10n.string("field.ple_memory"), help: L10n.string("help.ple_memory")) {
-                        SizeField(text: $settings.pleMemory, prompt: L10n.string("size.auto"))
+                        MemorySizeField(text: $settings.pleMemory, cap: .smallStore, prompt: L10n.string("size.auto"))
                     }
                 }
                 if profile.sparseKv {
                     FieldColumn(title: L10n.string("field.sparse_kv_memory"), help: L10n.string("help.sparse_kv_memory")) {
-                        SizeField(text: $settings.sparseKvMemory, prompt: L10n.string("size.auto"))
+                        MemorySizeField(text: $settings.sparseKvMemory, cap: .smallStore, prompt: L10n.string("size.auto"))
                     }
-                }
-            }
-            if profile.experts {
-                rowDivider
-                SettingRow(
-                    title: L10n.string("field.expert_memory_grow"),
-                    help: L10n.string("help.expert_memory_grow"),
-                    controlWidth: 300
-                ) {
-                    Toggle("", isOn: $settings.expertMemoryGrow)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(SplashPalette.violet)
                 }
             }
         }
@@ -818,6 +804,118 @@ struct SizeField: View {
 
     var body: some View {
         EditorField(text: $text, prompt: prompt, monospaced: true)
+    }
+}
+
+/// How much of the Mac's memory a memory setting may claim: the slider's and
+/// a typed size's upper limit. The overall budget takes the most of the
+/// machine (90%); a store that lives inside that budget takes less, and the
+/// small streaming caches less again, so no single setting can ask the whole
+/// machine for itself.
+enum MemoryCap {
+    /// `--max-memory`, the ceiling on the engine's Metal allocations.
+    case budget
+    /// `--expert-memory`, the routed-expert store inside the budget.
+    case experts
+    /// `--ple-memory` and `--sparse-kv-memory`, the small streaming caches.
+    case smallStore
+
+    /// The cap in gigabytes, on a tenth-of-a-gigabyte grain so a 48G Mac
+    /// reads `43.2G` rather than `43.200000000000004`.
+    var gigabytes: Double {
+        let physical = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+        let fraction: Double
+        switch self {
+        case .budget: fraction = 0.9
+        case .experts: fraction = 0.75
+        case .smallStore: fraction = 0.25
+        }
+        return max(0.5, (physical * fraction * 10).rounded() / 10)
+    }
+
+    /// The cap as the engine reads a size, such as `43.2G`.
+    var label: String { MemorySizeField.label(gigabytes) }
+}
+
+/// A memory size the user can drag or type: a slider up to the share of the
+/// Mac's memory the setting may claim, beside a field that still takes the
+/// whole syntax (`auto`, `off`, or a size such as `16G`). Dragging writes the
+/// size it lands on, the far left returning the setting to automatic; a size
+/// typed above the cap is clamped to it when the field is submitted.
+struct MemorySizeField: View {
+    @Binding var text: String
+    let cap: MemoryCap
+    var prompt = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Slider(value: slider, in: 0...cap.gigabytes)
+                    .accessibilityLabel(Text(prompt.isEmpty ? cap.label : prompt))
+                    .accessibilityValue(Text(MemorySizeField.label(slider.wrappedValue)))
+                EditorField(text: $text, prompt: prompt, monospaced: true)
+                    .frame(width: 84)
+                    .onSubmit(clampTyped)
+            }
+            Text(L10n.format("memory.cap", cap.label))
+                .font(.system(size: 9))
+                .foregroundStyle(SplashPalette.faint)
+        }
+    }
+
+    /// The slider reads the size the field holds and writes the size it is
+    /// dragged to, so typing and dragging stay one value. `auto`, `off` and
+    /// an empty field read as the far left, where a drag back returns the
+    /// setting to automatic.
+    private var slider: Binding<Double> {
+        Binding(
+            get: { min(MemorySizeField.gigabytes(text) ?? 0, cap.gigabytes) },
+            set: { newValue in
+                // Half-gigabyte steps keep a drag deliberate; below the first
+                // step the drag means "back to automatic" rather than a size.
+                let rounded = (newValue * 2).rounded() / 2
+                text = rounded < 0.5 ? "" : MemorySizeField.label(rounded)
+            }
+        )
+    }
+
+    /// A typed size above the cap is clamped to it; `auto`, `off` and an
+    /// empty field are not sizes, so they stay as they were typed.
+    private func clampTyped() {
+        guard let value = MemorySizeField.gigabytes(text), value > cap.gigabytes else { return }
+        text = cap.label
+    }
+
+    /// The size a value holds in gigabytes, for the slider: nil for empty,
+    /// `auto` or `off`, which the slider does not set. Sizes are binary, as
+    /// the engine reads them: `28G` is 28 GiB.
+    static func gigabytes(_ raw: String) -> Double? {
+        var value = raw.trimmingCharacters(in: .whitespaces)
+        guard !value.isEmpty,
+              value.caseInsensitiveCompare("auto") != .orderedSame,
+              value.caseInsensitiveCompare("off") != .orderedSame
+        else { return nil }
+        var scale = 1.0
+        if let last = value.last {
+            switch last {
+            case "K", "k": scale = 1_024
+            case "M", "m": scale = 1_048_576
+            case "G", "g": scale = 1_073_741_824
+            case "T", "t": scale = 1_099_511_627_776
+            default: break
+            }
+        }
+        if scale > 1 { value.removeLast() }
+        guard let amount = Double(value), amount.isFinite, amount > 0 else { return nil }
+        return amount * scale / 1_073_741_824
+    }
+
+    /// A size as the engine reads one: whole gigabytes plain, a fraction to
+    /// one decimal, so a 48G Mac's budget cap reads `43.2G`.
+    static func label(_ gigabytes: Double) -> String {
+        let rounded = (gigabytes * 10).rounded() / 10
+        if rounded == rounded.rounded() { return "\(Int(rounded))G" }
+        return String(format: "%.1fG", rounded)
     }
 }
 

@@ -159,7 +159,6 @@ enum SelfCheck {
         edited.maxMemory = "28G"
         edited.maxContext = "100K"
         edited.expertMemory = "16G"
-        edited.expertMemoryGrow = true
         edited.pleMemory = "2G"
         edited.sparseKvMemory = "1200M"
         edited.verifyRows = "all"
@@ -375,7 +374,6 @@ enum SelfCheck {
                 && carries("--speculation", "dflash2")
                 && launch.contains("--require-draft")
                 && carries("--expert-memory", "16G")
-                && carries("--expert-memory-grow", "on")
                 && carries("--ple-memory", "2G")
                 && carries("--sparse-kv-memory", "1200M")
                 && carries("--verify-rows", "all")

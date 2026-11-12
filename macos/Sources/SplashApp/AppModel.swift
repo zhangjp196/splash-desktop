@@ -126,7 +126,6 @@ final class AppModel: ObservableObject {
     @Published var pleMemory = ""
     @Published var sparseKvMemory = ""
     @Published var verifyRows = "auto"
-    @Published var expertMemoryGrow = ServerSettings.First.expertMemoryGrow
     /// How the engine runs this model: precision, admission, prefill pacing,
     /// and the thinking defaults a request may use. These belong to the
     /// configuration because they are chosen for the model it serves.
@@ -332,7 +331,6 @@ final class AppModel: ObservableObject {
         settings.pleMemory = pleMemory
         settings.sparseKvMemory = sparseKvMemory
         settings.verifyRows = verifyRows
-        settings.expertMemoryGrow = expertMemoryGrow
         settings.kvFormat = kvFormat
         settings.stateFormat = stateFormat
         settings.neuralEngine = neuralEngine
@@ -417,7 +415,6 @@ final class AppModel: ObservableObject {
         pleMemory = settings.pleMemory
         sparseKvMemory = settings.sparseKvMemory
         verifyRows = settings.verifyRows
-        expertMemoryGrow = settings.expertMemoryGrow
         kvFormat = settings.kvFormat
         stateFormat = settings.stateFormat
         neuralEngine = settings.neuralEngine
@@ -773,11 +770,6 @@ final class AppModel: ObservableObject {
         ] where supported {
             let trimmed = value.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty { arguments += [flag, trimmed] }
-        }
-        // A sized store keeps exactly its size unless this asks it to grow
-        // into spare memory, with that size as its floor.
-        if expertMemoryGrow && profile.experts {
-            arguments += ["--expert-memory-grow", "on"]
         }
         // `auto` is the server's own default; `all` makes a draft's greedy and
         // seeded outputs repeat.

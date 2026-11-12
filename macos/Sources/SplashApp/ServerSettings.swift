@@ -51,9 +51,6 @@ struct ServerSettings: Codable, Equatable {
         // The engine's memory and context defaults, shown in the panel.
         static let maxMemory = "28G"
         static let maxContext = "204800"
-        // A size fixes an expert store; on, it may still grow into spare
-        // memory with that size as its floor.
-        static let expertMemoryGrow = false
         // The admission limit: requests running and waiting at once. The
         // server's own default, so the panel and the engine open on the same
         // number.
@@ -134,9 +131,6 @@ struct ServerSettings: Codable, Equatable {
     /// automatic plan, `off` loads the store whole, and a size such as `16G`
     /// caps it.
     var expertMemory = ""
-    /// Whether a sized expert store may still grow into spare memory
-    /// (`--expert-memory-grow`), with the size it was given as its floor.
-    var expertMemoryGrow = First.expertMemoryGrow
     var pleMemory = ""
     var sparseKvMemory = ""
     /// Whether a draft's decode cycles verify every row (`all`) or let the
@@ -259,7 +253,7 @@ struct ServerSettings: Codable, Equatable {
         case reasoningEffort, maxConcurrency
         case diskCache, maxCacheDisk, maxCacheDiskWrites
         case cacheEvictionPreset, cacheEvictionPolicy, cacheEvictionProtect
-        case expertMemory, expertMemoryGrow, pleMemory, sparseKvMemory, verifyRows
+        case expertMemory, pleMemory, sparseKvMemory, verifyRows
         case settingsVersion
     }
 
@@ -324,7 +318,6 @@ struct ServerSettings: Codable, Equatable {
         maxMemory = value(String.self, .maxMemory) ?? maxMemory
         maxContext = value(String.self, .maxContext) ?? maxContext
         expertMemory = value(String.self, .expertMemory) ?? expertMemory
-        expertMemoryGrow = value(Bool.self, .expertMemoryGrow) ?? expertMemoryGrow
         pleMemory = value(String.self, .pleMemory) ?? pleMemory
         sparseKvMemory = value(String.self, .sparseKvMemory) ?? sparseKvMemory
         verifyRows = value(String.self, .verifyRows) ?? verifyRows
@@ -413,7 +406,6 @@ struct ServerSettings: Codable, Equatable {
             ("maxMemory", maxMemory),
             ("maxContext", maxContext),
             ("expertMemory", expertMemory),
-            ("expertMemoryGrow", expertMemoryGrow ? "1" : "0"),
             ("pleMemory", pleMemory),
             ("sparseKvMemory", sparseKvMemory),
             ("verifyRows", verifyRows),
@@ -487,7 +479,6 @@ struct ServerSettings: Codable, Equatable {
         }
         if let value = rows["unloadIdleWeights"] { unloadIdleWeights = value == "1" }
         if let value = rows["residencyKeepAlive"] { residencyKeepAlive = value }
-        if let value = rows["expertMemoryGrow"] { expertMemoryGrow = value == "1" }
         if let value = rows["residencySeconds"],
            Self.number(value, in: 1...86_400) != nil {
             residencySeconds = value

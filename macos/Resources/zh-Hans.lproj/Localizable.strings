@@ -43,8 +43,6 @@
 "help.max_context" = "引擎规划的上下文长度：默认 204800，最高 1M。";
 "field.expert_memory" = "专家驻留";
 "help.expert_memory" = "MoE 目标的专家驻留内存：留空自动规划，off 全部载入。";
-"field.expert_memory_grow" = "允许专家库向上增长";
-"help.expert_memory_grow" = "设定大小会固定专家库；开启后它仍可在空闲内存里向上增长，以设定的大小为下限。";
 "field.ple_memory" = "PLE 表";
 "help.ple_memory" = "Qwen3.8-Flash-Next 的 PLE 表：如 2G，off 全部载入，留空自动规划。";
 "field.sparse_kv_memory" = "KV 回读";
@@ -237,6 +235,7 @@
 "field.show_key" = "显示 API 密钥";
 "field.hide_key" = "隐藏 API 密钥";
 "size.auto" = "自动";
+"memory.cap" = "上限 %@";
 "unit.seconds" = "秒";
 "unit.milliseconds" = "毫秒";
 
