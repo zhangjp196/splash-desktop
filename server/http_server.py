@@ -11,7 +11,7 @@ import sys
 import time
 from http.server import HTTPServer
 
-from . import http_handler, serve_options
+from . import diagnostics, http_handler, serve_options
 from .connections import ConnectionSlots, HttpAdmission
 from .http_handler import FrontendHandler
 from .http_security import RefusedOriginLog
@@ -104,6 +104,9 @@ class FrontendServer(HTTPServer):
             "token_counts": self.token_counts.stats(),
             "connections": self.connections.stats(),
         }
+        # The console is its own backpressure domain: a line it could not take
+        # is counted here rather than waited on by a request.
+        status["console"] = diagnostics.console_stats()
         return status
 
     def server_activate(self):

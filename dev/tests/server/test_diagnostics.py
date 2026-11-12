@@ -332,6 +332,60 @@ class DiagnosticsTests(HarnessTestCase):
         for line in lines:
             self.assertRegex(line, r"^\d{2}:\d{2}:\d{2} worker \d line \d+$")
 
+    def test_bounded_console_drops_a_burst_and_counts_it(self):
+        # The console is its own backpressure domain: a console that cannot
+        # keep up costs lines, counted in /status, never a request's wait.
+        console = diagnostics.Console(queue_lines=4)
+        self.addCleanup(console.close)
+        with (
+            mock.patch("sys.stdout", new_callable=io.StringIO) as output,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as errors,
+        ):
+            for line in range(10):
+                console.write(f"line {line}\n", error=line == 9)
+            self.assertTrue(console.flush())
+            stats = console.stats()
+        self.assertEqual(stats["written"], 4)
+        self.assertEqual(stats["dropped_lines"], 6)
+        self.assertEqual(stats["queued"], 0)
+        # The lines that fit are the first ones, in order, and the drop is
+        # counted on the stream it would have reached.
+        self.assertEqual(
+            output.getvalue(), "".join(f"line {line}\n" for line in range(4))
+        )
+        self.assertEqual(errors.getvalue(), "")
+
+    def test_console_reports_its_counters_when_it_was_never_started(self):
+        with mock.patch.object(diagnostics, "_console", None):
+            self.assertEqual(
+                diagnostics.console_stats(),
+                {
+                    "queued": 0,
+                    "queue_lines": diagnostics.CONSOLE_QUEUE_LINES,
+                    "written": 0,
+                    "dropped_lines": 0,
+                },
+            )
+
+    def test_started_console_writes_and_close_flushes(self):
+        with (
+            mock.patch("sys.stdout", new_callable=io.StringIO) as output,
+            mock.patch.object(diagnostics, "_console", None),
+        ):
+            console = diagnostics.start_console(queue_lines=8)
+            self.addCleanup(diagnostics.close_console)
+            self.assertIs(diagnostics.start_console(), console)
+            diagnostics.print_status("queued line")
+            self.assertEqual(output.getvalue(), "")
+            # close() writes what the queue held before it stops.
+            console.close()
+            self.assertRegex(output.getvalue(), r"^\d{2}:\d{2}:\d{2} queued line\n$")
+            self.assertEqual(console.stats()["written"], 1)
+        # After close the console is gone: a later print writes in place.
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            diagnostics.print_status("inline line")
+            self.assertRegex(output.getvalue(), r"^\d{2}:\d{2}:\d{2} inline line\n$")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from dev.tests import native_peer
 from dev.tests.server_fixtures import FakeRuntime, HarnessTestCase
+from server import diagnostics
 from server import protocol as wire
 from server.chat_format import FLINT, QWEN
 from server.metrics import PROMETHEUS_SERIES, prometheus_metrics
@@ -17,7 +18,7 @@ from server.metrics import PROMETHEUS_SERIES, prometheus_metrics
 # runtime_status_test.cpp checks the engine writes.
 GOLDEN = Path(__file__).parents[1] / "engine/status_golden.json"
 # The sections the server adds to the engine's document before it renders it.
-SERVER_SECTIONS = {"transport", "frontend", "response_store"}
+SERVER_SECTIONS = {"transport", "frontend", "response_store", "console"}
 
 
 class StatusContractTests(unittest.TestCase):
@@ -58,6 +59,7 @@ class StatusRouteTests(HarnessTestCase):
         self.assertEqual(snapshot["memory_pressure"], "normal")
         self.assertEqual(snapshot["thermal_state"], "nominal")
         self.assertIs(snapshot["metal"]["healthy"], True)
+        self.assertEqual(snapshot["console"], diagnostics.console_stats())
         self.assertEqual(
             snapshot["transport"],
             {

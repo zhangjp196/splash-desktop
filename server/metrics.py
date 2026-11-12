@@ -21,6 +21,14 @@ def is_finite_number(value):
 PROMETHEUS_SERIES = {
     "splash_ready": ("ready",),
     "splash_metal_healthy": ("metal", "healthy"),
+    # A compile that landed after Ready: any non-zero value is a warmup gap,
+    # not a tuning knob.
+    "splash_metal_pipelines_created_while_serving_total": (
+        "metal",
+        "pipelines_created_while_serving",
+    ),
+    "splash_console_dropped_lines_total": ("console", "dropped_lines"),
+    "splash_console_queued": ("console", "queued"),
     "splash_transport_pending": ("transport", "pending"),
     "splash_frontend_active": ("frontend", "active"),
     "splash_frontend_waiting": ("frontend", "waiting"),
