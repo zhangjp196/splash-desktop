@@ -907,6 +907,29 @@ void testThermalStateStatus() {
   }
 }
 
+// A pipeline compiled after Ready is a warmup gap, and the status counts it:
+// zero is the only value a gate accepts, so the field must be present and
+// carry the backend's count.
+void testServingPipelineCompilesAreCounted() {
+  const auto memoryPlan = plan();
+  const auto status = [&](uint64_t createdWhileServing) {
+    return runtimeStatusJson(memoryPlan, {}, {}, {}, {}, {}, {}, {}, {}, true, {}, {}, {},
+                             {}, {}, ThermalState::Nominal, {}, {}, {}, {}, createdWhileServing);
+  };
+  require(status(0).find("\"pipelines_created_while_serving\":0") != std::string::npos,
+          "a clean start did not report zero serving-time compiles");
+  require(status(3).find("\"pipelines_created_while_serving\":3") != std::string::npos,
+          "a serving-time compile was not counted");
+  // The field sits in the metal section, beside health, so a gate reads one
+  // object.
+  const std::string json = status(1);
+  const size_t metal = json.rfind("\"metal\":{");
+  require(metal != std::string::npos &&
+              json.find("\"pipelines_created_while_serving\":1", metal) !=
+                  std::string::npos,
+          "the serving-time compile count left the metal section");
+}
+
 // The log names the thermal state once per change: a start at nominal says
 // nothing, a warm start names its state, and a repeat says nothing.
 void testThermalStateTransitions() {
@@ -982,6 +1005,7 @@ int main(int argc, char **argv) {
     testKvSpillStatus();
     testKvWindowStatus();
     testThermalStateStatus();
+    testServingPipelineCompilesAreCounted();
     testThermalStateTransitions();
     testStderrLinesStayWhole();
     testNoticesCarryTheTime();

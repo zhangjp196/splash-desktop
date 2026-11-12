@@ -341,7 +341,7 @@ std::string runtimeStatusJson(
     const AneFfnSnapshot &aneFfn, ThermalState thermalState,
     const std::optional<model::SparseRowStats> &streamedTable,
     const std::optional<model::ExpertStoreStats> &streamedExperts, const std::optional<KvSpillStatus> &kvSpill,
-    const FanState &fanState) {
+    const FanState &fanState, uint64_t metalPipelinesCreatedWhileServing) {
   const auto &resources = core.resources;
   const auto &scheduler = core.scheduler;
   const auto &pool = resources.pool;
@@ -756,7 +756,11 @@ std::string runtimeStatusJson(
   }
   out << "],\"detail\":" << json::quote(warmup.maximumPrefillDetail) << "}"
       << ",\"metal\":{\"healthy\":" << boolean(metalHealthy)
-      << ",\"failure_reason\":" << json::quote(metalFailureReason) << "}}";
+      << ",\"failure_reason\":" << json::quote(metalFailureReason)
+      // A compile that landed after Ready: non-zero means a kernel a request
+      // reached was not built during warmup, and the request paid for it.
+      << ",\"pipelines_created_while_serving\":"
+      << metalPipelinesCreatedWhileServing << "}}";
   return out.str();
 }
 

@@ -148,7 +148,7 @@ std::string RuntimeBootstrap::statusJson(const RuntimeMetricsSnapshot &metrics,
       nativeLoop_->resourceWaitSnapshot(), loop, nativeLoop_->weightsSnapshot(),
       resources_->aneFfnSnapshot(), thermalState_.state(),
       resources_->streamedTableStats(), resources_->streamedExpertStats(), resources_->kvSpillStatus(),
-      fanState_);
+      fanState_, backend.pipelinesCreatedWhileServing());
 }
 
 void RuntimeBootstrap::sampleThermalState() {
@@ -173,8 +173,31 @@ RuntimeBootstrapReport RuntimeBootstrap::requireWarmupAndAnnounce(
     const EngineMemoryPlan &memoryPlan, model::RuntimeModel &modelRuntime,
     ActualMemoryReporter memoryReporter, NativeRuntime &nativeLoop) {
   RuntimeBootstrapReport report = reportForPlan(memoryPlan);
+  // A first start spends minutes here, and a silent minute reads as a hang.
+  // Each step says which one it is and how many there are, so the wait is
+  // explained rather than guessed at; the count is fixed before the first
+  // step, so the numbers never move under the reader.
+  const auto &budget = memoryPlan.breakdown();
+  // Startup exercises only widths that fit this budget. This is not a
+  // serving concurrency limit: the engine still admits lanes dynamically.
+  const uint32_t affordableWidth = static_cast<uint32_t>(std::min<uint64_t>(
+      model::ExecutionLimits::maximumBatchWidth,
+      (budget.dynamicBudgetBytes -
+       kvRunwayPages(budget.kvExtentPages) * budget.kvPageBytes) /
+          budget.laneStateBytes));
+  // The maximum prefill, every decode width (a width the budget cannot hold
+  // is announced as skipped), the composite restore and the memory audit.
+  const uint32_t totalSteps = 1 + model::ExecutionLimits::maximumBatchWidth + 2;
+  uint32_t step = 0;
+  auto announce = [&](std::string_view name, std::string_view note = {}) {
+    logLine("Warming up · ", ++step, " of ", totalSteps, " steps · ", name,
+            note.empty() ? "" : " (", note, note.empty() ? "" : ")");
+  };
   auto run = [&](RuntimeBootstrapStage stage, WarmupStepStatus &status,
-                 auto &&operation, bool optional = false) {
+                 auto &&operation, bool optional = false,
+                 std::string_view name = {}) {
+    // A decode step names its width, as the status document's warmup keys do.
+    announce(name.empty() ? runtimeBootstrapStageName(stage) : name);
     model::WarmupStepResult result;
     try {
       result = operation();
@@ -215,30 +238,25 @@ RuntimeBootstrapReport RuntimeBootstrap::requireWarmupAndAnnounce(
   nativeLoop.observePrefill(model::ExecutionLimits::prefillTokenBudget,
                            maximumPrefill.wallSeconds * 1000.0, maximumPrefill.hostSeconds * 1000.0);
   report.warmup.maximumPrefillDetail = maximumPrefill.detail;
-  const auto &budget = memoryPlan.breakdown();
-  // Startup exercises only widths that fit this budget. This is not a
-  // serving concurrency limit: the engine still admits lanes dynamically.
-  const uint32_t affordableWidth = static_cast<uint32_t>(std::min<uint64_t>(
-      model::ExecutionLimits::maximumBatchWidth,
-      (budget.dynamicBudgetBytes -
-       kvRunwayPages(budget.kvExtentPages) * budget.kvPageBytes) /
-          budget.laneStateBytes));
   for (uint32_t width = 1;
        width <= model::ExecutionLimits::maximumBatchWidth; ++width) {
     if (width > affordableWidth ||
         (width > 1 && report.warmup.decodeBatches[width - 2] ==
                           WarmupStepStatus::MemoryLimited)) {
       report.warmup.decodeBatches[width - 1] = WarmupStepStatus::MemoryLimited;
+      announce("decode_b" + std::to_string(width), "skipped: memory");
       continue;
     }
     run(RuntimeBootstrapStage::DecodeWarmup,
         report.warmup.decodeBatches[width - 1],
-        [&] { return modelRuntime.warmupDecodeBatch(width); }, width > 1);
+        [&] { return modelRuntime.warmupDecodeBatch(width); }, width > 1,
+        "decode_b" + std::to_string(width));
   }
   run(RuntimeBootstrapStage::CompositeStateRestore,
       report.warmup.compositeStateRestore,
       [&] { return modelRuntime.warmupCompositeStateRestore(); }, true);
 
+  announce("memory_audit");
   ActualMemoryReport actual;
   try {
     actual = memoryReporter();
@@ -441,6 +459,9 @@ std::unique_ptr<RuntimeBootstrap> RuntimeBootstrap::start(
   // The per-operation guard RuntimeResources installed is only for startup:
   // once Ready, the engine meets memory pressure between its ticks.
   resources->backend().setOperationGuard({});
+  // From here a pipeline a dispatch resolves is compiled on the serving path,
+  // which the status counts (metal.pipelines_created_while_serving).
+  resources->backend().beginServing();
   resources->beginServing();
   return std::unique_ptr<RuntimeBootstrap>(
       new RuntimeBootstrap(std::move(resources), std::move(modelRuntime),

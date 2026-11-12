@@ -490,6 +490,19 @@ public:
   // as it would, but encodes and commits nothing.
   void preparePipelines(std::span<const ComputeDispatch> dispatches);
 
+  // Marks the end of startup, once every kernel a request may reach is
+  // compiled (preparePipelines). A dispatch that resolves a pipeline after
+  // this compiles it on the serving path, where it stalls the requests
+  // behind it; pipelinesCreatedWhileServing() counts those, so a gate can
+  // fail on a non-zero count instead of trusting that warmup covered every
+  // shape. Called once, before the engine answers its first request.
+  void beginServing() noexcept;
+  // Pipelines a dispatch compiled after beginServing(). Zero means every
+  // kernel a request reached was built before Ready; a non-zero count names
+  // a compile that landed in serving, which is a bug in the warmup, not a
+  // tuning knob.
+  [[nodiscard]] uint64_t pipelinesCreatedWhileServing() const noexcept;
+
   [[nodiscard]] MetalMemoryStats memoryStats() const noexcept;
   // Explicit safe-point refresh for memory admission/reclamation code. A
   // control-plane status query must use memoryStats() so it can never wait

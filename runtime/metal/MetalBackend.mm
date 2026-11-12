@@ -390,6 +390,11 @@ struct BackendAsyncState {
     mutable std::atomic<uint64_t> hostPhysicalBytes{0};
     mutable std::atomic<uint64_t> peakHostPhysicalBytes{0};
     std::atomic<bool> healthy{true};
+    // Set by MetalBackend::beginServing, and the pipelines compiled after it
+    // (MetalBackend::pipelinesCreatedWhileServing). Read from the status
+    // thread while the submitting thread compiles, so both are atomic.
+    std::atomic<bool> serving{false};
+    std::atomic<uint64_t> pipelinesCreatedWhileServing{0};
     mutable std::mutex healthMutex;
     std::string healthReason;
     mutable std::mutex gateMutex;
@@ -1101,6 +1106,11 @@ struct MetalBackend::Impl {
                 "unable to create Metal pipeline " + std::string(name) +
                 ": " + errorDescription(error));
         }
+        // Every pipeline is built here, so this is the one place that can
+        // tell a compile that landed in serving from one startup paid for.
+        if (asyncState->serving.load(std::memory_order_acquire))
+            asyncState->pipelinesCreatedWhileServing.fetch_add(
+                1, std::memory_order_relaxed);
         return result;
     }
 
@@ -2044,6 +2054,15 @@ void MetalBackend::preparePipelines(
     std::span<const ComputeDispatch> dispatches) {
     checkOperation();
     static_cast<void>(impl_->prepare(dispatches));
+}
+
+void MetalBackend::beginServing() noexcept {
+    impl_->asyncState->serving.store(true, std::memory_order_release);
+}
+
+uint64_t MetalBackend::pipelinesCreatedWhileServing() const noexcept {
+    return impl_->asyncState->pipelinesCreatedWhileServing.load(
+        std::memory_order_relaxed);
 }
 
 MetalMemoryStats MetalBackend::memoryStats() const noexcept {

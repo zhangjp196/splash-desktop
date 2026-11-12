@@ -742,6 +742,44 @@ void preparedPipelinesCompileAhead(const std::string &metallibPath) {
     std::cout << "PASS prepared pipelines compile ahead\n";
 }
 
+// A pipeline compiled after beginServing is counted, and one compiled before
+// it is not: the count is the gate that a warmup covered every kernel a
+// request reaches.
+void servingPipelineCompilesAreCounted(const std::string &metallibPath) {
+    MetalBackend backend(metallibPath);
+    auto buffer = sharedBuffer(backend, sizeof(uint32_t));
+    auto *value = static_cast<uint32_t *>(buffer.contents());
+    *value = 0;
+    const uint32_t count = 1, increment = 1;
+    const ComputeDispatch dispatch{"test_add_u32", {{0, buffer}},
+        {{1, &count, sizeof(count)}, {2, &increment, sizeof(increment)}},
+        {1, 1, 1}, {1, 1, 1}};
+    // Startup compiles: nothing counts yet.
+    backend.preparePipelines({&dispatch, 1});
+    require(backend.pipelinesCreatedWhileServing() == 0,
+            "a startup compile was counted as a serving one");
+    backend.beginServing();
+    require(backend.pipelinesCreatedWhileServing() == 0,
+            "beginServing itself counted a compile");
+    // A cached pipeline is no compile, so serving it counts nothing.
+    (void)backend.submit(dispatch);
+    require(backend.pipelinesCreatedWhileServing() == 0,
+            "submitting a prepared dispatch counted a compile");
+    // A dispatch of a kernel startup never prepared compiles while serving:
+    // a second backend stands for it, and its compile lands after its own
+    // beginServing.
+    MetalBackend late(metallibPath);
+    late.beginServing();
+    auto lateBuffer = sharedBuffer(late, sizeof(uint32_t));
+    const ComputeDispatch lateDispatch{"test_add_u32", {{0, lateBuffer}},
+        {{1, &count, sizeof(count)}, {2, &increment, sizeof(increment)}},
+        {1, 1, 1}, {1, 1, 1}};
+    (void)late.submit(lateDispatch);
+    require(late.pipelinesCreatedWhileServing() == 1,
+            "a compile after beginServing was not counted");
+    std::cout << "PASS serving pipeline compiles are counted\n";
+}
+
 std::atomic<unsigned> blitEncoders{0};
 std::atomic<unsigned> computeEncoders{0};
 IMP originalBlitEncoder = nullptr;
@@ -2514,6 +2552,7 @@ int main(int argc, const char *argv[]) {
             shutdownSparesACommandThatCompletes(argv[1]);
             dispatchProfilingCoversEveryCommand(argv[1]);
             preparedPipelinesCompileAhead(argv[1]);
+            servingPipelineCompilesAreCounted(argv[1]);
             buffersStayResident(argv[1]);
             infiniteKeepAliveHoldsResidency(argv[1]);
             releasedMemory(argv[1]);

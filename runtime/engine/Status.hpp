@@ -323,6 +323,9 @@ struct KvSpillStatus final {
     const std::optional<model::SparseRowStats> &streamedTable = std::nullopt,
     const std::optional<model::ExpertStoreStats> &streamedExperts = std::nullopt,
     const std::optional<KvSpillStatus> &kvSpill = std::nullopt,
-    const FanState &fanState = FanState{});
+    const FanState &fanState = FanState{},
+    // MetalBackend::pipelinesCreatedWhileServing: a compile after Ready,
+    // which warmup should have covered.
+    uint64_t metalPipelinesCreatedWhileServing = 0);
 
 } // namespace splash::engine
