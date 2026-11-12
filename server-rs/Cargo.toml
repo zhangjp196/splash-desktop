@@ -1,0 +1,14 @@
+[package]
+name = "splash-server"
+version = "1.10.0"
+edition = "2021"
+description = "Splash's serving process, in Rust: the HTTP APIs, the chat templates, the tokenizers and the engine's wire protocol client."
+license = "Apache-2.0"
+
+[lib]
+name = "splash_server"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
