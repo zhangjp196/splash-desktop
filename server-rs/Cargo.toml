@@ -12,5 +12,6 @@ path = "src/lib.rs"
 [dependencies]
 serde = "1"
 serde_json = { version = "1", features = ["unbounded_depth"] }
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 
 [dev-dependencies]
