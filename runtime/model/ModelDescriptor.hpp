@@ -49,9 +49,10 @@ enum class SpeculationKind : uint8_t { None = 1, DFlash2 };
 enum class DraftFormat : uint8_t { None = 1, Safetensors, Gguf };
 
 // The installed plan of a model's speculation, recorded beside its target
-// (docs/speculation.zh.md). A plan with no draft is complete: proposalRows is
-// one, the state layout's draft part is zero, and the decode cycle verifies
-// the anchor alone.
+// (the design lives in the repository's history:
+// `git show 68ce4e29^:docs/speculation.zh.md`). A plan with no draft is
+// complete: proposalRows is one, the state layout's draft part is zero, and
+// the decode cycle verifies the anchor alone.
 struct SpeculationPlan final {
   SpeculationKind kind = SpeculationKind::None;
   DraftFormat format = DraftFormat::None;
