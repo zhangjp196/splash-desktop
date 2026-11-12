@@ -548,3 +548,13 @@ impl Call {
         true
     }
 }
+
+impl fmt::Debug for Call {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Call")
+            .field("request_id", &self.request_id)
+            .field("generation", &self.generation)
+            .field("done", &self.done())
+            .finish()
+    }
+}
