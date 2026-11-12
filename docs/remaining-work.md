@@ -8,7 +8,7 @@
 
 已修的一处(2026-11-12):pool 对 pending keys 的读越界——循环的 `t` 跑到 `kBlock - 1 = 3`,而 pending 只有 `kPending = 3` 个槽。语义上 t=3 的读总被丢弃(完成的 block 末 token 必是本步的行,`position >= first`),但边界检查门禁会为此中止 dispatch。已按 `min(t, kPending - 1)` 收住;无验证的门禁通过。
 
-2026-11-12 的二分把症状钉死了:验证下 pool 的 kernel **完整执行**(dispatch 末尾落在绑定缓冲里的标记读得到),但它对 extent 的 addressed 写**整体不落地**——extent 读回全 0,无验证时同一测试通过,`MTL_SHADER_VALIDATION=2` 同样。已排除:pending 读越界(已修)、对齐、extent 大小、barrier 与写函数的形态(换成直接写仍被丢)、addressed 写机制本身(store kernel 经地址写 KV,attention-variants 在验证下通过)、绑定顺序、setTableReach(无人调用,store 也不靠它)。结论方向:验证层对这个 dispatch 的 addressed 写的丢弃,是 Metal 验证层的伪影而非 kernel 缺陷;下一步是给 Apple 的最小复现(qwen4-kernels 的 pool 一例即可),或把该例的 extent 改经 `HostKvExtents` 分配对照一次。相关 kernel 由 Qwen3.8-Flash-Next(d6003397)与 YaRN(40470bbd)引入。
+2026-11-12 的二分把症状钉死了:验证下 pool 的 kernel **完整执行**(dispatch 末尾落在绑定缓冲里的标记读得到),但它对 extent 的 addressed 写**整体不落地**——extent 读回全 0,无验证时同一测试通过,`MTL_SHADER_VALIDATION=2` 同样。已排除:pending 读越界(已修)、对齐、extent 大小、barrier 与写函数的形态(换成直接写仍被丢)、addressed 写机制本身(store kernel 经地址写 KV,attention-variants 在验证下通过)、绑定顺序、setTableReach(无人调用,store 也不靠它)。结论方向:验证层对这个 dispatch 的 addressed 写的丢弃,是 Metal 验证层的伪影而非 kernel 缺陷——同类先例见第 3 项的开源对照(llama.cpp 验证下出 NaN、PyTorch 验证下未绑定可选缓冲即中止);下一步是给 Apple 的最小复现(qwen4-kernels 的 pool 一例即可),或把该例的 extent 改经 `HostKvExtents` 分配对照一次。相关 kernel 由 Qwen3.8-Flash-Next(d6003397)与 YaRN(40470bbd)引入。
 
 ## 2. 已测量但未动的引擎项
 
@@ -18,10 +18,12 @@
 
 ## 3. 只能在模型环境验证的项
 
-- **decode 图复用的逐位门禁**:在真实 target 上跑 `--verify-rows all` 与 CPU 对比。现有 CPU 测试覆盖了复用的记账逻辑,但未覆盖真实 plan。
-- **logprob kernel 对真实词表**:metal 测试在 1,003 词表上对比 CPU 扫描;真实 152K 请求才能确认 float 分母的误差量级。
-- **完整 `make test-engine-metal` 门禁**:第 1 项修复前无法通过;`qwen4-kernels` 之后的测试组(attention plan、linear plan、KV page tier、model loading、qwen state、q8、gdn、dflash、draft selector、target sampling、vision、handoff)自本次改动后尚未全部跑过。
-- **改动前后 decode/prefill 速率对比**:同 prompt、同并发,方法见 [性能](performance.md)的基准记录。
+各项的开源对照(2026-11-12 查证),本机做不到的部分按同形状补:
+
+- **decode 图复用的逐位门禁**:在真实 target 上跑 `--verify-rows all` 与 CPU 对比。现有 CPU 测试覆盖了复用的记账逻辑,但未覆盖真实 plan。开源同形:vLLM 的 CUDA graph 重放以"重放输出对齐 eager 执行"为正确性门([CUDA Graphs 设计](https://docs.vllm.ai/en/stable/design/cuda_graphs/),静态输入缓冲 + 重放);本项的形状相同——复用图跑一遍、新 plan 跑一遍,逐 token 对齐。
+- **logprob kernel 对真实词表**:metal 测试在 1,003 词表上对比 CPU 扫描;真实 152K 请求才能确认 float 分母的误差量级。开源同形:llama.cpp 以"服务端返回的 logprobs 对齐参考实现"为门(社区实测其丢失与修复的[测量记录](https://huggingface.co/blog/bytkim/llama-cpp-logprob-loss));本项即同一对比在真实词表上做一次。
+- **完整 `make test-engine-metal` 门禁**:第 1 项修复前无法通过;`qwen4-kernels` 之后的测试组(attention plan、linear plan、KV page tier、model loading、qwen state、q8、gdn、dflash、draft selector、target sampling、vision、handoff)自本次改动后尚未全部跑过。开源对照:llama.cpp 同样在 `MTL_SHADER_VALIDATION=1` 下跑 Metal 测试,并撞到过验证层改变数值的已知问题([#4545](https://github.com/ggml-org/llama.cpp/issues/4545):验证下出 NaN,无验证不出;[#27784](https://github.com/ggml-org/llama.cpp/issues/27784):真越界而验证不报,因其把一个大缓冲绑定后按偏移寻址);PyTorch 的 MPS kernel 也有[验证下未绑定可选缓冲即中止](https://github.com/pytorch/pytorch/issues/200897)的先例。第 1 项的"验证层丢弃 addressed 写"属同一类伪影;llama.cpp 的对策是把寻址改成一个大绑定缓冲,本树的 extent 设计不允许,只能走 Apple 复现。
+- **改动前后 decode/prefill 速率对比**:同 prompt、同并发,方法见 [性能](performance.md)的基准记录。开源同形:社区基准的惯例是同机、同模型、同 prompt、同输出长度、temperature 0(如 [MLX 对 llama.cpp 的实测](https://bishal.io/blog/six-local-models-m1-max-llama-cpp-vs-mlx/)),与本树的方法一致。
 
 ## 4. 明确不做
 
