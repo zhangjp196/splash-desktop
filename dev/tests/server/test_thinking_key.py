@@ -153,7 +153,7 @@ class ThinkingKeyTests(unittest.TestCase):
                 "load_thinking_key",
                 side_effect=ThinkingKeyError("invalid key file"),
             ),
-            mock.patch.object(api.AutoTokenizer, "from_pretrained") as tokenizer,
+            mock.patch.object(api.FastTokenizer, "from_pretrained") as tokenizer,
             mock.patch.object(api.engine_runtime, "MultiplexedRuntime") as runtime,
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
             self.assertRaisesRegex(SystemExit, "1"),

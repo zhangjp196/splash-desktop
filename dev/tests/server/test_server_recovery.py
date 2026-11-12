@@ -878,7 +878,7 @@ class ServerRecoveryTests(HarnessTestCase):
                         serve_api, "load_thinking_key", return_value=None
                     ),
                     mock.patch.object(
-                        api.AutoTokenizer, "from_pretrained", return_value=object()
+                        api.FastTokenizer, "from_pretrained", return_value=object()
                     ),
                     mock.patch.object(serve_api, "validate_tokenizer"),
                     mock.patch.object(serve_api, "ChatTemplates"),

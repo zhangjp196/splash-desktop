@@ -4,7 +4,6 @@ import threading
 from concurrent.futures import Future, wait
 
 from llguidance import LLExecutor, LLMatcher, LLTokenizer, grammar_from
-from llguidance.hf import from_tokenizer as guidance_tokenizer
 from llguidance.numpy import (
     allocate_token_bitmask,
     fill_next_token_bitmask_par,
@@ -14,6 +13,7 @@ from llguidance.numpy import (
 from . import runtime as engine_runtime
 from .chat_format import THINK_END, THINK_START, TOOL_CALL_OPEN
 from .errors import APIError, ConstraintError
+from .fast_tokenizer import guidance_tokenizer
 from .lru import LRUCache
 
 

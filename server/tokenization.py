@@ -26,8 +26,12 @@ class PromptTokenizer:
     (ChatFormat.message_boundary), where the tokenizer splits its input."""
 
     MIN_PREFIX_CHARS = 4096
-    BUDGET_BYTES = 8 * 1024 * 1024
-    CAPACITY = 4
+    # Wide enough that concurrent coding agents' conversations, each a few
+    # hundred K tokens of ids, keep their prefixes cached beside each other:
+    # an evicted prefix re-encodes whole, which a 150K-token conversation
+    # pays on every admission until it is cached again.
+    BUDGET_BYTES = 32 * 1024 * 1024
+    CAPACITY = 16
 
     def __init__(self, tokenizer, marker):
         self.tokenizer = tokenizer

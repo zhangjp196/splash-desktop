@@ -73,7 +73,7 @@ class TokenizerContractTests(unittest.TestCase):
             mock.patch.object(server.signal, "signal"),
             mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
-                server.AutoTokenizer, "from_pretrained", return_value=tokenizer
+                server.FastTokenizer, "from_pretrained", return_value=tokenizer
             ),
             mock.patch.object(serve_api, "FrontendServer", return_value=http),
             mock.patch.object(server.engine_runtime, "MultiplexedRuntime") as native,

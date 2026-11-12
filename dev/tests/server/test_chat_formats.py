@@ -835,7 +835,7 @@ class ServedFamilyTests(unittest.TestCase):
             fixtures.unprepared_hold(family),
             mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
-                api.AutoTokenizer, "from_pretrained", return_value=tokenizer
+                api.FastTokenizer, "from_pretrained", return_value=tokenizer
             ),
             mock.patch.object(serve_api, "validate_tokenizer") as validate,
             mock.patch.object(serve_api, "ChatTemplates"),

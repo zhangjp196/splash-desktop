@@ -14,8 +14,6 @@ import signal
 import threading
 from pathlib import Path
 
-from transformers import AutoTokenizer
-
 from install import assembly
 from install.models import ModelError
 
@@ -26,6 +24,7 @@ from .backend import NativeBackend, ThinkingEndError, thinking_end_tokens
 from .chat_templates import ChatTemplateError, ChatTemplates
 from .constraints import ConstraintFactory, validate_tokenizer
 from .diagnostics import print_request, print_status
+from .fast_tokenizer import FastTokenizer
 from .frontend import Frontend
 from .http_server import FrontendServer
 from .origins import ANY_ORIGIN
@@ -277,9 +276,7 @@ def main():
                 f"{args.model} is not prepared as a model of a family this "
                 "release serves: prepare it again"
             )
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_root / "tokenizer", local_files_only=True, trust_remote_code=False
-        )
+        tokenizer = FastTokenizer.from_pretrained(model_root / "tokenizer")
         validate_tokenizer(tokenizer, family.chat_format)
         thinking_end = thinking_end_tokens(
             tokenizer, args.thinking_end_text, family.chat_format

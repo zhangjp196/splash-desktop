@@ -15,8 +15,6 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from transformers import AutoTokenizer
-
 from install import assembly
 
 from . import json_codec, serve_options
@@ -25,6 +23,7 @@ from .backend import NativeBackend
 from .chat_assets import CHAT_ASSETS
 from .connections import ConnectionSlots, HttpAdmission, RequestBodyReservation
 from .errors import APIError
+from .fast_tokenizer import FastTokenizer
 from .http_handler import (
     HTTP_IO_TIMEOUT,
     HTTP_UPLOAD_BYTES_PER_SECOND,
@@ -72,7 +71,7 @@ __all__ = (
     "HttpAdmission",
     "RequestBodyReservation",
     "APIError",
-    "AutoTokenizer",
+    "FastTokenizer",
     "BaseHTTPRequestHandler",
     "HTTPServer",
     "NativeBackend",

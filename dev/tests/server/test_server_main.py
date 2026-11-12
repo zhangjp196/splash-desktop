@@ -57,7 +57,7 @@ class ServerMainTests(unittest.TestCase):
             unprepared_hold(),
             mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
-                api.AutoTokenizer, "from_pretrained", return_value=tokenizer
+                api.FastTokenizer, "from_pretrained", return_value=tokenizer
             ),
             mock.patch.object(serve_api, "validate_tokenizer"),
             mock.patch.object(serve_api, "ChatTemplates"),
@@ -130,7 +130,7 @@ class ServerMainTests(unittest.TestCase):
                         serve_api, "load_thinking_key", return_value=None
                     ),
                     mock.patch.object(
-                        api.AutoTokenizer, "from_pretrained", return_value=object()
+                        api.FastTokenizer, "from_pretrained", return_value=object()
                     ),
                     mock.patch.object(serve_api, "validate_tokenizer"),
                     mock.patch.object(serve_api, "ChatTemplates") as templates_type,
@@ -197,7 +197,7 @@ class ServerMainTests(unittest.TestCase):
                         serve_api, "load_thinking_key", return_value=None
                     ),
                     mock.patch.object(
-                        api.AutoTokenizer, "from_pretrained", return_value=object()
+                        api.FastTokenizer, "from_pretrained", return_value=object()
                     ),
                     mock.patch.object(serve_api, "validate_tokenizer"),
                     mock.patch.object(serve_api, "ChatTemplates"),
@@ -254,7 +254,7 @@ class ServerMainTests(unittest.TestCase):
                         serve_api, "load_thinking_key", return_value=None
                     ),
                     mock.patch.object(
-                        api.AutoTokenizer, "from_pretrained", return_value=object()
+                        api.FastTokenizer, "from_pretrained", return_value=object()
                     ),
                     mock.patch.object(serve_api, "validate_tokenizer"),
                     mock.patch.object(serve_api, "ChatTemplates"),
@@ -291,7 +291,7 @@ class ServerMainTests(unittest.TestCase):
             unprepared_hold(),
             mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
-                api.AutoTokenizer, "from_pretrained", return_value=object()
+                api.FastTokenizer, "from_pretrained", return_value=object()
             ),
             mock.patch.object(serve_api, "validate_tokenizer"),
             mock.patch.object(serve_api, "ChatTemplates"),
@@ -338,7 +338,7 @@ class ServerMainTests(unittest.TestCase):
             unprepared_hold(),
             mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
-                api.AutoTokenizer, "from_pretrained", return_value=object()
+                api.FastTokenizer, "from_pretrained", return_value=object()
             ),
             mock.patch.object(serve_api, "validate_tokenizer"),
             mock.patch.object(serve_api, "ChatTemplates"),
@@ -374,7 +374,7 @@ class ServerMainTests(unittest.TestCase):
             unprepared_hold(),
             mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
-                api.AutoTokenizer,
+                api.FastTokenizer,
                 "from_pretrained",
                 return_value=SimpleNamespace(chat_template=None),
             ),
@@ -400,7 +400,7 @@ class ServerMainTests(unittest.TestCase):
         with (
             mock.patch.object(serve_api, "parse_args", return_value=args),
             mock.patch.object(serve_api, "FrontendServer", return_value=server),
-            mock.patch.object(api.AutoTokenizer, "from_pretrained") as tokenizer,
+            mock.patch.object(api.FastTokenizer, "from_pretrained") as tokenizer,
             mock.patch.object(api.engine_runtime, "MultiplexedRuntime") as runtime,
             mock.patch.object(api.signal, "signal"),
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
@@ -436,7 +436,7 @@ class ServerMainTests(unittest.TestCase):
             ),
             mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
-                api.AutoTokenizer, "from_pretrained", return_value=object()
+                api.FastTokenizer, "from_pretrained", return_value=object()
             ) as tokenizer,
             # The record names the family the model was installed as.
             mock.patch.object(
@@ -460,9 +460,7 @@ class ServerMainTests(unittest.TestCase):
         self.assertEqual(held, [True])
         # The tokenizer and every engine, a relaunched one too, are the
         # assembly's the link named, wherever the link points later.
-        tokenizer.assert_called_once_with(
-            served / "tokenizer", local_files_only=True, trust_remote_code=False
-        )
+        tokenizer.assert_called_once_with(served / "tokenizer")
         command = runtime_type.call_args.args[0]
         relaunch = runtime_type.call_args.kwargs["relaunch_command"]
         self.assertEqual(command[2], str(served))
@@ -523,7 +521,7 @@ class ServerMainTests(unittest.TestCase):
             ),
             mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(serve_api, "FrontendServer", return_value=server),
-            mock.patch.object(api.AutoTokenizer, "from_pretrained") as tokenizer,
+            mock.patch.object(api.FastTokenizer, "from_pretrained") as tokenizer,
             mock.patch.object(api.engine_runtime, "MultiplexedRuntime") as runtime,
             mock.patch.object(api.signal, "signal"),
             mock.patch("sys.stdout", new_callable=io.StringIO),

@@ -58,6 +58,7 @@ SERVER_FILES = (
     "image_prompts.py",
     "backend.py",
     "constraints.py",
+    "fast_tokenizer.py",
     "output.py",
     "frontend.py",
     "compaction.py",
@@ -119,7 +120,7 @@ OPTIONAL_ENGINE_FILES = ("host-step.metallib",)
 # entry modules, run from the runtime's directory.
 SMOKE_IMPORTS = (
     "import sys; sys.path.insert(0, '.'); "
-    "import tokenizers, llguidance, numpy, PIL, transformers, huggingface_hub, pypdfium2; "
+    "import tokenizers, llguidance, numpy, PIL, huggingface_hub, pypdfium2; "
     "import server.server, install.launcher"
 )
 
@@ -226,6 +227,9 @@ def build_runtime(destination, version):
     for entry in (destination / "python/bin").iterdir():
         if not re.fullmatch(r"python3(\.\d+)?", entry.name):
             entry.unlink()
+    # pip itself, which nothing at runtime imports: the install ran above.
+    for entry in (destination / "python/lib").glob("python*/site-packages/pip*"):
+        shutil.rmtree(entry)
     # The bytecode the distribution ships and pip's run writes.
     for cache in list(destination.rglob("__pycache__")):
         shutil.rmtree(cache)

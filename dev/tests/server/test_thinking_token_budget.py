@@ -398,7 +398,7 @@ class ThinkingEndTextTests(unittest.TestCase):
             mock.patch.object(server.signal, "signal"),
             mock.patch.object(serve_api, "load_thinking_key", return_value=None),
             mock.patch.object(
-                server.AutoTokenizer, "from_pretrained", return_value=self.tokenizer()
+                server.FastTokenizer, "from_pretrained", return_value=self.tokenizer()
             ),
             mock.patch.object(serve_api, "validate_tokenizer"),
             mock.patch.object(serve_api, "FrontendServer", return_value=http),
