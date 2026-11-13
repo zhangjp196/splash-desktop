@@ -150,6 +150,73 @@ pub fn completion_response(
     response
 }
 
+/// The metrics object a response and its usage chunk carry: the counts, the
+/// request's lifecycle intervals, and the decode rate the streaming chat
+/// page reads as its tok/s. Ported from `server/metrics.py`'s
+/// `metrics_dict`: the first native emission can be a whole speculative
+/// block, and its generation precedes TTFT, so those tokens are kept out of
+/// the interval from first emission to Done.
+pub fn metrics_dict(result: &CollectedResult) -> Value {
+    let decode_tokens = result
+        .completion_tokens
+        .saturating_sub(result.first_token_batch_tokens);
+    let mut latency = Map::new();
+    let intervals = [
+        ("start_to_first_token_ms", result.start_to_first_token_ms),
+        ("first_token_to_done_ms", result.first_token_to_done_ms),
+        ("wall_ms", result.request_wall_ms),
+    ];
+    for (name, milliseconds) in intervals {
+        if milliseconds.is_finite() && milliseconds >= 0.0 {
+            latency.insert(name.into(), json!(milliseconds));
+        }
+    }
+    let wall = latency.get("wall_ms").and_then(Value::as_f64);
+    let to_done = latency.get("first_token_to_done_ms").and_then(Value::as_f64);
+    if result.completion_tokens > 0 {
+        if let (Some(wall), Some(to_done)) = (wall, to_done) {
+            if wall >= to_done {
+                let ttft = wall - to_done;
+                latency.insert("ttft_ms".into(), json!(ttft));
+                let start = latency
+                    .get("start_to_first_token_ms")
+                    .and_then(Value::as_f64);
+                if let Some(start) = start {
+                    if ttft >= start {
+                        latency.insert("queue_to_start_ms".into(), json!(ttft - start));
+                    }
+                }
+            }
+        }
+    }
+    if result.first_token_batch_tokens > 0 && decode_tokens > 0 {
+        if let Some(to_done) = to_done {
+            if to_done > 0.0 {
+                let rate = decode_tokens as f64 * 1000.0 / to_done;
+                if rate.is_finite() {
+                    latency.insert("stream_tokens_per_second".into(), json!(rate));
+                }
+            }
+        }
+    }
+    let mut metrics = json!({
+        "prefill": {"tokens": result.prefill_tokens},
+        "decode": {"tokens": decode_tokens},
+        "request_latency": latency,
+        "cache": {
+            "matched_tokens": result.cache_matched_tokens,
+            "deduplicated_tokens": 0,
+        },
+    });
+    if result.drafted_tokens != 0 {
+        metrics["speculation"] = json!({
+            "drafted_tokens": result.drafted_tokens,
+            "accepted_draft_tokens": result.accepted_draft_tokens,
+        });
+    }
+    metrics
+}
+
 /// One chunk of a Chat completion stream.
 pub fn stream_chunk(
     model: &str,

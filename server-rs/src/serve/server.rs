@@ -126,15 +126,8 @@ fn serve_connection(stream: &mut TcpStream, server: &Server) -> std::io::Result<
                 Err(error) => Response::error(400, &error, "invalid_request_error"),
             })
         }
-        ("GET", "/status") => Ok(Response::json(
-            200,
-            &json!({
-                "ready": server.pipeline.client.ready(),
-                "model": server.pipeline.model,
-                "maximum_context_tokens": server.pipeline.client.readiness().map(|ready| ready.max_context_tokens),
-                "frontend": server.preparation().map(Preparation::status),
-            }),
-        )),
+        ("GET", "/status") => Ok(Response::json(200, &status_document(server))),
+        ("POST", "/v1/thermal") => Ok(thermal(&request, server)),
         ("GET", "/v1/models") => Ok(Response::json(
             200,
             &json!({"object": "list", "data": [{
@@ -154,6 +147,132 @@ fn serve_connection(stream: &mut TcpStream, server: &Server) -> std::io::Result<
             &Response::error(500, "the request failed", "internal_error"),
         ),
     }
+}
+
+/// The heat-and-noise rung of the running engine: sets the share of wall
+/// time prefill may keep the GPU busy, applied without a restart, and
+/// answers with the duty the engine took. Ported from the Python's
+/// `_post_thermal`.
+fn thermal(request: &crate::http::Request, server: &Server) -> Response {
+    let body = match request.json() {
+        Ok(body) => body,
+        Err(error) => return Response::error(400, &error, "invalid_request_error"),
+    };
+    let Some(object) = body.as_object() else {
+        return Response::error(400, "prefill_duty_percent is required", "invalid_request_error");
+    };
+    let Some(requested) = object.get("prefill_duty_percent") else {
+        return Response::error(400, "prefill_duty_percent is required", "invalid_request_error");
+    };
+    if let Some(unknown) = object
+        .keys()
+        .find(|name| name.as_str() != "prefill_duty_percent")
+    {
+        return Response::error(
+            400,
+            &format!("this endpoint takes only prefill_duty_percent; got {unknown}"),
+            "invalid_request_error",
+        );
+    }
+    let duty = match prefill_duty(requested) {
+        Some(duty) => duty,
+        None => {
+            return Response::error(
+                400,
+                &format!("prefill_duty_percent {PREFILL_DUTY_RANGE}"),
+                "invalid_request_error",
+            )
+        }
+    };
+    match server
+        .pipeline
+        .client
+        .set_prefill_duty(duty as f32, Duration::from_secs(5))
+    {
+        Ok(event) => {
+            let snapshot: Value =
+                serde_json::from_slice(&event.json).unwrap_or_else(|_| json!({}));
+            let took = snapshot
+                .pointer("/throttle/duty_percent")
+                .and_then(Value::as_f64)
+                .unwrap_or(duty);
+            Response::json(200, &json!({"prefill_duty_percent": took}))
+        }
+        Err(_) => Response::error(
+            503,
+            "the engine did not answer within 5 s; retry shortly",
+            "engine_busy",
+        ),
+    }
+}
+
+/// The duty a control request names: a number, or the text of one, from the
+/// minimum a person waits for to 100.
+fn prefill_duty(value: &Value) -> Option<f64> {
+    let duty = match value {
+        Value::Number(number) => number.as_f64()?,
+        Value::String(text) => text.parse::<f64>().ok()?,
+        _ => return None,
+    };
+    (duty.is_finite() && (MINIMUM_PREFILL_DUTY..=100.0).contains(&duty)).then_some(duty)
+}
+
+const MINIMUM_PREFILL_DUTY: f64 = 10.0;
+const PREFILL_DUTY_RANGE: &str = "must be a percentage from 10 to 100";
+
+/// The status document the live board reads: the engine's own JSON — its
+/// memory, cache, request, fan and throttle sections, with the rates and
+/// peaks `metrics` carries — plus what the server serving it adds: its
+/// readiness, the model name, the preparation slots, the transport
+/// counters, and the instance identity.
+fn status_document(server: &Server) -> Value {
+    let engine = server
+        .pipeline
+        .client
+        .status(Duration::from_secs(2))
+        .ok()
+        .and_then(|event| serde_json::from_slice::<Value>(&event.json).ok())
+        .filter(Value::is_object);
+    let ready = server.pipeline.client.ready();
+    let mut document = match engine {
+        Some(document) => document,
+        None => json!({"schema_version": 8}),
+    };
+    document["ready"] = json!(ready && document.get("ready").and_then(Value::as_bool).unwrap_or(true));
+    document["model"] = json!(server.pipeline.model);
+    // A status request the engine did not answer leaves the readiness the
+    // engine announced as the only truth: the context window the app waits
+    // for comes from it rather than disappearing with the document.
+    if document.get("maximum_context_tokens").is_none() {
+        if let Some(readiness) = server.pipeline.client.readiness() {
+            document["maximum_context_tokens"] = json!(readiness.max_context_tokens);
+        }
+    }
+    document["frontend"] = server
+        .preparation()
+        .map(Preparation::status)
+        .unwrap_or_else(|| json!({"preparation_capacity": 0, "active": 0, "waiting": 0}));
+    document["transport"] = json!({
+        "ready": ready,
+        "recovering": false,
+        "stopped": server.pipeline.client.fatal_error().is_some(),
+        "pending": server.pipeline.client.pending_count(),
+        "pending_limit": server
+            .pipeline
+            .client
+            .readiness()
+            .map(|ready| ready.max_concurrent_requests)
+            .unwrap_or(0),
+        "restarts": 0,
+        "last_crash_trace": Value::Null,
+        "status_stale": false,
+        "status_age_ms": 0.0,
+    });
+    document["instance"] = json!({
+        "pid": std::process::id(),
+        "model": server.pipeline.model,
+    });
+    document
 }
 
 fn web_asset(path: &str) -> Option<Response> {
@@ -234,9 +353,19 @@ fn complete_answer(
     job: &openai::JobInfo,
 ) -> std::io::Result<Response> {
     match pipeline.submit(prepared, max_output_tokens) {
-        Ok((call, tokens)) => {
+        Ok((call, tokens, first_batch)) => {
             let _ = call.result(None);
-            match pipeline.complete(body, prepared, &call, &tokens, &pipeline.model, job) {
+            let first_token_batch_tokens =
+                first_batch.load(std::sync::atomic::Ordering::Relaxed);
+            match pipeline.complete(
+                body,
+                prepared,
+                &call,
+                &tokens,
+                first_token_batch_tokens,
+                &pipeline.model,
+                job,
+            ) {
                 Ok(response) => Ok(Response::json(200, &response)),
                 Err(error) => Ok(Response::error(error.status, &error.message, "server_error")),
             }
@@ -276,6 +405,9 @@ fn stream_answer(
         Arc::new(std::sync::Mutex::new(
             StreamingToolCallProjector::without_policy(1, &pipeline.chat_format),
         )),
+        prepared.thinking,
+        pipeline.chat_format.clone(),
+        body.get("tools").is_some(),
     );
     let request = crate::protocol::RequestFrame {
         logical_max_output_tokens: max_output_tokens,

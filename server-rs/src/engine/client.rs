@@ -285,6 +285,34 @@ impl EngineClient {
         self.status_request(timeout, true)
     }
 
+    /// Changes a running engine's prefill duty, as `--prefill-duty` does at
+    /// start, and answers with the status that reads it back. The duty frame
+    /// itself is not answered; the status request written after it is, and
+    /// the engine applies the frames it reads in order, so that status's
+    /// `throttle` section carries the duty the engine took (it clamps what a
+    /// configuration may not ask for).
+    pub fn set_prefill_duty(
+        &self,
+        duty_percent: f32,
+        timeout: Duration,
+    ) -> Result<wire::StatusJsonEvent, EngineError> {
+        {
+            let state = self.shared.state.lock().expect("state lock");
+            if state.closed {
+                return Err(EngineError::RuntimeClosed("runtime is closed".into()));
+            }
+            if state.ready.is_none() {
+                return Err(EngineError::EngineUnhealthy(
+                    "native process is not ready".into(),
+                ));
+            }
+        }
+        let frame = wire::PrefillDutyRequestFrame { duty_percent };
+        self.shared
+            .write_frame(&wire::serialize_message(&wire::ClientMessage::PrefillDutyRequest(frame)).expect("prefill duty frame"))?;
+        self.status(timeout)
+    }
+
     fn status_request(
         &self,
         timeout: Duration,
