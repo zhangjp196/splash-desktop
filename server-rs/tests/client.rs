@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use splash_server::engine::{Call, EngineClient, EngineError, GenerationRequest};
+use splash_server::engine::{EngineClient, EngineError, GenerationRequest};
 use splash_server::protocol as wire;
 
 /// One client frame the fake engine reads.

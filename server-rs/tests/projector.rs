@@ -3,7 +3,7 @@
 //! `project` and `dev/tests/server/test_partial_tool_output.py`'s cases),
 //! each expectation checked against the Python's own output.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use splash_server::chat_format::{qwen, TOOL_CALL_OPEN};
 use splash_server::output::{
