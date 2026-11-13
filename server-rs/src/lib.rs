@@ -5,6 +5,7 @@
 //! wire protocol is first: it is the byte-exact boundary with the engine,
 //! and `dev/tests/engine/protocol_golden.txt` pins both sides' bytes.
 
+pub mod chat_format;
 pub mod engine;
 pub mod protocol;
 pub mod support;

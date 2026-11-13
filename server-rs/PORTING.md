@@ -18,7 +18,7 @@ sides.
 | 2 | `json_codec.py`, `errors.py`, `lru.py` | ~700 | `src/support/` | **done** — 12 tests; one documented deviation: lone-surrogate JSON escapes are refused at parse (serde_json), the Python retains them; the dialect layer decides how such requests are answered |
 | 3 | `runtime.py` (engine subprocess client) | 1,554 | `src/engine/` | **core done** — the call state machine and the one-generation client (spawn, reader thread, dispatch, submit, cancel, status) with 16 tests against a fake engine; restarts, liveness probes and the CPU mask workers remain |
 | 4 | `fast_tokenizer.py`, `tokenization.py` | ~900 | `src/tokenization/` (tokenizers crate) | **encoding surface and prompt cache done** (5 tests, real Qwen tokenizer); the chat-template half of `fast_tokenizer.py` is module 5 |
-| 5 | `chat_format.py`, `chat_templates.py`, `chat_messages.py` | ~2,300 | `src/templates/` (minijinja) | **rendering core done** — the golden fixture's 11 renders and the refusal match the Python byte for byte; `chat_format`/`chat_messages` (the format's structure and message normalization) remain |
+| 5 | `chat_format.py`, `chat_templates.py`, `chat_messages.py` | ~2,300 | `src/chat_format.rs`, `src/templates/` (minijinja) | **format model, rendering core and template loading done** (12 tests); `chat_messages.py` (message normalization) and `chat_templates.py`'s probing/patching remain |
 | 6 | `output.py`, `streamer.py`, `thinking.py` | ~1,100 | `src/output/` | not started |
 | 7 | `constraints.py` | ~600 | `src/constraints/` (llguidance crate) | not started |
 | 8 | `dialects/` (openai, anthropic, responses, scoring) | ~4,000 | `src/dialects/` | not started |
