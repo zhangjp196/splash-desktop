@@ -5,6 +5,17 @@ every module's port is wrong until the Python tests' behavior is
 reproduced, and the whole server is not replaced until the port serves
 what the Python one serves.
 
+## The end-to-end path (the second session's milestone)
+
+`src/serve/pipeline.rs` runs one Chat request from the body to the
+assembled response: the messages normalized, the template rendered, the
+prompt tokenized, the wire frame submitted to the engine client, the
+output's tokens collected through the call's events, and the answer
+assembled as OpenAI's dialect answers. `src/http/` carries the minimal
+HTTP/1.1 server the Python's stdlib frontend mirrors. The test runs the
+whole path against a fake engine over a socket pair, with the real Qwen
+tokenizer and template.
+
 ## Where this stands (end of the first porting session)
 
 5,702 lines of Rust (plus 2,152 of tests) port the first six modules'
