@@ -27,23 +27,23 @@ for the server: the complete response carries the engine's answer with
 its usage, and the SSE stream carries the role chunk, the content
 delta, the finish chunk, the usage chunk and [DONE].
 
-## Where this stands (end of the first porting session)
+## Where this stands (end of the second porting session)
 
-5,702 lines of Rust (plus 2,152 of tests) port the first six modules'
-cores: the wire protocol byte-exact against its golden file, the
-support layer, the engine client's call state machine and subprocess
-core, the tokenizer's encoding surface with the prompt cache, the chat
-format's model with the templates' rendering and loading, and the
-output's stop search, reasoning splitter and tool-call projector.
-62 tests are green, every one against the Python implementation's own
-output, and the build carries no warnings.
+12,746 lines of Rust (7,000 of source, 5,700 of tests, 24 test files)
+port the serving path's core end to end, with 115 tests green and no
+build warnings. The wire protocol is byte-exact against its golden
+file; the engine client runs one generation over any byte streams; the
+tokenizer, the chat templates and the constraints run on the same Rust
+libraries the Python wrapped; the three API dialects' shapes are
+ported; and the server answers Chat completions over real TCP, complete
+and streamed, behind the security layer and the admission gate.
 
 The next session picks up at the first `not started` row below. The
-highest-value next slices, in order: the streamer's incremental decode
-(`streamer.py`, small), the constraints (module 7, the llguidance crate
-direct), then the dialects and the HTTP layer, which make an
-end-to-end serving path. The projector's full `ParameterTypes` arrives
-with tool_schema (module 11). Each module's port is complete when its
+highest-value next slices, in order: the exchange's job machinery (the
+frontend's preparation slots, the choice jobs, the compaction), the
+remaining request conversion (the Responses tools and format), the
+connection watch's head-wait path, and the entry CLI that binds the
+listener and spawns the engine. Each module's port is complete when its
 Python test file's cases pass in Rust.
 
 ## Why this order
