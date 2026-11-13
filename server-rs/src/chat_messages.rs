@@ -19,7 +19,7 @@ pub struct MessageError {
 }
 
 impl MessageError {
-    fn bad(message: impl Into<String>) -> MessageError {
+    pub fn bad(message: impl Into<String>) -> MessageError {
         MessageError {
             status: 400,
             message: message.into(),

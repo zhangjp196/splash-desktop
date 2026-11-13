@@ -2,6 +2,7 @@
 //! assembly. Ported from `server/dialects/`.
 
 pub mod anthropic;
+pub mod anthropic_request;
 pub mod openai;
 
 
