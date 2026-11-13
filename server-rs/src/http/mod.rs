@@ -2,9 +2,15 @@
 //! architecture the Python's `http.server`-based frontend uses. It parses
 //! a request's line, headers and body, and answers with JSON or an SSE
 //! event stream.
+//!
+//! The security layer validates what a request names: its authority, its
+//! browser origin and its credentials.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+
+pub mod security;
+pub use security::{authenticate, parse_allowed_origin, validate_api_key, validate_headers, AllowedOrigin, Headers, SecurityError};
 
 /// One parsed request.
 pub struct Request {
