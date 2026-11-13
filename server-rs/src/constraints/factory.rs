@@ -12,27 +12,38 @@ use crate::constraints::tokenizer_env::ConstraintTokenizer;
 use crate::support::lru::LruCache;
 
 /// A grammar the factory compiles: GBNF and regex go through llguidance's
-/// own converters, which `GrammarWithLexer` builds from.
+/// own converters, which `GrammarWithLexer` builds from. `List` is a
+/// grammar list — the JSON `{"grammars": [...]}` a tool grammar is — whose
+/// side grammars the parser compiles together and starts at the first.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Grammar {
     Regex(String),
     Gbnf(String),
     Json(serde_json::Value),
+    List(String),
 }
 
 impl Grammar {
-    fn to_grammar_with_lexer(&self) -> Result<GrammarWithLexer, GrammarError> {
-        match self {
-            Grammar::Regex(regex) => Ok(GrammarWithLexer::from_regex(regex)),
-            // A GBNF grammar reads as llguidance's own grammar language,
-            // which TopLevelGrammar::from_lark_or_grammar_list parses.
+    /// The grammar as llguidance's top-level grammar: one grammar for the
+    /// single-grammar sources, the whole list for `Grammar::List`.
+    fn to_top_level_grammar(&self) -> Result<llguidance::api::TopLevelGrammar, GrammarError> {
+        Ok(match self {
+            Grammar::Regex(regex) => llguidance::api::TopLevelGrammar::from_grammar(
+                GrammarWithLexer::from_regex(regex),
+            ),
             Grammar::Gbnf(gbnf) => {
                 let top = llguidance::api::TopLevelGrammar::from_lark_or_grammar_list(gbnf)
                     .map_err(|error| GrammarError(error.to_string()))?;
-                Ok(top.grammars.into_iter().next().unwrap_or_default())
+                llguidance::api::TopLevelGrammar::from_grammar(
+                    top.grammars.into_iter().next().unwrap_or_default(),
+                )
             }
-            Grammar::Json(schema) => Ok(GrammarWithLexer::from_json_schema(schema.clone())),
-        }
+            Grammar::Json(schema) => llguidance::api::TopLevelGrammar::from_grammar(
+                GrammarWithLexer::from_json_schema(schema.clone()),
+            ),
+            Grammar::List(list) => llguidance::api::TopLevelGrammar::from_lark_or_grammar_list(list)
+                .map_err(|error| GrammarError(error.to_string()))?,
+        })
     }
 }
 
@@ -52,6 +63,10 @@ pub struct ConstraintFactory {
 
 /// The cache's bounds, as the Python's are.
 const CACHE_SIZE: usize = 32;
+
+/// The stack one grammar compile runs on: the lark compiler recurses over
+/// the grammar's expansions, and a schema's nesting multiplies the depth.
+const COMPILE_STACK_BYTES: usize = 64 * 1024 * 1024;
 const CACHE_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 
 impl ConstraintFactory {
@@ -96,7 +111,7 @@ impl ConstraintFactory {
         *self.misses.lock().expect("misses lock") += 1;
         let compiled = self.compile(grammar)?;
         let size = match grammar {
-            Grammar::Regex(text) | Grammar::Gbnf(text) => text.len(),
+            Grammar::Regex(text) | Grammar::Gbnf(text) | Grammar::List(text) => text.len(),
             Grammar::Json(schema) => serde_json::to_string(schema).map(|s| s.len()).unwrap_or(0),
         };
         let mut cache = self.cache.lock().expect("cache lock");
@@ -108,13 +123,22 @@ impl ConstraintFactory {
     }
 
     fn compile(&self, grammar: &Grammar) -> Result<Arc<Mutex<Matcher>>, GrammarError> {
-        let with_lexer = grammar.to_grammar_with_lexer()?;
-        let parser = self
-            .factory
-            .create_parser(llguidance::api::TopLevelGrammar::from_grammar(
-                with_lexer.clone(),
-            ))
-            .map_err(|error| GrammarError(error.to_string()))?;
+        let top = grammar.to_top_level_grammar()?;
+        // The lark compiler recurses over the grammar's expansions, and a
+        // schema's nesting multiplies the depth: the compile runs on a
+        // thread with a stack far above a request thread's, which the
+        // recursion would otherwise overflow.
+        let factory = &self.factory;
+        let parser = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(COMPILE_STACK_BYTES)
+                .spawn_scoped(scope, move || {
+                    factory.create_parser(top).map_err(|error| GrammarError(error.to_string()))
+                })
+                .expect("compile thread")
+                .join()
+                .expect("the compiler catches its own panics")
+        })?;
         let matcher = Matcher::new(Ok(parser));
         if matcher.is_error() {
             return Err(GrammarError(matcher.get_error().unwrap_or_default()));

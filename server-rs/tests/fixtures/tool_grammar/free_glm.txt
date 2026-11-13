@@ -1,0 +1,6 @@
+%llguidance {}
+start: parameter*
+parameter: <arg_key> NAME </arg_key> <arg_value> value
+value: RAW_VALUE </arg_value>
+NAME: /[^<> \t\n\r]([^<>\n\r]{0,254}[^<> \t\n\r])?/
+RAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\/arg_value>(?s:.*)/

@@ -10,11 +10,21 @@ use serde_json::{json, Value};
 
 use crate::chat_format::{ChatFormat, THINK_END, THINK_START};
 use crate::chat_messages::normalize_messages;
+use crate::constraints::{ConstraintFactory, Grammar, TokenConstraint};
 use crate::dialects::openai;
 use crate::engine::{EngineClient, EngineError, GenerationRequest};
+use crate::images::prompts::{
+    expand_image_pads, image_pad_token_id, prepare_images, render_image_tokens,
+};
+use crate::images::{ImageCache, RequestImages};
 use crate::output::{ReasoningPart, ReasoningSplitter, StreamingToolCallProjector};
+use crate::protocol::{ConstraintMode, ImageSpan};
 use crate::templates::{ChatTemplateRenderer, Templates};
 use crate::tokenization::{FastTokenizer, PromptTokenizer};
+use crate::tool_schema::policy::ResponseFormat;
+use crate::tool_schema::{
+    json_grammar, normalize_response_format, normalize_tools, tool_grammar, ToolPolicy,
+};
 
 /// The prepared pieces of one request.
 pub struct Prepared {
@@ -24,6 +34,35 @@ pub struct Prepared {
     /// starts in the reasoning: the Python's `RenderedPrompt.thinking`,
     /// which is the last think marker the prompt's end carries.
     pub thinking: bool,
+    /// The request's prepared images, held so their pixels outlive
+    /// preparation: the Python's `image_owner`, which keeps the batch's
+    /// charge on the image cache until the request ends.
+    pub images: Option<RequestImages>,
+    /// The image spans the engine injects into, and their pixels in span
+    /// order; both empty for a text-only request.
+    pub image_spans: Vec<ImageSpan>,
+    pub image_pixels: Vec<u8>,
+    /// The tools the prompt declares, as the Python's `Prompt.tools` —
+    /// every offered tool, each naming its function.
+    pub tools: Option<Vec<Value>>,
+    /// How the request's tool calls are generated and read; `None`
+    /// without tools.
+    pub tool_policy: Option<Arc<ToolPolicy>>,
+    /// The response format a structured output generates and validates
+    /// to; `None` without one.
+    pub response_format: Option<ResponseFormat>,
+}
+
+impl Prepared {
+    /// Whether the output generates under a grammar: constrained tool
+    /// calls, or a response schema beside or without them.
+    pub fn constrained(&self) -> bool {
+        self.tool_policy
+            .as_ref()
+            .map(|policy| policy.constrained)
+            .unwrap_or(false)
+            || self.response_format.is_some()
+    }
 }
 
 /// One error the pipeline answers with.
@@ -31,6 +70,27 @@ pub struct Prepared {
 pub struct PipelineError {
     pub status: u16,
     pub message: String,
+    /// The machine code a refusal carries where the Python's error names
+    /// one; `None` for the plain server error.
+    pub code: Option<String>,
+}
+
+impl PipelineError {
+    fn new(status: u16, message: impl Into<String>) -> PipelineError {
+        PipelineError {
+            status,
+            message: message.into(),
+            code: None,
+        }
+    }
+
+    fn with_code(status: u16, message: impl Into<String>, code: &str) -> PipelineError {
+        PipelineError {
+            status,
+            message: message.into(),
+            code: Some(code.to_string()),
+        }
+    }
 }
 
 impl From<crate::chat_messages::MessageError> for PipelineError {
@@ -38,6 +98,7 @@ impl From<crate::chat_messages::MessageError> for PipelineError {
         PipelineError {
             status: error.status,
             message: error.message,
+            code: None,
         }
     }
 }
@@ -47,6 +108,7 @@ impl From<crate::templates::ChatTemplateError> for PipelineError {
         PipelineError {
             status: 500,
             message: error.0,
+            code: None,
         }
     }
 }
@@ -56,6 +118,7 @@ impl From<EngineError> for PipelineError {
         PipelineError {
             status: 503,
             message: error.to_string(),
+            code: None,
         }
     }
 }
@@ -69,6 +132,15 @@ pub struct Pipeline {
     pub chat_format: ChatFormat,
     pub client: EngineClient,
     pub model: String,
+    /// The image cache the request images prepare through, and the pixel
+    /// budget one image resizes within: the Python's `images` and
+    /// `max_image_pixels`.
+    pub images: ImageCache,
+    pub max_image_pixels: u32,
+    /// The compiled output constraints, over the model's grammar
+    /// tokenizer; `None` where the model's tokenizer directory is
+    /// unknown, which a constrained request refuses.
+    pub constraints: Option<ConstraintFactory>,
 }
 
 /// The template variables a request's reasoning selects, as the Python's
@@ -130,6 +202,7 @@ fn invalid(message: impl Into<String>) -> PipelineError {
     PipelineError {
         status: 400,
         message: message.into(),
+        code: None,
     }
 }
 
@@ -152,34 +225,168 @@ const RESERVED_TEMPLATE_KWARGS: &[&str] = &[
 ];
 
 impl Pipeline {
+    /// The engine's readiness: whether the served model takes images, and
+    /// the context window a request's images count against.
+    fn readiness(&self) -> Option<crate::protocol::ReadyEvent> {
+        self.client.readiness()
+    }
+
     /// Prepare one Chat request's prompt: the messages normalized, the
-    /// template rendered, the prompt tokenized.
-    pub fn prepare(&self, body: &Value) -> Result<Prepared, PipelineError> {
+    /// template rendered, the prompt tokenized, the images prepared and
+    /// their placeholders widened.
+    pub fn prepare(
+        &self,
+        body: &Value,
+        deadline: &mut dyn FnMut() -> Result<(), crate::support::errors::ApiError>,
+    ) -> Result<Prepared, PipelineError> {
         let messages = body
             .get("messages")
-            .ok_or_else(|| PipelineError { status: 400, message: "messages is required".into() })?;
-        let normalized = normalize_messages(messages, false)?;
+            .ok_or_else(|| PipelineError::new(400, "messages is required"))?;
+        let ready = self.readiness();
+        let vision = ready.map(|ready| ready.vision).unwrap_or(false);
+        let max_context = ready
+            .map(|ready| u64::from(ready.max_context_tokens))
+            .unwrap_or(u64::MAX);
+        let normalized = normalize_messages(messages, vision)?;
         let templated = crate::chat_messages::template_messages(&normalized);
-        let messages_value = Value::Array(templated);
+        let messages_value = Value::Array(templated.clone());
+        // The tools and the response format read before the prompt
+        // renders, as the Python's `_prepare_prompt` runs: a refusal here
+        // never renders documents or builds validators.
+        let (offered, tool_policy) = normalize_tools(
+            body.get("tools"),
+            body.get("tool_choice"),
+            body.get("parallel_tool_calls"),
+            None,
+        )
+        .map_err(|error| PipelineError {
+            status: error.status,
+            message: error.message,
+            code: None,
+        })?;
+        let response_format = normalize_response_format(body.get("response_format"))
+            .map_err(|error| PipelineError {
+                status: error.status,
+                message: error.message,
+                code: None,
+            })?;
         let source = self.templates.select(None, body.get("tools"))?;
-        let renderer = ChatTemplateRenderer::new(&source)
-            .map_err(|error| PipelineError { status: 500, message: error.0 })?;
-        let tools = body.get("tools").cloned();
+        let tools = offered.clone();
         let kwargs = template_kwargs(body)?;
-        let rendered = renderer
-            .render(&messages_value, tools.as_ref(), None, true, &kwargs)
-            .map_err(|error| PipelineError { status: 500, message: error.0 })?;
-        let prompt_tokens = self.prompt_tokenizer.encode(&rendered);
+        // The images prepare before the template renders, as the Python's
+        // `_render_prompt` runs: an expired request starts no more decodes.
+        let images = if vision {
+            let mut check_deadline = || deadline();
+            Some(
+                prepare_images(
+                    &self.images,
+                    &templated,
+                    self.max_image_pixels,
+                    max_context,
+                    true,
+                    &mut check_deadline,
+                )
+                .map_err(|error| PipelineError { status: error.status, message: error.message, code: None })?,
+            )
+        } else {
+            None
+        };
+        let has_images = images.as_ref().map(|batch| !batch.is_empty()).unwrap_or(false);
+        let render = |template_source: &str| -> Result<String, crate::templates::ChatTemplateError> {
+            ChatTemplateRenderer::new(template_source)?
+                .render(
+                &messages_value,
+                tools.as_ref().map(|tools| Value::Array(tools.clone())).as_ref(),
+                None,
+                true,
+                &kwargs,
+            )
+        };
+        let (rendered, prompt_tokens, positions) = if has_images {
+            let (tokens, positions, rendered) = render_image_tokens(
+                &source,
+                &render,
+                &|text| self.tokenizer.encode_with_offsets(text, false),
+            )
+            .map_err(|error| PipelineError { status: error.status, message: error.message, code: None })?;
+            (rendered, tokens, Some(positions))
+        } else {
+            let rendered = render(&source)
+                .map_err(|error| PipelineError { status: 500, message: error.0, code: None })?;
+            let prompt_tokens = self.prompt_tokenizer.encode(&rendered);
+            (rendered, prompt_tokens, None)
+        };
         // The generation prompt opens the think block where its text ends
         // inside one: the same question `server/frontend.py`'s
         // `_generation_prompt` asks of the probed prompt, read from the
         // rendered text's own last markers.
         let thinking = rendered.rfind(THINK_START) > rendered.rfind(THINK_END);
+        // The placeholders widen to the images' merged token counts, and
+        // the spans name where the engine injects.
+        let (prompt_tokens, image_spans, image_pixels) = match (&images, positions) {
+            (Some(batch), Some(positions)) if !batch.is_empty() => {
+                let pad_id = image_pad_token_id(&self.tokenizer)
+                    .map_err(|error| PipelineError { status: error.status, message: error.message, code: None })?;
+                let (expanded, spans, pixels) = expand_image_pads(
+                    &prompt_tokens,
+                    batch.images(),
+                    &positions,
+                    pad_id,
+                    max_context,
+                    true,
+                )
+                .map_err(|error| PipelineError { status: error.status, message: error.message, code: None })?;
+                (expanded, spans, pixels)
+            }
+            _ => (prompt_tokens, Vec::new(), Vec::new()),
+        };
         Ok(Prepared {
             rendered,
             prompt_tokens,
             thinking,
+            images,
+            image_spans,
+            image_pixels,
+            tools,
+            tool_policy: tool_policy.map(Arc::new),
+            response_format,
         })
+    }
+
+    /// The engine request one prepared request submits: its frame, with
+    /// the image spans and the constraint mode the request carries, and
+    /// the mask provider a constrained request answers with.
+    pub fn generation_request(
+        &self,
+        prepared: &Prepared,
+        max_output_tokens: u32,
+        constraint: Option<Arc<TokenConstraint>>,
+    ) -> GenerationRequest {
+        GenerationRequest {
+            frame: crate::protocol::RequestFrame {
+                logical_max_output_tokens: max_output_tokens,
+                prompt_tokens: prepared.prompt_tokens.clone(),
+                image_spans: prepared.image_spans.clone(),
+                image_pixels: prepared.image_pixels.clone(),
+                constraint: if constraint.is_some() {
+                    ConstraintMode::TokenMask
+                } else {
+                    ConstraintMode::None
+                },
+                ..crate::protocol::RequestFrame::default()
+            },
+            deadline: None,
+            mask_provider: constraint.map(|constraint| -> crate::engine::MaskProvider {
+                Arc::new(move |event| {
+                    constraint.masks(&event.simulation_tokens).map_err(|error| {
+                        crate::engine::EngineError::MaskComputationFailed {
+                            message: error,
+                            retryable: false,
+                        }
+                    })
+                })
+            }),
+        }
     }
 
     /// Submit one prepared request to the engine, collecting the output's
@@ -202,6 +409,13 @@ impl Pipeline {
         let first_batch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let collector = tokens.clone();
         let first_batch_seen = first_batch.clone();
+        let constraint = self.constraint(prepared)?;
+        let constraint: Option<Arc<TokenConstraint>> =
+            constraint.map(|constraint| Arc::new(constraint));
+        // The tokens the output generates are the grammar's input: each
+        // emission is committed, and the next mask consumes them, as the
+        // Python's exchange does.
+        let committing = constraint.clone();
         let on_event: crate::engine::EventCallback = Arc::new(move |call, event| {
             if let crate::protocol::EngineEvent::Tokens(tokens_event) = event {
                 if call.request_id == tokens_event.request_id {
@@ -213,6 +427,12 @@ impl Pipeline {
                             std::sync::atomic::Ordering::Relaxed,
                         );
                     }
+                    if let Some(constraint) = committing.as_ref() {
+                        if let Err(error) = constraint.commit(&tokens_event.tokens) {
+                            call.record_callback_error(format!("constraint: {error}"));
+                            return;
+                        }
+                    }
                     collector
                         .lock()
                         .expect("token lock")
@@ -220,24 +440,51 @@ impl Pipeline {
                 }
             }
         });
-        let request = GenerationRequest {
-            frame: crate::protocol::RequestFrame {
-                logical_max_output_tokens: max_output_tokens,
-                prompt_tokens: prepared.prompt_tokens.clone(),
-                ..crate::protocol::RequestFrame::default()
-            },
-            deadline: None,
-            mask_provider: None,
-        };
+        let request = self.generation_request(prepared, max_output_tokens, constraint);
         let call = self.client.submit(&request, Some(on_event), None)?;
         Ok((call, tokens, first_batch))
+    }
+
+    /// The output constraint one prepared request generates under: the
+    /// grammar its tool policy or response format builds, compiled over
+    /// the model's grammar tokenizer. `None` for an unconstrained output.
+    pub fn constraint(
+        &self,
+        prepared: &Prepared,
+    ) -> Result<Option<TokenConstraint>, PipelineError> {
+        if !prepared.constrained() {
+            return Ok(None);
+        }
+        let factory = self.constraints.as_ref().ok_or_else(|| {
+            PipelineError::new(
+                500,
+                "the request is constrained but the model's grammar tokenizer is unavailable",
+            )
+        })?;
+        let grammar = match (&prepared.tool_policy, &prepared.response_format) {
+            (Some(policy), response_schema) => {
+                let response_schema = response_schema.as_ref().map(|format| &format.schema);
+                tool_grammar(policy, prepared.thinking, response_schema, &self.chat_format)
+                    .map_err(|error| PipelineError {
+                        status: error.status,
+                        message: error.message,
+                        code: None,
+                    })?
+            }
+            (None, Some(format)) => json_grammar(&format.schema, prepared.thinking, &self.chat_format),
+            (None, None) => return Ok(None),
+        };
+        let constraint = factory
+            .create(&Grammar::List(grammar))
+            .map_err(|error| PipelineError::with_code(400, error.0, "invalid_request_error"))?;
+        Ok(Some(constraint))
     }
 
     /// One complete (non-streaming) Chat response: the engine's output
     /// collected and assembled as OpenAI's dialect answers.
     pub fn complete(
         &self,
-        body: &Value,
+        _body: &Value,
         prepared: &Prepared,
         call: &Arc<crate::engine::Call>,
         tokens: &Arc<Mutex<Vec<u32>>>,
@@ -250,7 +497,7 @@ impl Pipeline {
         let text = self
             .tokenizer
             .decode(&tokens, true)
-            .map_err(|error| PipelineError { status: 500, message: error.0 })?;
+            .map_err(|error| PipelineError { status: 500, message: error.0, code: None })?;
         // The output's reasoning is split from its answer before the
         // projector reads it, as the Python's exchange does: the answer is
         // what a call's tags are read from, and the reasoning is what the
@@ -258,7 +505,7 @@ impl Pipeline {
         let mut splitter = ReasoningSplitter::new(
             prepared.thinking,
             Some(&self.chat_format),
-            body.get("tools").is_some(),
+            prepared.tool_policy.is_some(),
         );
         let mut reasoning = String::new();
         let mut answer = String::new();
@@ -270,9 +517,31 @@ impl Pipeline {
                 ReasoningPart::Content(text) => answer.push_str(&text),
             }
         }
-        let mut projector = StreamingToolCallProjector::without_policy(1, &self.chat_format);
+        // A chat answer is parsed as it arrives whether it streams or not:
+        // its calls where a tool policy stands, and in any answer, the
+        // reasoning the model writes after its own ended is dropped.
+        let mut projector = match &prepared.tool_policy {
+            Some(policy) => StreamingToolCallProjector::new(
+                Box::new(crate::tool_schema::ToolParameterTypes::new(policy.clone())),
+                1,
+                &self.chat_format,
+                prepared.response_format.is_some(),
+            ),
+            None => StreamingToolCallProjector::without_policy(1, &self.chat_format),
+        };
         projector.put(&answer);
         let (content, calls, _owed) = projector.finish(false);
+        // An answer without calls is validated against the response format
+        // only when the model ended it.
+        let ended = done.reason != crate::protocol::FinishReason::Length;
+        if ended && calls.is_empty() {
+            if let Some(format) = &prepared.response_format {
+                crate::tool_schema::validate_response_content(&content, Some(&format.validator))
+                    .map_err(|error| {
+                        PipelineError::with_code(error.status, error.message, &error.code)
+                    })?;
+            }
+        }
         let mut result = collected_result(&done, first_token_batch_tokens);
         result.metrics = openai::metrics_dict(&result);
         let collected = openai::Collected {

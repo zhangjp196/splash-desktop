@@ -133,7 +133,11 @@ fn serve_connection(stream: &mut TcpStream, server: &Server) -> std::io::Result<
             &json!({"object": "list", "data": [{
                 "id": server.pipeline.model, "object": "model", "owned_by": "splash",
                 "context_length": server.pipeline.client.readiness().map(|ready| ready.max_context_tokens),
-                "input_modalities": ["text"],
+                "input_modalities": if server.pipeline.client.readiness().map(|ready| ready.vision).unwrap_or(false) {
+                    vec!["text", "image"]
+                } else {
+                    vec!["text"]
+                },
             }]}),
         )),
         ("GET", path) => Ok(web_asset(path).unwrap_or_else(|| Response::error(404, "no such path", "not_found"))),
@@ -337,10 +341,17 @@ fn prepare_chat(
         .preparation()
         .ok_or_else(|| ApiError::new(503, "native process is not ready", "runtime_unavailable"))?;
     let _slot = preparation.acquire(deadline)?;
-    let prepared = server.pipeline.prepare(body);
+    // The deadline runs through preparation: an image decode an expired
+    // request starts is a decode the answer never reads.
+    let mut remaining = || deadline.remaining().map(|_| ()).map_err(|error| error);
+    let prepared = server.pipeline.prepare(body, &mut remaining);
     deadline.remaining()?;
     prepared.map_err(|error| {
-        ApiError::new(error.status, error.message, "invalid_request_error")
+        ApiError::new(
+            error.status,
+            error.message,
+            error.code.unwrap_or_else(|| "invalid_request_error".to_string()),
+        )
     })
 }
 
@@ -367,10 +378,18 @@ fn complete_answer(
                 job,
             ) {
                 Ok(response) => Ok(Response::json(200, &response)),
-                Err(error) => Ok(Response::error(error.status, &error.message, "server_error")),
+                Err(error) => Ok(Response::error(
+                    error.status,
+                    &error.message,
+                    &error.code.unwrap_or_else(|| "server_error".to_string()),
+                )),
             }
         }
-        Err(error) => Ok(Response::error(error.status, &error.message, "server_error")),
+        Err(error) => Ok(Response::error(
+                    error.status,
+                    &error.message,
+                    &error.code.unwrap_or_else(|| "server_error".to_string()),
+                )),
     }
 }
 
@@ -384,6 +403,15 @@ fn stream_answer(
     max_output_tokens: u32,
     job: &openai::JobInfo,
 ) -> std::io::Result<Response> {
+    // Compile before committing the HTTP status, so invalid schemas and
+    // unavailable grammar support receive an ordinary JSON error.
+    let constraint = match pipeline.constraint(prepared) {
+        Ok(constraint) => constraint.map(Arc::new),
+        Err(error) => {
+            let code = error.code.unwrap_or_else(|| "server_error".to_string());
+            return Ok(Response::error(error.status, &error.message, &code));
+        }
+    };
     write_response(stream, &Response::sse_head())?;
     let writer = Arc::new(Mutex::new(SseWriter {
         stream: stream.try_clone()?,
@@ -397,28 +425,33 @@ fn stream_answer(
         created_at: job.created_at,
         include_usage: body.pointer("/stream_options/include_usage").and_then(Value::as_bool).unwrap_or(false),
     });
+    // The output constraint the request generates under, and the projector
+    // that reads its calls as they arrive.
+    let projector = Arc::new(std::sync::Mutex::new(match &prepared.tool_policy {
+        Some(policy) => StreamingToolCallProjector::new(
+            Box::new(crate::tool_schema::ToolParameterTypes::new(policy.clone())),
+            1,
+            &pipeline.chat_format,
+            prepared.response_format.is_some(),
+        ),
+        None => StreamingToolCallProjector::without_policy(1, &pipeline.chat_format),
+    }));
     let tokens = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (on_event, on_complete) = stream_callbacks(
         sink,
-        tokens.clone(),
+        tokens,
         pipeline.tokenizer.clone(),
-        Arc::new(std::sync::Mutex::new(
-            StreamingToolCallProjector::without_policy(1, &pipeline.chat_format),
-        )),
+        projector,
         prepared.thinking,
         pipeline.chat_format.clone(),
-        body.get("tools").is_some(),
+        prepared.tool_policy.is_some(),
+        constraint.clone(),
+        prepared
+            .response_format
+            .as_ref()
+            .map(|format| format.validator.clone()),
     );
-    let request = crate::protocol::RequestFrame {
-        logical_max_output_tokens: max_output_tokens,
-        prompt_tokens: prepared.prompt_tokens.clone(),
-        ..crate::protocol::RequestFrame::default()
-    };
-    let generation = crate::engine::GenerationRequest {
-        frame: request,
-        deadline: None,
-        mask_provider: None,
-    };
+    let generation = pipeline.generation_request(prepared, max_output_tokens, constraint);
     let call = pipeline
         .client
         .submit(&generation, Some(on_event), Some(on_complete))

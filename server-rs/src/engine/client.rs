@@ -418,6 +418,90 @@ impl EngineClient {
         }
     }
 
+    /// One mask request's CPU worker: the provider computes the masks off
+    /// the reader thread, and the response frame goes back to the engine.
+    /// A provider that failed, or a response of the wrong shape, records
+    /// the failure and cancels the call, as the Python's `_mask_failed`
+    /// does.
+    fn submit_mask(
+        &self,
+        call: &Arc<Call>,
+        event: wire::MaskRequestEvent,
+        provider: crate::engine::call::MaskProvider,
+    ) {
+        if call.cancel_requested() || call.done() {
+            return;
+        }
+        let client = self.clone();
+        let worker_call = call.clone();
+        std::thread::Builder::new()
+            .name("splash-mask".to_owned())
+            .spawn(move || {
+                let call = worker_call;
+                if call.cancel_requested() || call.done() {
+                    return;
+                }
+                let outcome = match provider(&event) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        call.record_mask_error(error.clone());
+                        client.cancel(&call);
+                        return;
+                    }
+                };
+                if call.cancel_requested() || call.done() {
+                    return;
+                }
+                let expected = 4 * event.words_per_mask as usize * event.mask_rows();
+                let failure = if outcome.len() != expected {
+                    Some(EngineError::MaskComputationFailed {
+                        message: format!(
+                            "mask provider returned {} bytes; expected {expected}",
+                            outcome.len()
+                        ),
+                        retryable: false,
+                    })
+                } else {
+                    wire::serialize_message(&wire::ClientMessage::MaskResponse(
+                        wire::MaskResponseFrame {
+                            request_id: call.request_id,
+                            mask_request_id: event.mask_request_id,
+                            mask_words: outcome,
+                        },
+                    ))
+                    .map_err(|error| {
+                        EngineError::MaskComputationFailed {
+                            message: error.to_string(),
+                            retryable: false,
+                        }
+                    })
+                    .and_then(|encoded| {
+                        client
+                            .shared
+                            .write_frame(&encoded)
+                            .map_err(|error| EngineError::MaskComputationFailed {
+                                message: error.to_string(),
+                                retryable: true,
+                            })
+                    })
+                    .err()
+                };
+                if let Some(error) = failure {
+                    call.record_mask_error(error.clone());
+                    client.cancel(&call);
+                }
+            })
+            .map_err(|error| EngineError::MaskComputationFailed {
+                message: format!("mask worker failed to start: {error}"),
+                retryable: true,
+            })
+            .err()
+            .map(|error| {
+                call.record_mask_error(error.clone());
+                self.cancel(&call);
+            });
+    }
+
     /// Dispatch one decoded engine event, with the Python dispatch's rules.
     fn dispatch(&self, message: wire::EngineEvent) -> Result<(), EngineError> {
         let (generation, ready_arrived, call) = {
@@ -502,20 +586,14 @@ impl EngineClient {
                     return Err(EngineError::ProtocolFatal(issue));
                 }
             }
-            wire::EngineEvent::MaskRequest(_event) => {
+            wire::EngineEvent::MaskRequest(event) => {
                 let call = call.expect("gated above");
-                if call.mask_provider.is_none() {
+                let Some(provider) = call.mask_provider.clone() else {
                     return Err(EngineError::ProtocolFatal(
                         "native requested a token mask for an unconstrained request".into(),
                     ));
-                }
-                // The CPU mask workers are the next slice; until they are
-                // ported, a mask request fails its call as a server
-                // condition.
-                call.record_mask_error(EngineError::MaskComputationFailed {
-                    message: "token-mask workers are not ported yet".into(),
-                    retryable: true,
-                });
+                };
+                self.submit_mask(&call, event, provider);
             }
             wire::EngineEvent::Done(event) => {
                 let call = call.expect("gated above");

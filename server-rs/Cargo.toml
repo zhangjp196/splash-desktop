@@ -10,7 +10,11 @@ name = "splash_server"
 path = "src/lib.rs"
 
 [dependencies]
+base64 = "0.22"
 chrono = "0.4.45"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+jsonschema = { version = "0.30", default-features = false }
+kamadak-exif = "0.6"
 libc = "0.2"
 llguidance = "1.9.1"
 minijinja = { version = "3.1.0", features = ["builtins", "json", "serde"] }
@@ -18,5 +22,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["unbounded_depth", "preserve_order"] }
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 toktrie = "1.9.1"
+unicode-normalization = "0.1"
 
 [dev-dependencies]

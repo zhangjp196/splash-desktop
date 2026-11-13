@@ -59,6 +59,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut speculation = Speculation::Auto;
     let mut require_draft = false;
     let mut port = 8000;
+    let mut max_image_pixels = splash_server::images::MAX_PIXELS;
     let mut binary = None;
     let mut pending = 8;
     let mut context = "auto".to_owned();
@@ -83,6 +84,20 @@ fn run() -> Result<(), Box<dyn Error>> {
                     "--speculation" => speculation = Speculation::parse(&value)?,
                     "--binary" => binary = Some(PathBuf::from(value)),
                     "--port" => port = value.parse()?,
+                    "--max-image-pixels" => {
+                        max_image_pixels = value.parse().map_err(|_| {
+                            format!("--max-image-pixels must be an integer between {} and {}",
+                                splash_server::images::MIN_PIXELS, splash_server::images::MAX_PIXELS)
+                        })?;
+                        if !(splash_server::images::MIN_PIXELS..=splash_server::images::MAX_PIXELS)
+                            .contains(&max_image_pixels)
+                        {
+                            return Err(format!(
+                                "--max-image-pixels must be between {} and {}",
+                                splash_server::images::MIN_PIXELS, splash_server::images::MAX_PIXELS
+                            ).into());
+                        }
+                    }
                     "--queue-size" => pending = value.parse()?,
                     "--api-key" => key = Some(value),
                     "--host" if value.parse::<IpAddr>()?.is_loopback() => {
@@ -205,6 +220,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     let prompt_tokenizer = PromptTokenizer::from_directory(
         tokenizer.clone(), &tokenizer_directory, format.message_boundary,
     );
+    // The compiled output constraints, over the model's grammar tokenizer:
+    // constrained tool calls and structured output generate under them.
+    let constraints = splash_server::constraints::ConstraintTokenizer::from_directory(
+        &tokenizer_directory,
+        format.vocabulary,
+        &format.stop_ids(),
+    )
+    .ok()
+    .and_then(|env| splash_server::constraints::ConstraintFactory::new(&env, &format).ok());
     let binary = match binary {
         Some(binary) => binary,
         None => std::env::current_exe()?.with_file_name("splash"),
@@ -242,6 +266,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut engine_exited = None;
     Server::new(Pipeline {
         tokenizer, prompt_tokenizer, templates, chat_format: format, client, model,
+        images: splash_server::images::ImageCache::new(),
+        max_image_pixels,
+        constraints,
     }).with_api_key(key).serve_until(listener, || {
         if STOP.load(Ordering::Relaxed) {
             return true;

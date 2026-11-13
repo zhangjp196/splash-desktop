@@ -125,8 +125,10 @@ pub struct GenerationRequest {
     pub mask_provider: Option<MaskProvider>,
 }
 
-/// A token-mask request's mask provider.
-pub type MaskProvider = Arc<dyn Fn(&wire::MaskRequestEvent) -> Vec<u8> + Send + Sync>;
+/// A token-mask request's mask provider: the masks for one mask request,
+/// or the failure that ends the call.
+pub type MaskProvider =
+    Arc<dyn Fn(&wire::MaskRequestEvent) -> Result<Vec<u8>, EngineError> + Send + Sync>;
 
 impl GenerationRequest {
     pub fn validate(&self) -> Result<(), EngineError> {

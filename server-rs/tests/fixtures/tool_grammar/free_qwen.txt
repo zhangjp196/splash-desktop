@@ -1,0 +1,5 @@
+%llguidance {}
+start: parameter*
+parameter: "<parameter=" NAME ">\n" value
+value[suffix="\n</parameter>\n"]: /(?s:.*)/
+NAME: /[^<> \t\n\r]([^<>\n\r]{0,254}[^<> \t\n\r])?/

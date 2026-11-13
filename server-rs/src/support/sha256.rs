@@ -18,8 +18,8 @@ const H0: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
-/// The SHA-256 digest of `bytes`, as lowercase hexadecimal.
-pub fn hex_digest(bytes: &[u8]) -> String {
+/// The SHA-256 digest of `bytes`, as raw bytes.
+pub fn digest(bytes: &[u8]) -> [u8; 32] {
     let mut state = H0;
     let mut message = bytes.to_vec();
     let bit_length = (bytes.len() as u64).wrapping_mul(8);
@@ -31,7 +31,16 @@ pub fn hex_digest(bytes: &[u8]) -> String {
     for block in message.chunks_exact(64) {
         compress(&mut state, block);
     }
-    state.iter().map(|word| format!("{word:08x}")).collect()
+    let mut digest = [0u8; 32];
+    for (slot, word) in digest.chunks_exact_mut(4).zip(state) {
+        slot.copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+/// The SHA-256 digest of `bytes`, as lowercase hexadecimal.
+pub fn hex_digest(bytes: &[u8]) -> String {
+    digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn compress(state: &mut [u32; 8], block: &[u8]) {

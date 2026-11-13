@@ -1,0 +1,3 @@
+%llguidance {}
+start: WS %json {"type":"object","properties":{"answer":{"const":42},"marker":{"type":"string"}},"required":["answer"],"additionalProperties":false,"x-guidance":{"lenient":true,"whitespace_pattern":"[ \\t\\n\\r]{0,64}"}}
+WS: /[ \t\n\r]{0,64}/

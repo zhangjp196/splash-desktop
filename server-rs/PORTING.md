@@ -61,6 +61,13 @@ The listener serves the bundled chat UI, Chat token counts and a model list.
 Model downloading and assembly creation, full HTTP admission, LAN access
 and the other dialects are pending.
 
+The current Chat path also prepares inline images for vision-capable
+models and supports tool-call and JSON-schema constraints through token
+masks. PDF documents, generation deadlines and disconnect cancellation,
+and the remaining API routes are still pending. The desktop DMG has an
+ad hoc signature and is not notarized; this Rust release does not yet
+replace every feature of the Python server.
+
 ## Why this order
 
 Each module ports only against the modules below it, so the order is the

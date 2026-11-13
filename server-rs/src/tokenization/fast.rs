@@ -54,6 +54,23 @@ impl FastTokenizer {
         Ok(encoding.get_ids().to_vec())
     }
 
+    /// The token ids of `text`, with no special token added, and each
+    /// token's span in it. The spans are byte offsets into `text`, as the
+    /// tokenizers crate's `encode` reports them; the image pipeline ties
+    /// each image to its placeholder by the span.
+    pub fn encode_with_offsets(
+        &self,
+        text: &str,
+        add_special_tokens: bool,
+    ) -> Result<(Vec<u32>, Vec<(usize, usize)>), TokenizerError> {
+        let _guard = self.encode_lock.lock().expect("encode lock");
+        let encoding = self
+            .tokenizer
+            .encode(text, add_special_tokens)
+            .map_err(|error| TokenizerError(format!("encode failed: {error}")))?;
+        Ok((encoding.get_ids().to_vec(), encoding.get_offsets().to_vec()))
+    }
+
     /// The text `token_ids` decode to, with special tokens skipped as
     /// `skip_special_tokens` says.
     pub fn decode(

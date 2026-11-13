@@ -1,0 +1,9 @@
+%llguidance {}
+start: parameter_0 parameter_1 parameter_2? extra*
+parameter_0: "<parameter=" "value" ">\n" (%json {"$ref":"#/$defs/__splash_root/$defs/Names","maxItems":1,"$defs":{"__splash_root":{"type":"object","$defs":{"Names":{"type":"array","items":{"type":"string"}}},"properties":{"value":{"$ref":"#/$defs/__splash_root/$defs/Names","maxItems":1},"id":{"type":"string","pattern":"^ORD-[0-9]{4}$"},"big":{"type":"array","items":{"type":"string"}}},"required":["value","id"]}},"x-guidance":{"lenient":true,"whitespace_pattern":"[ \\t\\n\\r]{0,64}"}}) "\n</parameter>\n"
+parameter_1: "<parameter=" "id" ">\n" parameter_1_value
+parameter_1_value[suffix="\n</parameter>\n"]: /(?s:.*)/
+parameter_2: "<parameter=" "big" ">\n" (%json {"type":"array","items":{"type":"string"},"x-guidance":{"lenient":true,"whitespace_pattern":"[ \\t\\n\\r]{0,64}"}}) "\n</parameter>\n"
+EXTRA_NAME: /[^<> \t\n\r]([^<>\n\r]{0,254}[^<> \t\n\r])?/ & ~("value" | "id" | "big")
+extra: "<parameter=" EXTRA_NAME ">\n" extra_value
+extra_value[suffix="\n</parameter>\n"]: /(?s:.*)/

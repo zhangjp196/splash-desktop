@@ -1,0 +1,3 @@
+%llguidance {}
+start: WS %json {"type":"object","properties":{"order":{"type":"string","pattern":"^ORD-[0-9]{4}$"},"code":{"type":"string","pattern":"[A-Z]{3}"},"path":{"type":"string"}},"required":["order","code","path"],"additionalProperties":false,"x-guidance":{"lenient":true,"whitespace_pattern":"[ \\t\\n\\r]{0,64}"}}
+WS: /[ \t\n\r]{0,64}/

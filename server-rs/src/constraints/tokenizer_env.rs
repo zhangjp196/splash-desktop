@@ -74,7 +74,17 @@ fn token_bytes(config: &serde_json::Value) -> Vec<Vec<u8>> {
             if tokens.len() <= id {
                 tokens.resize(id + 1, Vec::new());
             }
-            tokens[id] = content.as_bytes().to_vec();
+            // Tool framing is addressed by name in the generated Lark
+            // grammar even when the tokenizer marks it as non-special.
+            // llguidance indexes named tokens under its special prefix.
+            let named = token.get("special").and_then(|v| v.as_bool()).unwrap_or(false)
+                || matches!(content, "<tool_call>" | "</tool_call>");
+            let mut bytes = Vec::with_capacity(content.len() + usize::from(named));
+            if named {
+                bytes.push(TokTrie::SPECIAL_TOKEN_MARKER);
+            }
+            bytes.extend_from_slice(content.as_bytes());
+            tokens[id] = bytes;
         }
     }
     if tokens.len() < vocab_size {
@@ -112,5 +122,27 @@ impl ConstraintTokenizer {
         Ok(ConstraintTokenizer {
             env: Arc::new(toktrie::ApproximateTokEnv::new(trie)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_tool_tokens_are_indexed_even_when_not_marked_special() {
+        let config = serde_json::json!({
+            "model": {"vocab": {"word": 0}},
+            "added_tokens": [
+                {"id": 1, "content": "<tool_call>", "special": false},
+                {"id": 2, "content": "</tool_call>", "special": false},
+                {"id": 3, "content": "ordinary", "special": false}
+            ]
+        });
+        let tokens = token_bytes(&config);
+        let trie = TokTrie::from(&TokRxInfo::new(4, 0), &tokens);
+        assert_eq!(trie.get_special_token("<tool_call>"), Some(1));
+        assert_eq!(trie.get_special_token("</tool_call>"), Some(2));
+        assert_eq!(tokens[3], b"ordinary");
     }
 }

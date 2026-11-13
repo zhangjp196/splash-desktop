@@ -260,6 +260,9 @@ fn a_chat_request_runs_the_whole_pipeline() {
         chat_format: format,
         client,
         model: "Qwen".into(),
+        images: splash_server::images::ImageCache::new(),
+        max_image_pixels: splash_server::images::MAX_PIXELS,
+        constraints: None,
     };
 
     // The request: normalize, render, tokenize, submit, collect, assemble.
@@ -286,7 +289,7 @@ fn a_chat_request_runs_the_whole_pipeline() {
     let prompt_tokens = pipeline.prompt_tokenizer.encode(&rendered);
     assert!(!prompt_tokens.is_empty());
 
-    let prepared = pipeline.prepare(&body).expect("prepares");
+    let prepared = pipeline.prepare(&body, &mut || Ok(())).expect("prepares");
     let (call, tokens, first_batch) = pipeline.submit(&prepared, 64).expect("submits");
     let done = call.result(None).expect("done");
     assert_eq!(done.prompt_tokens as usize, prompt_tokens.len());
@@ -346,19 +349,19 @@ fn a_reasoning_effort_decides_whether_the_prompt_thinks() {
         "messages": [{"role": "user", "content": "What is the answer?"}],
         "max_tokens": 64,
     });
-    assert!(pipeline.prepare(&body).expect("prepares").thinking,
+    assert!(pipeline.prepare(&body, &mut || Ok(())).expect("prepares").thinking,
         "the template opens the think block by default");
     body["reasoning_effort"] = json!("none");
-    assert!(!pipeline.prepare(&body).expect("prepares").thinking,
+    assert!(!pipeline.prepare(&body, &mut || Ok(())).expect("prepares").thinking,
         "reasoning off closes it");
     body["reasoning_effort"] = json!("medium");
-    assert!(pipeline.prepare(&body).expect("prepares").thinking,
+    assert!(pipeline.prepare(&body, &mut || Ok(())).expect("prepares").thinking,
         "an effort opens it");
     body["chat_template_kwargs"] = json!({"enable_thinking": false});
-    assert!(!pipeline.prepare(&body).expect("prepares").thinking,
+    assert!(!pipeline.prepare(&body, &mut || Ok(())).expect("prepares").thinking,
         "the request's own switch outranks the effort");
     body["chat_template_kwargs"] = json!({"messages": []});
-    let refused = pipeline.prepare(&body).err().expect("refused");
+    let refused = pipeline.prepare(&body, &mut || Ok(())).err().expect("refused");
     assert_eq!(refused.status, 400);
 }
 
@@ -434,6 +437,8 @@ fn a_chat_request_streams_as_openai_sse() {
         false,
         format.clone(),
         false,
+        None,
+        None,
     );
     let request = splash_server::engine::GenerationRequest {
         frame: splash_server::protocol::RequestFrame {
@@ -531,6 +536,8 @@ fn a_chat_stream_splits_reasoning_from_the_answer() {
         true,
         format.clone(),
         false,
+        None,
+        None,
     );
     let request = splash_server::engine::GenerationRequest {
         frame: splash_server::protocol::RequestFrame {
@@ -583,6 +590,9 @@ fn pipeline_of(
         chat_format: format.clone(),
         client,
         model: "Qwen".into(),
+        images: splash_server::images::ImageCache::new(),
+        max_image_pixels: splash_server::images::MAX_PIXELS,
+        constraints: None,
     }
 }
 
@@ -620,6 +630,9 @@ fn the_server_answers_over_real_tcp() {
         chat_format: format,
         client,
         model: "Qwen".into(),
+        images: splash_server::images::ImageCache::new(),
+        max_image_pixels: splash_server::images::MAX_PIXELS,
+        constraints: None,
     };
     let server = Server::new(pipeline);
 
@@ -679,6 +692,20 @@ fn the_server_answers_over_real_tcp() {
     let (_, streamed) = response.split_once("\r\n\r\n").expect("HTTP response");
     assert_eq!(streamed_text(streamed, "reasoning_content"), "The answer is 42.", "{response}");
     assert!(response.contains("[DONE]"), "{response}");
+
+    // A constraint that cannot be compiled must fail before SSE headers,
+    // so the client receives a single usable HTTP error response.
+    let mut constrained_body = streamed_body;
+    constrained_body["response_format"] = json!({"type": "json_object"});
+    let payload = constrained_body.to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    write!(stream, "POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", payload.len(), payload).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("reads");
+    assert!(response.starts_with("HTTP/1.1 500"), "{response}");
+    assert!(response.contains("grammar tokenizer is unavailable"), "{response}");
+    assert!(!response.contains("text/event-stream"), "{response}");
 
     // An elapsed request budget returns the OpenAI timeout before generation.
     let mut expired_body = body;
@@ -747,4 +774,640 @@ fn the_server_answers_over_real_tcp() {
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("reads");
     assert!(response.starts_with("HTTP/1.1 400 Bad Request"), "{response}");
+}
+
+/// The facts of one request frame the engine reads: the prompt's token
+/// count, the image spans it carries and their pixel bytes.
+struct RequestFacts {
+    prompt_count: u32,
+    span_count: u32,
+    spans: Vec<(u32, u32, u32, u32, u64, u64)>,
+    pixel_bytes: usize,
+}
+
+/// The fake engine of a vision model: Ready with vision on, then per
+/// request a start, the tokens of a fixed answer, and a done — reporting
+/// each request's image facts to the test.
+fn fake_engine_vision(mut stream: UnixStream, answer: &'static str, report: std::sync::mpsc::Sender<RequestFacts>) {
+    let ready = wire_event(&json!({
+        "frame_type": 0x0100,
+        "max_concurrent_requests": 4,
+        "max_context_tokens": 524288,
+        "vision": true,
+    }));
+    let _ = stream.write_all(&ready);
+    loop {
+        let mut header = [0u8; 16];
+        if stream.read_exact(&mut header).is_err() {
+            return;
+        }
+        let raw_type = u16::from_le_bytes([header[6], header[7]]);
+        let payload_bytes = u64::from_le_bytes(header[8..16].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8; payload_bytes];
+        if payload_bytes > 0 {
+            stream.read_exact(&mut payload).expect("engine reads payload");
+        }
+        if raw_type != 0x0001 {
+            continue;
+        }
+        let request_id = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        let prompt_count = u32::from_le_bytes(payload[30..34].try_into().unwrap());
+        let span_count = u32::from_le_bytes(payload[34..38].try_into().unwrap());
+        // The fixed part is 122 bytes; the prompt tokens, the spans and the
+        // pixels follow in that order.
+        let spans_offset = 122 + 4 * prompt_count as usize;
+        let mut spans = Vec::new();
+        for index in 0..span_count as usize {
+            let base = spans_offset + index * 32;
+            let read_u32 = |offset: usize| u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+            let read_u64 = |offset: usize| u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
+            spans.push((
+                read_u32(base),
+                read_u32(base + 4),
+                read_u32(base + 8),
+                read_u32(base + 12),
+                read_u64(base + 16),
+                read_u64(base + 24),
+            ));
+        }
+        let pixel_bytes = payload.len() - spans_offset - 32 * span_count as usize;
+        let _ = report.send(RequestFacts { prompt_count, span_count, spans, pixel_bytes });
+        for event in [
+            json!({"frame_type": 0x0101, "request_id": request_id, "lane": 0,
+                   "matched_prompt_tokens": 0}),
+            json!({"frame_type": 0x0102, "request_id": request_id, "sequence_offset": 0,
+                   "tokens": answer_tokens(answer)}),
+            json!({"frame_type": 0x0104, "request_id": request_id, "reason": 0,
+                   "bounded": false, "prompt_tokens": prompt_count,
+                   "completion_tokens": answer_tokens(answer).len(),
+                   "prefill_micros": 1000, "decode_micros": 2000,
+                   "wall_micros": 3500, "deduplicated_tokens": 0,
+                   "drafted_tokens": 0, "accepted_draft_tokens": 0,
+                   "draft_cycles": 0, "logit_count": 0}),
+        ] {
+            let _ = stream.write_all(&wire_event(&event));
+        }
+    }
+}
+
+/// A solid-color PNG the image crate encodes, as the images tests' helper.
+fn png_bytes(width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {
+    let image = image::RgbImage::from_pixel(width, height, image::Rgb(color));
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    use image::ImageEncoder as _;
+    image::codecs::png::PngEncoder::new(&mut buffer)
+        .write_image(image.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+        .expect("png encodes");
+    buffer.into_inner()
+}
+
+/// An image request prepares its placeholders wide and carries the spans
+/// and the pixels to the engine, as the Python's exchange does.
+#[test]
+fn an_image_request_carries_its_spans_and_pixels_to_the_engine() {
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || fake_engine_vision(engine_side, "The answer is 42.", tx));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let prompt_tokenizer =
+        PromptTokenizer::from_directory(tokenizer.clone(), &directory, format.message_boundary);
+    let templates = load_chat_templates(&directory).expect("loads");
+    let pipeline = Pipeline {
+        tokenizer: tokenizer.clone(),
+        prompt_tokenizer,
+        templates,
+        chat_format: format,
+        client,
+        model: "Qwen".into(),
+        images: splash_server::images::ImageCache::new(),
+        max_image_pixels: splash_server::images::MAX_PIXELS,
+        constraints: None,
+    };
+
+    // A 32x32 image: one patch grid of 2x2, one merged token.
+    let payload = png_bytes(32, 32, [200, 30, 30]);
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
+    let url = format!("data:image/png;base64,{encoded}");
+    let body = json!({
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": url}},
+            {"type": "text", "text": "What is in this image?"},
+        ]}],
+    });
+    let prepared = pipeline.prepare(&body, &mut || Ok(())).expect("prepares");
+    assert_eq!(prepared.image_spans.len(), 1, "one image, one span");
+    // The 32x32 source upscales to the 65536-pixel minimum: 256x256.
+    assert_eq!(prepared.image_pixels.len(), 256 * 256 * 3, "resized RGB bytes");
+    let span = &prepared.image_spans[0];
+    assert_eq!((span.grid_height, span.grid_width), (16, 16));
+    assert_eq!(span.tokens, (16 / 2) * (16 / 2));
+
+    // The prompt the engine reads is the expanded one, and the frame
+    // carries the spans and the pixels the preparation built.
+    let (call, _tokens, _first_batch) = pipeline.submit(&prepared, 64).expect("submits");
+    call.result(None).expect("done");
+    let facts = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the engine read the request");
+    assert_eq!(facts.prompt_count as usize, prepared.prompt_tokens.len());
+    assert_eq!(facts.span_count, 1);
+    assert_eq!(facts.pixel_bytes, prepared.image_pixels.len());
+    assert_eq!(facts.spans.len(), 1);
+    let (offset, tokens, grid_height, grid_width, digest_lo, digest_hi) = facts.spans[0];
+    assert_eq!((tokens, grid_height, grid_width), (span.tokens, span.grid_height, span.grid_width));
+    assert_eq!((digest_lo, digest_hi), (span.digest_lo, span.digest_hi));
+    assert!(offset < prepared.prompt_tokens.len() as u32);
+    // The span's run holds the pad token, widened from the placeholder.
+    let pad_id = splash_server::images::prompts::image_pad_token_id(&tokenizer).expect("pad token");
+    assert_eq!(prepared.prompt_tokens[offset as usize], pad_id);
+}
+
+/// A text-only request against a vision engine carries no image facts.
+#[test]
+fn a_text_request_on_a_vision_engine_carries_no_images() {
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || fake_engine_vision(engine_side, "The answer is 42.", tx));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let prompt_tokenizer =
+        PromptTokenizer::from_directory(tokenizer.clone(), &directory, format.message_boundary);
+    let templates = load_chat_templates(&directory).expect("loads");
+    let pipeline = Pipeline {
+        tokenizer,
+        prompt_tokenizer,
+        templates,
+        chat_format: format,
+        client,
+        model: "Qwen".into(),
+        images: splash_server::images::ImageCache::new(),
+        max_image_pixels: splash_server::images::MAX_PIXELS,
+        constraints: None,
+    };
+    let body = json!({"messages": [{"role": "user", "content": "Hello"}]});
+    let prepared = pipeline.prepare(&body, &mut || Ok(())).expect("prepares");
+    assert!(prepared.image_spans.is_empty() && prepared.image_pixels.is_empty());
+    let (call, _tokens, _first_batch) = pipeline.submit(&prepared, 64).expect("submits");
+    call.result(None).expect("done");
+    let facts = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the engine read the request");
+    assert_eq!(facts.span_count, 0);
+    assert_eq!(facts.pixel_bytes, 0);
+}
+
+/// The tool-call answer a Qwen model writes in its template's XML layout.
+const TOOL_CALL_ANSWER: &str = concat!(
+    "\n",
+    "\u{003c}\u{0074}\u{006f}\u{006f}\u{006c}\u{005f}\u{0063}\u{0061}\u{006c}\u{006c}\u{003e}",
+    "\n\u{003c}function=get_weather\u{003e}\n",
+    "\u{003c}parameter=city\u{003e}\n",
+    "Beijing\n",
+    "\u{003c}\u{002f}parameter\u{003e}\n",
+    "\u{003c}\u{002f}function\u{003e}\n",
+    "\u{003c}\u{002f}\u{0074}\u{006f}\u{006f}\u{006c}\u{005f}\u{0063}\u{0061}\u{006c}\u{006c}\u{003e}",
+);
+
+/// The weather tool a request offers.
+fn weather_tools() -> Value {
+    json!([{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Read the weather of a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }])
+}
+
+/// A pipeline with the constraint factory built over the model's tokenizer.
+fn constrained_pipeline_of(
+    tokenizer: &Arc<FastTokenizer>,
+    directory: &PathBuf,
+    format: &splash_server::chat_format::ChatFormat,
+    client: EngineClient,
+) -> Pipeline {
+    let env = splash_server::constraints::ConstraintTokenizer::from_directory(
+        directory,
+        format.vocabulary,
+        &format.stop_ids(),
+    )
+    .expect("env builds");
+    let constraints =
+        splash_server::constraints::ConstraintFactory::new(&env, format).expect("factory builds");
+    let pipeline = pipeline_of(tokenizer, directory, format, client);
+    Pipeline {
+        constraints: Some(constraints),
+        ..pipeline
+    }
+}
+
+/// A tool call the model writes is projected into the response's
+/// tool_calls, with the finish reason that names them.
+#[test]
+fn a_tool_call_answer_is_projected_into_tool_calls() {
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    std::thread::spawn(move || fake_engine(engine_side, TOOL_CALL_ANSWER));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let pipeline = constrained_pipeline_of(&tokenizer, &directory, &format, client);
+    let body = json!({
+        "messages": [{"role": "user", "content": "Weather in Beijing?"}],
+        "tools": weather_tools(),
+    });
+    let prepared = pipeline.prepare(&body, &mut || Ok(())).expect("prepares");
+    let (call, tokens, first_batch) = pipeline.submit(&prepared, 256).expect("submits");
+    call.result(None).expect("done");
+    let first_token_batch_tokens = first_batch.load(std::sync::atomic::Ordering::Relaxed);
+    let job = openai::JobInfo { public_id: "req1".into(), created_at: 1, reasoning_tokens: 0 };
+    let response = pipeline
+        .complete(&body, &prepared, &call, &tokens, first_token_batch_tokens, "Qwen", &job)
+        .expect("completes");
+    let choice = &response["choices"][0];
+    assert_eq!(choice["finish_reason"], json!("tool_calls"));
+    let tool_calls = choice["message"]["tool_calls"].as_array().expect("tool calls");
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0]["type"], json!("function"));
+    assert_eq!(tool_calls[0]["function"]["name"], json!("get_weather"));
+    let arguments: Value =
+        serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().expect("arguments"))
+            .expect("arguments JSON");
+    assert_eq!(arguments, json!({"city": "Beijing"}));
+}
+
+/// A streamed tool call arrives as its header and argument deltas.
+#[test]
+fn a_tool_call_streams_as_deltas() {
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    std::thread::spawn(move || fake_engine(engine_side, TOOL_CALL_ANSWER));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let pipeline = constrained_pipeline_of(&tokenizer, &directory, &format, client);
+    let body = json!({
+        "messages": [{"role": "user", "content": "Weather in Beijing?"}],
+        "tools": weather_tools(),
+        "stream": true,
+    });
+    let prepared = pipeline.prepare(&body, &mut || Ok(())).expect("prepares");
+    // The SSE sink writes onto its own socket pair; the test reads it.
+    use splash_server::serve::stream::StreamSink;
+    let (sink_write_side, mut sink_read_side) = UnixStream::pair().expect("socket pair");
+    let writer_stream = Mutex::new(sink_write_side.try_clone().expect("clone"));
+    let sink = Arc::new(StreamSink {
+        write: Arc::new(Mutex::new(Box::new(move |payload: &str| {
+            writer_stream
+                .lock()
+                .unwrap()
+                .write_all(format!("data: {payload}\n\n").as_bytes())
+                .map_err(|error| error.to_string())
+        }))),
+        model: "Qwen".into(),
+        request_id: "req1".into(),
+        created_at: 1_700_000_000,
+        include_usage: false,
+    });
+    let constraint = pipeline
+        .constraint(&prepared)
+        .expect("constraint reads")
+        .map(std::sync::Arc::new);
+    let projector = Arc::new(Mutex::new(StreamingToolCallProjector::new(
+        Box::new(splash_server::tool_schema::ToolParameterTypes::new(
+            prepared.tool_policy.clone().expect("policy"),
+        )),
+        1,
+        &format,
+        false,
+    )));
+    let tokens: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let (on_event, on_complete) = splash_server::serve::stream::stream_callbacks(
+        sink,
+        tokens,
+        tokenizer,
+        projector,
+        prepared.thinking,
+        format.clone(),
+        true,
+        constraint,
+        None,
+    );
+    let generation = pipeline.generation_request(&prepared, 256, None);
+    let call = pipeline
+        .client
+        .submit(&generation, Some(on_event), Some(on_complete))
+        .expect("submits");
+    call.result(None).expect("done");
+    // The stream's events, read off the socket until the end.
+    let mut text = String::new();
+    sink_read_side
+        .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut buffer = [0u8; 65536];
+    while std::time::Instant::now() < deadline {
+        match sink_read_side.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => text.push_str(&String::from_utf8_lossy(&buffer[..count])),
+            Err(_) => continue,
+        }
+        if text.contains("[DONE]") {
+            break;
+        }
+    }
+    // The call's header and its arguments streamed as tool_calls deltas.
+    let mut names = String::new();
+    let mut arguments = String::new();
+    for line in text.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else { continue };
+        if payload == "[DONE]" { continue; }
+        let Ok(chunk) = serde_json::from_str::<Value>(payload) else { continue };
+        if let Some(calls) = chunk.pointer("/choices/0/delta/tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+                    names.push_str(name);
+                }
+                if let Some(piece) = call.pointer("/function/arguments").and_then(Value::as_str) {
+                    arguments.push_str(piece);
+                }
+            }
+        }
+    }
+    assert_eq!(names, "get_weather", "{text}");
+    let assembled: Value = serde_json::from_str(&arguments).expect("arguments JSON");
+    assert_eq!(assembled, json!({"city": "Beijing"}), "{text}");
+    // The finish chunk names the calls.
+    assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
+}
+
+/// A structured output the model ended is validated against the response
+/// format; an invalid one is refused.
+#[test]
+fn a_structured_output_is_validated_against_the_response_format() {
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    std::thread::spawn(move || {
+        fake_engine(
+            engine_side,
+            "Let me think.\u{003c}\u{002f}\u{0074}\u{0068}\u{0069}\u{006e}\u{006b}\u{003e}{\"answer\": 42}",
+        )
+    });
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let pipeline = constrained_pipeline_of(&tokenizer, &directory, &format, client);
+    let body = json!({
+        "messages": [{"role": "user", "content": "Give me a number"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "integer"}},
+                    "required": ["answer"],
+                    "additionalProperties": false,
+                },
+            },
+        },
+    });
+    let prepared = pipeline.prepare(&body, &mut || Ok(())).expect("prepares");
+    assert!(prepared.constrained(), "a response format constrains");
+    let (call, tokens, first_batch) = pipeline.submit(&prepared, 256).expect("submits");
+    call.result(None).expect("done");
+    let first_token_batch_tokens = first_batch.load(std::sync::atomic::Ordering::Relaxed);
+    let job = openai::JobInfo { public_id: "req1".into(), created_at: 1, reasoning_tokens: 0 };
+    let response = pipeline
+        .complete(&body, &prepared, &call, &tokens, first_token_batch_tokens, "Qwen", &job)
+        .expect("completes");
+    let content = response["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("content");
+    let parsed: Value = serde_json::from_str(content).expect("content JSON");
+    assert_eq!(parsed, json!({"answer": 42}));
+}
+
+/// A structured output that breaks the response format is refused with the
+/// model-output code.
+#[test]
+fn an_invalid_structured_output_is_refused() {
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    std::thread::spawn(move || fake_engine(engine_side, "{\"answer\": \"not a number\"}"));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let pipeline = constrained_pipeline_of(&tokenizer, &directory, &format, client);
+    let body = json!({
+        "messages": [{"role": "user", "content": "Give me a number"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "integer"}},
+                    "required": ["answer"],
+                    "additionalProperties": false,
+                },
+            },
+        },
+    });
+    let prepared = pipeline.prepare(&body, &mut || Ok(())).expect("prepares");
+    let (call, tokens, first_batch) = pipeline.submit(&prepared, 256).expect("submits");
+    call.result(None).expect("done");
+    let first_token_batch_tokens = first_batch.load(std::sync::atomic::Ordering::Relaxed);
+    let job = openai::JobInfo { public_id: "req1".into(), created_at: 1, reasoning_tokens: 0 };
+    let error = pipeline
+        .complete(&body, &prepared, &call, &tokens, first_token_batch_tokens, "Qwen", &job)
+        .expect_err("refused");
+    assert_eq!(error.status, 500);
+    assert_eq!(error.code.as_deref(), Some("invalid_model_output"));
+}
+
+/// The facts of one constrained request the engine reads: the constraint
+/// mode byte, and the mask response the mask request drew.
+struct MaskFacts {
+    constraint_mode: u8,
+    mask_request_id: u64,
+    mask_bytes: Vec<u8>,
+}
+
+/// The fake engine of a constrained request: it reads the request's
+/// constraint mode, asks for one mask over the call's opening token, reads
+/// the mask response back, and then answers as the plain fake does.
+fn fake_engine_constrained(
+    mut stream: UnixStream,
+    answer: &'static str,
+    words_per_mask: u32,
+    report: std::sync::mpsc::Sender<MaskFacts>,
+) {
+    let ready = wire_event(&json!({
+        "frame_type": 0x0100,
+        "max_concurrent_requests": 4,
+        "max_context_tokens": 524288,
+        "vision": false,
+    }));
+    let _ = stream.write_all(&ready);
+    loop {
+        let mut header = [0u8; 16];
+        if stream.read_exact(&mut header).is_err() {
+            return;
+        }
+        let raw_type = u16::from_le_bytes([header[6], header[7]]);
+        let payload_bytes = u64::from_le_bytes(header[8..16].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8; payload_bytes];
+        if payload_bytes > 0 {
+            stream.read_exact(&mut payload).expect("engine reads payload");
+        }
+        if raw_type != 0x0001 {
+            continue;
+        }
+        let request_id = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        let constraint_mode = payload[9];
+        let prompt_count = u32::from_le_bytes(payload[30..34].try_into().unwrap());
+        // One mask over the call's opening token, before any output.
+        let mask_request_id = request_id;
+        let mut mask_payload = Vec::new();
+        mask_payload.extend_from_slice(&request_id.to_le_bytes());
+        mask_payload.extend_from_slice(&mask_request_id.to_le_bytes());
+        mask_payload.extend_from_slice(&words_per_mask.to_le_bytes());
+        let call_open = splash_server::chat_format::qwen().call_open_id;
+        mask_payload.extend_from_slice(&1u32.to_le_bytes());
+        mask_payload.extend_from_slice(&call_open.to_le_bytes());
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"SPLH");
+        frame.extend_from_slice(&13u16.to_le_bytes());
+        frame.extend_from_slice(&0x0103u16.to_le_bytes());
+        frame.extend_from_slice(&(mask_payload.len() as u64).to_le_bytes());
+        frame.extend_from_slice(&mask_payload);
+        let _ = stream.write_all(&frame);
+        // The mask response: its header, then the words.
+        let mut response_header = [0u8; 16];
+        stream.read_exact(&mut response_header).expect("engine reads mask response");
+        let response_type = u16::from_le_bytes([response_header[6], response_header[7]]);
+        let response_bytes =
+            u64::from_le_bytes(response_header[8..16].try_into().unwrap()) as usize;
+        let mut response = vec![0u8; response_bytes];
+        stream.read_exact(&mut response).expect("engine reads mask words");
+        assert_eq!(response_type, 0x0003, "the mask response frame type");
+        let response_request_id = u64::from_le_bytes(response[..8].try_into().unwrap());
+        let response_mask_id = u64::from_le_bytes(response[8..16].try_into().unwrap());
+        assert_eq!(response_request_id, request_id);
+        assert_eq!(response_mask_id, mask_request_id);
+        let _ = report.send(MaskFacts {
+            constraint_mode,
+            mask_request_id,
+            mask_bytes: response[20..].to_vec(),
+        });
+        for event in [
+            json!({"frame_type": 0x0101, "request_id": request_id, "lane": 0,
+                   "matched_prompt_tokens": 0}),
+            json!({"frame_type": 0x0102, "request_id": request_id, "sequence_offset": 0,
+                   "tokens": answer_tokens(answer)}),
+            json!({"frame_type": 0x0104, "request_id": request_id, "reason": 0,
+                   "bounded": false, "prompt_tokens": prompt_count,
+                   "completion_tokens": answer_tokens(answer).len(),
+                   "prefill_micros": 1000, "decode_micros": 2000,
+                   "wall_micros": 3500, "deduplicated_tokens": 0,
+                   "drafted_tokens": 0, "accepted_draft_tokens": 0,
+                   "draft_cycles": 0, "logit_count": 0}),
+        ] {
+            let _ = stream.write_all(&wire_event(&event));
+        }
+    }
+}
+
+/// A constrained request reaches the engine under a token mask, and the
+/// mask the grammar produces holds the call's opening and refuses what
+/// cannot follow it.
+#[test]
+fn a_constrained_request_generates_under_a_token_mask() {
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let format = qwen();
+    let words_per_mask = (format.vocabulary + 31) / 32;
+    std::thread::spawn(move || {
+        fake_engine_constrained(engine_side, "The answer is 42.", words_per_mask, tx)
+    });
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let pipeline = constrained_pipeline_of(&tokenizer, &directory, &format, client);
+    let body = json!({
+        "messages": [{"role": "user", "content": "Weather in Beijing?"}],
+        "tools": weather_tools(),
+        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+        "reasoning_effort": "none",
+    });
+    let prepared = pipeline.prepare(&body, &mut || Ok(())).expect("prepares");
+    assert!(prepared.constrained(), "a required choice constrains");
+    let (call, _tokens, _first_batch) = pipeline.submit(&prepared, 256).expect("submits");
+    call.result(None).expect("done");
+    let facts = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the engine read the request");
+    assert_eq!(facts.constraint_mode, 1, "the request carries a token mask");
+    // Two rows: one before the simulated token, one after it.
+    let words_per_row = (format.vocabulary as usize + 31) / 32;
+    assert_eq!(facts.mask_bytes.len(), 2 * words_per_row * 4);
+    let allowed = |row: usize, token: u32| {
+        let (word_index, bit) = ((token / 32) as usize, token % 32);
+        let word = u32::from_le_bytes(
+            facts.mask_bytes[row * words_per_row * 4 + word_index * 4
+                ..row * words_per_row * 4 + word_index * 4 + 4]
+                .try_into()
+                .expect("mask word"),
+        );
+        word & (1 << bit) != 0
+    };
+    // The call's opening may start the output, and may follow itself only
+    // as the grammar's layout writes it: the name's opening text.
+    let call_open = format.call_open_id;
+    assert!(allowed(0, call_open), "the call may start the output");
+    // A plain text token cannot follow the call's opening.
+    let the = tokenizer.encode("The", false).expect("encodes")[0];
+    assert!(!allowed(1, the), "plain text cannot follow the call's opening");
 }

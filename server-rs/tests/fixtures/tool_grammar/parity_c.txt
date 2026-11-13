@@ -1,0 +1,11 @@
+%llguidance {}
+start: parameter_0? parameter_1? parameter_2? parameter_3? parameter_4? extra*
+parameter_0: "<parameter=" "unit" ">\n" ("celsius" | "kelvin" | "null") "\n</parameter>\n"
+parameter_1: "<parameter=" "limit" ">\n" ("auto" | %json {"type":"integer","minimum":1,"x-guidance":{"lenient":true,"whitespace_pattern":"[ \\t\\n\\r]{0,64}"}}) "\n</parameter>\n"
+parameter_2: "<parameter=" "count" ">\n" (%json {"allOf":[{"type":"integer"},{"minimum":0}],"x-guidance":{"lenient":true,"whitespace_pattern":"[ \\t\\n\\r]{0,64}"}}) "\n</parameter>\n"
+parameter_3: "<parameter=" "color" ">\n" ("red" | "green") "\n</parameter>\n"
+parameter_4: "<parameter=" "time" ">\n" parameter_4_value
+parameter_4_value[suffix="\n</parameter>\n"]: /(?s:.*)/
+EXTRA_NAME: /[^<> \t\n\r]([^<>\n\r]{0,254}[^<> \t\n\r])?/ & ~("unit" | "limit" | "count" | "color" | "time")
+extra: "<parameter=" EXTRA_NAME ">\n" extra_value
+extra_value[suffix="\n</parameter>\n"]: /(?s:.*)/
