@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 chrono = "0.4.45"
+libc = "0.2"
 llguidance = "1.9.1"
 minijinja = { version = "3.1.0", features = ["builtins", "json", "serde"] }
 serde = { version = "1", features = ["derive"] }

@@ -63,20 +63,19 @@ local paths outside the source tree.
 
 ## Desktop app
 
-`macos/` is the Splash desktop app, a SwiftUI control panel for the Mac
-distributed as a disk image:
+`macos/` is the SwiftUI control panel. The desktop bundle starts the Rust
+server and includes the native inference engine. It uses an existing model
+assembly, selected by its model ID or its directory containing `model.json`.
 
 ```sh
-make package-app RELEASE_VERSION=$VERSION   # dist/Splash Desktop.app
-make package-dmg RELEASE_VERSION=$VERSION   # and Splash-Desktop-<version>.dmg
+make package-app RELEASE_VERSION=$VERSION   # dist/Splash Desktop Rust.app
+make package-dmg RELEASE_VERSION=$VERSION   # dist/Splash-Desktop-Rust-<version>.dmg
 ```
 
-`dev/tools/package_dmg.py` builds the app with `swift build`, puts the runtime
-`make package` ships under `Contents/Resources/runtime`, and writes the disk
-image. `RUNTIME_DIR=<directory>` overrides the archive with a staged runtime
-directory, for a source checkout without one, and `SOURCE_OVERLAY=1` embeds
-this checkout's `install/` and `server/` instead of the archive's, so a
-published engine serves the working tree's installer and server code.
+`dev/tools/package_rust_dmg.sh` builds the Swift app and Rust server and
+copies the native engine from `build/`. The installed app serves Chat
+Completions on IPv4 loopback. Model downloads and assembly creation are
+still pending in Rust. See [the porting status](../server-rs/PORTING.md).
 
 The app is called Splash Desktop: the bundle is `Splash Desktop.app`, the
 executable inside it is `SplashDesktop`, and the volume is
@@ -86,11 +85,8 @@ everything the runtime addresses by name — the `splash` command, the engine,
 the archive, the tap, the data directory and the settings database — is
 unchanged; delete the old app once the new one is in place.
 
-Neither the app nor the disk image is code-signed or notarized: it is for local
-installation, and distributing it requires signing and notarization. The app is
-built with Xcode's Swift toolchain, and the placeholder icon is generated at
-package time. `make package-app` builds just `dist/Splash Desktop.app` (no
-DMG).
+The app has an ad hoc signature. The image is for local installation and
+has no notarization. The packager writes a SHA-256 file beside the image.
 
 ## Private test releases
 
@@ -121,7 +117,10 @@ an archive before uploading it, serve `dist/` (`python3 -m http.server`) and
 run the installer with `SPLASH_BASE_URL` naming that server, `SPLASH_VERSION`
 and any `SPLASH_TOKEN`.
 
-## macOS app and disk image
+## Legacy Python desktop runtime
+
+The following describes the earlier Python desktop distribution.
+The current desktop build is documented in [Desktop app](#desktop-app).
 
 `make package-dmg` packages a self-contained `Splash-Desktop-<version>.dmg`: the
 native SwiftUI control panel (`macos/`) with the runtime archive embedded

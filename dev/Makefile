@@ -14,24 +14,12 @@ package-bottle:
 package-check:
 	$(PYTHON) dev/tools/package_brew.py check --version "$(RELEASE_VERSION)"
 
-# The macOS control panel and its disk image. The DMG embeds the runtime
-# archive `make package` writes (dist/splash-<version>-arm64-macos26.tar.gz);
-# RUNTIME_DIR overrides it with a staged runtime directory, for a source
-# checkout without a release archive. The packager is stdlib-only, so it needs
-# no virtual environment.
-RUNTIME_DIR ?=
-RUNTIME_ARG = $(if $(RUNTIME_DIR),--runtime "$(RUNTIME_DIR)")
-# SOURCE_OVERLAY=1 embeds this checkout's install/ and server/ instead of the
-# archive's, so a published engine serves the working tree's code.
-SOURCE_OVERLAY ?=
-OVERLAY_ARG = $(if $(filter 1,$(SOURCE_OVERLAY)),--overlay-source)
-.PHONY: package-app package-dmg
-package-app:
-	$(BUILD_ID_PYTHON) dev/tools/package_dmg.py --version "$(RELEASE_VERSION)" \
-		$(RUNTIME_ARG) $(OVERLAY_ARG) --app-only
-package-dmg:
-	$(BUILD_ID_PYTHON) dev/tools/package_dmg.py --version "$(RELEASE_VERSION)" \
-		$(RUNTIME_ARG) $(OVERLAY_ARG)
+# The desktop bundle ships the Rust server and native engine.
+.PHONY: package-app package-dmg package-rust-dmg
+package-app: all
+	/bin/bash dev/tools/package_rust_dmg.sh "$(RELEASE_VERSION)" --app-only
+package-dmg package-rust-dmg: all
+	/bin/bash dev/tools/package_rust_dmg.sh "$(RELEASE_VERSION)"
 
 # Uploads the built RELEASE_VERSION archive, its checksum, the tester installer
 # and the `latest` pointer to the private Hugging Face repo testers install

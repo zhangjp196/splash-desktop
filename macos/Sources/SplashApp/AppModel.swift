@@ -4,8 +4,7 @@ import Darwin
 import Foundation
 
 /// Owns the server subprocess and the settings the control panel edits.
-/// The app never loads a model itself: it starts `install/launcher.py serve`
-/// from the embedded runtime, streams its output, watchs `/status`, and
+/// The app starts the bundled Rust server, streams its output, watches `/status`, and
 /// opens the conversation in the web browser.
 @MainActor
 final class AppModel: ObservableObject {
@@ -674,15 +673,13 @@ final class AppModel: ObservableObject {
     }
 
     var canStart: Bool {
-        guard !isBusy, !isRunning, Runtime.python != nil, Runtime.launcher != nil else {
+        guard !isBusy, !isRunning, Runtime.server != nil else {
             return false
         }
         switch modelMode {
         case .upstream:
             return !modelID.trimmingCharacters(in: .whitespaces).isEmpty
         case .local:
-            // An MLX or GGUF target without a named draft has its family's
-            // DFlash2 draft downloaded by the installer.
             return !modelDirectory.isEmpty
         }
     }
@@ -902,7 +899,7 @@ final class AppModel: ObservableObject {
 
     func start() {
         guard canStart else { return }
-        guard let python = Runtime.python, let launcher = Runtime.launcher else {
+        guard let server = Runtime.server else {
             phase = .failed(L10n.string("error.no_runtime"))
             return
         }
@@ -921,7 +918,7 @@ final class AppModel: ObservableObject {
         statusUpdatedAt = nil
         runningConfigID = nil
         stopping = false
-        let arguments = launchArguments(launcherPath: launcher.path)
+        let arguments = launchArguments(launcherPath: server.path)
 
         // The engine reports settings a model cannot use ("--ple-memory
         // ignored: ... has no PLE table to stream"), and the log keeps those
@@ -931,17 +928,14 @@ final class AppModel: ObservableObject {
         logLaunch(arguments)
 
         let process = Process()
-        process.executableURL = python
-        process.arguments = arguments
+        process.executableURL = server
+        var serverArguments = Array(arguments.dropFirst())
         var environment = ProcessInfo.processInfo.environment
-        environment["PYTHONUNBUFFERED"] = "1"
-        // Keep the signed bundle sealed: an import that writes a .pyc inside
-        // it would add files the signature does not cover.
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        environment["TRANSFORMERS_VERBOSITY"] = "error"
-        // The download source: where a Hub download lands and which Hub it
-        // asks, for a launcher that has to fetch a model or a draft.
-        environment.merge(source.environment) { _, source in source }
+        if let index = serverArguments.firstIndex(of: "--api-key") {
+            environment["SPLASH_API_KEY"] = serverArguments[index + 1]
+            serverArguments.removeSubrange(index...index + 1)
+        }
+        process.arguments = serverArguments
         process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -1103,12 +1097,8 @@ final class AppModel: ObservableObject {
         let status = finished.terminationStatus
         if status == 0 {
             phase = .idle
-        } else if let record = Runtime.serveRecord(port: global.port),
-                  record.pid == finished.processIdentifier,
-                  let failure = record.failure {
-            // The launcher or the server wrote why this start failed; the
-            // record is fresher than the log's last line.
-            phase = .failed(failure.message)
+        } else if let error = logLines.last(where: { $0.hasPrefix("splash-server: ") }) {
+            phase = .failed(String(error.dropFirst("splash-server: ".count)))
         } else {
             phase = .failed(L10n.format("error.exited", status))
         }

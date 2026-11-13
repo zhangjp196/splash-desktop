@@ -27,24 +27,26 @@ for the server: the complete response carries the engine's answer with
 its usage, and the SSE stream carries the role chunk, the content
 delta, the finish chunk, the usage chunk and [DONE].
 
-## Where this stands (end of the second porting session)
+## Where this stands
 
-12,746 lines of Rust (7,000 of source, 5,700 of tests, 24 test files)
-port the serving path's core end to end, with 115 tests green and no
-build warnings. The wire protocol is byte-exact against its golden
-file; the engine client runs one generation over any byte streams; the
-tokenizer, the chat templates and the constraints run on the same Rust
-libraries the Python wrapped; the three API dialects' shapes are
-ported; and the server answers Chat completions over real TCP, complete
-and streamed, behind the security layer and the admission gate.
+The wire protocol is byte-exact against its golden file. The Rust listener
+serves Chat Completions (JSON and SSE) and a minimal `/status`. Chat prompt
+preparation is limited by the engine's reported concurrency. A request's
+`timeout` includes body upload, queueing, and prompt preparation. Status
+reports the preparation capacity and active and waiting counts.
 
-The next session picks up at the first `not started` row below. The
-highest-value next slices, in order: the exchange's job machinery (the
-frontend's preparation slots, the choice jobs, the compaction), the
-remaining request conversion (the Responses tools and format), the
-connection watch's head-wait path, and the entry CLI that binds the
-listener and spawns the engine. Each module's port is complete when its
-Python test file's cases pass in Rust.
+The next work in the exchange is to carry the deadline through engine
+submission and generation, add per-choice jobs and cancellation, and port
+compaction. Preparation for token counts and documents still needs its
+callers, including releasing the preparation slot while a PDF worker runs.
+The desktop DMG launches the Rust CLI directly and embeds the native engine.
+The CLI loads existing model assemblies and binds to IPv4 loopback with
+Host and Origin validation and optional API-key checks for POST requests.
+It resolves an explicit DFlash2 draft against the selected assembly's
+recorded draft source, including version 1 assembly records.
+The listener serves the bundled chat UI, Chat token counts and a model list.
+Model downloading and assembly creation, full HTTP admission, LAN access
+and the other dialects are pending.
 
 ## Why this order
 
@@ -59,17 +61,17 @@ sides.
 | 2 | `json_codec.py`, `errors.py`, `lru.py` | ~700 | `src/support/` | **done** — 12 tests; one documented deviation: lone-surrogate JSON escapes are refused at parse (serde_json), the Python retains them; the dialect layer decides how such requests are answered |
 | 3 | `runtime.py` (engine subprocess client) | 1,554 | `src/engine/` | **core done** — the call state machine and the one-generation client (spawn, reader thread, dispatch, submit, cancel, status) with 16 tests against a fake engine; restarts, liveness probes and the CPU mask workers remain |
 | 4 | `fast_tokenizer.py`, `tokenization.py` | ~900 | `src/tokenization/` (tokenizers crate) | **encoding surface and prompt cache done** (5 tests, real Qwen tokenizer); the chat-template half of `fast_tokenizer.py` is module 5 |
-| 5 | `chat_format.py`, `chat_templates.py`, `chat_messages.py` | ~2,300 | `src/chat_format.rs`, `src/templates/` (minijinja) | **format model, rendering core and template loading done** (12 tests); `chat_messages.py` (message normalization) and `chat_templates.py`'s probing/patching remain |
+| 5 | `chat_format.py`, `chat_templates.py`, `chat_messages.py` | ~2,300 | `src/chat_format.rs`, `src/templates/`, `src/chat_messages.rs` | **format model, rendering core, template loading and text message normalization done**; template probing/patching and multimodal normalization remain |
 | 6 | `output.py`, `streamer.py`, `thinking.py` | ~1,100 | `src/output/` | **stop search, reasoning splitter, tool-call projector and streamer done** (20 tests, each against the Python's own output); `thinking.py` remains; the projector's full `ParameterTypes` (schema reading) is module 11 |
 | 7 | `constraints.py` | ~600 | `src/constraints/` (llguidance crate) | **grammar tokenizer env, factory with cache, and token masks done** (4 tests, each against the Python's own output); the executor's parallel mask fill and the strict-tool schemas are tool_schema's (module 11) |
 | 8 | `dialects/` (openai, anthropic, responses, scoring) | ~4,000 | `src/dialects/` | **chat_messages, the OpenAI and Anthropic assemblies, the Anthropic request conversion, and the Responses input and output done** (28 tests, each against the Python's own output); the exchange/job machinery and the remaining request conversion remain |
-| 9 | `http_server.py`, `http_handler.py`, `http_security.py`, `connections.py`, `origins.py`, `routing.py` | ~2,000 | `src/http/` (std-only) | **minimal server, the security layer, the network entry, and the admission gate with the body reservation done** (13 tests); the connection watch's head-wait path remains |
-| 10 | `frontend.py`, `backend.py`, `generation_options.py`, `request_fields.py` | ~2,500 | `src/serve/` | not started |
+| 9 | `http_server.py`, `http_handler.py`, `http_security.py`, `connections.py`, `origins.py`, `routing.py` | ~2,000 | `src/http/`, `src/serve/server.rs` | **minimal listener and unit-tested security and admission primitives**; wiring those primitives into the listener, request I/O limits, connection watching, and remaining routes are pending |
+| 10 | `frontend.py`, `backend.py`, `job.py`, `generation_options.py`, `request_fields.py` | ~2,500 | `src/serve/` | **Chat preparation slots and preparation deadlines started**; generation deadlines, disconnect and choice-job handling, generation options, and request-field parity are pending |
 | 11 | `judgments.py`, `schema_validation.py`, `tool_schema.py`, `compaction.py` | ~1,500 | `src/judgments/` | not started |
 | 12 | `images.py`, `documents.py`, `document_worker.py` | ~1,200 | `src/documents/` (pdfium, image) | not started |
-| 13 | `metrics.py`, `latency.py`, `diagnostics.py`, `serve_record.py`, `serve_options.py`, `server.py` | ~1,500 | `src/main.rs` | not started |
-| — | `install/assembly.py` (startup reads it) | 504 | `src/assembly/` | not started |
-| — | installer (`install/` rest) | ~5,700 | **stays Python** | excluded by decision |
+| 13 | `metrics.py`, `latency.py`, `diagnostics.py`, `serve_record.py`, `serve_options.py`, `server.py` | ~1,500 | `src/main.rs` | **standalone CLI starts and stops the native engine**; full options, metrics, diagnostics and supervision are pending |
+| — | `install/assembly.py` (startup reads it) | 504 | `src/main.rs` | **reads existing model assemblies**; full verification and publication are pending |
+| — | installer (`install/` rest) | ~5,700 | — | Python remains in the checkout; desktop bundle excludes it and uses prepared models |
 
 ## What the port keeps
 

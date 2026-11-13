@@ -3,7 +3,7 @@ import PackageDescription
 
 // The macOS control panel for Splash Desktop. It owns no model or engine code:
 // it locates the runtime the DMG embeds (Resources/runtime, or
-// SPLASH_RUNTIME_DIR), launches `install/launcher.py serve`, shows its log and
+// SPLASH_RUNTIME_DIR), launches `engine/splash-server serve`, shows its log and
 // status, and renders the server's own chat page in a web view.
 //
 // The target is SplashDesktop, so the executable inside the bundle is

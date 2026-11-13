@@ -163,7 +163,7 @@ pub fn stream_callbacks(
                     None,
                 )?;
             }
-            sink.sse(&json!("[DONE]"))
+            sink.write.lock().expect("write lock")("[DONE]")
         })();
         if let Err(error) = outcome {
             eprintln!("stream finish failed: {error}");

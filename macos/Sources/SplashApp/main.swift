@@ -15,8 +15,7 @@ if CommandLine.arguments.contains("--print-runtime") {
     let runtime = Runtime.root
     print(runtime?.path ?? "")
     if let runtime {
-        print("python: \(Runtime.python?.path ?? "missing")")
-        print("launcher: \(Runtime.launcher?.path ?? "missing")")
+        print("server: \(Runtime.server?.path ?? "missing")")
         print("catalog: \(Runtime.catalog.count) model(s)")
         _ = runtime
         exit(0)

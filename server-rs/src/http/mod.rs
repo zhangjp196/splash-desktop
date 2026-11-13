@@ -18,6 +18,7 @@ pub use security::{authenticate, parse_allowed_origin, validate_api_key, validat
 pub struct Request {
     pub method: String,
     pub path: String,
+    pub headers: Headers,
     pub body: Vec<u8>,
 }
 
@@ -69,19 +70,31 @@ fn status_text(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "OK",
     }
 }
 
 /// Read one request from the connection, or `None` at EOF.
 pub fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
+    Ok(read_timed_request(stream)?.map(|(request, _)| request))
+}
+
+pub(crate) fn read_timed_request(
+    stream: &mut TcpStream,
+) -> std::io::Result<Option<(Request, std::time::Instant)>> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
+    if (&mut reader).take(65537).read_line(&mut line)? == 0 {
         return Ok(None);
+    }
+    if line.len() > 65536 || !line.ends_with('\n') {
+        return Err(std::io::ErrorKind::InvalidData.into());
     }
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
@@ -89,29 +102,44 @@ pub fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> 
     if method.is_empty() || path.is_empty() {
         return Ok(None);
     }
-    let mut content_length = 0usize;
+    let mut headers = Headers::new();
+    let mut remaining = 65536;
     loop {
         let mut header = String::new();
-        if reader.read_line(&mut header)? == 0 {
+        if (&mut reader).take(remaining + 1).read_line(&mut header)? == 0 {
             return Ok(None);
         }
+        if header.len() as u64 > remaining || !header.ends_with('\n') {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        remaining -= header.len() as u64;
         let header = header.trim_end();
         if header.is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().unwrap_or(0);
-            }
-        }
+        let (name, value) = header.split_once(':').ok_or(std::io::ErrorKind::InvalidData)?;
+        headers.add(name, value.trim());
     }
+    let content_length = match headers.get("content-length") {
+        [] => 0,
+        [length] => length.parse::<usize>().map_err(|_| std::io::ErrorKind::InvalidData)?,
+        _ => return Err(std::io::ErrorKind::InvalidData.into()),
+    };
+    if content_length > 128 * 1024 * 1024 || !headers.get("transfer-encoding").is_empty() {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    let started_at = std::time::Instant::now();
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body)?;
-    Ok(Some(Request { method, path, body }))
+    Ok(Some((Request { method, path, headers, body }, started_at)))
 }
 
 /// Write one response.
 pub fn write_response(stream: &mut TcpStream, response: &Response) -> std::io::Result<()> {
+    if response.content_type == "text/event-stream" {
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")?;
+        return stream.flush();
+    }
     let head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         response.status,

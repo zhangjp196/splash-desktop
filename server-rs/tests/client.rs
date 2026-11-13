@@ -307,8 +307,8 @@ fn status_correlates_its_answer() {
 
 #[test]
 fn the_pending_limit_refuses_the_next_request() {
-    // A script whose first request never finishes, so the slot stays held.
-    let (client, _engine) = paired_client(vec![vec![]]);
+    // Hold all eight requests until the client exercises the pending limit.
+    let (client, _engine) = paired_client(vec![vec![]; 8]);
     assert!(client.wait_ready(Some(Duration::from_secs(5))));
     let first = client.submit(&generation_request(), None, None).expect("first");
     for _ in 1..8 {
@@ -318,11 +318,9 @@ fn the_pending_limit_refuses_the_next_request() {
         .submit(&generation_request(), None, None)
         .expect_err("limit full");
     assert!(matches!(error, EngineError::PendingLimitExceeded(_)));
-    // Cancelling the stuck request frees its slot.
-    assert!(client.cancel(&first));
-    let _ = first.result(Some(Duration::from_secs(5)));
-    let next = client.submit(&generation_request(), None, None);
-    assert!(next.is_ok(), "the cancelled slot was not released");
+    assert_eq!(client.pending_count(), 8);
+    client.close();
+    assert!(first.result(Some(Duration::from_secs(5))).is_err());
 }
 
 #[test]

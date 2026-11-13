@@ -447,4 +447,33 @@ fn the_server_answers_over_real_tcp() {
     assert!(response.contains("\"chat.completion.chunk\""), "{response}");
     assert!(response.contains("The answer is 42."), "{response}");
     assert!(response.contains("[DONE]"), "{response}");
+
+    // An elapsed request budget returns the OpenAI timeout before generation.
+    let mut expired_body = body;
+    expired_body["timeout"] = json!(1e-12);
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        expired_body.to_string().len(),
+        expired_body
+    );
+    stream.write_all(request.as_bytes()).expect("writes");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("reads");
+    assert!(response.starts_with("HTTP/1.1 504 Gateway Timeout\r\n"), "{response}");
+    assert!(response.contains("\"code\":\"request_timeout\""), "{response}");
+
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(b"GET /status HTTP/1.1\r\n\r\n").expect("writes");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("reads");
+    let (_, payload) = response.split_once("\r\n\r\n").expect("HTTP response");
+    let status: Value = serde_json::from_str(payload).expect("JSON status");
+    assert_eq!(status["frontend"], json!({"preparation_capacity": 4, "active": 0, "waiting": 0}));
 }

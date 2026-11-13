@@ -22,7 +22,7 @@ struct ModelsPane: View {
                         downloader.reset()
                         downloading = true
                     } label: {
-                        Label(L10n.string("download.title"), systemImage: "arrow.down.circle")
+                        Label(L10n.string("download.title"), systemImage: "magnifyingglass.circle")
                             .font(.system(size: 12, weight: .semibold))
                     }
                     .buttonStyle(.bordered)
@@ -70,7 +70,6 @@ struct ModelsPane: View {
                 downloader: downloader,
                 onClose: { downloading = false }
             )
-            .environmentObject(model)
         }
         .sheet(item: $editing) { session in
             ConfigEditor(
