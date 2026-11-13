@@ -209,3 +209,99 @@ pub fn normalize_responses_input(
     flush(&mut messages, &mut pending);
     Ok(messages)
 }
+
+/// The Responses output item of one output block, ported from
+/// `server/dialects/responses.py`'s `responses_item`: the item id's
+/// prefix by kind, the status, and the text or arguments an item in
+/// progress does not carry yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputBlock {
+    pub kind: String,
+    pub text: String,
+    pub call_id: Option<String>,
+    pub name: Option<String>,
+    pub status: String,
+}
+
+/// The id prefix of each kind's item.
+fn item_prefix(kind: &str) -> Option<&'static str> {
+    match kind {
+        "reasoning" => Some("rs"),
+        "text" => Some("msg"),
+        "tool" => Some("fc"),
+        "custom" => Some("ctc"),
+        _ => None,
+    }
+}
+
+/// The Responses output item of `block` at `index`. An item in progress
+/// carries no text or arguments yet.
+pub fn responses_item(
+    public_id: &str,
+    block: &OutputBlock,
+    index: usize,
+) -> Result<Value, MessageError> {
+    let prefix = item_prefix(&block.kind)
+        .ok_or_else(|| bad(format!("unsupported output block: {}", block.kind)))?;
+    let item_id = format!("{prefix}_{public_id}_{index}");
+    let in_progress = block.status == "in_progress";
+    let text = if in_progress { "" } else { &block.text };
+    match block.kind.as_str() {
+        "reasoning" => Ok(json!({
+            "id": item_id,
+            "type": "reasoning",
+            "status": block.status,
+            "summary": if text.is_empty() {
+                json!([])
+            } else {
+                json!([{"type": "summary_text", "text": text}])
+            },
+            "content": if text.is_empty() {
+                json!([])
+            } else {
+                json!([{"type": "reasoning_text", "text": text}])
+            },
+            "encrypted_content": null,
+        })),
+        "text" => Ok(json!({
+            "id": item_id,
+            "type": "message",
+            "status": block.status,
+            "role": "assistant",
+            "content": if in_progress {
+                json!([])
+            } else {
+                json!([{"type": "output_text", "text": text, "annotations": []}])
+            },
+        })),
+        "tool" => Ok(json!({
+            "id": item_id,
+            "type": "function_call",
+            "status": block.status,
+            "call_id": block.call_id,
+            "name": block.name,
+            "arguments": text,
+        })),
+        "custom" => Ok(json!({
+            "id": item_id,
+            "type": "custom_tool_call",
+            "status": block.status,
+            "call_id": block.call_id,
+            "name": block.name,
+            "input": text,
+        })),
+        _ => unreachable!("prefix checked above"),
+    }
+}
+
+/// The Responses output items of the output's blocks, in order.
+pub fn responses_output(
+    public_id: &str,
+    blocks: &[OutputBlock],
+) -> Result<Vec<Value>, MessageError> {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| responses_item(public_id, block, index))
+        .collect()
+}
