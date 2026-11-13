@@ -5,6 +5,25 @@ every module's port is wrong until the Python tests' behavior is
 reproduced, and the whole server is not replaced until the port serves
 what the Python one serves.
 
+## Where this stands (end of the first porting session)
+
+5,702 lines of Rust (plus 2,152 of tests) port the first six modules'
+cores: the wire protocol byte-exact against its golden file, the
+support layer, the engine client's call state machine and subprocess
+core, the tokenizer's encoding surface with the prompt cache, the chat
+format's model with the templates' rendering and loading, and the
+output's stop search, reasoning splitter and tool-call projector.
+62 tests are green, every one against the Python implementation's own
+output, and the build carries no warnings.
+
+The next session picks up at the first `not started` row below. The
+highest-value next slices, in order: the streamer's incremental decode
+(`streamer.py`, small), the constraints (module 7, the llguidance crate
+direct), then the dialects and the HTTP layer, which make an
+end-to-end serving path. The projector's full `ParameterTypes` arrives
+with tool_schema (module 11). Each module's port is complete when its
+Python test file's cases pass in Rust.
+
 ## Why this order
 
 Each module ports only against the modules below it, so the order is the
