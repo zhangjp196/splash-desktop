@@ -192,6 +192,7 @@ fn collected_result(done: &crate::protocol::DoneEvent) -> openai::CollectedResul
         } else {
             0.0
         },
+        bounded: false,
         metrics: json!({}),
     }
 }

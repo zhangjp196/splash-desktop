@@ -21,6 +21,7 @@ fn result() -> CollectedResult {
         first_token_to_done_ms: 30.0,
         request_wall_ms: 45.0,
         stream_tokens_per_second: 41.0,
+        bounded: false,
         metrics: json!({
             "request_latency": {
                 "start_to_first_token_ms": 12.5,

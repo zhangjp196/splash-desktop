@@ -21,6 +21,9 @@ pub struct CollectedResult {
     pub first_token_to_done_ms: f64,
     pub request_wall_ms: f64,
     pub stream_tokens_per_second: f64,
+    /// A LENGTH end at a bound of the engine's own, which Anthropic's
+    /// stop reason reads as the context window's.
+    pub bounded: bool,
     /// The metrics object the response carries as it is.
     pub metrics: Value,
 }

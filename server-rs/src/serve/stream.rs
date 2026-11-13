@@ -149,6 +149,7 @@ pub fn stream_callbacks(
                 } else {
                     0.0
                 },
+                bounded: done.bounded,
                 metrics: json!({}),
             };
             let timings = openai::timings_dict(&result);
