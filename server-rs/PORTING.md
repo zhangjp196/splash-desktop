@@ -24,16 +24,29 @@ POST /v1/chat/completions (complete or streamed, as the body's `stream`
 says) and GET /status. The tests run every path against a fake engine —
 over socket pairs for the pipeline and the stream, and over real TCP
 for the server: the complete response carries the engine's answer with
-its usage, and the SSE stream carries the role chunk, the content
-delta, the finish chunk, the usage chunk and [DONE].
+its usage and the reasoning kept apart from it, and the SSE stream
+carries the role chunk, the reasoning and content deltas, the finish
+chunk, the usage chunk and [DONE].
 
 ## Where this stands
 
 The wire protocol is byte-exact against its golden file. The Rust listener
-serves Chat Completions (JSON and SSE) and a minimal `/status`. Chat prompt
-preparation is limited by the engine's reported concurrency. A request's
-`timeout` includes body upload, queueing, and prompt preparation. Status
-reports the preparation capacity and active and waiting counts.
+serves Chat Completions (JSON and SSE) and a `/status` document: the
+engine's own status JSON — its memory, cache, request, fan, throttle and
+speculation sections, the rates `metrics` reports — beside the server's
+readiness, preparation slots and transport counters, which is what the
+desktop's live board reads. Chat prompt preparation is limited by the
+engine's reported concurrency. A request's `timeout` includes body upload,
+queueing, and prompt preparation. The stream splits the output's reasoning
+from its answer as the Python's exchange does, so a thinking model's
+`</think>` never reaches a client as content, and its usage chunk carries
+the request's metrics — the decode rate the chat page shows as tok/s —
+beside the timings. POST `/v1/thermal` sets the running engine's prefill
+duty in place, as the desktop's thermal pane asks. A prepared model is
+resolved through the installer's selection link (`.selections/<digest of the
+selection>`), so a directory with several prepared assemblies serves the one
+the command's options name, and the streamer counts characters where the
+Python does, so a multi-byte reply never splits inside a character.
 
 The next work in the exchange is to carry the deadline through engine
 submission and generation, add per-choice jobs and cancellation, and port
@@ -62,14 +75,14 @@ sides.
 | 3 | `runtime.py` (engine subprocess client) | 1,554 | `src/engine/` | **core done** — the call state machine and the one-generation client (spawn, reader thread, dispatch, submit, cancel, status) with 16 tests against a fake engine; restarts, liveness probes and the CPU mask workers remain |
 | 4 | `fast_tokenizer.py`, `tokenization.py` | ~900 | `src/tokenization/` (tokenizers crate) | **encoding surface and prompt cache done** (5 tests, real Qwen tokenizer); the chat-template half of `fast_tokenizer.py` is module 5 |
 | 5 | `chat_format.py`, `chat_templates.py`, `chat_messages.py` | ~2,300 | `src/chat_format.rs`, `src/templates/`, `src/chat_messages.rs` | **format model, rendering core, template loading and text message normalization done**; template probing/patching and multimodal normalization remain |
-| 6 | `output.py`, `streamer.py`, `thinking.py` | ~1,100 | `src/output/` | **stop search, reasoning splitter, tool-call projector and streamer done** (20 tests, each against the Python's own output); `thinking.py` remains; the projector's full `ParameterTypes` (schema reading) is module 11 |
+| 6 | `output.py`, `streamer.py`, `thinking.py` | ~1,100 | `src/output/` | **stop search, reasoning splitter, tool-call projector and streamer done** (20 tests, each against the Python's own output); the splitter rides the pipeline's complete answer and the SSE stream, so `reasoning_content` is reported rather than a raw `</think>`; `thinking.py` remains; the projector's full `ParameterTypes` (schema reading) is module 11 |
 | 7 | `constraints.py` | ~600 | `src/constraints/` (llguidance crate) | **grammar tokenizer env, factory with cache, and token masks done** (4 tests, each against the Python's own output); the executor's parallel mask fill and the strict-tool schemas are tool_schema's (module 11) |
 | 8 | `dialects/` (openai, anthropic, responses, scoring) | ~4,000 | `src/dialects/` | **chat_messages, the OpenAI and Anthropic assemblies, the Anthropic request conversion, and the Responses input and output done** (28 tests, each against the Python's own output); the exchange/job machinery and the remaining request conversion remain |
-| 9 | `http_server.py`, `http_handler.py`, `http_security.py`, `connections.py`, `origins.py`, `routing.py` | ~2,000 | `src/http/`, `src/serve/server.rs` | **minimal listener and unit-tested security and admission primitives**; wiring those primitives into the listener, request I/O limits, connection watching, and remaining routes are pending |
+| 9 | `http_server.py`, `http_handler.py`, `http_security.py`, `connections.py`, `origins.py`, `routing.py` | ~2,000 | `src/http/`, `src/serve/server.rs` | **minimal listener and unit-tested security and admission primitives**, with Chat completions, token counts, models, `/status` and `/v1/thermal` routed; wiring the rest of the security primitives into the listener, request I/O limits, connection watching, and remaining routes are pending |
 | 10 | `frontend.py`, `backend.py`, `job.py`, `generation_options.py`, `request_fields.py` | ~2,500 | `src/serve/` | **Chat preparation slots and preparation deadlines started**; generation deadlines, disconnect and choice-job handling, generation options, and request-field parity are pending |
 | 11 | `judgments.py`, `schema_validation.py`, `tool_schema.py`, `compaction.py` | ~1,500 | `src/judgments/` | not started |
 | 12 | `images.py`, `documents.py`, `document_worker.py` | ~1,200 | `src/documents/` (pdfium, image) | not started |
-| 13 | `metrics.py`, `latency.py`, `diagnostics.py`, `serve_record.py`, `serve_options.py`, `server.py` | ~1,500 | `src/main.rs` | **standalone CLI starts and stops the native engine**; full options, metrics, diagnostics and supervision are pending |
+| 13 | `metrics.py`, `latency.py`, `diagnostics.py`, `serve_record.py`, `serve_options.py`, `server.py` | ~1,500 | `src/main.rs` | **standalone CLI starts and stops the native engine**; `/status` serves the engine's own document with the server's transport accounting, so the live board reads it; the status cache, full options, metrics and diagnostics remain |
 | — | `install/assembly.py` (startup reads it) | 504 | `src/main.rs` | **reads existing model assemblies**; full verification and publication are pending |
 | — | installer (`install/` rest) | ~5,700 | — | Python remains in the checkout; desktop bundle excludes it and uses prepared models |
 

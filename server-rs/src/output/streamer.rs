@@ -15,18 +15,26 @@ pub enum Streamed {
 
 /// The streamer of one generation's output.
 ///
-/// The decode is incremental by difference: the tokens decoded whole each
-/// time, the text beyond what was already emitted is this step's, and a
-/// trailing U+FFFD — a multi-byte character the output ends inside — is
-/// held until more text decides it. The observable behavior is the
-/// Python's `DecodeStream`, whose type in the tokenizers crate this port
-/// uses borrows the tokenizer and cannot be stored beside it.
+/// The decode is incremental by difference, as the tokenizers crate's own
+/// `DecodeStream` does it: the ids needed to produce a valid chunk are kept
+/// with the string they last decoded to, and each new token's chunk is what
+/// the longer decode adds past that string. A trailing U+FFFD — a
+/// multi-byte character the output ends inside — is held until more text
+/// decides it. The crate's `DecodeStream` borrows the tokenizer and cannot
+/// be stored beside it, so its algorithm is carried here over
+/// `FastTokenizer::decode`.
 pub struct CallbackStreamer {
     stops: Option<StopSearch>,
     token_ids: Vec<u32>,
     emitted: Vec<String>,
-    /// How much of the whole decode the stream has published.
-    settled: usize,
+    /// The ids needed to produce valid chunks: the read, the prefix and the
+    /// rest, as the crate's `DecodeStream` keeps them.
+    ids: Vec<u32>,
+    /// The string those ids last decoded to, which the next chunk is what
+    /// follows.
+    prefix: String,
+    /// The index within `ids` the prefix corresponds to.
+    prefix_index: usize,
     pending_text: String,
     stop_sequence: Option<String>,
 }
@@ -42,7 +50,9 @@ impl CallbackStreamer {
             },
             token_ids: Vec::new(),
             emitted: Vec::new(),
-            settled: 0,
+            ids: Vec::new(),
+            prefix: String::new(),
+            prefix_index: 0,
             pending_text: String::new(),
             stop_sequence: None,
         }
@@ -61,36 +71,54 @@ impl CallbackStreamer {
         tokenizer: &crate::tokenization::FastTokenizer,
         token_ids: &[u32],
     ) -> Vec<Streamed> {
-        if self.stop_sequence.is_some() {
-            return Vec::new();
-        }
-        self.token_ids.extend_from_slice(token_ids);
-        let whole = tokenizer.decode(&self.token_ids, true).unwrap_or_default();
-        self.put_decoded(&whole)
-    }
-
-    /// The whole decode so far, as the streaming loop reads it: the text
-    /// beyond what was published is this step's, and a trailing U+FFFD —
-    /// a multi-byte character the output ends inside — is held until more
-    /// text decides it.
-    pub fn put_decoded(&mut self, whole: &str) -> Vec<Streamed> {
         let mut output = Vec::new();
-        if self.stop_sequence.is_some() {
-            return output;
+        for token_id in token_ids {
+            if self.stop_sequence.is_some() {
+                break;
+            }
+            self.token_ids.push(*token_id);
+            if let Some(text) = self.step(tokenizer, *token_id) {
+                output.extend(self.emit(&text));
+            }
         }
-        let fresh = &whole[self.settled.min(whole.len())..];
-        let complete = fresh.trim_end_matches('\u{fffd}');
-        if complete.is_empty() {
-            return output;
-        }
-        self.settled += complete.len();
-        output.extend(self.emit(complete));
         output
     }
 
-    /// How much of the whole decode the stream has published.
-    pub fn settled(&self) -> usize {
-        self.settled
+    /// One token's chunk, as the crate's `step_decode_stream` produces it:
+    /// the text the longer decode adds past the string the kept ids last
+    /// decoded to, or nothing while a multi-byte character is still
+    /// incomplete.
+    fn step(
+        &mut self,
+        tokenizer: &crate::tokenization::FastTokenizer,
+        token_id: u32,
+    ) -> Option<String> {
+        if self.prefix.is_empty() && !self.ids.is_empty() {
+            let new_prefix = tokenizer.decode(&self.ids, true).ok()?;
+            if !new_prefix.ends_with('\u{fffd}') {
+                self.prefix = new_prefix;
+                self.prefix_index = self.ids.len();
+            }
+        }
+        self.ids.push(token_id);
+        let string = tokenizer.decode(&self.ids, true).ok()?;
+        if string.len() <= self.prefix.len() || string.ends_with('\u{fffd}') {
+            return None;
+        }
+        if !string.starts_with(&self.prefix) {
+            // The decode changed behind the published text, which the
+            // crate's stream reports as an invalid prefix: keep the text
+            // already sent and start the prefix over from here.
+            self.prefix.clear();
+            self.prefix_index = 0;
+            return None;
+        }
+        let new_text = string[self.prefix.len()..].to_string();
+        let new_prefix_index = self.ids.len() - self.prefix_index;
+        self.ids = self.ids[self.prefix_index..].to_vec();
+        self.prefix = tokenizer.decode(&self.ids, true).ok()?;
+        self.prefix_index = new_prefix_index;
+        Some(new_text)
     }
 
     /// The text as it arrives, held back where a stop may still change
@@ -108,8 +136,16 @@ impl CallbackStreamer {
         let found = stops.search(text);
         if let Some(found) = found {
             self.stop_sequence = Some(found.stop.clone());
-            let keep = self.pending_text.len().saturating_sub(found.back);
-            let ready = self.pending_text[..keep].to_string();
+            // `back` counts characters, as the search does.
+            let characters = self.pending_text.chars().count();
+            let keep = characters.saturating_sub(found.back);
+            let split = self
+                .pending_text
+                .char_indices()
+                .nth(keep)
+                .map(|(index, _)| index)
+                .unwrap_or(self.pending_text.len());
+            let ready = self.pending_text[..split].to_string();
             self.pending_text.clear();
             let mut output = Vec::new();
             if !ready.is_empty() {
@@ -119,10 +155,19 @@ impl CallbackStreamer {
             output.push(Streamed::Stopped);
             return output;
         }
+        // `held` counts characters, so the split is at a character
+        // boundary: a byte offset would cut a multi-byte character.
         let held = stops.held();
-        let ready_len = self.pending_text.len() - held;
-        let ready = self.pending_text[..ready_len].to_string();
-        self.pending_text = self.pending_text[ready_len..].to_string();
+        let characters = self.pending_text.chars().count();
+        let ready_len = characters.saturating_sub(held);
+        let split = self
+            .pending_text
+            .char_indices()
+            .nth(ready_len)
+            .map(|(index, _)| index)
+            .unwrap_or(self.pending_text.len());
+        let ready = self.pending_text[..split].to_string();
+        self.pending_text = self.pending_text[split..].to_string();
         if ready.is_empty() {
             Vec::new()
         } else {

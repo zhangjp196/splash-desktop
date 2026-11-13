@@ -55,6 +55,26 @@ fn the_incremental_decode_agrees_with_the_whole_decode() {
     assert_eq!(streamer.token_ids(), &tokens[..]);
 }
 
+/// A multi-byte character split across tokens must not split the text at a
+/// byte offset: the Python's streamer counts characters, and a byte offset
+/// lands inside a character and panics.
+#[test]
+fn a_multibyte_reply_streams_without_splitting_a_character() {
+    let Some((tokenizer, _)) = qwen_tokenizer() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let text = "思考过程：1 + 1 等于 2。然后给出答案。";
+    let tokens = tokenizer.encode(text, false).expect("encodes");
+    let mut streamer = CallbackStreamer::new(&[]);
+    let mut streamed = Vec::new();
+    for chunk in tokens.chunks(1) {
+        streamed.extend(streamer.put_tokens(&tokenizer, chunk));
+    }
+    streamed.extend(streamer.end(&tokenizer));
+    assert_eq!(text_of(&streamed), text);
+}
+
 #[test]
 fn a_stop_sequence_holds_its_may_complete_end_and_ends_the_stream() {
     let Some((tokenizer, _)) = qwen_tokenizer() else {

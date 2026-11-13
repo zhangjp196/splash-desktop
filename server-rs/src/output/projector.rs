@@ -606,9 +606,8 @@ impl StreamingToolCallProjector {
                     let (start, tag) = self.next_tag(&end_refs.iter().map(|t| t.to_string()).collect::<Vec<_>>());
                     let Some(_tag) = tag else {
                         let pending = self.state.pending.clone();
-                        let held = hold_partial(&pending, &end_refs).1;
-                        let ready_len = pending.len() - held.len();
-                        let ready = pending[..ready_len].to_string();
+                        let (ready, held) = hold_partial(&pending, &end_refs);
+                        let ready = ready.to_string();
                         self.put_value(&ready, &mut events);
                         self.state.pending = held.to_string();
                         break;

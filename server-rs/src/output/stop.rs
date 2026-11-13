@@ -3,16 +3,22 @@
 //! `hold_partial`.
 
 /// `text` split before its longest end that begins one of `markers`, which
-/// more text may complete.
+/// more text may complete. The lengths are characters, as the Python's
+/// `hold_partial` counts them: a byte length would split a multi-byte
+/// character and panic.
 pub fn hold_partial<'a>(text: &'a str, markers: &[&str]) -> (&'a str, &'a str) {
-    let longest = markers.iter().map(|marker| marker.len()).max().unwrap_or(0);
-    let bytes = text.len();
-    for length in (1..=(bytes.min(longest.saturating_sub(1)))).rev() {
-        let (head, tail) = text.split_at(bytes - length);
-        if markers
-            .iter()
-            .any(|marker| length < marker.len() && marker.starts_with(tail))
-        {
+    let longest = markers
+        .iter()
+        .map(|marker| marker.chars().count())
+        .max()
+        .unwrap_or(0);
+    let boundaries: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+    let count = boundaries.len();
+    for length in (1..=count.min(longest.saturating_sub(1))).rev() {
+        let (head, tail) = text.split_at(boundaries[count - length]);
+        if markers.iter().any(|marker| {
+            length < marker.chars().count() && marker.starts_with(tail)
+        }) {
             return (head, tail);
         }
     }
