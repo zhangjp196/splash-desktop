@@ -11,10 +11,18 @@ what the Python one serves.
 assembled response: the messages normalized, the template rendered, the
 prompt tokenized, the wire frame submitted to the engine client, the
 output's tokens collected through the call's events, and the answer
-assembled as OpenAI's dialect answers. `src/http/` carries the minimal
-HTTP/1.1 server the Python's stdlib frontend mirrors. The test runs the
-whole path against a fake engine over a socket pair, with the real Qwen
-tokenizer and template.
+assembled as OpenAI's dialect answers. `src/serve/stream.rs` runs one
+request's stream: the role chunk at the start, the output's text as
+content deltas through the streamer's incremental decode, the finish
+chunk with the timings, the usage chunk when asked, and `[DONE]` — the
+events written as OpenAI's SSE chunks as they arrive, the completion
+callback writing the finish, as the Python's exchange collects.
+`src/http/` carries the minimal HTTP/1.1 server the Python's stdlib
+frontend mirrors. The tests run both paths against a fake engine over a
+socket pair, with the real Qwen tokenizer and template: the complete
+response carries the engine's answer with its usage, and the SSE stream
+carries the role chunk, the content delta, the finish chunk, the usage
+chunk and [DONE].
 
 ## Where this stands (end of the first porting session)
 

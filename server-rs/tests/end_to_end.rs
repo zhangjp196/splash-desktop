@@ -5,13 +5,14 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use splash_server::chat_format::qwen;
 use splash_server::chat_messages::normalize_messages;
 use splash_server::dialects::openai;
 use splash_server::engine::EngineClient;
+use splash_server::output::StreamingToolCallProjector;
 use splash_server::serve::Pipeline;
 use splash_server::templates::load_chat_templates;
 use splash_server::tokenization::{FastTokenizer, PromptTokenizer};
@@ -228,4 +229,135 @@ fn a_chat_request_runs_the_whole_pipeline() {
 /// The template messages step, as the pipeline's prepare runs it.
 fn crate_chat_messages_template(normalized: &[Value]) -> Value {
     Value::Array(splash_server::chat_messages::template_messages(normalized))
+}
+
+/// The streaming path: the engine's events written as OpenAI's SSE chunks
+/// as they arrive, read back off a socket pair.
+#[test]
+fn a_chat_request_streams_as_openai_sse() {
+    use splash_server::serve::stream::{stream_callbacks, StreamSink};
+    
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    std::thread::spawn(move || fake_engine(engine_side, "The answer is 42."));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+
+    // The SSE sink writes onto its own socket pair; the test reads it.
+    let (sink_write_side, mut sink_read_side) = UnixStream::pair().expect("socket pair");
+    let writer_stream = Mutex::new(sink_write_side.try_clone().expect("clone"));
+    let sink = Arc::new(StreamSink {
+        write: Arc::new(Mutex::new(Box::new(move |payload: &str| {
+            writer_stream
+                .lock()
+                .unwrap()
+                .write_all(format!("data: {payload}\n\n").as_bytes())
+                .map_err(|error| error.to_string())
+        }))),
+        model: "Qwen".into(),
+        request_id: "req1".into(),
+        created_at: 1_700_000_000,
+        include_usage: true,
+    });
+
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let body = json!({
+        "messages": [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "What is the answer?"},
+        ],
+        "max_tokens": 64,
+    });
+    let normalized = normalize_messages(&body["messages"], false).expect("normalizes");
+    let templated = crate_chat_messages_template(&normalized);
+    let rendered = {
+        let source = pipeline_source(&pipeline_of(&tokenizer, &directory, &format, client.clone()));
+        let renderer =
+            splash_server::templates::ChatTemplateRenderer::new(&source).expect("compiles");
+        renderer
+            .render(&templated, None, None, true, &Default::default())
+            .expect("renders")
+    };
+    let prompt_tokens = {
+        let pipeline = pipeline_of(&tokenizer, &directory, &format, client.clone());
+        pipeline.prompt_tokenizer.encode(&rendered)
+    };
+
+    let tokens: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let (on_event, on_complete) = stream_callbacks(
+        sink.clone(),
+        tokens.clone(),
+        tokenizer.clone(),
+        Arc::new(Mutex::new(
+            StreamingToolCallProjector::without_policy(1, &format),
+        )),
+    );
+    let request = splash_server::engine::GenerationRequest {
+        frame: splash_server::protocol::RequestFrame {
+            logical_max_output_tokens: 64,
+            prompt_tokens: prompt_tokens.clone(),
+            ..splash_server::protocol::RequestFrame::default()
+        },
+        deadline: None,
+        mask_provider: None,
+    };
+    let call = client
+        .submit(&request, Some(on_event), Some(on_complete))
+        .expect("submits");
+    let _done = call.result(None).expect("done");
+
+    // The SSE stream: the role chunk, the content deltas, the finish
+    // chunk, the usage chunk, and [DONE].
+    let mut lines = String::new();
+    sink_read_side
+        .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut buffer = [0u8; 65536];
+    while std::time::Instant::now() < deadline {
+        match sink_read_side.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => lines.push_str(&String::from_utf8_lossy(&buffer[..count])),
+            Err(_) => continue, // a read timeout: more may follow
+        }
+        if lines.contains("[DONE]") {
+            break;
+        }
+    }
+    assert!(lines.contains("\"chat.completion.chunk\""), "{lines}");
+    assert!(lines.contains("\"role\":\"assistant\""), "{lines}");
+    assert!(lines.contains("The answer is 42."), "{lines}");
+    assert!(lines.contains("\"finish_reason\":\"stop\""), "{lines}");
+    assert!(lines.contains("\"usage\""), "{lines}");
+    assert!(lines.contains("[DONE]"), "{lines}");
+}
+
+fn pipeline_of(
+    tokenizer: &Arc<FastTokenizer>,
+    directory: &PathBuf,
+    format: &splash_server::chat_format::ChatFormat,
+    client: EngineClient,
+) -> Pipeline {
+    let prompt_tokenizer =
+        PromptTokenizer::from_directory(tokenizer.clone(), directory, format.message_boundary);
+    let templates = load_chat_templates(directory).expect("loads");
+    Pipeline {
+        tokenizer: tokenizer.clone(),
+        prompt_tokenizer,
+        templates,
+        chat_format: format.clone(),
+        client,
+        model: "Qwen".into(),
+    }
+}
+
+fn pipeline_source(pipeline: &Pipeline) -> String {
+    pipeline
+        .templates
+        .select(None, None)
+        .expect("the model has a chat template")
 }

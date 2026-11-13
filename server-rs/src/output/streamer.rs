@@ -61,15 +61,23 @@ impl CallbackStreamer {
         tokenizer: &crate::tokenization::FastTokenizer,
         token_ids: &[u32],
     ) -> Vec<Streamed> {
+        if self.stop_sequence.is_some() {
+            return Vec::new();
+        }
+        self.token_ids.extend_from_slice(token_ids);
+        let whole = tokenizer.decode(&self.token_ids, true).unwrap_or_default();
+        self.put_decoded(&whole)
+    }
+
+    /// The whole decode so far, as the streaming loop reads it: the text
+    /// beyond what was published is this step's, and a trailing U+FFFD —
+    /// a multi-byte character the output ends inside — is held until more
+    /// text decides it.
+    pub fn put_decoded(&mut self, whole: &str) -> Vec<Streamed> {
         let mut output = Vec::new();
         if self.stop_sequence.is_some() {
             return output;
         }
-        self.token_ids.extend_from_slice(token_ids);
-        let whole = tokenizer.decode(&self.token_ids, true).unwrap_or_default();
-        // The text beyond what was emitted is this step's; a trailing
-        // U+FFFD is a character the output ends inside, which the rest
-        // decides.
         let fresh = &whole[self.settled.min(whole.len())..];
         let complete = fresh.trim_end_matches('\u{fffd}');
         if complete.is_empty() {
@@ -78,6 +86,11 @@ impl CallbackStreamer {
         self.settled += complete.len();
         output.extend(self.emit(complete));
         output
+    }
+
+    /// How much of the whole decode the stream has published.
+    pub fn settled(&self) -> usize {
+        self.settled
     }
 
     /// The text as it arrives, held back where a stop may still change
