@@ -11,9 +11,11 @@ path = "src/lib.rs"
 
 [dependencies]
 chrono = "0.4.45"
+llguidance = "1.9.1"
 minijinja = { version = "3.1.0", features = ["builtins", "json", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["unbounded_depth", "preserve_order"] }
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
+toktrie = "1.9.1"
 
 [dev-dependencies]
