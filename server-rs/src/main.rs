@@ -54,6 +54,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut model = None;
     let mut directory = None;
     let mut draft = None;
+    let mut mmproj = None;
+    let mut language_only = false;
     let mut speculation = Speculation::Auto;
     let mut require_draft = false;
     let mut port = 8000;
@@ -67,6 +69,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--require-draft" => require_draft = true,
+            "--language-only" => language_only = true,
             "--disable-ane" => engine_args.extend(["--ane".into(), "off".into()]),
             "--persistent-cache" => engine_args.extend([flag, "on".into()]),
             "--allow-idle-sleep" => engine_args.extend(["--idle-sleep".into(), "allow".into()]),
@@ -76,11 +79,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                     "--model" => model = Some(value),
                     "--model-dir" => directory = Some(PathBuf::from(value)),
                     "--draft-model" => draft = Some(value),
-                    "--speculation" => speculation = match value.as_str() {
-                        "auto" | "none" => Speculation::Auto,
-                        "dflash2" => Speculation::Dflash2,
-                        _ => return Err(format!("unsupported speculation mode: {value}").into()),
-                    },
+                    "--mmproj" => mmproj = Some(value),
+                    "--speculation" => speculation = Speculation::parse(&value)?,
                     "--binary" => binary = Some(PathBuf::from(value)),
                     "--port" => port = value.parse()?,
                     "--queue-size" => pending = value.parse()?,
@@ -137,21 +137,49 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     };
     let selection = draft.as_ref().map(|draft| format!(" with draft {draft}")).unwrap_or_default();
+    let models = models_root()?;
     let path = match (directory, model.as_deref()) {
         (Some(path), _) if path.join("model.json").is_file() => path,
         (Some(path), _) => {
+            // The installer records a local target's assembly under the
+            // selection link its options hash to, so the same directory may
+            // hold several prepared assemblies: the link names the one this
+            // command asks for, and only a selection the installer never
+            // recorded falls back to matching the records themselves.
             let path = path.canonicalize()?;
-            let target = path.to_string_lossy();
-            find_assembly(
-                |record| matches_draft(record) && record.pointer("/sources/target/repo")
-                    .and_then(Value::as_str).is_some_and(|source| same_source(source, &target)),
-                &format!("{target}{selection}"),
-            )?
+            let target = path.to_string_lossy().into_owned();
+            let link = local_selection_link(
+                &models,
+                &target,
+                language_only,
+                draft.as_deref(),
+                mmproj.as_deref(),
+                speculation,
+                require_draft,
+            );
+            match assembly_at(&link) {
+                Some(assembly) => assembly,
+                None => find_assembly(
+                    |record| matches_draft(record) && record.pointer("/sources/target/repo")
+                        .and_then(Value::as_str).is_some_and(|source| same_source(source, &target)),
+                    &format!("{target}{selection}"),
+                )?,
+            }
         }
-        (None, Some(model)) => find_assembly(
-            |record| matches_model(record, model) && matches_draft(record),
-            &format!("{model}{selection}"),
-        )?,
+        (None, Some(model)) => {
+            let (repo, variant) = split_model_id(model);
+            let link = match variant {
+                Some(variant) => models.join(format!("{repo}:{variant}")),
+                None => models.join(&repo),
+            };
+            match assembly_at(&link) {
+                Some(assembly) => assembly,
+                None => find_assembly(
+                    |record| matches_model(record, model) && matches_draft(record),
+                    &format!("{model}{selection}"),
+                )?,
+            }
+        }
         _ => return Err("specify --model or --model-dir".into()),
     };
     let path = path.canonicalize()?;
@@ -248,6 +276,18 @@ impl Drop for EngineProcess {
 }
 
 fn find_model(id: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let models = models_root()?;
+    // A Hub model's selection link is the repository ID itself, or the
+    // repository and variant the ID names (install/models.py's
+    // selection_link); the link is what the installer prepared.
+    let (repo, variant) = split_model_id(id);
+    let link = match variant {
+        Some(variant) => models.join(format!("{repo}:{variant}")),
+        None => models.join(&repo),
+    };
+    if link.join("model.json").is_file() {
+        return Ok(link.canonicalize()?);
+    }
     find_assembly(|record| matches_model(record, id), id)
 }
 
@@ -255,6 +295,26 @@ fn find_model(id: &str) -> Result<PathBuf, Box<dyn Error>> {
 enum Speculation {
     Auto,
     Dflash2,
+}
+
+impl Speculation {
+    /// The mode a selection names, as `install/models.py`'s
+    /// `speculation_mode`: `none` was one before this release, and is auto
+    /// now.
+    fn parse(value: &str) -> Result<Speculation, Box<dyn Error>> {
+        match value {
+            "auto" | "none" => Ok(Speculation::Auto),
+            "dflash2" => Ok(Speculation::Dflash2),
+            _ => Err(format!("unsupported speculation mode: {value}").into()),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Speculation::Auto => "auto",
+            Speculation::Dflash2 => "dflash2",
+        }
+    }
 }
 
 fn matches_model(record: &Value, id: &str) -> bool {
@@ -268,12 +328,62 @@ fn same_source(recorded: &str, requested: &str) -> bool {
     )
 }
 
+/// `owner/repo[:variant]` -> (repository ID, variant or None), as
+/// `server/serve_options.py`'s `split_model_id`.
+fn split_model_id(value: &str) -> (String, Option<String>) {
+    match value.split_once(':') {
+        Some((repo, variant)) if !variant.is_empty() => (repo.to_owned(), Some(variant.to_owned())),
+        _ => (value.to_owned(), None),
+    }
+}
+
+fn models_root() -> Result<PathBuf, Box<dyn Error>> {
+    let home = std::env::var_os("HOME").ok_or("HOME is required to locate prepared models")?;
+    Ok(PathBuf::from(home).join("Library/Application Support/Splash/models"))
+}
+
+/// The selection link a local target directory and its options name, as
+/// `install/models.py`'s `local_selection_link` hashes it: the directory,
+/// whether it serves text only, the draft, the speculation mode and whether
+/// a draft is required, with the projector appended when one is named.
+fn local_selection_link(
+    models: &std::path::Path,
+    directory: &str,
+    language_only: bool,
+    draft: Option<&str>,
+    mmproj: Option<&str>,
+    speculation: Speculation,
+    require_draft: bool,
+) -> PathBuf {
+    let mut selection = vec![
+        Value::String(directory.to_owned()),
+        Value::Bool(language_only),
+        draft.map_or(Value::Null, |draft| Value::String(draft.to_owned())),
+        Value::String(speculation.name().to_owned()),
+        Value::Bool(require_draft),
+    ];
+    if let Some(mmproj) = mmproj {
+        selection.push(Value::String(mmproj.to_owned()));
+    }
+    let encoded = serde_json::to_string(&Value::Array(selection)).expect("selection JSON");
+    models
+        .join(".selections")
+        .join(splash_server::support::sha256::hex_digest(encoded.as_bytes()))
+}
+
+/// The assembly a selection link names, when the installer prepared one.
+fn assembly_at(link: &std::path::Path) -> Option<PathBuf> {
+    link.join("model.json")
+        .is_file()
+        .then(|| link.canonicalize().ok())
+        .flatten()
+}
+
 fn find_assembly(
     matches_record: impl Fn(&Value) -> bool,
     selection: &str,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    let home = std::env::var_os("HOME").ok_or("HOME is required to locate prepared models")?;
-    let models = PathBuf::from(home).join("Library/Application Support/Splash/models/.selections");
+    let models = models_root()?.join(".selections");
     let mut matches = Vec::new();
     for entry in fs::read_dir(&models)? {
         let path = entry?.path();
