@@ -361,3 +361,90 @@ fn pipeline_source(pipeline: &Pipeline) -> String {
         .select(None, None)
         .expect("the model has a chat template")
 }
+
+/// The server over real TCP: a Chat completion answered complete, and one
+/// answered streamed, both read back off the socket.
+#[test]
+fn the_server_answers_over_real_tcp() {
+    use splash_server::serve::Server;
+
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    std::thread::spawn(move || fake_engine(engine_side, "The answer is 42."));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let prompt_tokenizer =
+        PromptTokenizer::from_directory(tokenizer.clone(), &directory, format.message_boundary);
+    let templates = load_chat_templates(&directory).expect("loads");
+    let pipeline = Pipeline {
+        tokenizer,
+        prompt_tokenizer,
+        templates,
+        chat_format: format,
+        client,
+        model: "Qwen".into(),
+    };
+    let server = Server::new(pipeline);
+
+    // The listener on an ephemeral port.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+    let address = listener.local_addr().expect("address").to_string();
+    std::thread::spawn(move || server.serve(listener));
+
+    let body = json!({
+        "model": "Qwen",
+        "messages": [
+            {"role": "user", "content": "What is the answer?"},
+        ],
+        "max_tokens": 64,
+    });
+
+    // The complete answer.
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        serde_json::to_string(&body).unwrap().len(),
+        serde_json::to_string(&body).unwrap()
+    );
+    stream.write_all(request.as_bytes()).expect("writes");
+    let mut response = String::new();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let _ = stream.read_to_string(&mut response);
+    assert!(response.contains("\"chat.completion\""), "{response}");
+    assert!(response.contains("The answer is 42."), "{response}");
+    assert!(response.contains("\"usage\""), "{response}");
+
+    // The streamed answer.
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    let streamed_body = json!({
+        "model": "Qwen",
+        "messages": [
+            {"role": "user", "content": "What is the answer?"},
+        ],
+        "max_tokens": 64,
+        "stream": true,
+    });
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        serde_json::to_string(&streamed_body).unwrap().len(),
+        serde_json::to_string(&streamed_body).unwrap()
+    );
+    stream.write_all(request.as_bytes()).expect("writes");
+    let mut response = String::new();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let _ = stream.read_to_string(&mut response);
+    assert!(response.contains("text/event-stream"), "{response}");
+    assert!(response.contains("\"chat.completion.chunk\""), "{response}");
+    assert!(response.contains("The answer is 42."), "{response}");
+    assert!(response.contains("[DONE]"), "{response}");
+}

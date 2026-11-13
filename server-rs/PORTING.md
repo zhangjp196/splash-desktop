@@ -18,11 +18,14 @@ chunk with the timings, the usage chunk when asked, and `[DONE]` — the
 events written as OpenAI's SSE chunks as they arrive, the completion
 callback writing the finish, as the Python's exchange collects.
 `src/http/` carries the minimal HTTP/1.1 server the Python's stdlib
-frontend mirrors. The tests run both paths against a fake engine over a
-socket pair, with the real Qwen tokenizer and template: the complete
-response carries the engine's answer with its usage, and the SSE stream
-carries the role chunk, the content delta, the finish chunk, the usage
-chunk and [DONE].
+frontend mirrors, and `src/serve/server.rs` is the network entry: a
+listener the caller binds, one thread per connection, the routes for
+POST /v1/chat/completions (complete or streamed, as the body's `stream`
+says) and GET /status. The tests run every path against a fake engine —
+over socket pairs for the pipeline and the stream, and over real TCP
+for the server: the complete response carries the engine's answer with
+its usage, and the SSE stream carries the role chunk, the content
+delta, the finish chunk, the usage chunk and [DONE].
 
 ## Where this stands (end of the first porting session)
 

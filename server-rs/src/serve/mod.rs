@@ -5,6 +5,8 @@
 //! other dialects, the security layer) build on it.
 
 pub mod pipeline;
+pub mod server;
 pub mod stream;
 
 pub use pipeline::Pipeline;
+pub use server::Server;
