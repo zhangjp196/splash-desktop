@@ -8,4 +8,5 @@
 pub mod engine;
 pub mod protocol;
 pub mod support;
+pub mod templates;
 pub mod tokenization;
