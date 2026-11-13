@@ -6,6 +6,7 @@
 //! and `dev/tests/engine/protocol_golden.txt` pins both sides' bytes.
 
 pub mod chat_format;
+pub mod output;
 pub mod engine;
 pub mod protocol;
 pub mod support;
