@@ -40,7 +40,7 @@ sides.
 | 5 | `chat_format.py`, `chat_templates.py`, `chat_messages.py` | ~2,300 | `src/chat_format.rs`, `src/templates/` (minijinja) | **format model, rendering core and template loading done** (12 tests); `chat_messages.py` (message normalization) and `chat_templates.py`'s probing/patching remain |
 | 6 | `output.py`, `streamer.py`, `thinking.py` | ~1,100 | `src/output/` | **stop search, reasoning splitter, tool-call projector and streamer done** (20 tests, each against the Python's own output); `thinking.py` remains; the projector's full `ParameterTypes` (schema reading) is module 11 |
 | 7 | `constraints.py` | ~600 | `src/constraints/` (llguidance crate) | **grammar tokenizer env, factory with cache, and token masks done** (4 tests, each against the Python's own output); the executor's parallel mask fill and the strict-tool schemas are tool_schema's (module 11) |
-| 8 | `dialects/` (openai, anthropic, responses, scoring) | ~4,000 | `src/dialects/` | **request side begun**: `chat_messages.py` ported (9 tests); the dialects' request conversion and response assembly remain |
+| 8 | `dialects/` (openai, anthropic, responses, scoring) | ~4,000 | `src/dialects/` | **chat_messages and the OpenAI response assembly done** (14 tests, each against the Python's own output); the exchange/job machinery, the streaming loop and the other dialects remain |
 | 9 | `http_server.py`, `http_handler.py`, `http_security.py`, `connections.py`, `origins.py`, `routing.py` | ~2,000 | `src/http/` (axum or hyper) | not started |
 | 10 | `frontend.py`, `backend.py`, `generation_options.py`, `request_fields.py` | ~2,500 | `src/serve/` | not started |
 | 11 | `judgments.py`, `schema_validation.py`, `tool_schema.py`, `compaction.py` | ~1,500 | `src/judgments/` | not started |

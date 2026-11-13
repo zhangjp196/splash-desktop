@@ -8,6 +8,7 @@
 pub mod chat_format;
 pub mod chat_messages;
 pub mod constraints;
+pub mod dialects;
 pub mod output;
 pub mod engine;
 pub mod protocol;
