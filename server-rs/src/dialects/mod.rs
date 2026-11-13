@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 pub mod anthropic_request;
+pub mod responses;
 pub mod openai;
 
 
