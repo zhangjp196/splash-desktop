@@ -9,7 +9,9 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
+pub mod admission;
 pub mod security;
+pub use admission::{HttpAdmission, RequestBodyReservation, CONNECTION_OVERLOADED_RESPONSE, HEAD_WAIT_BYTES};
 pub use security::{authenticate, parse_allowed_origin, validate_api_key, validate_headers, AllowedOrigin, Headers, SecurityError};
 
 /// One parsed request.
