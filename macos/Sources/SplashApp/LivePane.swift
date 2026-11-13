@@ -51,11 +51,11 @@ struct LivePane: View {
         // crossfades through the transition above alone.
     }
 
-    /// The board's inner tabs: one glance at everything, then the requests,
-    /// the memory and storage, and the heat, each with the panels that belong
-    /// to it rather than one long page.
+    /// The board's inner tabs: one glance at everything, then the requests
+    /// and the memory and storage, each with the panels that belong to it
+    /// rather than one long page.
     private enum LiveTab: String, CaseIterable, Identifiable {
-        case overview, requests, memory, thermal
+        case overview, requests, memory
 
         var id: String { rawValue }
         var title: String { L10n.string("live.tab.\(rawValue)") }
@@ -66,7 +66,6 @@ struct LivePane: View {
             case .overview: return "rectangle.grid.2x2.fill"
             case .requests: return "tray.full.fill"
             case .memory: return "memorychip.fill"
-            case .thermal: return "fan.fill"
             }
         }
 
@@ -75,7 +74,6 @@ struct LivePane: View {
             case .overview: return SplashPalette.mint
             case .requests: return SplashPalette.violet
             case .memory: return SplashPalette.blue
-            case .thermal: return SplashPalette.amber
             }
         }
     }
@@ -106,12 +104,6 @@ struct LivePane: View {
         switch tab {
         case .overview:
             VStack(alignment: .leading, spacing: 20) {
-                LifecycleCard(
-                    live: live,
-                    stage: model.stage,
-                    updated: model.statusUpdatedAt != nil
-                )
-                .equatable()
                 heroes(live)
                 HStack(spacing: 12) {
                     MemoryPanel(live: live, history: model.memoryHistory)
@@ -133,12 +125,6 @@ struct LivePane: View {
             }
         case .requests:
             VStack(alignment: .leading, spacing: 20) {
-                ActivityPanel(
-                    events: model.recentEvents,
-                    completed: live.completed,
-                    uptime: { model.uptimeText }
-                )
-                .equatable()
                 MetricSection(
                     title: L10n.string("live.serving"),
                     systemImage: "power",
@@ -185,16 +171,6 @@ struct LivePane: View {
                     systemImage: "externaldrive.fill",
                     cards: caches(live),
                     tint: SplashPalette.cyan
-                )
-                .equatable()
-            }
-        case .thermal:
-            VStack(alignment: .leading, spacing: 20) {
-                MetricSection(
-                    title: L10n.string("live.thermal"),
-                    systemImage: "fan.fill",
-                    cards: thermal(live),
-                    tint: SplashPalette.amber
                 )
                 .equatable()
             }
@@ -422,33 +398,6 @@ struct LivePane: View {
                 systemImage: "waveform.path.ecg",
                 tint: SplashPalette.cyan
             ),
-        ]
-    }
-
-    /// What the Mac is doing about the heat, as the thermal page reads it in
-    /// full: the fans as one number, the hottest of the four temperature
-    /// groups, and the share of the wall time prefill may keep the GPU busy.
-    private func thermal(_ live: LiveStatus) -> [MetricCard] {
-        let fans = live.fanSpeeds
-        let hottest = TemperatureGroup.hottest(live.temperatures)
-        return [
-            MetricCard(title: L10n.string("live.fans"),
-                       value: fans.isEmpty ? "—" : "\(fans.max() ?? 0)",
-                       caption: fans.isEmpty
-                           ? L10n.string("thermal.no_fans")
-                           : L10n.format("thermal.fan.count", fans.count),
-                       systemImage: "fan.fill", tint: SplashPalette.cyan),
-            MetricCard(title: L10n.string("live.hottest"),
-                       value: hottest.map { String(format: "%.1f °C", $0.celsius) } ?? "—",
-                       caption: hottest?.group.title ?? L10n.string("thermal.unavailable"),
-                       systemImage: "thermometer.medium", tint: hottest.map { heatTint($0.celsius) } ?? .gray),
-            MetricCard(title: L10n.string("live.duty"),
-                       value: live.dutyPercent.map { String(format: "%.0f%%", $0) } ?? "—",
-                       caption: live.thermalScale.map {
-                           L10n.format("thermal.scale.caption", $0)
-                       } ?? "",
-                       systemImage: "metronome.fill", tint: SplashPalette.amber,
-                       progress: live.dutyPercent.map { $0 / 100 }),
         ]
     }
 }
