@@ -13,8 +13,8 @@
 "section.request.help" = "Keys, aliases, payload limits and reasoning.";
 "section.schedule" = "Scheduling";
 "section.schedule.help" = "Admission, concurrency and draft verification.";
-"field.target" = "Target folder";
-"field.target.prompt" = "an MLX 4-bit or GGUF folder";
+"field.target" = "Target";
+"field.target.prompt" = "a GGUF file or MLX model folder";
 "field.draft" = "Draft folder";
 "field.draft.prompt" = "the matching DFlash2 checkpoint (empty downloads the family's)";
 "field.mmproj" = "Vision projector (GGUF)";
@@ -503,7 +503,7 @@
 "live.tab.thermal" = "Thermal";
 "live.tab.thermal.help" = "Fans, temperatures and the prefill duty.";
 "field.local_kind" = "Local kind";
-"help.local_kind" = "Both kinds pick a model folder: GGUF offers a vision projector of its own, and MLX takes the folder as its model.";
+"help.local_kind" = "GGUF picks one file (its split shards stay beside it); MLX picks a model folder. A GGUF vision projector can be selected separately.";
 "config.group.draft" = "DFlash2 draft";
 "field.draft_source" = "Draft source";
 "help.draft_source" = "Where the DFlash2 draft comes from: nothing uses the family\u2019s own, a folder a local draft directory, and an ID a Hugging Face repository.";

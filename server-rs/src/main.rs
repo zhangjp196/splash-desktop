@@ -105,6 +105,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let mut model = None;
     let mut directory = None;
+    let mut gguf_target = None;
     let mut draft = None;
     let mut mmproj = None;
     let mut language_only = false;
@@ -167,6 +168,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 match flag.as_str() {
                     "--model" => model = Some(value),
                     "--model-dir" => directory = Some(PathBuf::from(value)),
+                    "--gguf-target" => gguf_target = Some(PathBuf::from(value)),
                     "--draft-model" => draft = Some(value),
                     "--mmproj" => mmproj = Some(value),
                     "--speculation" => speculation = Speculation::parse(&value)?,
@@ -380,9 +382,31 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
     let selection = draft.as_ref().map(|draft| format!(" with draft {draft}")).unwrap_or_default();
     let models = models_root()?;
-    let path = match (directory, model.as_deref()) {
-        (Some(path), _) if path.join("model.json").is_file() => path,
-        (Some(path), _) => {
+    if gguf_target.is_some() && (directory.is_some() || model.is_some()) {
+        return Err("--gguf-target cannot be combined with --model or --model-dir".into());
+    }
+    if gguf_target.is_some() && speculation == Speculation::Dflash2 && draft.is_none() {
+        return Err("--speculation dflash2 requires --draft-model for --gguf-target".into());
+    }
+    let prepared_gguf = if let Some(target) = gguf_target {
+        let target = splash_server::gguf::select_local_target(&target)?;
+        let model_id = local_gguf_model_id(&target);
+        let engine = resolve_check_engine(None)?;
+        Some(splash_server::gguf::prepare_local_with_draft(
+            &target,
+            mmproj.as_deref().map(Path::new),
+            draft.as_deref().map(Path::new),
+            &models,
+            &model_id,
+            &engine,
+        )?)
+    } else {
+        None
+    };
+    let path = match (prepared_gguf, directory, model.as_deref()) {
+        (Some(path), _, _) => path,
+        (None, Some(path), _) if path.join("model.json").is_file() => path,
+        (None, Some(path), _) => {
             // The installer records a local target's assembly under the
             // selection link its options hash to, so the same directory may
             // hold several prepared assemblies: the link names the one this
@@ -390,23 +414,13 @@ fn run() -> Result<(), Box<dyn Error>> {
             // recorded falls back to matching the records themselves.
             let path = path.canonicalize()?;
             let target = path.to_string_lossy().into_owned();
-            // A local DFlash2 path fully identifies the prepared draft. The
-            // `auto` and explicit `dflash2` modes therefore refer to the same
-            // local assembly; hashing the mode separately makes a valid GGUF
-            // selection disappear whenever the UI toggles `auto` to
-            // `dflash2`, especially for directories with multiple targets.
-            let link_speculation = if draft.is_some() && speculation == Speculation::Dflash2 {
-                Speculation::Auto
-            } else {
-                speculation
-            };
             let link = local_selection_link(
                 &models,
                 &target,
                 language_only,
                 draft.as_deref(),
                 mmproj.as_deref(),
-                link_speculation,
+                speculation,
                 require_draft,
             );
             match assembly_at(&link) {
@@ -418,7 +432,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 )?,
             }
         }
-        (None, Some(model)) => {
+        (None, None, Some(model)) => {
             let (repo, variant) = split_model_id(model);
             let link = match variant {
                 Some(variant) => models.join(format!("{repo}:{variant}")),
@@ -432,7 +446,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 )?,
             }
         }
-        _ => return Err("specify --model or --model-dir".into()),
+        _ => return Err("specify --model, --model-dir, or --gguf-target".into()),
     };
     let path = path.canonicalize()?;
     let record = File::open(path.join("model.json"))
@@ -687,12 +701,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn print_help() {
-    println!("Usage: splash-server serve (--model ID | --model-dir PATH) [OPTIONS]");
+    println!("Usage: splash-server serve (--model ID | --model-dir PATH | --gguf-target PATH) [OPTIONS]");
     println!("       splash-server model-path ID");
     println!("       splash-server inspect-gguf FILE [--tensors]");
     println!("       splash-server gguf-config FILE [--vision FILE] [--engine PATH]");
-    println!("       splash-server prepare-gguf TARGET --models-dir DIR [--vision FILE] [--engine PATH] [--model-id NAME]");
-    println!("         Prepares one local GGUF (single or complete split set), optionally with one mmproj; draft models are unsupported.");
+    println!("       splash-server prepare-gguf TARGET --models-dir DIR [--vision FILE] [--draft DIR] [--engine PATH] [--model-id NAME]");
+    println!("         Prepares one local GGUF (single or complete split set), optionally with one mmproj and local DFlash2 draft.");
     println!("       splash-server prepare-mlx DIRECTORY --models-dir DIR [--engine PATH] [--model-id NAME] [--language-only]");
     println!("         Prepares a local MLX-affine model with one model.safetensors checkpoint.");
     println!("       splash-server install-cached [--cache-dir DIR] [--models-dir DIR] [--engine PATH]");
@@ -700,6 +714,7 @@ fn print_help() {
     println!("\nModel selection:");
     println!("      --model ID                         Prepared model ID");
     println!("      --model-dir PATH                   Prepared assembly directory");
+    println!("      --gguf-target PATH                 Prepare and serve a local GGUF file (or an unambiguous directory)");
     println!("      --draft-model ID                  Draft model ID");
     println!("      --mmproj PATH                     Vision projector file");
     println!("      --speculation MODE                auto, off, or a supported draft mode");
@@ -978,7 +993,7 @@ fn run_gguf_config(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     }
     let config = splash_server::gguf::model_config(&target, vision.as_ref())?;
     let engine = resolve_check_engine(engine_path)?;
-    let family = splash_server::gguf::validate_with_engine(&engine, &target, vision.as_ref())?;
+    let family = splash_server::gguf::validate_with_engine(&engine, &target, vision.as_ref(), None)?;
     let result = serde_json::json!({
         "target_format": "gguf",
         "vision_format": if vision.is_some() { "gguf" } else { "none" },
@@ -997,6 +1012,7 @@ fn run_prepare_gguf(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     let target = arguments.first().ok_or("prepare-gguf requires a GGUF file")?;
     let mut models_dir = None;
     let mut vision = None;
+    let mut draft = None;
     let mut engine = None;
     let mut model_id = None;
     let mut index = 1;
@@ -1008,29 +1024,32 @@ fn run_prepare_gguf(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         match flag.as_str() {
             "--models-dir" if models_dir.is_none() => models_dir = Some(PathBuf::from(value)),
             "--vision" if vision.is_none() => vision = Some(PathBuf::from(value)),
+            "--draft" if draft.is_none() => draft = Some(PathBuf::from(value)),
             "--engine" if engine.is_none() => engine = Some(PathBuf::from(value)),
             "--model-id" if model_id.is_none() => model_id = Some(value),
-            "--models-dir" | "--vision" | "--engine" | "--model-id" => return Err(format!("prepare-gguf accepts {flag} only once").into()),
+            "--models-dir" | "--vision" | "--draft" | "--engine" | "--model-id" => return Err(format!("prepare-gguf accepts {flag} only once").into()),
             _ => return Err(format!("unknown prepare-gguf option: {flag}").into()),
         }
     }
     let models_dir = models_dir.ok_or("prepare-gguf requires --models-dir DIR")?;
-    let model_id = model_id.unwrap_or_else(|| {
-        let stem = Path::new(target).file_stem().and_then(|name| name.to_str()).unwrap_or("local-gguf");
-        let model_stem = stem.strip_suffix(".gguf").unwrap_or(stem);
-        let (prefix, count) = model_stem.rsplit_once("-of-").unwrap_or((model_stem, ""));
-        let (name, number) = prefix.rsplit_once('-').unwrap_or((prefix, ""));
-        let is_split = number.len() == 5 && count.len() == 5
-            && number.bytes().all(|byte| byte.is_ascii_digit())
-            && count.bytes().all(|byte| byte.is_ascii_digit());
-        format!("local/{}", if is_split { name } else { model_stem })
-    });
+    let model_id = model_id.unwrap_or_else(|| local_gguf_model_id(Path::new(target)));
     let engine = resolve_check_engine(engine)?;
-    let assembly = splash_server::gguf::prepare_local(
-        Path::new(target), vision.as_deref(), &models_dir, &model_id, &engine,
+    let assembly = splash_server::gguf::prepare_local_with_draft(
+        Path::new(target), vision.as_deref(), draft.as_deref(), &models_dir, &model_id, &engine,
     )?;
     println!("{}", assembly.display());
     Ok(())
+}
+
+fn local_gguf_model_id(target: &Path) -> String {
+    let stem = target.file_stem().and_then(|name| name.to_str()).unwrap_or("local-gguf");
+    let model_stem = stem.strip_suffix(".gguf").unwrap_or(stem);
+    let (prefix, count) = model_stem.rsplit_once("-of-").unwrap_or((model_stem, ""));
+    let (name, number) = prefix.rsplit_once('-').unwrap_or((prefix, ""));
+    let is_split = number.len() == 5 && count.len() == 5
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+        && count.bytes().all(|byte| byte.is_ascii_digit());
+    format!("local/{}", if is_split { name } else { model_stem })
 }
 
 fn run_prepare_mlx(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {

@@ -369,7 +369,7 @@ enum SelfCheck {
                 carries(launch, flag, value)
             }
             passed = passed
-                && carries("--model-dir", "/tmp/selfcheck")
+                && carries("--gguf-target", "/tmp/selfcheck")
                 && carries("--draft-model", "/tmp/selfcheck-draft")
                 && carries("--speculation", "dflash2")
                 && launch.contains("--require-draft")

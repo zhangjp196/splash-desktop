@@ -185,7 +185,23 @@ pub fn prepare_local(
     model_id: &str,
     engine: &Path,
 ) -> Result<PathBuf, String> {
-    prepare_local_discovered(target_path, vision_path, models_root, model_id, engine)
+    prepare_local_with_draft(target_path, vision_path, None, models_root, model_id, engine)
+}
+
+/// Prepare a local GGUF target together with an optional local DFlash2
+/// checkpoint. The draft is linked into the same immutable assembly so serve
+/// does not need a prior Python installer cache.
+pub fn prepare_local_with_draft(
+    target_path: &Path,
+    vision_path: Option<&Path>,
+    draft_path: Option<&Path>,
+    models_root: &Path,
+    model_id: &str,
+    engine: &Path,
+) -> Result<PathBuf, String> {
+    prepare_local_discovered_with_draft(
+        target_path, vision_path, draft_path, models_root, model_id, engine,
+    )
 }
 
 /// Discover all shards beside a selected local GGUF and publish them in
@@ -198,13 +214,25 @@ pub fn prepare_local_discovered(
     model_id: &str,
     engine: &Path,
 ) -> Result<PathBuf, String> {
+    prepare_local_discovered_with_draft(target_path, vision_path, None, models_root, model_id, engine)
+}
+
+pub fn prepare_local_discovered_with_draft(
+    target_path: &Path,
+    vision_path: Option<&Path>,
+    draft_path: Option<&Path>,
+    models_root: &Path,
+    model_id: &str,
+    engine: &Path,
+) -> Result<PathBuf, String> {
     let parts = discover_split_parts(target_path)?;
-    prepare_local_parts(&parts, vision_path, models_root, model_id, engine)
+    prepare_local_parts(&parts, vision_path, draft_path, models_root, model_id, engine)
 }
 
 fn prepare_local_parts(
     target_paths: &[PathBuf],
     vision_path: Option<&Path>,
+    draft_path: Option<&Path>,
     models_root: &Path,
     model_id: &str,
     engine: &Path,
@@ -248,7 +276,13 @@ fn prepare_local_parts(
     let scalar_bytes = pretty_json(&scalar_metadata)?;
     generated.insert("gguf-metadata.json".into(), scalar_bytes.clone());
 
-    let family = validate_with_engine(engine, &target, vision.as_ref())?;
+    let draft_root = draft_path.map(fs::canonicalize).transpose()
+        .map_err(|error| format!("cannot resolve DFlash2 draft: {error}"))?;
+    let draft_config = draft_root.as_ref().map(|root| root.join("config.json"));
+    if let Some(config) = &draft_config {
+        if !config.is_file() { return Err(format!("DFlash2 draft has no config.json: {}", config.display())); }
+    }
+    let family = validate_with_engine(engine, &target, vision.as_ref(), draft_config.as_deref())?;
     let sources = crate::assembly::persist_generated(models_root, &generated)?;
     let metadata_key = crate::assembly::gguf_metadata_key_many(&canonical_paths, vision_path.as_deref())?;
     let mut files = BTreeMap::new();
@@ -262,21 +296,75 @@ fn prepare_local_parts(
     if let Some(path) = vision_path {
         files.insert("vision/mmproj.gguf".into(), path);
     }
-    let record = serde_json::json!({
-        "version": 2,
-        "model": model_id,
-        "family": family,
-        "target_format": "gguf",
-        "vision_format": if vision.is_some() { "gguf" } else { "none" },
-        "sources": {"target": {"repo": canonical_paths[0].to_string_lossy(), "revision": null}},
-        "metadata": metadata_key,
-        "speculation": {
-            "version": 1, "provider": "none", "format": "none",
-            "source": {"kind": "none"}, "proposal_rows": 1,
-            "state": "none", "fallback": "none"
+    let record = if let Some(draft_root) = draft_root {
+        for (name, path) in local_draft_files(&draft_root)? {
+            files.insert(name, path);
         }
-    });
+        serde_json::json!({
+            "version": 1,
+            "model": model_id,
+            "family": family,
+            "target_format": "gguf",
+            "vision_format": if vision.is_some() { "gguf" } else { "none" },
+            "sources": {
+                "target": {"repo": canonical_paths[0].to_string_lossy(), "revision": null},
+                "draft": {"repo": draft_root.to_string_lossy(), "revision": null}
+            },
+            "metadata": metadata_key
+        })
+    } else {
+        serde_json::json!({
+            "version": 2,
+            "model": model_id,
+            "family": family,
+            "target_format": "gguf",
+            "vision_format": if vision.is_some() { "gguf" } else { "none" },
+            "sources": {"target": {"repo": canonical_paths[0].to_string_lossy(), "revision": null}},
+            "metadata": metadata_key,
+            "speculation": {
+                "version": 1, "provider": "none", "format": "none",
+                "source": {"kind": "none"}, "proposal_rows": 1,
+                "state": "none", "fallback": "none"
+            }
+        })
+    };
     crate::assembly::publish(models_root, record, &files)
+}
+
+fn local_draft_files(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let config = root.join("config.json");
+    if !config.is_file() { return Err(format!("DFlash2 draft has no config.json: {}", config.display())); }
+    let mut names = BTreeSet::new();
+    let index = root.join("model.safetensors.index.json");
+    if index.is_file() {
+        let value: Value = serde_json::from_slice(&fs::read(&index)
+            .map_err(|error| format!("cannot read {}: {error}", index.display()))?)
+            .map_err(|error| format!("invalid DFlash2 shard index: {error}"))?;
+        let weight_map = value.get("weight_map").and_then(Value::as_object)
+            .filter(|map| !map.is_empty()).ok_or("invalid DFlash2 shard index: empty weight_map")?;
+        for filename in weight_map.values() {
+            let filename = filename.as_str().ok_or("invalid DFlash2 shard index: non-string filename")?;
+            if filename.contains('/') || !filename.ends_with(".safetensors") {
+                return Err(format!("unsupported DFlash2 shard filename: {filename}"));
+            }
+            names.insert(filename.to_owned());
+        }
+        names.insert("model.safetensors.index.json".to_owned());
+    } else if root.join("model.safetensors").is_file() {
+        names.insert("model.safetensors".to_owned());
+    } else {
+        return Err(format!("DFlash2 draft has no safetensors weights: {}", root.display()));
+    }
+    if root.join("mask_embedding.safetensors").is_file() {
+        names.insert("mask_embedding.safetensors".to_owned());
+    }
+    let mut files = vec![("draft/config.json".to_owned(), config)];
+    for name in names {
+        let path = root.join(&name);
+        if !path.is_file() { return Err(format!("DFlash2 shard is missing: {}", path.display())); }
+        files.push((format!("draft/{name}"), path));
+    }
+    Ok(files)
 }
 
 fn discover_split_parts(selected: &Path) -> Result<Vec<PathBuf>, String> {
@@ -311,6 +399,35 @@ fn discover_split_parts(selected: &Path) -> Result<Vec<PathBuf>, String> {
         return Err(format!("split GGUF is incomplete or has extra parts (expected 1..={expected_count}, found {numbers:?})"));
     }
     Ok(found.into_values().map(|(_, path)| path).collect())
+}
+
+/// Resolve a selected GGUF file or a directory containing exactly one logical
+/// GGUF target. A directory with several independent targets is ambiguous and
+/// asks the caller to select a specific GGUF; split shards count as one.
+pub fn select_local_target(path: &Path) -> Result<PathBuf, String> {
+    if path.is_file() { return Ok(path.to_path_buf()); }
+    if !path.is_dir() { return Err(format!("GGUF target does not exist: {}", path.display())); }
+    let mut targets = Vec::new();
+    for entry in fs::read_dir(path).map_err(|error| format!("cannot scan GGUF directory {}: {error}", path.display()))? {
+        let entry = entry.map_err(|error| format!("cannot scan GGUF directory: {error}"))?;
+        let file_type = entry.file_type().map_err(|error| format!("cannot inspect GGUF target: {error}"))?;
+        if !(file_type.is_file() || (file_type.is_symlink() && fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_file()))) { continue; }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue; };
+        if !name.to_ascii_lowercase().ends_with(".gguf") || name.to_ascii_lowercase().contains("mmproj") { continue; }
+        match split_filename(&name) {
+            Some((_, 1, _)) => targets.push(entry.path()),
+            Some(_) => {},
+            None => targets.push(entry.path()),
+        }
+    }
+    targets.sort();
+    targets.dedup();
+    match targets.as_slice() {
+        [target] => Ok(target.clone()),
+        [] => Err(format!("no GGUF target found in {}", path.display())),
+        _ => Err(format!("directory contains multiple GGUF targets; select one .gguf file: {}",
+            targets.iter().map(|target| target.file_name().unwrap_or_default().to_string_lossy()).collect::<Vec<_>>().join(", "))),
+    }
 }
 
 fn split_filename(name: &str) -> Option<(&str, u32, u32)> {
@@ -938,6 +1055,7 @@ pub fn validate_with_engine(
     engine: &Path,
     target: &Metadata,
     vision: Option<&Metadata>,
+    draft_config: Option<&Path>,
 ) -> Result<String, String> {
     require_loadable(target)?;
     if let Some(vision) = vision { require_vision_loadable(vision)?; }
@@ -946,10 +1064,10 @@ pub fn validate_with_engine(
     let metadata_path = directory.0.join("gguf-metadata.json");
     write_json(&config_path, &model_config(target, None)?)?;
     write_json(&metadata_path, &target.scalar_metadata())?;
-    let family = model_check(engine, "none", &config_path, &metadata_path)?;
+    let family = model_check(engine, "none", &config_path, &metadata_path, draft_config)?;
     if let Some(vision) = vision {
         write_json(&config_path, &model_config(target, Some(vision))?)?;
-        let vision_family = model_check(engine, "gguf", &config_path, &metadata_path)?;
+        let vision_family = model_check(engine, "gguf", &config_path, &metadata_path, draft_config)?;
         if family != vision_family {
             return Err("native model-check changed the GGUF family when adding vision".into());
         }
@@ -957,11 +1075,18 @@ pub fn validate_with_engine(
     Ok(family)
 }
 
-fn model_check(engine: &Path, vision_format: &str, config: &Path, metadata: &Path) -> Result<String, String> {
+fn model_check(
+    engine: &Path,
+    vision_format: &str,
+    config: &Path,
+    metadata: &Path,
+    draft_config: Option<&Path>,
+) -> Result<String, String> {
     let output = Command::new(engine)
         .args(["model-check", "gguf", vision_format])
         .arg(config)
         .arg(metadata)
+        .args(draft_config.into_iter())
         .output()
         .map_err(|error| format!("cannot run native model-check using {}: {error}", engine.display()))?;
     if !output.status.success() {
@@ -1266,6 +1391,46 @@ mod tests {
         assert_eq!(Metadata::from_reader(&fixture()[..], false).unwrap().tensors.len(), 0);
     }
 
+    #[test]
+    fn local_target_directory_selects_one_model_and_refuses_ambiguous_ggufs() {
+        let scratch = TempDirectory::new().unwrap();
+        let directory = scratch.0.join("targets");
+        fs::create_dir_all(&directory).unwrap();
+        let single = directory.join("model-Q4.gguf");
+        let projector = directory.join("mmproj-F16.gguf");
+        fs::write(&single, []).unwrap();
+        fs::write(&projector, []).unwrap();
+        assert_eq!(select_local_target(&directory).unwrap(), single);
+
+        let first = directory.join("other-Q4.gguf");
+        fs::write(&first, []).unwrap();
+        let error = select_local_target(&directory).unwrap_err();
+        assert!(error.contains("multiple GGUF targets"));
+        assert!(error.contains("model-Q4.gguf"));
+        assert!(error.contains("other-Q4.gguf"));
+    }
+
+    #[test]
+    fn local_dflash2_checkpoint_files_are_resolved_from_its_index() {
+        let scratch = TempDirectory::new().unwrap();
+        let draft = scratch.0.join("draft");
+        fs::create_dir_all(&draft).unwrap();
+        fs::write(draft.join("config.json"), b"{}").unwrap();
+        fs::write(draft.join("model-00001-of-00002.safetensors"), b"one").unwrap();
+        fs::write(draft.join("model-00002-of-00002.safetensors"), b"two").unwrap();
+        fs::write(draft.join("unused.safetensors"), b"unused").unwrap();
+        fs::write(draft.join("model.safetensors.index.json"), br#"{"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}}"#).unwrap();
+
+        let files = local_draft_files(&draft).unwrap();
+        let names = files.iter().map(|(name, _)| name.as_str()).collect::<BTreeSet<_>>();
+        assert_eq!(names, BTreeSet::from([
+            "draft/config.json",
+            "draft/model-00001-of-00002.safetensors",
+            "draft/model-00002-of-00002.safetensors",
+            "draft/model.safetensors.index.json",
+        ]));
+    }
+
     #[cfg(unix)]
     #[test]
     fn prepares_validated_local_gguf_and_refuses_split_without_publishing() {
@@ -1301,6 +1466,21 @@ mod tests {
         assert!(published.join("tokenizer/tokenizer.json").is_file());
         assert!(published.join("vision/mmproj.gguf").is_file());
         assert!(crate::assembly::verify(&published, &record, false).is_ok());
+
+        let draft = scratch.0.join("draft");
+        fs::create_dir_all(&draft).unwrap();
+        fs::write(draft.join("config.json"), b"{\"dflash_config\":{}}\n").unwrap();
+        fs::write(draft.join("model.safetensors"), b"draft weights").unwrap();
+        let draft_models = scratch.0.join("draft-models");
+        let drafted = prepare_local_with_draft(
+            &target, Some(&projector), Some(&draft), &draft_models, "local/example-draft", &engine,
+        ).unwrap();
+        let drafted_record: Value = serde_json::from_slice(&fs::read(drafted.join("model.json")).unwrap()).unwrap();
+        assert_eq!(drafted_record["version"], 1);
+        assert_eq!(drafted_record["sources"]["draft"]["repo"], fs::canonicalize(&draft).unwrap().to_string_lossy().as_ref());
+        assert!(drafted.join("draft/config.json").is_file());
+        assert!(drafted.join("draft/model.safetensors").is_file());
+        assert!(crate::assembly::verify(&drafted, &drafted_record, false).is_ok());
 
         // Hugging Face snapshots link their `.gguf` name to an extensionless
         // blob. The published assembly must retain the snapshot basename so
@@ -1657,10 +1837,10 @@ mod tests {
         vision.values.insert("clip.vision.image_mean".into(), serde_json::json!([0.5, 0.5, 0.5]));
         vision.values.insert("clip.vision.image_std".into(), serde_json::json!([0.5, 0.5, 0.5]));
         vision.tensors.insert("v.patch_embd.weight".into(), Tensor { extents: vec![1], kind: 8, offset: 0 });
-        assert_eq!(validate_with_engine(&engine, &target, Some(&vision)).unwrap(), "Qwen3.8-4B");
+        assert_eq!(validate_with_engine(&engine, &target, Some(&vision), None).unwrap(), "Qwen3.8-4B");
         assert_eq!(fs::read_to_string(&calls).unwrap().lines().collect::<Vec<_>>(), ["none", "gguf"]);
         fs::write(&calls, "").unwrap();
-        assert_eq!(validate_with_engine(&engine, &target, None).unwrap(), "Qwen3.8-4B");
+        assert_eq!(validate_with_engine(&engine, &target, None, None).unwrap(), "Qwen3.8-4B");
         assert_eq!(fs::read_to_string(&calls).unwrap().lines().collect::<Vec<_>>(), ["none"]);
     }
 }

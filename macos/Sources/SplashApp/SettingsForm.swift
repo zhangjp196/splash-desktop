@@ -232,7 +232,8 @@ struct SettingsEditor: View {
             ) {
                 DirectoryPicker(
                     path: $settings.modelDirectory,
-                    prompt: L10n.string("field.target.prompt")
+                    prompt: L10n.string("field.target.prompt"),
+                    files: settings.localKind == "gguf"
                 )
             }
             if settings.localKind == "gguf" && profile.vision {
@@ -954,8 +955,7 @@ struct SecretField: View {
 struct DirectoryPicker: View {
     @Binding var path: String
     let prompt: String
-    /// Choose a GGUF file rather than a directory: only a vision projector
-    /// does, since a target is a folder.
+    /// Choose a file for GGUF targets/projectors or directories for MLX and drafts.
     var files = false
 
     var body: some View {

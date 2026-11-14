@@ -710,10 +710,9 @@ final class AppModel: ObservableObject {
 
     // MARK: Lifecycle
 
-    /// The command `serve` runs with, from the settings the panel holds:
-    /// the launcher first, then each flag this configuration sets. The
-    /// headless selfcheck reads it too, so a setting the panel added is also
-    /// one the command carries.
+    /// The bundled Rust server runs with the settings the panel holds. The
+    /// headless selfcheck reads these arguments too, so a panel setting is
+    /// also one the command carries.
     func launchArguments(launcherPath: String) -> [String] {
         let profile = ModelProfile.of(modelID: modelID, directory: modelDirectory)
         var arguments = [launcherPath, "serve"]
@@ -721,8 +720,12 @@ final class AppModel: ObservableObject {
         case .upstream:
             arguments += ["--model", modelID.trimmingCharacters(in: .whitespaces)]
         case .local:
-            arguments += ["--model-dir", modelDirectory]
-            // Text only loads no tower, so it names no projector: the launcher
+            if localKind == "gguf" {
+                arguments += ["--gguf-target", modelDirectory]
+            } else {
+                arguments += ["--model-dir", modelDirectory]
+            }
+            // Text only loads no tower, so it names no projector: the server
             // refuses the two together, and the form keeps the path for the
             // configuration that turns vision back on. Only a GGUF target has
             // one; an MLX target is vision or text as its own files say.

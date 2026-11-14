@@ -13,8 +13,8 @@
 "section.request.help" = "密钥、别名、载荷上限与思考级别。";
 "section.schedule" = "调度";
 "section.schedule.help" = "准入、并发与草稿校验。";
-"field.target" = "目标文件夹";
-"field.target.prompt" = "MLX 4-bit 或 GGUF 文件夹";
+"field.target" = "目标";
+"field.target.prompt" = "GGUF 文件或 MLX 模型文件夹";
 "field.draft" = "Draft 文件夹";
 "field.draft.prompt" = "匹配的 DFlash2 检查点（留空则自动下载）";
 "field.mmproj" = "视觉投影器（GGUF）";
@@ -500,7 +500,7 @@
 "live.tab.thermal" = "散热";
 "live.tab.thermal.help" = "风扇、温度与 prefill 占空比。";
 "field.local_kind" = "本地类型";
-"help.local_kind" = "两种都选模型文件夹：GGUF 可另配视觉模型，MLX 直接以该文件夹为模型。";
+"help.local_kind" = "GGUF 选择一个文件（分片文件放在它旁边）；MLX 选择模型文件夹。GGUF 视觉投影文件可单独选择。";
 "config.group.draft" = "DFlash2 草稿模型";
 "field.draft_source" = "草稿来源";
 "help.draft_source" = "DFlash2 草稿从哪来：不指定则用模型家族自带的，文件夹为本地草稿目录，ID 为 Hugging Face 仓库。";
