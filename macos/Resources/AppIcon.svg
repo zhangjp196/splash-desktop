@@ -47,6 +47,12 @@
     <rect width="1024" height="1024" fill="url(#glow)"/>
     <rect width="1024" height="1024" fill="url(#vignette)"/>
     <ellipse cx="512" cy="842" rx="196" ry="32" fill="#02152F" opacity="0.34" filter="url(#soft)"/>
+    <!-- Three crisp droplets make the mark read as a splash at small sizes. -->
+    <g fill="#DDFBFF" stroke="#FFFFFF" stroke-opacity="0.68" stroke-width="4">
+      <path d="M512 92 C512 92 542 130 542 151 C542 169 529 181 512 181 C495 181 482 169 482 151 C482 130 512 92 512 92 Z"/>
+      <path d="M256 398 C256 398 292 444 292 470 C292 491 277 507 256 507 C235 507 220 491 220 470 C220 444 256 398 256 398 Z"/>
+      <path d="M768 398 C768 398 804 444 804 470 C804 491 789 507 768 507 C747 507 732 491 732 470 C732 444 768 398 768 398 Z"/>
+    </g>
     <g filter="url(#dropShadow)">
       <path d="M512 188 C512 188 704 432 704 642 C704 783 614 868 512 868 C410 868 320 783 320 642 C320 432 512 188 512 188 Z" fill="url(#drop)"/>
     </g>
