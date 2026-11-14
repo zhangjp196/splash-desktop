@@ -284,7 +284,7 @@ fn prepare_local_parts(
     }
     let family = validate_with_engine(engine, &target, vision.as_ref(), draft_config.as_deref())?;
     let sources = crate::assembly::persist_generated(models_root, &generated)?;
-    let metadata_key = crate::assembly::gguf_metadata_key_many(&canonical_paths, vision_path.as_deref())?;
+    let metadata_key = crate::assembly::gguf_metadata_key_many_cached(models_root, &canonical_paths, vision_path.as_deref())?;
     let mut files = BTreeMap::new();
     for name in generated.keys() {
         files.insert(name.clone(), sources[name].clone());

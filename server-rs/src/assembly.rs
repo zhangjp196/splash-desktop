@@ -60,6 +60,14 @@ pub fn publish(
         .map_err(|error| format!("cannot create models directory: {error}"))?;
     let _lock = installation_lock(models_root)?;
 
+    // The first publication hashes each source and publishes the immutable
+    // content-addressed record below. Later starts can find that record from
+    // cheap file metadata and verify its links without rereading model bytes.
+    let fast_key = fast_cache_key(&record, files)?;
+    if let Some(destination) = fast_cached_assembly(models_root, &fast_key, &record) {
+        return Ok(destination);
+    }
+
     let mut file_records = serde_json::Map::new();
     for (name, source) in files {
         if !safe_relative_path(name) {
@@ -71,7 +79,7 @@ pub fn publish(
         if !metadata.is_file() {
             return Err(format!("assembly source is not a file: {}", absolute.display()));
         }
-        let digest = source_file_digest(&absolute)?;
+        let digest = source_file_digest_cached(models_root, &absolute)?;
         file_records.insert(name.clone(), serde_json::json!({
             "path": absolute,
             "bytes": metadata.len(),
@@ -89,7 +97,7 @@ pub fn publish(
 
     let encoded = canonical_json(&record)?;
     let identity = crate::support::sha256::hex_digest(&encoded);
-    let destination = models_root.join(".resolved").join(identity);
+    let destination = models_root.join(".resolved").join(&identity);
     if destination.exists() {
         // A matching immutable record is reusable. A damaged entry can be
         // replaced while holding the installation lock.
@@ -126,7 +134,62 @@ pub fn publish(
         let _ = fs::remove_dir_all(&stage);
     }
     write_result?;
+    remember_fast_cache(models_root, &fast_key, &identity)?;
     Ok(destination)
+}
+
+fn fast_cache_key(
+    record: &Value,
+    files: &std::collections::BTreeMap<String, PathBuf>,
+) -> Result<String, String> {
+    let mut file_metadata = serde_json::Map::new();
+    for (name, source) in files {
+        if !safe_relative_path(name) {
+            return Err(format!("invalid assembly file path: {name}"));
+        }
+        let absolute = absolute_path(source)?;
+        let metadata = fs::metadata(&absolute)
+            .map_err(|error| format!("cannot inspect assembly source {}: {error}", absolute.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("assembly source is not a file: {}", absolute.display()));
+        }
+        file_metadata.insert(name.clone(), serde_json::json!({
+            "path": absolute,
+            "source": source_metadata_identity(&metadata)?,
+        }));
+    }
+    let key = serde_json::json!({"record": record, "files": Value::Object(file_metadata)});
+    Ok(crate::support::sha256::hex_digest(&canonical_json(&key)?))
+}
+
+fn fast_cached_assembly(models_root: &Path, key: &str, expected_record: &Value) -> Option<PathBuf> {
+    let cache_entry = models_root.join(".assembly-fast-cache").join(key);
+    let identity = fs::read_to_string(&cache_entry).ok()?;
+    let identity = identity.trim();
+    if !is_hex(Some(identity), 64) {
+        let _ = fs::remove_file(cache_entry);
+        return None;
+    }
+    let destination = models_root.join(".resolved").join(identity);
+    let encoded = fs::read(destination.join("model.json")).ok()?;
+    let record: Value = serde_json::from_slice(&encoded).ok()?;
+    let mut base_record = record.clone();
+    let Some(object) = base_record.as_object_mut() else {
+        let _ = fs::remove_file(cache_entry);
+        return None;
+    };
+    if object.remove("files").is_none()
+        || canonical_json(&base_record).ok()? != canonical_json(expected_record).ok()?
+        || verify(&destination, &record, false).is_err()
+    {
+        let _ = fs::remove_file(cache_entry);
+        return None;
+    }
+    Some(destination)
+}
+
+fn remember_fast_cache(models_root: &Path, key: &str, identity: &str) -> Result<(), String> {
+    remember_cache_value(models_root, ".assembly-fast-cache", key, identity)
 }
 
 /// Persist generated assembly inputs in an immutable content-addressed cache.
@@ -262,13 +325,30 @@ pub fn gguf_metadata_key(target: &Path, vision: Option<&Path>) -> Result<String,
 
 /// Metadata key for an ordered GGUF shard set and optional vision projector.
 pub fn gguf_metadata_key_many(targets: &[PathBuf], vision: Option<&Path>) -> Result<String, String> {
+    gguf_metadata_key_many_with(targets, vision, source_file_digest)
+}
+
+/// Metadata key using a digest cache scoped to the local models directory.
+pub fn gguf_metadata_key_many_cached(
+    models_root: &Path,
+    targets: &[PathBuf],
+    vision: Option<&Path>,
+) -> Result<String, String> {
+    gguf_metadata_key_many_with(targets, vision, |path| source_file_digest_cached(models_root, path))
+}
+
+fn gguf_metadata_key_many_with(
+    targets: &[PathBuf],
+    vision: Option<&Path>,
+    mut digest_source: impl FnMut(&Path) -> Result<String, String>,
+) -> Result<String, String> {
     if targets.is_empty() { return Err("GGUF source set is empty".into()); }
     let mut sources = Vec::new();
     for path in targets.iter().map(PathBuf::as_path).chain(vision) {
         let metadata = fs::metadata(path).map_err(|error| format!("cannot inspect GGUF source: {error}"))?;
         sources.push(serde_json::json!({
             "bytes": metadata.len(),
-            "digest": source_file_digest(path)?,
+            "digest": digest_source(path)?,
         }));
     }
     let adapter = crate::support::sha256::hex_digest(include_bytes!("../../install/gguf.py"));
@@ -299,7 +379,14 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
     else { std::env::current_dir().map(|cwd| cwd.join(path)).map_err(|error| error.to_string()) }
 }
 
+#[cfg(test)]
+thread_local! {
+    static SOURCE_HASH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn source_file_digest(path: &Path) -> Result<String, String> {
+    #[cfg(test)]
+    SOURCE_HASH_CALLS.with(|calls| calls.set(calls.get() + 1));
     let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if let Some(parent) = resolved.parent() {
         if parent.file_name().and_then(|name| name.to_str()) == Some("blobs") {
@@ -311,6 +398,69 @@ fn source_file_digest(path: &Path) -> Result<String, String> {
     let file = File::open(path).map_err(|error| format!("cannot hash {}: {error}", path.display()))?;
     crate::support::sha256::hash_reader(file)
         .map_err(|error| format!("cannot hash {}: {error}", path.display()))
+}
+
+fn source_metadata_identity(metadata: &fs::Metadata) -> Result<Value, String> {
+    let mtime_ns = stat_ns(metadata, false).ok_or("source timestamps are unsupported on this platform")?;
+    let ctime_ns = stat_ns(metadata, true).ok_or("source timestamps are unsupported on this platform")?;
+    #[cfg(unix)]
+    let file_id = {
+        use std::os::unix::fs::MetadataExt;
+        serde_json::json!({"device": metadata.dev(), "inode": metadata.ino()})
+    };
+    #[cfg(not(unix))]
+    let file_id = Value::Null;
+    Ok(serde_json::json!({
+        "bytes": metadata.len(),
+        "mtime_ns": mtime_ns,
+        "ctime_ns": ctime_ns,
+        "file_id": file_id,
+    }))
+}
+
+/// Return a cached digest when a source's identity and metadata are unchanged.
+/// A cache miss computes SHA-256 once and stores it for later preparations.
+pub fn source_file_digest_cached(models_root: &Path, path: &Path) -> Result<String, String> {
+    let absolute = absolute_path(path)?;
+    let metadata = fs::metadata(&absolute)
+        .map_err(|error| format!("cannot inspect source file {}: {error}", absolute.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("assembly source is not a file: {}", absolute.display()));
+    }
+    let key_value = serde_json::json!({
+        "path": absolute,
+        "source": source_metadata_identity(&metadata)?,
+    });
+    let key = crate::support::sha256::hex_digest(&canonical_json(&key_value)?);
+    let cache_entry = models_root.join(".source-digest-cache").join(&key);
+    if let Ok(digest) = fs::read_to_string(&cache_entry) {
+        let digest = digest.trim();
+        if is_hex(Some(digest), 64) {
+            return Ok(digest.to_ascii_lowercase());
+        }
+        let _ = fs::remove_file(&cache_entry);
+    }
+    let digest = source_file_digest(&absolute)?;
+    remember_cache_value(models_root, ".source-digest-cache", &key, &digest)?;
+    Ok(digest)
+}
+
+fn remember_cache_value(models_root: &Path, cache_name: &str, key: &str, value: &str) -> Result<(), String> {
+    let cache_root = models_root.join(cache_name);
+    fs::create_dir_all(&cache_root)
+        .map_err(|error| format!("cannot create {cache_name}: {error}"))?;
+    let destination = cache_root.join(key);
+    let temporary = cache_root.join(format!(".cache-{}", unique_suffix()));
+    let result = (|| {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary)
+            .map_err(|error| format!("cannot create {cache_name} entry: {error}"))?;
+        file.write_all(value.as_bytes()).and_then(|_| file.write_all(b"\n")).and_then(|_| file.sync_all())
+            .map_err(|error| format!("cannot write {cache_name} entry: {error}"))?;
+        fs::rename(&temporary, &destination)
+            .map_err(|error| format!("cannot publish {cache_name} entry: {error}"))
+    })();
+    if result.is_err() { let _ = fs::remove_file(&temporary); }
+    result
 }
 
 fn canonical_json(value: &Value) -> Result<Vec<u8>, String> {
@@ -500,6 +650,7 @@ mod tests {
     use std::collections::BTreeMap;
     use serde_json::json;
 
+
     fn fixture() -> (std::path::PathBuf, Value) {
         let root = std::env::temp_dir().join(format!("splash-assembly-{}", unique_suffix()));
         let source = root.with_extension("source");
@@ -565,6 +716,55 @@ mod tests {
         let selection = models.join(".selections/model");
         publish_selection(&selection, &published).unwrap();
         assert_eq!(fs::read_link(&selection).unwrap(), published);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn publish_reuses_fast_metadata_cache_and_rehashes_after_change() {
+        let (root, mut record) = fixture();
+        let source = root.with_extension("source");
+        let models = root.join("models");
+        record.as_object_mut().unwrap().remove("files");
+        let files = [("target/weights.bin".to_owned(), source.clone())].into_iter().collect();
+
+        SOURCE_HASH_CALLS.with(|calls| calls.set(0));
+        let first = publish(&models, record.clone(), &files).unwrap();
+        SOURCE_HASH_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+        assert_eq!(fs::read_dir(models.join(".assembly-fast-cache")).unwrap().count(), 1);
+
+        SOURCE_HASH_CALLS.with(|calls| calls.set(0));
+        let second = publish(&models, record.clone(), &files).unwrap();
+        SOURCE_HASH_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+        assert_eq!(second, first);
+
+        fs::write(&source, b"changed weights with a different size").unwrap();
+        SOURCE_HASH_CALLS.with(|calls| calls.set(0));
+        let changed = publish(&models, record, &files).unwrap();
+        SOURCE_HASH_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+        assert_ne!(changed, first);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_digest_cache_skips_unchanged_bytes_and_invalidates_changed_files() {
+        let root = std::env::temp_dir().join(format!("splash-source-digest-{}", unique_suffix()));
+        let models = root.join("models");
+        let source = root.join("weights.safetensors");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&source, b"first weights").unwrap();
+
+        SOURCE_HASH_CALLS.with(|calls| calls.set(0));
+        let first = source_file_digest_cached(&models, &source).unwrap();
+        SOURCE_HASH_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+        SOURCE_HASH_CALLS.with(|calls| calls.set(0));
+        assert_eq!(source_file_digest_cached(&models, &source).unwrap(), first);
+        SOURCE_HASH_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+
+        fs::write(&source, b"second weights changed").unwrap();
+        SOURCE_HASH_CALLS.with(|calls| calls.set(0));
+        let changed = source_file_digest_cached(&models, &source).unwrap();
+        SOURCE_HASH_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+        assert_ne!(changed, first);
         fs::remove_dir_all(root).unwrap();
     }
 
