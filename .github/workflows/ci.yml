@@ -42,7 +42,7 @@ jobs:
       - name: Install Python 3.13
         run: HOMEBREW_NO_AUTO_UPDATE=1 brew install python@3.13
       - name: Build production and run CPU runtime checks
-        run: make check-source check-native-cpu PYTHON_CANDIDATES="$(brew --prefix python@3.13)/bin/python3.13"
+        run: make check-source check-native-cpu check-rust-tools PYTHON_CANDIDATES="$(brew --prefix python@3.13)/bin/python3.13"
       - name: Build every native test and tool
         run: make check-native-build
       - name: Run native sanitizers
@@ -68,6 +68,17 @@ jobs:
           make check-python PYTHON_CANDIDATES="$(brew --prefix python@${{ matrix.python-version }})/bin/python${{ matrix.python-version }}"
           actual=$(.venv/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
           test "$actual" = "${{ matrix.python-version }}"
+
+  rust-server:
+    name: Rust server compatibility suite
+    runs-on: blacksmith-6vcpu-macos-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run Rust server and build-tool suites
+        run: |
+          cargo test --locked --manifest-path server-rs/Cargo.toml
+          cargo test --locked --manifest-path dev/build-tools-rs/Cargo.toml
 
   release-hardware:
     name: Release gate (${{ matrix.runner_label }})

@@ -38,6 +38,9 @@ pub struct Collected {
     pub result: Option<CollectedResult>,
     /// Whether the output called a tool.
     pub called: bool,
+    /// Chat token probabilities, present only when requested for a
+    /// non-streaming unconstrained completion.
+    pub logprobs: Option<Value>,
 }
 
 /// What one request carries past its output: the ids and the reasoning
@@ -124,6 +127,9 @@ pub fn chat_choice(collected: &Collected, _job: &JobInfo, index: usize) -> Value
         "finish_reason".into(),
         json!(finish_reason(result, collected.called)),
     );
+    if let Some(logprobs) = &collected.logprobs {
+        choice.insert("logprobs".into(), logprobs.clone());
+    }
     Value::Object(choice)
 }
 

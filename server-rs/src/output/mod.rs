@@ -9,6 +9,7 @@ pub mod stop;
 
 pub use projector::{
     convert_value, ProjectorEvent, StaticTypes, StreamingToolCallProjector, ToolCall, Types,
+    MAX_STOP_CHARACTERS,
 };
 pub use reasoning::{ReasoningPart, ReasoningSplitter};
 pub use streamer::CallbackStreamer;

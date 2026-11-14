@@ -126,6 +126,14 @@ fn anthropic_content(value: &Value, label: &str) -> Result<Value, MessageError> 
                 source.unwrap()["data"].as_str().unwrap()
             );
             parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
+        } else if kind == "document" {
+            let document = crate::documents::DocumentService::document_parts(block)
+                .map_err(|error| MessageError {
+                    status: error.status,
+                    message: error.message,
+                    code: error.code,
+                })?;
+            parts.extend(document);
         } else {
             return Err(bad(format!("{label} contains unsupported content")));
         }
@@ -282,31 +290,38 @@ fn anthropic_message(
     Ok(tool_results)
 }
 
-/// A tool result as a Chat tool message: its content as text, its call's
-/// id.
+/// A tool result as a Chat tool message, retaining its media and error flag.
 fn anthropic_tool_result(block: &Value) -> Result<Value, MessageError> {
     let tool_call_id = block.get("tool_use_id").and_then(|id| id.as_str());
     let Some(tool_call_id) = tool_call_id else {
         return Err(bad("invalid Anthropic tool_result block"));
     };
-    let content = block.get("content").unwrap_or(&Value::Null);
-    let text = match content {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => {
-            let mut out = String::new();
-            for part in parts {
-                let kind = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if kind == "text" {
-                    out.push_str(part.get("text").and_then(|t| t.as_str()).unwrap_or(""));
-                } else {
-                    return Err(bad("unsupported Anthropic tool_result content"));
-                }
-            }
-            out
-        }
-        _ => String::new(),
+    let is_error = match block.get("is_error").filter(|value| !value.is_null()) {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(bad("tool_result.is_error must be a boolean")),
     };
-    Ok(json!({"role": "tool", "tool_call_id": tool_call_id, "content": text}))
+    let mut content = block.get("content").filter(|value| !value.is_null())
+        .cloned().unwrap_or_else(|| json!(""));
+    if let Some(parts) = content.as_array_mut() {
+        for part in parts {
+            if part.get("type").and_then(Value::as_str) == Some("tool_reference") {
+                let name = part.get("tool_name").and_then(Value::as_str)
+                    .filter(|name| crate::tool_schema::is_tag_name(name))
+                    .ok_or_else(|| bad(format!("tool_reference.tool_name must be {}", crate::tool_schema::TAG_NAME_RULE)))?;
+                *part = json!({"type": "text", "text": format!("\nAvailable tool: {name}\n")});
+            }
+        }
+    }
+    let mut content = anthropic_content(&content, "tool_result")?;
+    if is_error {
+        match &mut content {
+            Value::String(text) => text.insert_str(0, "Tool execution failed:\n"),
+            Value::Array(parts) => parts.insert(0, json!({"type": "text", "text": "Tool execution failed:\n"})),
+            _ => unreachable!(),
+        }
+    }
+    Ok(json!({"role": "tool", "tool_call_id": tool_call_id, "content": content}))
 }
 
 /// A Messages generation request as a Chat body, and how its response

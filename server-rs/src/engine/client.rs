@@ -4,9 +4,9 @@
 //! reader thread parses its stdout, dispatching each event to the call it
 //! names.
 //!
-//! This core carries one engine generation: spawn, submit, cancel, status
-//! and the dispatch rules. The restart attempts, the liveness probes and
-//! the CPU mask workers are the next slice (`PORTING.md`).
+//! This core carries one engine generation: spawn, submit, cancel, status,
+//! liveness probes and the dispatch rules. Process restarts still belong to
+//! the serving process that owns the child.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -22,6 +22,7 @@ use crate::protocol as wire;
 /// How long the engine's loop may leave a status request unanswered before
 /// its engine counts as stuck and fails: far above any legitimate tick.
 pub const STATUS_ANSWER_LIMIT: Duration = Duration::from_secs(30);
+const LIVENESS_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -82,6 +83,7 @@ struct Shared {
     state: Mutex<State>,
     ready_changed: Condvar,
     write: Mutex<Box<dyn Write + Send>>,
+    latency_metrics: Mutex<Option<Arc<crate::metrics::LatencyMetrics>>>,
 }
 
 impl Shared {
@@ -137,8 +139,14 @@ impl EngineClient {
             }),
             ready_changed: Condvar::new(),
             write: Mutex::new(write),
+            latency_metrics: Mutex::new(None),
         });
         let client = EngineClient { shared: shared.clone() };
+        let liveness_client = client.clone();
+        std::thread::Builder::new()
+            .name("splash-engine-liveness".into())
+            .spawn(move || liveness_loop(liveness_client))
+            .expect("liveness thread");
         let reader_shared = Arc::downgrade(&shared);
         std::thread::Builder::new()
             .name("splash-engine-reader".into())
@@ -180,6 +188,20 @@ impl EngineClient {
         self.readiness().is_some()
     }
 
+    /// Attach the frontend's latency collector. Every submitted request
+    /// observes native queue time at its first matching Start event.
+    pub fn set_latency_metrics(&self, metrics: Arc<crate::metrics::LatencyMetrics>) {
+        *self.shared.latency_metrics.lock().expect("latency metrics lock") = Some(metrics);
+    }
+
+    pub fn latency_metrics(&self) -> Option<Arc<crate::metrics::LatencyMetrics>> {
+        self.shared
+            .latency_metrics
+            .lock()
+            .expect("latency metrics lock")
+            .clone()
+    }
+
     pub fn pending_count(&self) -> usize {
         self.shared.state.lock().expect("state lock").pending.len()
     }
@@ -203,7 +225,66 @@ impl EngineClient {
         on_event: Option<EventCallback>,
         on_complete: Option<CompletionCallback>,
     ) -> Result<Arc<Call>, EngineError> {
+        self.submit_with_http_start(request, on_event, on_complete, None)
+    }
+
+    /// Submit a request while measuring HTTP time-to-first-token from the
+    /// instant the complete request headers were received. The first token
+    /// batch is excluded from `output_interval`; that metric starts between
+    /// subsequent non-empty token batches.
+    pub fn submit_with_http_start(
+        &self,
+        request: &GenerationRequest,
+        on_event: Option<EventCallback>,
+        on_complete: Option<CompletionCallback>,
+        http_started_at: Option<std::time::Instant>,
+    ) -> Result<Arc<Call>, EngineError> {
         request.validate()?;
+        let submitted_at = std::time::Instant::now();
+        let metrics = self
+            .shared
+            .latency_metrics
+            .lock()
+            .expect("latency metrics lock")
+            .clone();
+        let on_event = if let Some(metrics) = metrics {
+            let callback = on_event;
+            let measured_start = std::sync::atomic::AtomicBool::new(false);
+            let last_output_at = Mutex::new(None::<std::time::Instant>);
+            Some(Arc::new(move |call: &Call, event: &wire::EngineEvent| {
+                match event {
+                    wire::EngineEvent::Start(start)
+                        if start.request_id == call.request_id
+                            && !measured_start.swap(true, std::sync::atomic::Ordering::Relaxed) =>
+                    {
+                        metrics.observe("native_queue", submitted_at.elapsed());
+                    }
+                    wire::EngineEvent::Tokens(tokens)
+                        if tokens.request_id == call.request_id && !tokens.tokens.is_empty() =>
+                    {
+                        let now = std::time::Instant::now();
+                        let mut previous = last_output_at.lock().expect("output latency lock");
+                        if previous.is_none() {
+                            if let Some(started_at) = http_started_at {
+                                metrics.observe(
+                                    "http_ttft",
+                                    now.saturating_duration_since(started_at),
+                                );
+                            }
+                        } else if let Some(previous) = *previous {
+                            metrics.observe("output_interval", now.saturating_duration_since(previous));
+                        }
+                        *previous = Some(now);
+                    }
+                    _ => {}
+                }
+                if let Some(callback) = &callback {
+                    callback(call, event);
+                }
+            }) as EventCallback)
+        } else {
+            on_event
+        };
         let mut state = self.shared.state.lock().expect("state lock");
         if state.closed {
             return Err(EngineError::RuntimeClosed("runtime is closed".into()));
@@ -247,6 +328,7 @@ impl EngineClient {
         let call = Call::new(request_id, generation, request, on_event, on_complete);
         state.pending.insert(request_id, call.clone());
         drop(state);
+        self.shared.ready_changed.notify_all();
         // Admission is held: a write failure fails the call, which releases
         // it from the pending map.
         if let Err(error) = self.shared.write_frame(&encoded) {
@@ -354,7 +436,7 @@ impl EngineClient {
         }
         let deadline = std::time::Instant::now() + timeout;
         let mut answered = waiter.result.lock().expect("waiter lock");
-        while answered.is_none() {
+        while answered.is_none() && waiter.error.lock().expect("waiter lock").is_none() {
             let now = std::time::Instant::now();
             if now >= deadline {
                 break;
@@ -415,6 +497,7 @@ impl EngineClient {
                 .expect("state lock")
                 .pending
                 .remove(&call.request_id);
+            self.shared.ready_changed.notify_all();
         }
     }
 
@@ -635,6 +718,7 @@ impl EngineClient {
                 .expect("state lock")
                 .pending
                 .remove(&call.request_id);
+            self.shared.ready_changed.notify_all();
         }
     }
 
@@ -690,6 +774,43 @@ impl EngineClient {
 
 /// The reader thread: parse the engine's output, decode each frame, and
 /// dispatch it; any failure fails the generation.
+fn liveness_loop(client: EngineClient) {
+    loop {
+        let mut state = client.shared.state.lock().expect("state lock");
+        while !state.closed && (state.pending.is_empty() || state.ready.is_none()) {
+            state = client.shared.ready_changed.wait(state).expect("state lock");
+        }
+        if state.closed {
+            return;
+        }
+        let (state, _) = client
+            .shared
+            .ready_changed
+            .wait_timeout(state, LIVENESS_PROBE_INTERVAL)
+            .expect("state lock");
+        if state.closed {
+            return;
+        }
+        if state.pending.is_empty() || state.ready.is_none() {
+            continue;
+        }
+        drop(state);
+
+        // Status is answered by the engine's main loop, so its response
+        // distinguishes a live reader thread from a loop stalled in native
+        // work. A missing response fails every call in this generation.
+        if client.status(STATUS_ANSWER_LIMIT).is_err() {
+            fail_shared(
+                &client.shared,
+                EngineError::EngineUnhealthy(
+                    "native engine did not answer its liveness status request".into(),
+                ),
+            );
+            return;
+        }
+    }
+}
+
 fn reader_loop(
     mut read: Box<dyn Read + Send>,
     shared: std::sync::Weak<Shared>,

@@ -25,6 +25,7 @@ pub struct StreamSink {
     pub request_id: String,
     pub created_at: i64,
     pub include_usage: bool,
+    pub compaction: Option<Value>,
 }
 
 impl StreamSink {
@@ -42,7 +43,7 @@ impl StreamSink {
         metrics: Option<Value>,
         timings: Option<Value>,
     ) -> Result<(), String> {
-        let chunk = openai::stream_chunk(
+        let mut chunk = openai::stream_chunk(
             &self.model,
             &self.request_id,
             self.created_at,
@@ -52,6 +53,9 @@ impl StreamSink {
             metrics,
             timings,
         );
+        if let Some(compaction) = &self.compaction {
+            chunk["compaction"] = compaction.clone();
+        }
         self.sse(&chunk)
     }
 
@@ -112,21 +116,84 @@ pub fn stream_callbacks(
     constraint: Option<Arc<TokenConstraint>>,
     validator: Option<Arc<ResponseValidator>>,
 ) -> (EventCallback, crate::engine::CompletionCallback) {
+    stream_callbacks_with_stops_and_cancel(
+        sink,
+        tokens,
+        tokenizer,
+        projector,
+        thinking,
+        chat_format,
+        tool_calls,
+        constraint,
+        validator,
+        Vec::new(),
+        Arc::new(|call| {
+            call.mark_cancel_requested();
+        }),
+    )
+}
+
+/// Build stream callbacks that can cancel the engine call when writing to
+/// the HTTP connection fails.
+pub fn stream_callbacks_with_stops_and_cancel(
+    sink: Arc<StreamSink>,
+    tokens: Arc<Mutex<Vec<u32>>>,
+    tokenizer: Arc<crate::tokenization::FastTokenizer>,
+    projector: Arc<Mutex<StreamingToolCallProjector>>,
+    thinking: bool,
+    chat_format: ChatFormat,
+    tool_calls: bool,
+    constraint: Option<Arc<TokenConstraint>>,
+    validator: Option<Arc<ResponseValidator>>,
+    stop_sequences: Vec<String>,
+    cancel: Arc<dyn Fn(&crate::engine::Call) + Send + Sync>,
+) -> (EventCallback, crate::engine::CompletionCallback) {
+    stream_callbacks_with_request_log(
+        sink, tokens, tokenizer, projector, thinking, chat_format, tool_calls,
+        constraint, validator, stop_sequences, cancel, None,
+    )
+}
+
+/// Build stream callbacks with optional Chat request lifecycle diagnostics.
+pub fn stream_callbacks_with_request_log(
+    sink: Arc<StreamSink>,
+    tokens: Arc<Mutex<Vec<u32>>>,
+    tokenizer: Arc<crate::tokenization::FastTokenizer>,
+    projector: Arc<Mutex<StreamingToolCallProjector>>,
+    thinking: bool,
+    chat_format: ChatFormat,
+    tool_calls: bool,
+    constraint: Option<Arc<TokenConstraint>>,
+    validator: Option<Arc<ResponseValidator>>,
+    stop_sequences: Vec<String>,
+    cancel: Arc<dyn Fn(&crate::engine::Call) + Send + Sync>,
+    request_log: Option<Arc<crate::diagnostics::RequestLogContext>>,
+) -> (EventCallback, crate::engine::CompletionCallback) {
+    let stop_refs: Vec<&str> = stop_sequences.iter().map(String::as_str).collect();
     let state: Arc<Mutex<StreamState>> = Arc::new(Mutex::new(StreamState {
         started: false,
-        streamer: CallbackStreamer::new(&[]),
+        streamer: CallbackStreamer::new(&stop_refs),
         splitter: ReasoningSplitter::new(thinking, Some(&chat_format), tool_calls),
         first_token_batch_tokens: 0,
+        stopped: false,
     }));
     let event_state = state.clone();
     let event_sink = sink.clone();
     let event_projector = projector.clone();
+    let cancel_on_write_error = cancel.clone();
+    let cancel_on_stop = cancel.clone();
+    let completion_tokenizer = tokenizer.clone();
+    let start_request_log = request_log.clone();
     let on_event: EventCallback = Arc::new(move |call, event| {
         let sink = event_sink.clone();
         let mut state = event_state.lock().expect("stream state lock");
+        let mut stop_matched = false;
         let outcome: Result<(), String> = match event {
             EngineEvent::Start(start) if start.request_id == call.request_id => {
                 state.started = true;
+                if let Some(request) = start_request_log.as_ref() {
+                    request.admitted(start.matched_prompt_tokens);
+                }
                 sink.chunk(
                     json!({"role": "assistant", "content": ""}),
                     None,
@@ -155,14 +222,20 @@ pub fn stream_callbacks(
                     .expect("token lock")
                     .extend_from_slice(&tokens_event.tokens);
                 let streamed = state.streamer.put_tokens(&tokenizer, &tokens_event.tokens);
+                state.stopped = state.streamer.stop_sequence().is_some();
+                stop_matched = state.stopped;
                 publish(&sink, &mut state.splitter, &event_projector, streamed)
             }
             _ => Ok(()),
         };
+        if stop_matched {
+            cancel_on_stop(call);
+        }
         if let Err(error) = outcome {
-            // A write that failed ends the stream; the reader thread sees
-            // the closed connection.
+            // A failed write means the client cannot consume the rest of
+            // this answer, so stop spending engine time on it.
             eprintln!("stream write failed: {error}");
+            cancel_on_write_error(call);
         }
     });
 
@@ -172,15 +245,29 @@ pub fn stream_callbacks(
     let complete_state = state.clone();
     let on_complete: crate::engine::CompletionCallback = Arc::new(move |call| {
         let sink = sink.clone();
+        let request_log = request_log.clone();
         let outcome = (|| -> Result<(), String> {
             {
                 let mut state = complete_state.lock().expect("stream state lock");
+                let tail = state.streamer.end(&completion_tokenizer);
+                publish(&sink, &mut state.splitter, &projector, tail)?;
                 let parts = state.splitter.finish();
                 publish_parts(&sink, &projector, parts)?;
             }
-            let done = call
-                .result(None)
-                .map_err(|error| error.to_string())?;
+            let done = match call.result(None) {
+                Ok(done) => done,
+                Err(error) => {
+                    let error = crate::serve::pipeline::PipelineError::from(error);
+                    crate::diagnostics::request_error(error.code.as_deref().unwrap_or("server_error"));
+                    let api_error = crate::support::errors::ApiError::new(
+                        error.status,
+                        error.message,
+                        error.code.unwrap_or_else(|| "server_error".into()),
+                    );
+                    sink.error(&api_error)?;
+                    return Ok(());
+                }
+            };
             let first_token_batch_tokens = complete_state
                 .lock()
                 .expect("stream state lock")
@@ -188,15 +275,28 @@ pub fn stream_callbacks(
             // The projector's held text and calls go out before the finish
             // chunk, and an answer without calls is validated against the
             // response format only when the model ended it.
-            let incomplete = done.reason == crate::protocol::FinishReason::Length;
+            let stopped = complete_state.lock().expect("stream state lock").stopped;
+            let incomplete = done.reason == crate::protocol::FinishReason::Length && !stopped;
             let (content, calls, events) = projector
                 .lock()
                 .expect("projector lock")
                 .finish(incomplete);
+            if let Some(request) = request_log.as_ref() {
+                let tool_calls: Vec<(String, String)> = calls
+                    .iter()
+                    .map(|call| (call.name.clone(), call.arguments.clone()))
+                    .collect();
+                crate::diagnostics::request_done(
+                    &done,
+                    request.matched_tokens(),
+                    first_token_batch_tokens,
+                    &tool_calls,
+                );
+            }
             for event in &events {
                 sink.chunk(tool_chunk(event), None, None, None, None)?;
             }
-            let ended = done.reason != crate::protocol::FinishReason::Length;
+            let ended = done.reason != crate::protocol::FinishReason::Length || stopped;
             if ended && calls.is_empty() {
                 if let Some(validator) = validator.as_ref() {
                     if let Err(error) = validate_response_content(&content, Some(validator)) {
@@ -206,7 +306,11 @@ pub fn stream_callbacks(
                 }
             }
             let mut result = openai::CollectedResult {
-                reason: format!("{:?}", done.reason).to_lowercase(),
+                reason: if stopped {
+                    "stop".into()
+                } else {
+                    format!("{:?}", done.reason).to_lowercase()
+                },
                 prompt_tokens: done.prompt_tokens as u64,
                 completion_tokens: done.completion_tokens as u64,
                 prefill_tokens: done.prompt_tokens as u64,
@@ -311,4 +415,5 @@ struct StreamState {
     /// The tokens of the output's first emission, which precede TTFT and so
     /// stay out of the rate the usage chunk reports.
     first_token_batch_tokens: u64,
+    stopped: bool,
 }

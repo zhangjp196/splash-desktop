@@ -16,7 +16,7 @@ ANNOUNCE_INSTALL_WAIT = /usr/bin/lockf -s -k -t 0 "$(INSTALL_LOCK)" true \
 	|| echo "Another setup of $(VENV) is running; waiting..."
 REQUIREMENTS := install/requirements.txt
 PYTHON_CANDIDATES ?= python3.13 python3 python3.12 python3.14
-BUILD_ID_PYTHON ?= python3
+BUILD_SCRIPT_PYTHON ?= python3
 SPLASH_MAKEFILE := $(abspath $(firstword $(MAKEFILE_LIST)))
 MODEL ?=
 # MODEL with the installer's source options selects one installation
@@ -204,9 +204,14 @@ ENGINE_LINKFLAGS := -framework Foundation -framework Metal -framework IOKit \
 ENGINE_DEPFLAGS := -MMD -MP
 # Configuration belongs to each successful output, not to a shared timestamp:
 # macOS make can treat a new stamp and an old binary in the same second as equal.
-BUILD_CONFIG_TOOL := dev/tools/build_config.py
+BUILD_TOOLS_MANIFEST := dev/build-tools-rs/Cargo.toml
+BUILD_TOOLS_LOCK := dev/build-tools-rs/Cargo.lock
+BUILD_TOOLS_SOURCE_FILES := dev/build-tools-rs/src/lib.rs \
+	dev/build-tools-rs/src/main.rs server-rs/src/support/sha256.rs
+BUILD_TOOLS_BINARY := dev/build-tools-rs/target/release/splash-build-tools
 BUILD_RULES_DIGEST := $(shell shasum -a 256 Makefile dev/native.mk \
-	$(BUILD_CONFIG_TOOL) | shasum -a 256 | cut -c1-16)
+	$(BUILD_TOOLS_MANIFEST) $(BUILD_TOOLS_LOCK) $(BUILD_TOOLS_SOURCE_FILES) \
+	| shasum -a 256 | cut -c1-16)
 shell-quote = '$(subst ','"'"',$(1))'
 CONFIG_DIGEST := $(shell printf '%s\0' $(BUILD_RULES_DIGEST) \
 	$(call shell-quote,$(CXX)) $(call shell-quote,$(ENGINE_CXXFLAGS)) \
@@ -214,16 +219,18 @@ CONFIG_DIGEST := $(shell printf '%s\0' $(BUILD_RULES_DIGEST) \
 	$(call shell-quote,$(ENGINE_LINKFLAGS)) $(call shell-quote,$(AR)) \
 	$(call shell-quote,$(METAL)) $(call shell-quote,$(PROD_METALFLAGS)) \
 	$(call shell-quote,$(METALLIB)) | shasum -a 256 | cut -c1-16)
-RUN_CONFIGURED = $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) record \
+RUN_CONFIGURED = $(BUILD_TOOLS_BINARY) build-config record \
 	--output $(call shell-quote,$@) --config $(BUILD_CONFIG) --
 BUILD_INPUTS = $(filter-out force-build-config,$^)
-BUILD_ID_SCRIPT := dev/tools/build_identity.py
 BUILD_ID_HEADER := $(ENGINE_BUILD)/BuildIdentity.hpp
 BUILD_ID_STAMP := $(ENGINE_BUILD)/build-identity.json
 PRODUCTION_ENGINE_INPUTS := $(sort $(shell find runtime -type f \
 	\( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' \
 		-o -name '*.hpp' -o -name '*.m' -o -name '*.mm' \) \
 	-print))
+
+$(BUILD_TOOLS_BINARY): $(BUILD_TOOLS_MANIFEST) $(BUILD_TOOLS_LOCK) $(BUILD_TOOLS_SOURCE_FILES)
+	cargo build --locked --release --manifest-path $(BUILD_TOOLS_MANIFEST)
 BUILD_ID_CONSTANT_ARGS = \
 	--constant 'runtime=qwen-hybrid-dflash8' \
 	--constant 'engine_cxxflags=$(ENGINE_CXXFLAGS)' \
@@ -354,8 +361,8 @@ force-build-identity:
 $(ENGINE_BUILD): | $(BUILD)
 	mkdir -p $@
 
-$(BUILD_ID_STAMP): force-build-identity | $(ENGINE_BUILD)
-	@$(BUILD_ID_PYTHON) $(BUILD_ID_SCRIPT) write --root . \
+$(BUILD_ID_STAMP): force-build-identity | $(ENGINE_BUILD) $(BUILD_TOOLS_BINARY)
+	@$(BUILD_TOOLS_BINARY) build-identity write --root . \
 		--header $(BUILD_ID_HEADER) --stamp $(BUILD_ID_STAMP) \
 		$(BUILD_ID_CONSTANT_ARGS) >/dev/null
 
@@ -436,18 +443,29 @@ $(SANITIZER_CONFIG_TARGETS): BUILD_CONFIG := $(SANITIZER_CONFIG_DIGEST)
 $(PRODUCTION_AIRS): BUILD_CONFIG := $(PRODUCTION_AIR_CONFIG)
 $(LIB): BUILD_CONFIG := $(PRODUCTION_LIB_CONFIG)
 $(TEST_KERNEL_CONFIG_TARGETS): BUILD_CONFIG := $(TEST_KERNEL_CONFIG)
-STALE_CONFIG_TARGETS := $(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
+ifeq ($(wildcard $(BUILD_TOOLS_BINARY)),)
+# A clean checkout has no native helper yet; conservatively rebuild every
+# configured output. The first recipe builds the helper before the compiler.
+STALE_CONFIG_TARGETS := $(PRODUCTION_CONFIG_TARGETS) $(TEST_CONFIG_TARGETS) \
+	$(SANITIZER_CONFIG_TARGETS) $(PRODUCTION_AIRS) $(LIB) $(TEST_KERNEL_CONFIG_TARGETS)
+else
+STALE_CONFIG_TARGETS := $(shell $(BUILD_TOOLS_BINARY) build-config stale \
 	--config $(CONFIG_DIGEST) $(PRODUCTION_CONFIG_TARGETS)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
+	$(shell $(BUILD_TOOLS_BINARY) build-config stale \
 	--config $(TEST_CONFIG_DIGEST) $(TEST_CONFIG_TARGETS)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
+	$(shell $(BUILD_TOOLS_BINARY) build-config stale \
 	--config $(SANITIZER_CONFIG_DIGEST) $(SANITIZER_CONFIG_TARGETS)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
+	$(shell $(BUILD_TOOLS_BINARY) build-config stale \
 	--config $(PRODUCTION_AIR_CONFIG) $(PRODUCTION_AIRS)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
+	$(shell $(BUILD_TOOLS_BINARY) build-config stale \
 	--config $(PRODUCTION_LIB_CONFIG) $(LIB)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
+	$(shell $(BUILD_TOOLS_BINARY) build-config stale \
 	--config $(TEST_KERNEL_CONFIG) $(TEST_KERNEL_CONFIG_TARGETS))
+endif
 ifneq ($(strip $(STALE_CONFIG_TARGETS)),)
 $(STALE_CONFIG_TARGETS): force-build-config
 endif
+
+# All configured compiler outputs need the native helper before their recipe.
+$(PRODUCTION_CONFIG_TARGETS) $(TEST_CONFIG_TARGETS) $(SANITIZER_CONFIG_TARGETS) \
+	$(PRODUCTION_AIRS) $(LIB) $(TEST_KERNEL_CONFIG_TARGETS): | $(BUILD_TOOLS_BINARY)

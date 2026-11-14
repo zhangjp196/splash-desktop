@@ -3,6 +3,8 @@
 //! `install/models.py` records it, so it needs the same digest without a
 //! dependency the runtime does not otherwise carry.
 
+use std::io::{self, Read};
+
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -41,6 +43,31 @@ pub fn digest(bytes: &[u8]) -> [u8; 32] {
 /// The SHA-256 digest of `bytes`, as lowercase hexadecimal.
 pub fn hex_digest(bytes: &[u8]) -> String {
     digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Stream a file through SHA-256 without allocating memory proportional to
+/// model size.
+pub fn hash_reader(mut input: impl Read) -> io::Result<String> {
+    let mut state = H0;
+    let mut pending = Vec::with_capacity(8192);
+    let mut total = 0u64;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let count = input.read(&mut chunk)?;
+        if count == 0 { break; }
+        total = total.checked_add(count as u64).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "input is too large to hash"))?;
+        pending.extend_from_slice(&chunk[..count]);
+        let complete = pending.len() / 64 * 64;
+        for block in pending[..complete].chunks_exact(64) { compress(&mut state, block); }
+        pending.drain(..complete);
+    }
+    pending.push(0x80);
+    while pending.len() % 64 != 56 { pending.push(0); }
+    pending.extend_from_slice(&total.wrapping_mul(8).to_be_bytes());
+    for block in pending.chunks_exact(64) { compress(&mut state, block); }
+    let mut digest = [0u8; 32];
+    for (slot, word) in digest.chunks_exact_mut(4).zip(state) { slot.copy_from_slice(&word.to_be_bytes()); }
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn compress(state: &mut [u32; 8], block: &[u8]) {
@@ -88,7 +115,8 @@ fn compress(state: &mut [u32; 8], block: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::hex_digest;
+    use super::{hash_reader, hex_digest};
+    use std::io::Cursor;
 
     #[test]
     fn the_digest_matches_the_published_vectors() {
@@ -104,6 +132,14 @@ mod tests {
             hex_digest(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
+    }
+
+    #[test]
+    fn streaming_hash_matches_buffered_hash_across_block_boundaries() {
+        for size in [0, 1, 55, 56, 63, 64, 65, 8191, 8192, 8193, 100_003] {
+            let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            assert_eq!(hash_reader(Cursor::new(&bytes)).unwrap(), hex_digest(&bytes));
+        }
     }
 
     #[test]

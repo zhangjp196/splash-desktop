@@ -10,6 +10,38 @@ fn resolver(signature: &str) -> Result<String, MessageError> {
 }
 
 #[test]
+fn pdf_document_blocks_reach_the_shared_file_path() {
+    let body = json!({"model": "claude", "max_tokens": 20, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "Read this"},
+        {"type": "document", "title": "Report", "source": {
+            "type": "base64", "media_type": "application/pdf", "data": "JVBERg=="
+        }}
+    ]}]});
+    let (chat, _) = anthropic_to_chat_body(&body, &resolver).unwrap();
+    let content = &chat["messages"][0]["content"];
+    assert_eq!(content[0]["text"], "Read this");
+    assert_eq!(content[1]["text"], "Report\n");
+    assert_eq!(content[2]["file"]["file_data"], "data:application/pdf;base64,JVBERg==");
+}
+
+#[test]
+fn tool_results_preserve_media_references_and_failure() {
+    let body = json!({"model": "claude", "max_tokens": 20, "messages": [
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call1", "is_error": true,
+            "content": [{"type": "tool_reference", "tool_name": "lookup"},
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERg=="}}]}]}
+    ]});
+    let (chat, _) = anthropic_to_chat_body(&body, &resolver).unwrap();
+    let content = &chat["messages"][0]["content"];
+    assert_eq!(content[0]["text"], "Tool execution failed:\n");
+    assert_eq!(content[1]["text"], "\nAvailable tool: lookup\n");
+    assert_eq!(content[2]["file"]["file_data"], "data:application/pdf;base64,JVBERg==");
+    let mut invalid = body;
+    invalid["messages"][0]["content"][0]["is_error"] = json!("yes");
+    assert!(anthropic_to_chat_body(&invalid, &resolver).is_err());
+}
+
+#[test]
 fn a_messages_request_converts_to_a_chat_body() {
     let body = json!({
         "model": "claude",
@@ -123,4 +155,37 @@ fn the_refusals_read_as_the_python_names_them() {
     });
     let (chat, _) = anthropic_to_chat_body(&body, &resolver).expect("converts");
     assert_eq!(chat["messages"][0]["content"], json!("You are helpful."));
+}
+
+#[test]
+fn omitted_thinking_roundtrips_through_a_fernet_signature() {
+    let codec = splash_server::thinking::ThinkingCodec::new(
+        b"MDEyMzQ1Njc4OWFiY2RlZmZlZGNiYTk4NzY1NDMyMTA=",
+    )
+    .expect("Fernet key");
+    let hidden = "private omitted reasoning";
+    let signature = codec.encode(hidden).expect("signs hidden reasoning");
+    let body = json!({
+        "model": "claude",
+        "max_tokens": 100,
+        "thinking": {"type": "enabled", "display": "omitted"},
+        "messages": [
+            {"role": "user", "content": "continue"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "", "signature": signature},
+                {"type": "text", "text": "visible answer"}
+            ]},
+            {"role": "user", "content": "next"}
+        ]
+    });
+    let resolver = |signature: &str| {
+        codec.decode(signature).map_err(|error| MessageError {
+            status: error.status,
+            message: error.message,
+            code: error.code,
+        })
+    };
+    let (chat, display) = anthropic_to_chat_body(&body, &resolver).expect("valid signature");
+    assert_eq!(display, "omitted");
+    assert_eq!(chat["messages"][1]["reasoning_content"], json!(hidden));
 }

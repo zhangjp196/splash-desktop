@@ -1,9 +1,8 @@
 //! Chat message normalization, which every API's request reaches.
 //! Ported from `server/chat_messages.py`.
 //!
-//! One documented deviation: a PDF file part is refused until the
-//! documents module ports (`server/documents.py` renders it); images are
-//! kept in their canonical form for the chat template.
+//! PDF file parts are expanded by the document preparation stage before
+//! message normalization; images stay in canonical form for the chat template.
 
 use serde_json::{json, Map, Value};
 
@@ -127,8 +126,9 @@ fn user_content(content: &Value, vision: bool) -> Result<Value, MessageError> {
                 canonical.push(json!({"type": "text", "text": part_text(map)?}));
             }
             "file" => {
-                // The documents module renders a PDF to its pages; until it
-                // ports, a file part is refused with the vision note.
+                // A PDF normally has already been expanded by the document
+                // stage. Do not silently pass a surviving, unexpanded file
+                // part into template rendering.
                 return Err(MessageError::bad(
                     "PDF input is not supported: this model is serving without vision (started with --language-only)",
                 ));
@@ -164,8 +164,8 @@ fn call_arguments(arguments: &Value) -> Value {
     }
 }
 
-/// `messages` checked and in canonical form. Each PDF would render to its
-/// pages here; until the documents module ports, a file part is refused.
+/// `messages` checked and in canonical form. PDF parts are expanded before
+/// this function is called on the serving path.
 pub fn normalize_messages(messages: &Value, vision: bool) -> Result<Vec<Value>, MessageError> {
     let Some(items) = messages.as_array() else {
         return Err(MessageError::bad("messages must be a non-empty array"));

@@ -7,6 +7,8 @@
 //! the engine injects there.
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
+use std::io::Read;
 
 use serde_json::Value;
 
@@ -181,24 +183,21 @@ fn prepare_images_limited(
     Ok(prepared)
 }
 
-/// A random marker for one call: `__splash_image_<32 hex>__`, from a
-/// splitmix64 seeded by the clock and an address, std only. The Python
-/// pins one per process so its compiled template is reused, which the
-/// Rust renderer does not cache.
-fn render_marker() -> String {
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos() as u64)
-        .unwrap_or(0x9E37_79B9_7F4A_7C15);
-    seed ^= &seed as *const u64 as u64;
-    let mut next = move || {
-        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut mixed = seed;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        mixed ^ (mixed >> 31)
-    };
-    format!("__splash_image_{:016x}{:016x}__", next(), next())
+/// A cryptographically random process-wide marker, matching Python's module
+/// constant. Keeping it stable also lets the template renderer reuse its
+/// compiled version across requests.
+fn render_marker() -> Result<&'static str, ApiError> {
+    static MARKER: OnceLock<String> = OnceLock::new();
+    if let Some(marker) = MARKER.get() {
+        return Ok(marker.as_str());
+    }
+    let mut random = [0; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut random))
+        .map_err(|_| ApiError::new(500, "image marker randomness is unavailable", "internal_server_error"))?;
+    let marker = format!("__splash_image_{}__", random.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+    let _ = MARKER.set(marker);
+    Ok(MARKER.get().expect("image marker initialized").as_str())
 }
 
 /// Track placeholders emitted by the template, not quoted in input text.
@@ -219,7 +218,7 @@ pub fn render_image_tokens(
     render: &dyn Fn(&str) -> Result<String, ChatTemplateError>,
     tokenize: &dyn Fn(&str) -> Result<(Vec<u32>, Vec<(usize, usize)>), TokenizerError>,
 ) -> Result<(Vec<u32>, Vec<usize>, String), ApiError> {
-    let marker = render_marker();
+    let marker = render_marker()?;
     let marked = template_source.replace(IMAGE_PAD_TOKEN, &marker);
     let rendered = render(&marked).map_err(|error| {
         // A template's own refusal reads as the Python's caller answers a
@@ -368,6 +367,17 @@ mod tests {
         {{ '<|vision_start|><|image_pad|><|vision_end|>' }}\
         {% else %}{{ part.text }}{% endif %}{% endfor %}{% endif %}\
         {{ '\\n' }}{% endfor %}";
+
+    #[test]
+    fn image_render_marker_is_128_bit_and_stable_across_requests() {
+        let first = render_marker().unwrap().to_owned();
+        assert!(first.starts_with("__splash_image_") && first.ends_with("__"));
+        assert_eq!(first.len(), "__splash_image_".len() + 32 + 2);
+        assert!(first["__splash_image_".len()..first.len() - 2]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+        assert_eq!(render_marker().unwrap(), first);
+    }
 
     /// A WordLevel tokenizer with the vision tokens added, written to a
     /// fresh directory the test owns.

@@ -239,14 +239,145 @@ fn decode_and_resize(
         image.to_rgb8()
     };
     let rgb = if (rgb.height(), rgb.width()) != (height, width) {
-        // PIL's BICUBIC resampling is close to but not identical with the
-        // image crate's CatmullRom; the port's geometry and pixel digests
-        // are self-consistent, not PIL's bytes.
-        image::imageops::resize(&rgb, width, height, image::imageops::FilterType::CatmullRom)
+        image::RgbImage::from_raw(
+            width,
+            height,
+            resize_bicubic_rgb(&rgb, rgb.width(), rgb.height(), width, height),
+        )
+        .expect("resized RGB buffer has target dimensions")
     } else {
         rgb
     };
     Ok((height, width, rgb.into_raw()))
+}
+
+const PILLOW_RESAMPLE_BITS: u32 = 22;
+const PILLOW_RESAMPLE_SCALE: f64 = (1u64 << PILLOW_RESAMPLE_BITS) as f64;
+
+#[derive(Debug)]
+struct ResampleCoefficients {
+    start: usize,
+    weights: Vec<i32>,
+}
+
+/// Pillow's 8-bit BICUBIC resampler. Coefficients use its 22-bit fixed-point
+/// representation and each separable pass rounds and clips back to u8.
+/// Used by `decode_and_resize` for Pillow-compatible RGB resizing.
+fn resize_bicubic_rgb(
+    input: &[u8],
+    in_width: u32,
+    in_height: u32,
+    out_width: u32,
+    out_height: u32,
+) -> Vec<u8> {
+    assert!(in_width > 0 && in_height > 0 && out_width > 0 && out_height > 0);
+    assert_eq!(input.len(), in_width as usize * in_height as usize * 3);
+
+    let horizontal_first = !((i64::from(in_height) - i64::from(out_height) > 0)
+        && (i64::from(in_height) - i64::from(out_height))
+            > (i64::from(in_width) - i64::from(out_width)) * 2);
+    if horizontal_first {
+        let horizontal = resample_horizontal(input, in_width, in_height, out_width);
+        resample_vertical(&horizontal, out_width, in_height, out_height)
+    } else {
+        let vertical = resample_vertical(input, in_width, in_height, out_height);
+        resample_horizontal(&vertical, in_width, out_height, out_width)
+    }
+}
+
+fn bicubic_coefficients(in_size: u32, out_size: u32) -> Vec<ResampleCoefficients> {
+    assert!(in_size > 0 && out_size > 0);
+    let scale = f64::from(in_size) / f64::from(out_size);
+    let filter_scale = scale.max(1.0);
+    let support = 2.0 * filter_scale;
+    (0..out_size)
+        .map(|out| {
+            let center = (f64::from(out) + 0.5) * scale;
+            // C's cast to int truncates toward zero. Clamping follows it, as
+            // Pillow does at the first and last source pixels.
+            let first = ((center - support + 0.5) as i64).max(0) as usize;
+            let last = ((center + support + 0.5) as i64).min(i64::from(in_size)) as usize;
+            let values = (first..last)
+                .map(|source| {
+                    bicubic_filter((source as f64 + 0.5 - center) / filter_scale)
+                })
+                .collect::<Vec<_>>();
+            let total = values.iter().sum::<f64>();
+            let weights = values
+                .into_iter()
+                .map(|value| {
+                    // Pillow rounds signed normalized coefficients by adding
+                    // 0.5 and flooring, then stores them in a 22-bit table.
+                    ((value / total * PILLOW_RESAMPLE_SCALE) + 0.5).floor() as i32
+                })
+                .collect();
+            ResampleCoefficients { start: first, weights }
+        })
+        .collect()
+}
+
+fn bicubic_filter(x: f64) -> f64 {
+    let x = x.abs();
+    if x < 1.0 {
+        ((1.5 * x - 2.5) * x) * x + 1.0
+    } else if x < 2.0 {
+        ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0
+    } else {
+        0.0
+    }
+}
+
+fn rounded_u8(sum: i64) -> u8 {
+    ((sum + (1i64 << (PILLOW_RESAMPLE_BITS - 1))) >> PILLOW_RESAMPLE_BITS)
+        .clamp(0, 255) as u8
+}
+
+fn resample_horizontal(input: &[u8], in_width: u32, height: u32, out_width: u32) -> Vec<u8> {
+    let coefficients = bicubic_coefficients(in_width, out_width);
+    let mut output = vec![0; out_width as usize * height as usize * 3];
+    let in_stride = in_width as usize * 3;
+    let out_stride = out_width as usize * 3;
+    for y in 0..height as usize {
+        let input_row = y * in_stride;
+        let output_row = y * out_stride;
+        for (x, coefficients) in coefficients.iter().enumerate() {
+            let mut sums = [0i64; 3];
+            for (index, weight) in coefficients.weights.iter().enumerate() {
+                let source = input_row + (coefficients.start + index) * 3;
+                let weight = i64::from(*weight);
+                sums[0] += i64::from(input[source]) * weight;
+                sums[1] += i64::from(input[source + 1]) * weight;
+                sums[2] += i64::from(input[source + 2]) * weight;
+            }
+            let destination = output_row + x * 3;
+            output[destination] = rounded_u8(sums[0]);
+            output[destination + 1] = rounded_u8(sums[1]);
+            output[destination + 2] = rounded_u8(sums[2]);
+        }
+    }
+    output
+}
+
+fn resample_vertical(input: &[u8], width: u32, in_height: u32, out_height: u32) -> Vec<u8> {
+    let coefficients = bicubic_coefficients(in_height, out_height);
+    let stride = width as usize * 3;
+    let mut output = vec![0; width as usize * out_height as usize * 3];
+    for (y, coefficients) in coefficients.iter().enumerate() {
+        let output_row = y * stride;
+        for x in 0..stride {
+            let sum = coefficients
+                .weights
+                .iter()
+                .enumerate()
+                .map(|(index, weight)| {
+                    i64::from(input[(coefficients.start + index) * stride + x])
+                        * i64::from(*weight)
+                })
+                .sum();
+            output[output_row + x] = rounded_u8(sum);
+        }
+    }
+    output
 }
 
 /// Decode the payload's first frame (a GIF's first, for one) after the
@@ -600,6 +731,72 @@ mod tests {
                 u64::from_le_bytes(digest[8..16].try_into().unwrap())
             )
         );
+    }
+
+    #[test]
+    fn bicubic_rgb_matches_pillow_fixed_fixture() {
+        let (width, height, out_width, out_height) = (7u32, 5u32, 32u32, 32u32);
+        let source = (0..width as usize * height as usize * 3)
+            .map(|index| ((index * 73 + (index / 3) * 19 + 11) % 256) as u8)
+            .collect::<Vec<_>>();
+        let resized = resize_bicubic_rgb(&source, width, height, out_width, out_height);
+        let digest = sha256::digest(&resized);
+        let digest = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        assert_eq!(digest, "94ce87451733d5d51ed98b16a4d4c6d34fd94447e22311dd7f5f8971119fc3c2");
+        assert_eq!(&resized[..18], &[0, 71, 174, 0, 70, 173, 2, 69, 172, 51, 66, 170, 117, 62, 167, 190, 57, 162]);
+    }
+
+    #[test]
+    fn decode_and_resize_uses_pillow_bicubic_fixture() {
+        let (width, height) = (320u32, 320u32);
+        let pixels = (0..width as usize * height as usize * 3)
+            .map(|index| ((index * 73 + (index / 3) * 19 + 11) % 256) as u8)
+            .collect::<Vec<_>>();
+        let mut encoded = Cursor::new(Vec::new());
+        image::codecs::png::PngEncoder::new(&mut encoded)
+            .write_image(
+                &pixels,
+                width,
+                height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .expect("PNG encodes");
+
+        let (height, width, resized) =
+            decode_and_resize(encoded.get_ref(), MIN_PIXELS, MAX_SOURCE_PIXELS).unwrap();
+        assert_eq!((height, width), (256, 256));
+        let digest = sha256::digest(&resized);
+        let digest = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        assert_eq!(digest, "a949a563c7a57e67da32eef7cf3163d2ef9feee925c69f49948b29ec203fddf5");
+    }
+
+    #[test]
+    fn bicubic_rgb_matches_pillow_thousand_case_oracle() {
+        // Pillow 13.0.0 oracle: 1,000 deterministic RGB sources, varied
+        // up/down/mixed resizing, SHA-256 over dimensions and output bytes.
+        let mut seed = 9u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let mut oracle_input = Vec::new();
+        for case in 0..1_000usize {
+            let width = 2 + next() % 79;
+            let height = 2 + next() % 79;
+            let out_width = 2 + next() % 79;
+            let out_height = 2 + next() % 79;
+            let source = (0..width as usize * height as usize * 3)
+                .map(|index| ((index * 73 + (index / 3) * 19 + case * 29 + 11) % 256) as u8)
+                .collect::<Vec<_>>();
+            oracle_input.extend_from_slice(&width.to_le_bytes());
+            oracle_input.extend_from_slice(&height.to_le_bytes());
+            oracle_input.extend_from_slice(&out_width.to_le_bytes());
+            oracle_input.extend_from_slice(&out_height.to_le_bytes());
+            oracle_input.extend_from_slice(&resize_bicubic_rgb(&source, width, height, out_width, out_height));
+        }
+        let digest = sha256::digest(&oracle_input);
+        let digest = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        assert_eq!(digest, "d24895ab8180eddd9ddc51fcc4a1c8c2f1feebe222d84dc6bdeb8e458b072cf3");
     }
 
     #[test]

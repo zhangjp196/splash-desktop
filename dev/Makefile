@@ -47,8 +47,9 @@ HTTP_SMOKE_ARGS ?=
 
 .PHONY: agent-preflight architecture-check check check-source \
 	check-native-engine check-native-cpu check-native-metal check-native-build \
-	check-python \
-	install-development _install-development release-check test \
+	check-python check-rust-server check-rust-tools \
+	install-development _install-development release-check test test-rust-server \
+	test-rust-tools \
 	test-agent-real test-http-real test-performance-real test-pressure-real \
 	test-release-real test-python test-real verify-models \
 	test-engine test-engine-cpu test-engine-metal test-sanitizers
@@ -101,12 +102,20 @@ check-python: install-development test-python
 	$(PYTHON) -m ruff format --check --config dev/ruff.toml server \
 		install/*.py dev/tools dev/tests dev/benchmarks
 
-# It parses the server's sources, which need the environment's Python
-# (3.12-3.14); BUILD_ID_PYTHON, the build tools' python3, may be Xcode's 3.9.
+# The Rust server's protocol, dialect, and end-to-end coverage runs without
+# preparing the Python environment or installing Python test dependencies.
+check-rust-server:
+	cargo test --locked --manifest-path server-rs/Cargo.toml
+
+check-rust-tools:
+	cargo test --locked --manifest-path dev/build-tools-rs/Cargo.toml
+
+# It parses the server's sources, which need the development environment's
+# Python (3.12-3.14).
 architecture-check: install-environment
 	$(PYTHON) dev/tools/check_architecture.py
 
-check: check-source check-native-engine check-python
+check: check-source check-native-engine check-python check-rust-server check-rust-tools
 
 check-source: architecture-check
 	$(PYTHON) dev/tools/check_history.py
@@ -114,7 +123,11 @@ check-source: architecture-check
 	@empty_tree=$$(git hash-object -t tree /dev/null); \
 		git diff --check $$empty_tree HEAD
 
-test: test-engine test-python
+test: test-engine test-python test-rust-server test-rust-tools
+
+test-rust-server: check-rust-server
+
+test-rust-tools: check-rust-tools
 
 test-http-real: preflight $(TARGET) verify-build-identity
 	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/smoke_real.py \
@@ -148,7 +161,7 @@ ANE_FFN_SHARE_ARGS = $(if $(ANE_FFN_SHARE),--ane-ffn-share "$(ANE_FFN_SHARE)",)
 test-performance-real: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB) \
 		$(if $(BASELINE),$(WEIGHT_DIGESTS))
 	@mkdir -p "$(MODEL_RESULTS)"
-	@$(BUILD_ID_PYTHON) $(BUILD_ID_SCRIPT) check --root . \
+	@$(BUILD_TOOLS_BINARY) build-identity check --root . \
 		--header $(BUILD_ID_HEADER) --stamp $(BUILD_ID_STAMP) \
 		$(BUILD_ID_CONSTANT_ARGS) --binary $(TEST_BACKEND_BENCHMARK)
 ifneq ($(BASELINE),)

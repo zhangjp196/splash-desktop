@@ -17,6 +17,18 @@ use splash_server::serve::Pipeline;
 use splash_server::templates::load_chat_templates;
 use splash_server::tokenization::{FastTokenizer, PromptTokenizer};
 
+#[derive(Clone)]
+struct CapturedConsole(Arc<Mutex<Vec<u8>>>);
+
+impl Write for CapturedConsole {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
 fn qwen_directory() -> Option<PathBuf> {
     let base = std::env::var("HOME").ok()?;
     let dir: PathBuf = base.parse().ok()?;
@@ -214,7 +226,10 @@ fn wire_event(event: &Value) -> Vec<u8> {
                 &(event["accepted_draft_tokens"].as_u64().unwrap() as u32).to_le_bytes(),
             );
             payload.extend_from_slice(&(event["draft_cycles"].as_u64().unwrap() as u32).to_le_bytes());
-            payload.extend_from_slice(&(event["logit_count"].as_u64().unwrap() as u32).to_le_bytes());
+            let option_logits = event["option_logits"].as_array().cloned().unwrap_or_default();
+            let logit_count = event["logit_count"].as_u64().unwrap_or(option_logits.len() as u64) as u32;
+            payload.extend_from_slice(&logit_count.to_le_bytes());
+            for logit in option_logits { payload.extend_from_slice(&(logit.as_f64().unwrap() as f32).to_le_bytes()); }
             payload
         }
         _ => unreachable!("test events only"),
@@ -262,6 +277,9 @@ fn a_chat_request_runs_the_whole_pipeline() {
         model: "Qwen".into(),
         images: splash_server::images::ImageCache::new(),
         max_image_pixels: splash_server::images::MAX_PIXELS,
+        default_reasoning_effort: None,
+        thinking_end_tokens: None,
+        documents: None,
         constraints: None,
     };
 
@@ -400,6 +418,7 @@ fn a_chat_request_streams_as_openai_sse() {
         request_id: "req1".into(),
         created_at: 1_700_000_000,
         include_usage: true,
+        compaction: None,
     });
 
     let format = qwen();
@@ -517,6 +536,7 @@ fn a_chat_stream_splits_reasoning_from_the_answer() {
         request_id: "req2".into(),
         created_at: 1_700_000_000,
         include_usage: false,
+        compaction: None,
     });
 
     let format = qwen();
@@ -592,6 +612,9 @@ fn pipeline_of(
         model: "Qwen".into(),
         images: splash_server::images::ImageCache::new(),
         max_image_pixels: splash_server::images::MAX_PIXELS,
+        default_reasoning_effort: None,
+        thinking_end_tokens: None,
+        documents: None,
         constraints: None,
     }
 }
@@ -603,11 +626,90 @@ fn pipeline_source(pipeline: &Pipeline) -> String {
         .expect("the model has a chat template")
 }
 
+fn fake_score_engine(mut stream: UnixStream) {
+    let ready = wire_event(&json!({"frame_type":0x0100,"max_concurrent_requests":4,"max_context_tokens":524288,"vision":false}));
+    let _ = stream.write_all(&ready);
+    loop {
+        let mut header = [0u8;16];
+        if stream.read_exact(&mut header).is_err() { return; }
+        let kind = u16::from_le_bytes([header[6],header[7]]);
+        let count = u64::from_le_bytes(header[8..16].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8;count];
+        if stream.read_exact(&mut payload).is_err() { return; }
+        if kind != 0x0001 { continue; }
+        let request_id = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        let prompt_count = u32::from_le_bytes(payload[30..34].try_into().unwrap());
+        let score_count = u32::from_le_bytes(payload[74..78].try_into().unwrap()) as usize;
+        let start = wire_event(&json!({"frame_type":0x0101,"request_id":request_id,"lane":0,"matched_prompt_tokens":0}));
+        let done = wire_event(&json!({
+            "frame_type":0x0104,"request_id":request_id,"reason":0,"bounded":false,
+            "prompt_tokens":prompt_count,"completion_tokens":0,"prefill_micros":1000,
+            "decode_micros":0,"wall_micros":1300,"deduplicated_tokens":0,
+            "drafted_tokens":0,"accepted_draft_tokens":0,"draft_cycles":0,
+            "option_logits":(0..score_count).map(|index| index as f64).collect::<Vec<_>>()
+        }));
+        let _ = stream.write_all(&start);
+        let _ = stream.write_all(&done);
+    }
+}
+
+#[test]
+fn judgments_and_systemone_score_through_the_native_engine_route() {
+    use splash_server::serve::Server;
+    let Some(directory) = qwen_directory() else { eprintln!("no local Qwen tokenizer; skipped"); return; };
+    let (engine_side, client_read) = UnixStream::pair().expect("engine socket");
+    let client_write = client_read.try_clone().expect("clone engine socket");
+    std::thread::spawn(move || fake_score_engine(engine_side));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads tokenizer"));
+    let pipeline = pipeline_of(&tokenizer, &directory, &format, client);
+    let server = Server::new(pipeline);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+    let address = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || server.serve(listener));
+
+    let call = |path: &str, body: Value| -> String {
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+        write!(stream, "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+        stream.write_all(&bytes).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let judgment = call("/v1/judgments", json!({"model":"Qwen","id":"r1","state":"evidence","question":"pick","options":[{"id":"a","description":"A"},{"id":"b","description":"B"}]}));
+    assert!(judgment.starts_with("HTTP/1.1 200"), "{judgment}");
+    assert!(judgment.contains("\"answer_token_ids\":["), "{judgment}");
+    let judgment_json: Value = serde_json::from_str(judgment.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(judgment_json["id"], "r1");
+    assert!(judgment_json["probabilities"][1].as_f64().unwrap() > judgment_json["probabilities"][0].as_f64().unwrap());
+
+    let systemone = call("/v1/systemone", json!({"model":"Qwen","state":"evidence","questions":{
+        "n":{"type":"noul"},
+        "c":{"type":"choice","criteria":{"left":"L","right":"R"}},
+        "s":{"type":"score","criteria":["low","mid","high"]},
+        "d":{"type":"choice","criteria":{"only":"one"}}
+    }}));
+    assert!(systemone.starts_with("HTTP/1.1 200"), "{systemone}");
+    let result: Value = serde_json::from_str(systemone.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(result["answers"]["c"]["choice"], "right");
+    assert!(result["answers"]["n"]["noul"].as_f64().unwrap() < 0.5);
+    assert!(result["answers"]["s"]["score"].as_f64().unwrap() > 1.0);
+    assert_eq!(result["answers"]["d"]["choice"], "only");
+    assert_eq!(result["usage"]["output_tokens"], 0);
+}
+
 /// The server over real TCP: a Chat completion answered complete, and one
 /// answered streamed, both read back off the socket.
 #[test]
 fn the_server_answers_over_real_tcp() {
     use splash_server::serve::Server;
+
+    let captured_logs = Arc::new(Mutex::new(Vec::new()));
+    splash_server::diagnostics::start_console_with_writer(CapturedConsole(captured_logs.clone()))
+        .expect("install captured console");
 
     let Some(directory) = qwen_directory() else {
         eprintln!("no local Qwen tokenizer; skipped");
@@ -632,17 +734,41 @@ fn the_server_answers_over_real_tcp() {
         model: "Qwen".into(),
         images: splash_server::images::ImageCache::new(),
         max_image_pixels: splash_server::images::MAX_PIXELS,
+        default_reasoning_effort: None,
+        thinking_end_tokens: None,
+        documents: None,
         constraints: None,
     };
-    let server = Server::new(pipeline);
+    let thinking_codec = Arc::new(
+        splash_server::thinking::ThinkingCodec::new(
+            b"MDEyMzQ1Njc4OWFiY2RlZmZlZGNiYTk4NzY1NDMyMTA=",
+        )
+        .expect("Fernet key"),
+    );
+    let server = Server::new(pipeline).with_thinking_codec(thinking_codec.clone());
 
     // The listener on an ephemeral port.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
     let address = listener.local_addr().expect("address").to_string();
     std::thread::spawn(move || server.serve(listener));
 
+    for (path, expected_status, expected_body) in [
+        ("/v1/models", "200", "\"models\""),
+        ("/v1/models/Qwen", "200", "\"id\":\"Qwen\""),
+        ("/v1/models/missing", "404", "model_not_found"),
+    ] {
+        let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("reads");
+        assert!(response.starts_with(&format!("HTTP/1.1 {expected_status}")), "{response}");
+        assert!(response.contains(expected_body), "{response}");
+    }
+
     let body = json!({
         "model": "Qwen",
+        "reasoning_effort": "high",
         "messages": [
             {"role": "user", "content": "What is the answer?"},
         ],
@@ -692,6 +818,369 @@ fn the_server_answers_over_real_tcp() {
     let (_, streamed) = response.split_once("\r\n\r\n").expect("HTTP response");
     assert_eq!(streamed_text(streamed, "reasoning_content"), "The answer is 42.", "{response}");
     assert!(response.contains("[DONE]"), "{response}");
+
+    splash_server::diagnostics::flush_console(std::time::Duration::from_secs(1));
+    let log = String::from_utf8(captured_logs.lock().unwrap().clone()).expect("UTF-8 diagnostics");
+    assert!(log.contains("Started · input "), "{log}");
+    assert!(log.contains("cached 0 · effort high · thinking "), "{log}");
+    assert!(log.contains("Done · input "), "{log}");
+    assert!(log.contains("TTFT 0.0s"), "{log}");
+    assert!(log.contains("tok/s"), "{log}");
+    assert!(!log.contains("What is the answer?"), "request body leaked to diagnostics: {log}");
+
+    // Responses returns a distinct complete-response envelope and keeps
+    // the input history available for retrieval and continuation.
+    let responses_body = json!({"input": "What is the answer?"});
+    let payload = responses_body.to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    write!(stream,
+        "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        payload.len(), payload,
+    ).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("reads Responses response");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let first: Value = response.split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str(body).ok()).expect("Responses JSON");
+    assert_eq!(first["object"], "response");
+    assert_eq!(first["status"], "completed");
+    assert!(first.to_string().contains("The answer is 42."));
+    let id = first["id"].as_str().expect("stored response id");
+
+    // Custom and namespace tool declarations are normalized into the Chat
+    // tool policy and make it through the actual Responses route.
+    let custom_tool_body = json!({
+        "input":"What is the answer?",
+        "reasoning":{"effort":"none"},
+        "tools":[
+            {"type":"custom","name":"shell","description":"Run a command","format":{"type":"text"}},
+            {"type":"namespace","name":"files","tools":[{"type":"function","name":"search","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}]},
+        ],
+        "tool_choice":"none",
+    }).to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    write!(stream,
+        "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        custom_tool_body.len(), custom_tool_body,
+    ).unwrap();
+    let mut custom_response = String::new();
+    stream.read_to_string(&mut custom_response).expect("reads custom-tool response");
+    assert!(custom_response.starts_with("HTTP/1.1 200 OK"), "{custom_response}");
+    let custom_response: Value = custom_response.split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str(body).ok()).expect("custom-tool Responses JSON");
+    assert_eq!(custom_response["status"], "completed");
+    assert!(custom_response.to_string().contains("The answer is 42."));
+
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    write!(stream, "GET /v1/responses/{id} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut fetched = String::new();
+    stream.read_to_string(&mut fetched).expect("reads stored response");
+    assert!(fetched.starts_with("HTTP/1.1 200 OK"), "{fetched}");
+    let fetched: Value = fetched.split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str(body).ok()).expect("stored JSON");
+    assert_eq!(fetched, first);
+
+    let next_body = json!({"previous_response_id": id, "input": "Continue"}).to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    write!(stream,
+        "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        next_body.len(), next_body,
+    ).unwrap();
+    let mut continued = String::new();
+    stream.read_to_string(&mut continued).expect("reads continued response");
+    assert!(continued.starts_with("HTTP/1.1 200 OK"), "{continued}");
+    let continued: Value = continued.split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str(body).ok()).expect("continued JSON");
+    assert_eq!(continued["previous_response_id"], id);
+
+    let responses_streamed_body = json!({
+        "input":"What is the answer?",
+        "reasoning":{"effort":"none"},
+        "stream":true,
+    }).to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    write!(stream,
+        "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        responses_streamed_body.len(), responses_streamed_body,
+    ).unwrap();
+    let mut streamed = String::new();
+    stream.read_to_string(&mut streamed).expect("reads Responses SSE");
+    assert!(streamed.starts_with("HTTP/1.1 200 OK"), "{streamed}");
+    assert!(streamed.contains("Content-Type: text/event-stream"), "{streamed}");
+    let (_, frames) = streamed.split_once("\r\n\r\n").expect("HTTP response");
+    let frames: Vec<_> = frames.split("\n\n").filter(|frame| !frame.trim().is_empty()).collect();
+    let names: Vec<_> = frames.iter().filter_map(|frame| frame.lines()
+        .find_map(|line| line.strip_prefix("event: "))).collect();
+    assert_eq!(&names[..2], &["response.created", "response.in_progress"]);
+    assert!(names.contains(&"response.output_text.delta"), "{names:?}");
+    assert_eq!(names.last(), Some(&"response.completed"));
+    let sequence: Vec<u64> = frames.iter().filter_map(|frame| frame.lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .and_then(|data| serde_json::from_str::<Value>(data).ok())
+        .and_then(|payload| payload.get("sequence_number").and_then(Value::as_u64))).collect();
+    assert_eq!(sequence, (0..sequence.len() as u64).collect::<Vec<_>>());
+
+    // Anthropic Messages uses its own incremental event sequence. A stop
+    // emitted text ends before the stop string and the final delta reports
+    // that exact match.
+    let anthropic_body = json!({
+        "model": "Qwen",
+        "messages": [{"role": "user", "content": "What is the answer?"}],
+        "max_tokens": 64,
+        "stream": true,
+        "stop_sequences": ["42."],
+    });
+    let payload = anthropic_body.to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("reads stream");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(
+        response.contains("Content-Type: text/event-stream"),
+        "{response}"
+    );
+    let (_, event_stream) = response.split_once("\r\n\r\n").expect("HTTP response");
+    let mut event_names = Vec::new();
+    let mut text_deltas = String::new();
+    let mut text_delta_count = 0;
+    let mut stop_reason = None;
+    let mut stop_sequence = None;
+    for frame in event_stream
+        .split("\n\n")
+        .filter(|frame| !frame.trim().is_empty())
+    {
+        let event = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("event: "))
+            .expect("named Anthropic event")
+            .to_owned();
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("JSON event data");
+        let payload: Value = serde_json::from_str(data).expect("valid SSE JSON");
+        assert_eq!(payload["type"], json!(event));
+        event_names.push(event.clone());
+        if event == "content_block_delta"
+            && payload.pointer("/delta/type").and_then(Value::as_str) == Some("text_delta")
+        {
+            text_deltas.push_str(
+                payload
+                    .pointer("/delta/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            );
+            text_delta_count += 1;
+        }
+        if event == "message_delta" {
+            stop_reason = payload
+                .pointer("/delta/stop_reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            stop_sequence = payload
+                .pointer("/delta/stop_sequence")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+    }
+    assert_eq!(event_names.first().map(String::as_str), Some("message_start"));
+    assert_eq!(event_names.last().map(String::as_str), Some("message_stop"));
+    let block_start = event_names
+        .iter()
+        .position(|event| event == "content_block_start")
+        .unwrap();
+    let first_delta = event_names
+        .iter()
+        .position(|event| event == "content_block_delta")
+        .unwrap();
+    let block_stop = event_names
+        .iter()
+        .position(|event| event == "content_block_stop")
+        .unwrap();
+    let message_delta = event_names
+        .iter()
+        .position(|event| event == "message_delta")
+        .unwrap();
+    assert!(
+        block_start < first_delta
+            && first_delta < block_stop
+            && block_stop < message_delta,
+        "{event_names:?}"
+    );
+    assert!(
+        text_delta_count >= 2,
+        "expected multiple incremental text deltas: {event_stream}"
+    );
+    assert_eq!(text_deltas, "The answer is ");
+    assert_eq!(stop_reason.as_deref(), Some("stop_sequence"));
+    assert_eq!(stop_sequence.as_deref(), Some("42."));
+
+    // Omitted thinking stays hidden in the live SSE body, while its trailing
+    // signature roundtrips through a later Messages request.
+    let omitted_body = json!({
+        "model": "Qwen",
+        "messages": [{"role": "user", "content": "Think privately."}],
+        "max_tokens": 64,
+        "stream": true,
+        "thinking": {"type": "enabled", "display": "omitted"},
+    });
+    let payload = omitted_body.to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    write!(
+        stream,
+        "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("reads SSE");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let (_, event_stream) = response.split_once("\r\n\r\n").expect("HTTP response");
+    let mut signature = None;
+    let mut hidden_text_was_sent = false;
+    for frame in event_stream.split("\n\n").filter(|frame| !frame.trim().is_empty()) {
+        let event_name = frame.lines().find_map(|line| line.strip_prefix("event: ")).unwrap_or("");
+        let data = frame.lines().find_map(|line| line.strip_prefix("data: ")).unwrap_or("");
+        let event: Value = serde_json::from_str(data).expect("SSE JSON");
+        if event["type"] == "content_block_delta"
+            && event.pointer("/delta/type").and_then(Value::as_str) == Some("thinking_delta")
+        {
+            hidden_text_was_sent = true;
+        }
+        if event["type"] == "content_block_delta"
+            && event.pointer("/delta/type").and_then(Value::as_str) == Some("signature_delta")
+        {
+            signature = event.pointer("/delta/signature").and_then(Value::as_str).map(str::to_owned);
+        }
+        assert_eq!(event["type"], json!(event_name));
+    }
+    assert!(!hidden_text_was_sent, "omitted thinking leaked: {event_stream}");
+    let signature = signature.expect("thinking signature delta");
+    assert_eq!(thinking_codec.decode(&signature).expect("valid signature"), "The answer is 42.");
+
+    let continuation = json!({
+        "model": "Qwen",
+        "messages": [
+            {"role": "user", "content": "Think privately."},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "", "signature": signature},
+                {"type": "text", "text": "visible answer"}
+            ]},
+            {"role": "user", "content": "Continue."}
+        ],
+        "max_tokens": 64,
+        "thinking": {"type": "enabled", "display": "omitted"},
+    });
+    let payload = continuation.to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    write!(
+        stream,
+        "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("reads continuation");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("signature"), "{response}");
+
+    // The legacy text-completion route tokenizes its raw prompt, returns the
+    // `text_completion` envelope, and streams text chunks with stop handling.
+    let completion_body = json!({
+        "model": "Qwen",
+        "prompt": "Complete this sentence:",
+        "max_tokens": 64,
+    });
+    let payload = completion_body.to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "POST /v1/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("reads completion");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let (_, payload) = response.split_once("\r\n\r\n").expect("HTTP response");
+    let completion: Value = serde_json::from_str(payload).expect("JSON completion");
+    assert_eq!(completion["object"], json!("text_completion"));
+    assert_eq!(completion["choices"][0]["text"], json!("The answer is 42."));
+    assert_eq!(completion["choices"][0]["finish_reason"], json!("stop"));
+    assert!(completion["usage"]["prompt_tokens"].as_u64().unwrap() > 0);
+
+    let streamed_completion_body = json!({
+        "model": "Qwen",
+        "prompt": "Complete this sentence:",
+        "max_tokens": 64,
+        "stream": true,
+        "stop": "42.",
+    });
+    let payload = streamed_completion_body.to_string();
+    let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "POST /v1/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("reads completion stream");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("Content-Type: text/event-stream"), "{response}");
+    let (_, event_stream) = response.split_once("\r\n\r\n").expect("HTTP response");
+    let mut streamed_text = String::new();
+    let mut chunks = 0;
+    let mut finish = None;
+    for line in event_stream.lines() {
+        let Some(data) = line.strip_prefix("data: ") else { continue };
+        if data == "[DONE]" {
+            continue;
+        }
+        let chunk: Value = serde_json::from_str(data).expect("valid completion chunk");
+        assert_eq!(chunk["object"], json!("text_completion"));
+        if let Some(choice) = chunk["choices"].as_array().and_then(|choices| choices.first()) {
+            streamed_text.push_str(choice["text"].as_str().unwrap_or(""));
+            if let Some(reason) = choice["finish_reason"].as_str() {
+                finish = Some(reason.to_owned());
+            }
+            if choice["text"].as_str().is_some_and(|text| !text.is_empty()) {
+                chunks += 1;
+            }
+        }
+    }
+    assert!(chunks >= 2, "expected incremental text chunks: {event_stream}");
+    assert_eq!(streamed_text, "The answer is ");
+    assert_eq!(finish.as_deref(), Some("stop"));
 
     // A constraint that cannot be compiled must fail before SSE headers,
     // so the client receives a single usable HTTP error response.
@@ -774,6 +1263,13 @@ fn the_server_answers_over_real_tcp() {
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("reads");
     assert!(response.starts_with("HTTP/1.1 400 Bad Request"), "{response}");
+
+    splash_server::diagnostics::flush_console(std::time::Duration::from_secs(1));
+    let route_logs = String::from_utf8(captured_logs.lock().unwrap().clone()).expect("UTF-8 diagnostics");
+    assert!(route_logs.matches("Started · input ").count() >= 9, "{route_logs}");
+    assert!(route_logs.matches("Done · input ").count() >= 9, "{route_logs}");
+    assert!(route_logs.contains("effort none"), "Responses/Anthropic converted effort missing: {route_logs}");
+    assert!(!route_logs.contains("What is the answer?"), "request content leaked: {route_logs}");
 }
 
 /// The facts of one request frame the engine reads: the prompt's token
@@ -889,6 +1385,9 @@ fn an_image_request_carries_its_spans_and_pixels_to_the_engine() {
         model: "Qwen".into(),
         images: splash_server::images::ImageCache::new(),
         max_image_pixels: splash_server::images::MAX_PIXELS,
+        default_reasoning_effort: None,
+        thinking_end_tokens: None,
+        documents: None,
         constraints: None,
     };
 
@@ -958,6 +1457,9 @@ fn a_text_request_on_a_vision_engine_carries_no_images() {
         model: "Qwen".into(),
         images: splash_server::images::ImageCache::new(),
         max_image_pixels: splash_server::images::MAX_PIXELS,
+        default_reasoning_effort: None,
+        thinking_end_tokens: None,
+        documents: None,
         constraints: None,
     };
     let body = json!({"messages": [{"role": "user", "content": "Hello"}]});
@@ -970,6 +1472,82 @@ fn a_text_request_on_a_vision_engine_carries_no_images() {
         .expect("the engine read the request");
     assert_eq!(facts.span_count, 0);
     assert_eq!(facts.pixel_bytes, 0);
+}
+
+#[test]
+fn compaction_keeps_the_final_image_batch_in_message_order() {
+    let Some(directory) = qwen_directory() else { eprintln!("no local Qwen tokenizer; skipped"); return; };
+    let (engine_side, client_read) = UnixStream::pair().expect("engine socket");
+    let client_write = client_read.try_clone().expect("clone engine socket");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || fake_engine_vision(engine_side, "summary", tx));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads tokenizer"));
+    let pipeline = pipeline_of(&tokenizer, &directory, &format, client);
+    let red = png_bytes(32, 32, [220, 10, 10]);
+    let blue = png_bytes(32, 32, [10, 10, 220]);
+    use base64::Engine as _;
+    let data_url = |bytes: &[u8]| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes));
+    let body = json!({"messages":[
+        {"role":"system","content":"Inspect the evidence."},
+        {"role":"user","content":[{"type":"text","text":"old image"},{"type":"image_url","image_url":{"url":data_url(&red)}}]},
+        {"role":"assistant","content":"The older image was red."},
+        {"role":"user","content":[{"type":"text","text":"Now inspect this one"},{"type":"image_url","image_url":{"url":data_url(&blue)}}]}
+    ]});
+    let mut deadline = || Ok(None);
+    let prepared = pipeline.prepare_with_compaction(
+        &body, &mut deadline, Some(splash_server::serve::compaction::CompactAt::Fraction(0.0)), Some(1), None, true,
+    ).expect("image-aware compaction prepares");
+    assert!(prepared.compaction.is_some(), "the older turn was compacted");
+    assert_eq!(prepared.image_spans.len(), 1, "only the latest retained image remains");
+    let expected = splash_server::images::images::prepare(&blue, splash_server::images::MAX_PIXELS).unwrap();
+    assert_eq!(prepared.image_pixels, expected.pixels, "the retained pixels belong to the newest message");
+    assert_eq!(prepared.image_spans[0].digest_lo, expected.digest_lo);
+    assert_eq!(prepared.image_spans[0].digest_hi, expected.digest_hi);
+    assert_eq!(pipeline.images.stats().request_bytes, expected.pixels.len(), "Prepared owns exactly the final batch");
+    let summary_facts = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert_eq!(summary_facts.span_count, 0, "the note request is text only");
+    drop(prepared);
+    assert_eq!(pipeline.images.stats().request_bytes, 0, "dropping Prepared releases the final image budget");
+}
+
+#[test]
+fn image_only_compaction_keeps_the_latest_image() {
+    let Some(directory) = qwen_directory() else { eprintln!("no local Qwen tokenizer; skipped"); return; };
+    let (engine_side, client_read) = UnixStream::pair().expect("engine socket");
+    let client_write = client_read.try_clone().expect("clone engine socket");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || fake_engine_vision(engine_side, "summary", tx));
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads tokenizer"));
+    let pipeline = pipeline_of(&tokenizer, &directory, &format, client);
+    let old_image = png_bytes(32, 32, [220, 10, 10]);
+    let latest_image = png_bytes(32, 32, [10, 10, 220]);
+    use base64::Engine as _;
+    let data_url = |bytes: &[u8]| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes));
+    let body = json!({"messages":[
+        {"role":"system","content":"Compare the images."},
+        {"role":"user","content":[{"type":"image_url","image_url":{"url":data_url(&old_image)}}]},
+        {"role":"assistant","content":"The earlier image was red."},
+        {"role":"user","content":[{"type":"image_url","image_url":{"url":data_url(&latest_image)}}]}
+    ]});
+    let mut deadline = || Ok(None);
+    let prepared = pipeline.prepare_with_compaction(
+        &body, &mut deadline, Some(splash_server::serve::compaction::CompactAt::Fraction(0.0)), Some(1), None, true,
+    ).expect("text compaction prepares");
+    assert!(prepared.compaction.is_some());
+    assert_eq!(prepared.image_spans.len(), 1);
+    let expected = splash_server::images::images::prepare(&latest_image, splash_server::images::MAX_PIXELS).unwrap();
+    assert_eq!(prepared.image_pixels, expected.pixels);
+    assert_eq!(prepared.image_spans[0].digest_lo, expected.digest_lo);
+    assert_eq!(prepared.image_spans[0].digest_hi, expected.digest_hi);
+    assert_eq!(pipeline.images.stats().request_bytes, expected.pixels.len());
+    let summary_facts = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert_eq!(summary_facts.span_count, 0);
+    drop(prepared);
+    assert_eq!(pipeline.images.stats().request_bytes, 0);
 }
 
 /// The tool-call answer a Qwen model writes in its template's XML layout.
@@ -1097,6 +1675,7 @@ fn a_tool_call_streams_as_deltas() {
         request_id: "req1".into(),
         created_at: 1_700_000_000,
         include_usage: false,
+        compaction: None,
     });
     let constraint = pipeline
         .constraint(&prepared)

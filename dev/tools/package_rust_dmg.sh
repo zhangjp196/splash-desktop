@@ -35,6 +35,13 @@ done
 install -m 755 server-rs/target/release/splash-server "$runtime/engine/splash-server"
 install -m 755 build/splash "$runtime/engine/splash"
 install -m 644 build/splash.metallib "$runtime/engine/splash.metallib"
+if [[ -n ${SPLASH_PDFIUM_PATH:-} ]]; then
+    if [[ ! -f $SPLASH_PDFIUM_PATH ]]; then
+        echo "SPLASH_PDFIUM_PATH is not a file: $SPLASH_PDFIUM_PATH" >&2
+        exit 2
+    fi
+    install -m 644 "$SPLASH_PDFIUM_PATH" "$runtime/engine/libpdfium.dylib"
+fi
 if [[ -f build/host-step.metallib ]]; then
     install -m 644 build/host-step.metallib "$runtime/engine/host-step.metallib"
 fi
@@ -78,6 +85,9 @@ PLIST
 plutil -lint "$contents/Info.plist"
 codesign --force --sign - "$runtime/engine/splash-server"
 codesign --force --sign - "$runtime/engine/splash"
+if [[ -f $runtime/engine/libpdfium.dylib ]]; then
+    codesign --force --sign - "$runtime/engine/libpdfium.dylib"
+fi
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 "$contents/MacOS/SplashDesktop" --print-runtime

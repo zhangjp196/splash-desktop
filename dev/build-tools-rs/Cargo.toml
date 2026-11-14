@@ -1,0 +1,12 @@
+[package]
+name = "splash-build-tools"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "splash-build-tools"
+path = "src/main.rs"
+
+[lib]
+name = "splash_build_tools"
+path = "src/lib.rs"

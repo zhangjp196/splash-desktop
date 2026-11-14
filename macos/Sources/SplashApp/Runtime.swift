@@ -26,6 +26,17 @@ enum Runtime {
         root?.appendingPathComponent("engine/splash-server")
     }
 
+    /// An optional PDFium dylib can be bundled beside the engine or supplied
+    /// by the launcher environment. The Rust server passes this setting on to
+    /// its isolated document worker.
+    static var pdfiumLibrary: URL? {
+        let environment = ProcessInfo.processInfo.environment["SPLASH_PDFIUM_PATH"]
+        let candidates = [environment.map { URL(fileURLWithPath: $0) },
+                          root?.appendingPathComponent("engine/libpdfium.dylib")]
+            .compactMap { $0 }
+        return candidates.first(where: { FileManager.default.isReadableFile(atPath: $0.path) })
+    }
+
     /// The model IDs the suggested list bundles, for the picker: the first
     /// column of `suggested-models.tsv`, comments and layout aside.
     static var catalog: [String] {

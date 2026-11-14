@@ -5,6 +5,10 @@
 //! dialects build on it.
 
 pub mod pipeline;
+pub mod compaction;
+pub mod anthropic;
+pub mod completions;
+pub mod scoring;
 mod preparation;
 pub mod server;
 pub mod stream;

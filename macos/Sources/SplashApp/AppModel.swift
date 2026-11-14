@@ -935,6 +935,10 @@ final class AppModel: ObservableObject {
             environment["SPLASH_API_KEY"] = serverArguments[index + 1]
             serverArguments.removeSubrange(index...index + 1)
         }
+        if environment["SPLASH_PDFIUM_PATH"] == nil,
+           let pdfium = Runtime.pdfiumLibrary {
+            environment["SPLASH_PDFIUM_PATH"] = pdfium.path
+        }
         process.arguments = serverArguments
         process.environment = environment
         let pipe = Pipe()

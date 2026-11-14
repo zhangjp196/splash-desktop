@@ -245,6 +245,71 @@ fn a_request_runs_start_tokens_done() {
 }
 
 #[test]
+fn submit_to_start_is_recorded_as_native_queue_latency() {
+    let (client, _engine) = paired_client(vec![]);
+    let metrics = Arc::new(splash_server::metrics::LatencyMetrics::default());
+    client.set_latency_metrics(metrics.clone());
+    assert!(client.wait_ready(Some(Duration::from_secs(5))));
+    let call = client
+        .submit(&generation_request(), None, None)
+        .expect("submit");
+    call.result(Some(Duration::from_secs(5))).expect("done");
+    let histogram = metrics.snapshot();
+    assert_eq!(histogram["native_queue"]["count"], 1);
+    assert!(histogram["native_queue"]["sum"].as_f64().unwrap() >= 0.0);
+}
+
+#[test]
+fn subsequent_token_batches_record_output_intervals() {
+    let request_id = 1;
+    let script = vec![vec![
+        wire::EngineEvent::Start(wire::StartEvent {
+            request_id,
+            lane: 0,
+            matched_prompt_tokens: 0,
+        }),
+        wire::EngineEvent::Tokens(wire::TokensEvent {
+            request_id,
+            sequence_offset: 0,
+            tokens: vec![1],
+        }),
+        wire::EngineEvent::Tokens(wire::TokensEvent {
+            request_id,
+            sequence_offset: 1,
+            tokens: vec![2],
+        }),
+        wire::EngineEvent::Done(wire::DoneEvent {
+            request_id,
+            reason: wire::FinishReason::Stop,
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            prefill_micros: 0,
+            decode_micros: 0,
+            wall_micros: 0,
+            option_logits: vec![],
+            deduplicated_tokens: 0,
+            drafted_tokens: 0,
+            accepted_draft_tokens: 0,
+            draft_cycles: 0,
+            bounded: false,
+        }),
+    ]];
+    let (client, _engine) = paired_client(script);
+    let metrics = Arc::new(splash_server::metrics::LatencyMetrics::default());
+    client.set_latency_metrics(metrics.clone());
+    assert!(client.wait_ready(Some(Duration::from_secs(5))));
+    let http_started_at = std::time::Instant::now() - Duration::from_millis(10);
+    let call = client
+        .submit_with_http_start(&generation_request(), None, None, Some(http_started_at))
+        .expect("submit");
+    call.result(Some(Duration::from_secs(5))).expect("done");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot["http_ttft"]["count"], 1);
+    assert_eq!(snapshot["output_interval"]["count"], 1);
+    assert!(snapshot["http_ttft"]["sum"].as_f64().unwrap() >= 0.01);
+}
+
+#[test]
 fn submit_before_ready_is_refused() {
     let (client, _engine) = paired_client(vec![]);
     let error = client

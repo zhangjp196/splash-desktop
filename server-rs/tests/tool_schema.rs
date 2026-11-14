@@ -864,6 +864,58 @@ fn a_strict_tools_types_are_those_of_its_framed_arguments() {
 }
 
 #[test]
+fn parameter_types_follow_local_anchors_composition_and_pattern_properties() {
+    let policy = Arc::new(tool_policy(json!({
+        "typed": {
+            "type":"object",
+            "$defs":{"text":{"$anchor":"text","type":"string"}},
+            "properties":{
+                "direct":{"$ref":"#text"},
+                "count":{"allOf":[{"type":"number"},{"type":"integer"}]},
+                "choice":{"anyOf":[{"const":true},{"enum":[1,2]}]}
+            },
+            "patternProperties":{"^x_":{"type":"integer"}},
+            "additionalProperties":{"type":"string"}
+        }
+    })));
+    let types = ToolParameterTypes::new(policy);
+    let (parameters, other) = types.of("typed");
+    assert_eq!(types_of(parameters.get("direct").cloned()), some_types(&["string"]));
+    assert_eq!(types_of(parameters.get("count").cloned()), some_types(&["integer"]));
+    assert_eq!(types_of(parameters.get("choice").cloned()), some_types(&["boolean", "integer"]));
+    // Pattern-matched names and arbitrary extra names share the union of
+    // their declared types, as the XML reader cannot know the property name
+    // until it reads it.
+    assert_eq!(types_of(other), some_types(&["integer", "string"]));
+}
+
+#[test]
+fn strict_parameter_types_use_the_same_draft_three_aliases_as_generation() {
+    let tools = json!([{
+        "type":"function",
+        "function":{
+            "name":"legacy",
+            "strict":true,
+            "parameters":{
+                "$schema":"http://json-schema.org/draft-03/schema#",
+                "type":"dict",
+                "properties":{
+                    "count":{"type":"INTEGER"},
+                    "labels":{"type":"list","items":{"type":"str"}}
+                }
+            }
+        }
+    }]);
+    let policy = Arc::new(normalize_tools(Some(&tools), Some(&json!("required")), Some(&json!(false)), None)
+        .expect("legacy strict schema is accepted").1.unwrap());
+    let types = ToolParameterTypes::new(policy);
+    let (parameters, other) = types.of("legacy");
+    assert_eq!(types_of(parameters.get("count").cloned()), some_types(&["integer"]));
+    assert_eq!(types_of(parameters.get("labels").cloned()), some_types(&["array"]));
+    assert_eq!(types_of(other), Some(vec![]), "strict arguments are closed");
+}
+
+#[test]
 fn a_tool_whose_arguments_cannot_be_projected_declares_no_types() {
     let policy = Arc::new(tool_policy(json!({
         "c": {"type": "object", "properties": {"a": {"$ref": "#/properties/a"}}},
@@ -969,6 +1021,24 @@ fn a_draft3_schema_validates_as_its_keywords_read() {
     .expect("builds");
     assert!(validator.is_valid(&json!(1)).expect("evaluates"));
     assert!(!validator.is_valid(&json!("s")).expect("evaluates"));
+}
+
+#[test]
+fn draft3_nested_ids_resolve_local_fragment_references() {
+    let validator = build_validator(&json!({
+        "$schema": "http://json-schema.org/draft-03/schema#",
+        "properties": {
+            "name": {"id": "#text", "type": "string"},
+            "copy": {"$ref": "#text"}
+        }
+    }))
+    .expect("builds");
+    assert!(validator
+        .is_valid(&json!({"name": "x", "copy": "y"}))
+        .expect("evaluates"));
+    assert!(!validator
+        .is_valid(&json!({"name": "x", "copy": 1}))
+        .expect("evaluates"));
 }
 
 #[test]
@@ -1083,6 +1153,7 @@ fn a_validator_the_crate_cannot_build_waits_for_the_output() {
     let error = validate_response_content("\"x\"", Some(&validator)).expect_err("fails");
     assert_eq!((error.status, error.code.as_str()), (500, "output_validation_failed"));
 }
+
 
 // ------------------------------------------------------------- references
 

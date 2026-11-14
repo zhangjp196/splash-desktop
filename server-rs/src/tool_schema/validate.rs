@@ -629,6 +629,24 @@ fn translate_draft3_node(node: &Value) -> Value {
                     }
                 }
             }
+            // Draft 3 calls the resource identifier `id`; later drafts use
+            // `$id` and `$anchor` separately. Preserve its base-URI and
+            // fragment-anchor behavior so local references to a nested
+            // Draft 3 schema resolve the same way they do in Python.
+            "id" => {
+                if let Some(identifier) = value.as_str() {
+                    let (base, fragment) = identifier
+                        .split_once('#')
+                        .map(|(base, fragment)| (base, Some(fragment)))
+                        .unwrap_or((identifier, None));
+                    if !base.is_empty() {
+                        out.insert("$id".to_string(), Value::String(base.to_string()));
+                    }
+                    if let Some(fragment) = fragment.filter(|fragment| !fragment.is_empty()) {
+                        out.insert("$anchor".to_string(), Value::String(fragment.to_string()));
+                    }
+                }
+            }
             "items" => match value {
                 Value::Array(items) => {
                     let translated = items.iter().map(translate_draft3_node).collect::<Vec<_>>();

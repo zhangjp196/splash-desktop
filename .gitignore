@@ -1,4 +1,5 @@
 build/
+/dev/build-tools-rs/target/
 .venv
 .venv.install.lock
 macos/.build/

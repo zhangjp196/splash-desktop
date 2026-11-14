@@ -40,6 +40,7 @@ fn collected() -> Collected {
         tool_calls: vec![],
         result: Some(result()),
         called: false,
+        logprobs: None,
     }
 }
 
