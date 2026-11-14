@@ -185,7 +185,7 @@ To serve files already on this Mac, pass the target's GGUF file or GGUF/MLX
 directory directly, and a compatible local DFlash2 draft:
 
 ```bash
-splash serve --model local/qwen \
+splash serve --model qwen \
   --model-dir /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf \
   --draft-model /models/Qwen3.8-27B-DFlash2
 ```

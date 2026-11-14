@@ -621,7 +621,7 @@ holding one GGUF target, or an MLX model directory. It names the target
 directly, rather than a library to search by repository ID:
 
 ```sh
-splash serve --model local/qwen \
+splash serve --model qwen \
   --model-dir /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf \
   --draft-model /models/Qwen3.8-27B-DFlash2 \
   --mmproj /models/Qwen3.8-27B-GGUF/mmproj-BF16.gguf

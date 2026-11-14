@@ -193,7 +193,7 @@ ones of one model (`--revision`, `--draft-model`, `--mmproj`) and the ones it
 sets itself, from one table (`LaunchOption.all`) the tests hold to `splash
 serve --help`; the API key reaches the server as `SPLASH_API_KEY`, from the
 Keychain, and nothing starts while the Keychain does not give it. It serves
-model files on this Mac the user adds with `splash serve --model local/NAME
+model files on this Mac the user adds with `splash serve --model NAME
 --model-dir PATH`, NAME being the file's or folder's name made a repository
 name, and at launch it runs `install/cached.py`. While a model runs, the Server
 shows its context limit, from `/v1/models`, and its `/status`: requests,

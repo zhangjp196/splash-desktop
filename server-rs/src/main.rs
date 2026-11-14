@@ -1072,12 +1072,12 @@ fn local_gguf_model_id(target: &Path) -> String {
     let is_split = number.len() == 5 && count.len() == 5
         && number.bytes().all(|byte| byte.is_ascii_digit())
         && count.bytes().all(|byte| byte.is_ascii_digit());
-    format!("local/{}", if is_split { name } else { model_stem })
+    if is_split { name } else { model_stem }.to_string()
 }
 
 fn local_mlx_model_id(target: &Path) -> String {
     let name = target.file_name().and_then(|name| name.to_str()).unwrap_or("local-mlx");
-    format!("local/{name}")
+    name.to_string()
 }
 
 fn run_prepare_mlx(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
