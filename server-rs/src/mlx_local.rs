@@ -31,6 +31,17 @@ pub fn prepare_local(
     engine: &Path,
     language_only: bool,
 ) -> Result<PathBuf, String> {
+    prepare_local_with_draft(target_dir, None, models_root, model_id, engine, language_only)
+}
+
+pub fn prepare_local_with_draft(
+    target_dir: &Path,
+    draft_dir: Option<&Path>,
+    models_root: &Path,
+    model_id: &str,
+    engine: &Path,
+    language_only: bool,
+) -> Result<PathBuf, String> {
     if model_id.trim().is_empty() {
         return Err("model ID must not be empty".into());
     }
@@ -69,7 +80,15 @@ pub fn prepare_local(
     } else {
         "none"
     };
-    let family = model_check(engine, vision_format, &config_path)?;
+    let draft_root = draft_dir.map(fs::canonicalize).transpose()
+        .map_err(|error| format!("cannot resolve DFlash2 draft: {error}"))?;
+    let draft_config = draft_root.as_ref().map(|root| root.join("config.json"));
+    if let Some(config) = &draft_config {
+        if !config.is_file() {
+            return Err(format!("DFlash2 draft has no config.json: {}", config.display()));
+        }
+    }
+    let family = model_check(engine, vision_format, &config_path, draft_config.as_deref())?;
 
     let mut files = BTreeMap::new();
     files.insert("config.json".to_owned(), config_path.clone());
@@ -88,23 +107,40 @@ pub fn prepare_local(
         // A single checkpoint file may contain both groups.
         files.insert("vision/model.safetensors".to_owned(), weights_path);
     }
-    let record = serde_json::json!({
-        "version": 2,
-        "model": model_id,
-        "family": family,
-        "target_format": "mlx-affine",
-        "vision_format": vision_format,
-        "sources": {"target": {"repo": target_dir.to_string_lossy(), "revision": null}},
-        "speculation": {
-            "version": 1,
-            "provider": "none",
-            "format": "none",
-            "source": {"kind": "none"},
-            "proposal_rows": 1,
-            "state": "none",
-            "fallback": "none"
+    let record = if let Some(draft_root) = draft_root {
+        for (name, path) in crate::local_draft::files(&draft_root)? {
+            files.insert(name, path);
         }
-    });
+        serde_json::json!({
+            "version": 1,
+            "model": model_id,
+            "family": family,
+            "target_format": "mlx-affine",
+            "vision_format": vision_format,
+            "sources": {
+                "target": {"repo": target_dir.to_string_lossy(), "revision": null},
+                "draft": {"repo": draft_root.to_string_lossy(), "revision": null}
+            }
+        })
+    } else {
+        serde_json::json!({
+            "version": 2,
+            "model": model_id,
+            "family": family,
+            "target_format": "mlx-affine",
+            "vision_format": vision_format,
+            "sources": {"target": {"repo": target_dir.to_string_lossy(), "revision": null}},
+            "speculation": {
+                "version": 1,
+                "provider": "none",
+                "format": "none",
+                "source": {"kind": "none"},
+                "proposal_rows": 1,
+                "state": "none",
+                "fallback": "none"
+            }
+        })
+    };
     crate::assembly::publish(models_root, record, &files)
 }
 
@@ -208,10 +244,11 @@ fn validate_processor(config: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn model_check(engine: &Path, vision_format: &str, config: &Path) -> Result<String, String> {
+fn model_check(engine: &Path, vision_format: &str, config: &Path, draft_config: Option<&Path>) -> Result<String, String> {
     let output = Command::new(engine)
         .args(["model-check", "mlx-affine", vision_format])
         .arg(config)
+        .args(draft_config.into_iter())
         .output()
         .map_err(|error| format!("cannot run native model-check using {}: {error}", engine.display()))?;
     if !output.status.success() {
@@ -291,6 +328,36 @@ mod tests {
         assert_eq!(record["family"], "Qwen3.5-Test");
         assert!(published.join("target/model.safetensors").is_symlink());
         assert!(published.join("tokenizer/tokenizer.json").is_symlink());
+    }
+
+    #[test]
+    fn prepares_mlx_with_local_dflash2_draft() {
+        let scratch = Scratch::new();
+        let target = scratch.0.join("target");
+        fixture_dir(&target, false);
+        let draft = scratch.0.join("draft");
+        fs::create_dir_all(&draft).unwrap();
+        fs::write(draft.join("config.json"), br#"{"model_type":"dflash2"}"#).unwrap();
+        fs::write(draft.join("model.safetensors"), b"draft weights").unwrap();
+        let engine = scratch.0.join("engine");
+        fs::write(&engine, "#!/bin/sh\n[ \"$1 $2 $3\" = 'model-check mlx-affine none' ] || exit 2\ncase \"$5\" in */draft/config.json) ;; *) exit 3 ;; esac\nprintf '{\"family\":\"Qwen3.5-Test\"}'\n").unwrap();
+        let mut permissions = fs::metadata(&engine).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&engine, permissions).unwrap();
+
+        let published = prepare_local_with_draft(
+            &target,
+            Some(&draft),
+            &scratch.0.join("models"),
+            "local/target",
+            &engine,
+            false,
+        ).unwrap();
+        let record: Value = serde_json::from_slice(&fs::read(published.join("model.json")).unwrap()).unwrap();
+        assert_eq!(record["version"], 1);
+        assert_eq!(record["sources"]["draft"]["repo"], draft.canonicalize().unwrap().to_string_lossy().as_ref());
+        assert!(published.join("draft/config.json").is_symlink());
+        assert!(published.join("draft/model.safetensors").is_symlink());
     }
 
     #[test]

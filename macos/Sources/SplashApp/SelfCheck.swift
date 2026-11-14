@@ -412,11 +412,16 @@ enum SelfCheck {
                 && vision.contains("--mmproj")
                 && vision.contains("/tmp/selfcheck-mmproj.gguf")
                 && !vision.contains("--language-only")
-            // An MLX target has no projector row of its own: the command carries
-            // none for one, whatever the form still holds.
+            // An MLX target is prepared at launch and has no projector row of
+            // its own, whatever the form still holds.
             reloaded.localKind = "mlx"
+            reloaded.draftMode = "folder"
+            reloaded.draftDirectory = "/tmp/selfcheck-draft"
             let mlx = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
-            passed = passed && !mlx.contains("--mmproj")
+            passed = passed
+                && carries(mlx, "--mlx-target", "/tmp/selfcheck")
+                && carries(mlx, "--draft-model", "/tmp/selfcheck-draft")
+                && !mlx.contains("--mmproj")
             reloaded.localKind = "gguf"
             // A Hub draft is named by its repository ID instead of a directory,
             // on either kind of target.

@@ -297,7 +297,7 @@ fn prepare_local_parts(
         files.insert("vision/mmproj.gguf".into(), path);
     }
     let record = if let Some(draft_root) = draft_root {
-        for (name, path) in local_draft_files(&draft_root)? {
+        for (name, path) in crate::local_draft::files(&draft_root)? {
             files.insert(name, path);
         }
         serde_json::json!({
@@ -329,42 +329,6 @@ fn prepare_local_parts(
         })
     };
     crate::assembly::publish(models_root, record, &files)
-}
-
-fn local_draft_files(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
-    let config = root.join("config.json");
-    if !config.is_file() { return Err(format!("DFlash2 draft has no config.json: {}", config.display())); }
-    let mut names = BTreeSet::new();
-    let index = root.join("model.safetensors.index.json");
-    if index.is_file() {
-        let value: Value = serde_json::from_slice(&fs::read(&index)
-            .map_err(|error| format!("cannot read {}: {error}", index.display()))?)
-            .map_err(|error| format!("invalid DFlash2 shard index: {error}"))?;
-        let weight_map = value.get("weight_map").and_then(Value::as_object)
-            .filter(|map| !map.is_empty()).ok_or("invalid DFlash2 shard index: empty weight_map")?;
-        for filename in weight_map.values() {
-            let filename = filename.as_str().ok_or("invalid DFlash2 shard index: non-string filename")?;
-            if filename.contains('/') || !filename.ends_with(".safetensors") {
-                return Err(format!("unsupported DFlash2 shard filename: {filename}"));
-            }
-            names.insert(filename.to_owned());
-        }
-        names.insert("model.safetensors.index.json".to_owned());
-    } else if root.join("model.safetensors").is_file() {
-        names.insert("model.safetensors".to_owned());
-    } else {
-        return Err(format!("DFlash2 draft has no safetensors weights: {}", root.display()));
-    }
-    if root.join("mask_embedding.safetensors").is_file() {
-        names.insert("mask_embedding.safetensors".to_owned());
-    }
-    let mut files = vec![("draft/config.json".to_owned(), config)];
-    for name in names {
-        let path = root.join(&name);
-        if !path.is_file() { return Err(format!("DFlash2 shard is missing: {}", path.display())); }
-        files.push((format!("draft/{name}"), path));
-    }
-    Ok(files)
 }
 
 fn discover_split_parts(selected: &Path) -> Result<Vec<PathBuf>, String> {
@@ -1421,7 +1385,7 @@ mod tests {
         fs::write(draft.join("unused.safetensors"), b"unused").unwrap();
         fs::write(draft.join("model.safetensors.index.json"), br#"{"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}}"#).unwrap();
 
-        let files = local_draft_files(&draft).unwrap();
+        let files = crate::local_draft::files(&draft).unwrap();
         let names = files.iter().map(|(name, _)| name.as_str()).collect::<BTreeSet<_>>();
         assert_eq!(names, BTreeSet::from([
             "draft/config.json",

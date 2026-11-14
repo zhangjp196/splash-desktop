@@ -722,8 +722,12 @@ final class AppModel: ObservableObject {
         case .local:
             if localKind == "gguf" {
                 arguments += ["--gguf-target", modelDirectory]
-            } else {
+            } else if draftMode == "hub" && draftDirectory.trimmingCharacters(in: .whitespaces).isEmpty {
+                // Keep repository-ID drafts on the prepared-assembly lookup
+                // path; only a local draft directory can be assembled here.
                 arguments += ["--model-dir", modelDirectory]
+            } else {
+                arguments += ["--mlx-target", modelDirectory]
             }
             // Text only loads no tower, so it names no projector: the server
             // refuses the two together, and the form keeps the path for the

@@ -18,6 +18,7 @@ pub mod http;
 pub mod images;
 pub mod metrics;
 pub mod mlx_local;
+pub mod local_draft;
 pub mod output;
 pub mod engine;
 pub mod gguf;
