@@ -390,13 +390,23 @@ fn run() -> Result<(), Box<dyn Error>> {
             // recorded falls back to matching the records themselves.
             let path = path.canonicalize()?;
             let target = path.to_string_lossy().into_owned();
+            // A local DFlash2 path fully identifies the prepared draft. The
+            // `auto` and explicit `dflash2` modes therefore refer to the same
+            // local assembly; hashing the mode separately makes a valid GGUF
+            // selection disappear whenever the UI toggles `auto` to
+            // `dflash2`, especially for directories with multiple targets.
+            let link_speculation = if draft.is_some() && speculation == Speculation::Dflash2 {
+                Speculation::Auto
+            } else {
+                speculation
+            };
             let link = local_selection_link(
                 &models,
                 &target,
                 language_only,
                 draft.as_deref(),
                 mmproj.as_deref(),
-                speculation,
+                link_speculation,
                 require_draft,
             );
             match assembly_at(&link) {
