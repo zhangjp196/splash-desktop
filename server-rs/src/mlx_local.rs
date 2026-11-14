@@ -1,10 +1,9 @@
 //! Offline preparation of a local MLX-affine checkpoint.
 //!
-//! The initial native slice deliberately supports the common single-file
-//! `model.safetensors` layout. Large weights are linked into the assembly;
-//! they are never copied.
+//! Local MLX-affine checkpoints are linked into immutable assemblies; their
+//! large weight files are never copied.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -61,20 +60,13 @@ pub fn prepare_local_with_draft(
     }
     let config: Value = read_json(&config_path, "model config")?;
     let has_vision_config = config.get("vision_config").is_some_and(Value::is_object);
-    let weights_path = target_dir.join("model.safetensors");
-    if !weights_path.is_file() {
-        if target_dir.join("model.safetensors.index.json").is_file() {
-            return Err("sharded MLX safetensors indexes are not supported by native local preparation yet".into());
-        }
-        return Err("local MLX model is missing model.safetensors".into());
-    }
-    let tensor_names = safetensors_tensor_names(&weights_path)?;
+    let (target_weights, vision_weights) = weight_shards(&target_dir)?;
 
     let vision_format = if has_vision_config && !language_only {
         let processor = image_processor(&target_dir)?;
         validate_processor(&processor)?;
-        if !tensor_names.iter().any(|name| VISION_PREFIXES.iter().any(|prefix| name.starts_with(prefix))) {
-            return Err("local MLX config describes vision, but model.safetensors has no vision tower tensors".into());
+        if vision_weights.is_empty() {
+            return Err("local MLX config describes vision, but the checkpoint has no vision tower tensors".into());
         }
         "safetensors"
     } else {
@@ -94,7 +86,11 @@ pub fn prepare_local_with_draft(
     files.insert("config.json".to_owned(), config_path.clone());
     files.insert("target/config.json".to_owned(), config_path.clone());
     files.insert("tokenizer/config.json".to_owned(), config_path.clone());
-    files.insert("target/model.safetensors".to_owned(), weights_path.clone());
+    for path in &target_weights {
+        let name = path.file_name().and_then(|name| name.to_str())
+            .ok_or("local MLX checkpoint has an invalid shard filename")?;
+        files.insert(format!("target/{name}"), path.clone());
+    }
     for name in TOKENIZER_FILES {
         let path = target_dir.join(name);
         if path.is_file() {
@@ -103,9 +99,11 @@ pub fn prepare_local_with_draft(
     }
     if vision_format == "safetensors" {
         files.insert("vision/config.json".to_owned(), config_path.clone());
-        // Python's assembler links mixed text+vision shards in both locations.
-        // A single checkpoint file may contain both groups.
-        files.insert("vision/model.safetensors".to_owned(), weights_path);
+        for path in &vision_weights {
+            let name = path.file_name().and_then(|name| name.to_str())
+                .ok_or("local MLX vision checkpoint has an invalid shard filename")?;
+            files.insert(format!("vision/{name}"), path.clone());
+        }
     }
     let record = if let Some(draft_root) = draft_root {
         for (name, path) in crate::local_draft::files(&draft_root)? {
@@ -147,6 +145,57 @@ pub fn prepare_local_with_draft(
 fn read_json(path: &Path, description: &str) -> Result<Value, String> {
     let bytes = fs::read(path).map_err(|error| format!("cannot read {description}: {error}"))?;
     serde_json::from_slice(&bytes).map_err(|error| format!("invalid {description}: {error}"))
+}
+
+/// Partition the MLX checkpoint's shards by tensor name. A shard containing
+/// both text and vision weights is linked into both checkpoint directories.
+fn weight_shards(target_dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
+    let index_path = target_dir.join("model.safetensors.index.json");
+    if index_path.is_file() {
+        let index = read_json(&index_path, "safetensors shard index")?;
+        let weight_map = index.get("weight_map").and_then(Value::as_object)
+            .filter(|map| !map.is_empty())
+            .ok_or("invalid safetensors shard index: empty weight_map")?;
+        let mut shard_tensors = BTreeMap::<String, BTreeSet<String>>::new();
+        for (tensor, filename) in weight_map {
+            if tensor.is_empty() || tensor.chars().any(char::is_control) {
+                return Err("invalid safetensors shard index: invalid tensor name".into());
+            }
+            let filename = filename.as_str()
+                .ok_or("invalid safetensors shard index: non-string filename")?;
+            if filename.contains('/') || filename.contains('\\') || !filename.ends_with(".safetensors") {
+                return Err(format!("unsupported safetensors shard filename: {filename}"));
+            }
+            shard_tensors.entry(filename.to_owned()).or_default().insert(tensor.clone());
+        }
+        if shard_tensors.len() > 1024 {
+            return Err("local MLX checkpoint has more than 1024 safetensors shards".into());
+        }
+        let mut target = Vec::new();
+        let mut vision = Vec::new();
+        for (filename, tensors) in shard_tensors {
+            let path = target_dir.join(&filename);
+            if !path.is_file() {
+                return Err(format!("safetensors shard is missing: {}", path.display()));
+            }
+            let has_vision = tensors.iter().any(|tensor| VISION_PREFIXES.iter().any(|prefix| tensor.starts_with(prefix)));
+            let has_text = tensors.iter().any(|tensor| !VISION_PREFIXES.iter().any(|prefix| tensor.starts_with(prefix)));
+            if has_text { target.push(path.clone()); }
+            if has_vision { vision.push(path); }
+        }
+        if target.is_empty() {
+            return Err("local MLX checkpoint index contains no target model tensors".into());
+        }
+        Ok((target, vision))
+    } else {
+        let path = target_dir.join("model.safetensors");
+        if !path.is_file() {
+            return Err("local MLX model is missing model.safetensors or model.safetensors.index.json".into());
+        }
+        let tensors = safetensors_tensor_names(&path)?;
+        let has_vision = tensors.iter().any(|tensor| VISION_PREFIXES.iter().any(|prefix| tensor.starts_with(prefix)));
+        Ok((vec![path.clone()], if has_vision { vec![path] } else { Vec::new() }))
+    }
 }
 
 fn safetensors_tensor_names(path: &Path) -> Result<Vec<String>, String> {
@@ -361,15 +410,59 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_sharded_checkpoints_before_publication() {
+    fn prepares_text_only_mlx_from_indexed_shards() {
         let scratch = Scratch::new();
         let target = scratch.0.join("model");
         fixture_dir(&target, false);
         fs::remove_file(target.join("model.safetensors")).unwrap();
-        fs::write(target.join("model.safetensors.index.json"), b"{}").unwrap();
-        let result = prepare_local(&target, &scratch.0.join("models"), "local/model", Path::new("unused"), false);
-        assert!(result.unwrap_err().contains("sharded MLX safetensors indexes"));
-        assert!(!scratch.0.join("models/.resolved").exists());
+        write_safetensors(&target.join("model-00001-of-00002.safetensors"), &["language_model.embed_tokens.weight"]);
+        write_safetensors(&target.join("model-00002-of-00002.safetensors"), &["language_model.layers.0.weight"]);
+        fs::write(target.join("model.safetensors.index.json"), br#"{"weight_map":{"language_model.embed_tokens.weight":"model-00001-of-00002.safetensors","language_model.layers.0.weight":"model-00002-of-00002.safetensors"}}"#).unwrap();
+        let engine = scratch.0.join("engine");
+        fs::write(&engine, "#!/bin/sh\n[ \"$1 $2 $3\" = 'model-check mlx-affine none' ] || exit 2\nprintf '{\"family\":\"Qwen3.5-Test\"}'\n").unwrap();
+        let mut permissions = fs::metadata(&engine).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&engine, permissions).unwrap();
+
+        let published = prepare_local(&target, &scratch.0.join("models"), "local/model", &engine, false).unwrap();
+        assert!(published.join("target/model-00001-of-00002.safetensors").is_symlink());
+        assert!(published.join("target/model-00002-of-00002.safetensors").is_symlink());
+        assert!(!published.join("target/model.safetensors.index.json").exists());
+    }
+
+    #[test]
+    fn partitions_vision_shards_and_links_mixed_shards_to_both() {
+        let scratch = Scratch::new();
+        let target = scratch.0.join("model");
+        fixture_dir(&target, true);
+        fs::remove_file(target.join("model.safetensors")).unwrap();
+        let text = "model-00001-of-00003.safetensors";
+        let vision = "model-00002-of-00003.safetensors";
+        let mixed = "model-00003-of-00003.safetensors";
+        write_safetensors(&target.join(text), &["language_model.embed_tokens.weight"]);
+        write_safetensors(&target.join(vision), &["vision_tower.embeddings.weight"]);
+        write_safetensors(&target.join(mixed), &["language_model.layers.0.weight", "vision_tower.blocks.0.weight"]);
+        fs::write(target.join("model.safetensors.index.json"), serde_json::to_vec(&serde_json::json!({
+            "weight_map": {
+                "language_model.embed_tokens.weight": text,
+                "vision_tower.embeddings.weight": vision,
+                "language_model.layers.0.weight": mixed,
+                "vision_tower.blocks.0.weight": mixed
+            }
+        })).unwrap()).unwrap();
+        let engine = scratch.0.join("engine");
+        fs::write(&engine, "#!/bin/sh\n[ \"$1 $2 $3\" = 'model-check mlx-affine safetensors' ] || exit 2\nprintf '{\"family\":\"Qwen3.5-Vision\"}'\n").unwrap();
+        let mut permissions = fs::metadata(&engine).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&engine, permissions).unwrap();
+
+        let published = prepare_local(&target, &scratch.0.join("models"), "local/model", &engine, false).unwrap();
+        assert!(published.join(format!("target/{text}")).is_symlink());
+        assert!(!published.join(format!("target/{vision}")).exists());
+        assert!(published.join(format!("target/{mixed}")).is_symlink());
+        assert!(!published.join(format!("vision/{text}")).exists());
+        assert!(published.join(format!("vision/{vision}")).is_symlink());
+        assert!(published.join(format!("vision/{mixed}")).is_symlink());
     }
 
     #[test]
