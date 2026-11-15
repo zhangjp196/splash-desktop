@@ -94,6 +94,46 @@ samples per phase (four measured requests per build/scenario). M5 Pro 16:
 192 tokens, two scenarios, one sample per phase. Every tested output text and
 acceptance statistic matches the baseline after restoring split-order sums.
 
+A follow-up M3 Max diagnostic (2026-11-15) measured one 128K-history verify
+attention layer with the production INT8 KV format, a 1.5-second warmup for
+the first case (0.1 seconds for each subsequent case) and nine samples per
+case. The `lanes` setting here is the number of
+verified rows in one graph; the times therefore grow with batch width and do
+not directly predict tokens per second.
+
+| Model | 1 row | 2 rows | 3 rows | 4 rows | ms per row, 1 → 4 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.8-27B | 3.233 ms | 7.528 ms | 10.042 ms | 13.789 ms | 3.233 → 3.447 |
+| Qwen3.6-35B-A3B | 1.942 ms | 3.693 ms | 5.549 ms | 7.355 ms | 1.942 → 1.839 |
+
+This does not show a compelling lane-only tuning opportunity: 27B gets slightly
+slower per row, and 35B's small improvement needs an end-to-end speculative
+decode comparison before it could justify a policy change. At this context,
+the prefill attention graph still costs about 704 ms/layer for 27B and
+481 ms/layer for 35B at one 2,048-row chunk. With the measured 32K figures,
+quadrupling history takes about four times as long for that fixed chunk,
+which points to the long-context attention algorithm as the remaining
+high-value area rather than dispatch-width tuning.
+
+### Long-history two-split prefill trial (M3 Max, 2026-11-15)
+
+A second page-loop strategy partitioned histories at 32K into two independent
+page ranges per query tile, then used the existing ordered split reduction.
+The model's 50K cold request took 217.37 s versus 219.25 s with the default
+single range (0.9% faster); 10K took 33.14 s versus 33.28 s. These are one
+sample per build, run sequentially, so the small difference is within likely
+thermal and clock variation. The 2K request did not activate the candidate
+policy and measured 6.41 s versus 6.47 s. Both builds produced the same output
+token for each of the 2K, 10K and 50K cold requests, and the 50K exact-prefix
+hit stayed around 0.17 s.
+
+For the 27B attention geometry, reserving two partial ranges raises the
+prefill scratch bound by about 32.5 MiB. The measured 0.9% long-request change
+does not justify that permanent scratch increase, so the runtime policy was
+removed. This rules out a simple two-way split at the existing page-loop level;
+a more substantial attention-kernel redesign would need to reduce bytes read
+or barriers, not just expose another layer of page parallelism.
+
 | Device/model | Scenario | Baseline tok/s | Candidate tok/s | Change |
 | --- | --- | ---: | ---: | ---: |
 | M3 / 27B | python_code | 93.5 | 93.5 | +0.01% |

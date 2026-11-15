@@ -31,8 +31,15 @@ using splash::metal::MetalBackend;
 
 // The hidden columns the AneFfn program splits a projection's inputs into
 // (ops/AneFfn.cpp kSegment): a matmul reads one segment at a time.
-constexpr uint32_t kSegment = 2560;
+constexpr uint32_t kMaximumSegment = 2560;
+constexpr uint32_t kSegmentStep = ANE_FFN_INTERMEDIATE_BLOCK;
 constexpr uint32_t kDefaultRows = 2048, kDefaultRounds = 3;
+
+uint32_t segmentFor(uint32_t hidden) {
+  for (uint32_t segment = kMaximumSegment; segment >= kSegmentStep; segment -= kSegmentStep)
+    if (hidden % segment == 0) return segment;
+  return 0;
+}
 
 std::string fp16(double value) {
   char text[32];
@@ -46,7 +53,7 @@ std::string dimensions(uint32_t height, uint32_t width) {
 
 // The MIL of the projection: one matmul per input segment, their sum scaled by
 // the weights' row scales and the tokens' scales.
-std::string mil(uint32_t rows, uint32_t columns, uint32_t segments, uint32_t stage,
+std::string mil(uint32_t rows, uint32_t columns, uint32_t segmentSize, uint32_t segments, uint32_t stage,
                 const std::vector<Surface> &activations, const std::vector<Surface> &weights,
                 const Surface &weightScale, const Surface &tokenScale, const Surface &output) {
   const std::string unit = fp16(1.0 / ANE_FFN_INT8_UNIT);
@@ -62,15 +69,15 @@ std::string mil(uint32_t rows, uint32_t columns, uint32_t segments, uint32_t sta
   };
   for (uint32_t segment = 0; segment < segments; ++segment) {
     const std::string index = std::to_string(segment);
-    buffer("x" + index, activations[segment], kSegment, rows);
-    buffer("w" + index, weights[segment], columns, kSegment);
+    buffer("x" + index, activations[segment], segmentSize, rows);
+    buffer("w" + index, weights[segment], columns, segmentSize);
   }
   buffer("sw", weightScale, columns, 1);
   buffer("sx", tokenScale, 1, rows);
   for (uint32_t segment = 0; segment < segments; ++segment) {
     const std::string index = std::to_string(segment);
-    f16("x" + index + "_d", kSegment, rows, "dequantize(input = x" + index + "_t, scale = " + unit + ")");
-    f16("w" + index + "_d", columns, kSegment, "dequantize(input = w" + index + "_t, scale = " + unit + ")");
+    f16("x" + index + "_d", segmentSize, rows, "dequantize(input = x" + index + "_t, scale = " + unit + ")");
+    f16("w" + index + "_d", columns, segmentSize, "dequantize(input = w" + index + "_t, scale = " + unit + ")");
     line("tensor<fp16, " + dimensions(columns, rows) + "> m" + index +
          " = matmul(transpose_x = bool(false), transpose_y = bool(false), x = w" + index + "_d, y = x" + index +
          "_d)");
@@ -111,11 +118,12 @@ int main(int argc, char **argv) {
   const uint32_t rows = argc > 4 ? static_cast<uint32_t>(std::strtoul(argv[4], nullptr, 10)) : kDefaultRows;
   const uint32_t rounds = argc > 5 ? static_cast<uint32_t>(std::strtoul(argv[5], nullptr, 10)) : kDefaultRounds;
   const uint32_t stage = argc > 6 ? static_cast<uint32_t>(std::strtoul(argv[6], nullptr, 10)) : 3;
-  if (!columns || !hidden || hidden % kSegment || !rows || !rounds) {
-    std::fprintf(stderr, "N and rows must be positive and K a multiple of %u\n", kSegment);
+  const uint32_t segmentSize = segmentFor(hidden);
+  if (!columns || !hidden || !segmentSize || !rows || !rounds) {
+    std::fprintf(stderr, "N and rows must be positive and K divisible by an ANE segment (512 to 2560)\n");
     return 2;
   }
-  const uint32_t segments = hidden / kSegment;
+  const uint32_t segments = hidden / segmentSize;
   try {
     MetalBackend backend(argv[1]);
     std::mt19937 rng(7);
@@ -123,15 +131,16 @@ int main(int argc, char **argv) {
     std::vector<Surface> activations, weights;
     std::vector<std::vector<int8_t>> hostActivations(segments), hostWeights(segments);
     for (uint32_t segment = 0; segment < segments; ++segment) {
-      activations.push_back(Surface::create(backend, kSegment, rows, Surface::Element::Int8));
-      weights.push_back(Surface::create(backend, columns, kSegment, Surface::Element::Int8));
-      hostActivations[segment].resize(uint64_t{kSegment} * rows);
-      hostWeights[segment].resize(uint64_t{columns} * kSegment);
+      activations.push_back(Surface::create(backend, segmentSize, rows, Surface::Element::Int8));
+      weights.push_back(Surface::create(backend, columns, segmentSize, Surface::Element::Int8));
+      hostActivations[segment].resize(uint64_t{segmentSize} * rows);
+      hostWeights[segment].resize(uint64_t{columns} * segmentSize);
       for (int8_t &value : hostActivations[segment]) value = static_cast<int8_t>(codes(rng));
       for (int8_t &value : hostWeights[segment]) value = static_cast<int8_t>(codes(rng));
       std::memcpy(contents<int8_t>(activations.back()), hostActivations[segment].data(),
-                  uint64_t{kSegment} * rows);
-      std::memcpy(contents<int8_t>(weights.back()), hostWeights[segment].data(), uint64_t{columns} * kSegment);
+                  uint64_t{segmentSize} * rows);
+      std::memcpy(contents<int8_t>(weights.back()), hostWeights[segment].data(),
+                  uint64_t{columns} * segmentSize);
     }
     Surface weightScale = Surface::create(backend, columns, 1, Surface::Element::Float16);
     Surface tokenScale = Surface::create(backend, 1, rows, Surface::Element::Float16);
@@ -141,7 +150,7 @@ int main(int argc, char **argv) {
     for (uint32_t token = 0; token < rows; ++token) contents<_Float16>(tokenScale)[token] = tokenStep;
 
     const std::string source =
-        mil(rows, columns, segments, stage, activations, weights, weightScale, tokenScale, output);
+        mil(rows, columns, segmentSize, segments, stage, activations, weights, weightScale, tokenScale, output);
     // The MIL names no BLOBFILE, but the service loads a program with its
     // blob beside it: a zero blob keeps that path the one AneFfn takes.
     const std::vector<uint8_t> blob(64 * 1024, 0);
@@ -200,8 +209,8 @@ int main(int argc, char **argv) {
       for (uint32_t token = 0; token < rows; token += 683) {
         double reference = 0.0;
         for (uint32_t segment = 0; segment < segments; ++segment)
-          for (uint32_t k = 0; k < kSegment; ++k)
-            reference += double(hostWeights[segment][uint64_t{column} * kSegment + k]) *
+          for (uint32_t k = 0; k < segmentSize; ++k)
+            reference += double(hostWeights[segment][uint64_t{column} * segmentSize + k]) *
                          double(hostActivations[segment][uint64_t{k} * rows + token]);
         reference *= double(weightStep) * double(tokenStep) / (double(ANE_FFN_INT8_UNIT) * ANE_FFN_INT8_UNIT);
         const _Float16 *values = contents<_Float16>(output);

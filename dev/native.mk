@@ -158,6 +158,7 @@ TEST_TEACHER_LOGITS := $(ENGINE_TEST_BUILD)/teacher-logits
 TEST_ATTENTION_SWEEP := $(ENGINE_TEST_BUILD)/attention-sweep
 TEST_GGUF_PROJECTION_BENCHMARK := $(ENGINE_TEST_BUILD)/gguf-projection-benchmark
 TEST_ANE_PROJECTION_BENCHMARK := $(ENGINE_TEST_BUILD)/ane-projection-benchmark
+TEST_ANE_WEIGHT_STAGE_BENCHMARK := $(ENGINE_TEST_BUILD)/ane-weight-stage-benchmark
 TEST_ANE_MIXER_PROBE := $(ENGINE_TEST_BUILD)/ane-mixer-probe
 TEST_GGUF_MOE_BENCHMARK := $(ENGINE_TEST_BUILD)/gguf-moe-benchmark
 TEST_MODEL_RUNTIME_ORACLE := $(ENGINE_TEST_BUILD)/model-runtime-oracle
@@ -282,7 +283,7 @@ TEST_CONFIG_TARGETS := $(filter-out $(LIB) $(HOST_STEP_LIB),$(sort $(TEST_CPU_TA
 	$(TEST_MODEL_RUNTIME_ORACLE) $(TEST_VISION_ENCODER_TEST) \
 	$(TEST_DECODE_PROFILE) $(TEST_TEACHER_LOGITS) $(TEST_ATTENTION_SWEEP) \
 	$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) \
-	$(TEST_ANE_PROJECTION_BENCHMARK) $(TEST_ANE_MIXER_PROBE) \
+	$(TEST_ANE_PROJECTION_BENCHMARK) $(TEST_ANE_WEIGHT_STAGE_BENCHMARK) $(TEST_ANE_MIXER_PROBE) \
 	$(TEST_Q8_AIR) $(TEST_Q8_KERNEL_AIRS) $(TEST_RESIDENCY_AIR) $(TEST_HOST_STEP_AIR) $(TEST_METAL_BACKEND_AIR) \
 	$(TEST_GGUF_DEQUANT_AIR)
 # Benchmarks and tools that build with the production flags.
@@ -493,6 +494,9 @@ $(TEST_GGUF_MOE_BENCHMARK): dev/benchmarks/gguf_moe_benchmark.mm \
 		$(ENGINE_LIBRARY) $(LIB)
 $(TEST_ANE_PROJECTION_BENCHMARK): dev/benchmarks/ane_projection_benchmark.mm \
 		$(ENGINE_LIBRARY)
+$(TEST_ANE_WEIGHT_STAGE_BENCHMARK): dev/benchmarks/ane_weight_stage_benchmark.mm \
+		dev/tests/engine/GgufFormatReference.hpp dev/tests/engine/TestBuffers.hpp \
+		$(ENGINE_LIBRARY) $(LIB)
 $(TEST_ANE_MIXER_PROBE): dev/benchmarks/ane_mixer_probe.mm \
 		$(ENGINE_LIBRARY) $(LIB)
 
@@ -512,7 +516,8 @@ $(TEST_DRAFT_PREPARATION) $(TEST_GGUF_PROJECTION) $(TEST_ANE_FFN) \
 		$(TEST_MODEL_RUNTIME_ORACLE) \
 		$(TEST_DECODE_PROFILE) $(TEST_TEACHER_LOGITS) $(TEST_ATTENTION_SWEEP) \
 		$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) \
-		$(TEST_ANE_PROJECTION_BENCHMARK) $(TEST_ANE_PROJECTION_SPLIT) $(TEST_ANE_MIXER_PROBE): | $(ENGINE_TEST_BUILD)
+		$(TEST_ANE_PROJECTION_BENCHMARK) $(TEST_ANE_PROJECTION_SPLIT) $(TEST_ANE_WEIGHT_STAGE_BENCHMARK) \
+		$(TEST_ANE_MIXER_PROBE): | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $(TEST_INPUTS) \
 		$(ENGINE_LINKFLAGS) -o $@
 
@@ -701,7 +706,8 @@ test-real: preflight $(TARGET) $(TEST_MODEL_RUNTIME_ORACLE) \
 
 .PHONY: benchmark-backend \
 	benchmark-concurrency benchmark-decode-profile benchmark-attention-sweep \
-	benchmark-gguf-projection benchmark-gguf-moe benchmark-ane-mixer teacher-logits
+	benchmark-gguf-projection benchmark-gguf-moe benchmark-ane-mixer \
+	benchmark-ane-weight-stage teacher-logits
 # decode-profile replays the installed model's prefill and decode commands as
 # separate dispatches; DECODE_PROFILE_ARGS passes --prompt-tokens/--cycles,
 # or --images HxW[,HxW...] for the vision encoder on synthetic images.
@@ -743,6 +749,18 @@ benchmark-gguf-moe: $(TEST_GGUF_MOE_BENCHMARK) $(LIB)
 ANE_MIXER_ARGS ?= 2048 8 5120 8192
 benchmark-ane-mixer: $(TEST_ANE_MIXER_PROBE) $(LIB)
 	$(TEST_ANE_MIXER_PROBE) $(LIB) $(ANE_MIXER_ARGS)
+
+# Separate per-prompt row-scale preparation, per-chunk GGUF-to-ANE weight
+# staging, and ANE projection evaluation at one shared geometry. Override the
+# ANE_STAGE_* variables to match another target projection.
+ANE_STAGE_N ?= 8192
+ANE_STAGE_K ?= 5120
+ANE_STAGE_ROWS ?= 2048
+ANE_STAGE_ROUNDS ?= 11
+ANE_STAGE_FORMAT ?= iq3s
+benchmark-ane-weight-stage: $(TEST_ANE_WEIGHT_STAGE_BENCHMARK) $(TEST_ANE_PROJECTION_BENCHMARK) $(LIB)
+	$(TEST_ANE_WEIGHT_STAGE_BENCHMARK) $(LIB) $(ANE_STAGE_N) $(ANE_STAGE_K) $(ANE_STAGE_ROWS) $(ANE_STAGE_ROUNDS) $(ANE_STAGE_FORMAT)
+	$(TEST_ANE_PROJECTION_BENCHMARK) $(LIB) $(ANE_STAGE_N) $(ANE_STAGE_K) $(ANE_STAGE_ROWS) $(ANE_STAGE_ROUNDS)
 
 benchmark-backend: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
 	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)"

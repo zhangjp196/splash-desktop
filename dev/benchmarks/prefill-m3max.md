@@ -117,6 +117,29 @@ SPLASH_ANE_SHARE=0.60 splash serve --model ...
 The cost is KV context: the split's buffers come out of the attention cache,
 so check the start's logged context against 0.53 before adopting it.
 
+### End-to-end long-context baseline (2026-11-15)
+
+`backend-benchmark --scenario context --samples 1` on the M3 Max with the
+installed `Qwopus3.8-27B-Coder-Flash-4bit` target and its DFlash2 draft,
+int8 KV and the automatically calibrated ANE split (share 0.56) measured cold
+requests and exact prefix hits. Each cold request asks for one generated
+token; the exact hit reuses all but the final 16 or 32 prompt tokens.
+
+| Prompt tokens | Cold request wall / GPU | Exact prefix hit wall | Target rows recomputed |
+| ---: | ---: | ---: | ---: |
+| 2,048 | 6.95 s / 6.92 s | 209 ms | 32 |
+| 10,000 | 34.11 s / 34.06 s | 132 ms | 16 |
+| 50,000 | 222.92 s / 222.70 s | 167 ms | 16 |
+
+The wall and GPU times are close, so host dispatch overhead is small in these
+cold requests. Prefix hits remain below 0.2 s even at 50K because they only
+recompute the tail. These are one-sample baselines, not an ABBA comparison;
+they establish scale and cache behavior, not a kernel speedup. The benchmark
+was stopped after the complete 50K scenarios because its context scenario
+would next run 128K cold prompts multiple times; 128K end-to-end timing is not
+measured here. The kernel-level 128K attention sweep remains a separate,
+single-layer diagnostic.
+
 ## C1, verified end to end
 
 `dev/tests/smoke_real.py --persistent-cache` restarts a server in a fresh cache
@@ -169,3 +192,23 @@ make benchmark-gguf-moe GGUF_MOE_ARGS='10'
 
 `gguf-moe-benchmark` now prints prefill on both expert tiles: the device's plan
 and the other tile, with the tile rows `moeGgufPrefillTile` gives it.
+
+## Follow-up measurements (2026-11-15)
+
+On the installed 27B target, six 2K short-prefill samples per share gave
+median wall times of 6.348 s at the automatically selected 19/34 units
+(effective share 0.5588) and 6.264 s at 20/34 units (0.5882), a 1.3% change.
+The 50K cold request at 0.5882 took 228.19 s versus 222.92 s in the earlier
+auto-share baseline. Those long runs were not thermally paired, but the short
+gain is small and the long result points the other way. Keep automatic share
+selection as the default; this sample does not justify a production override.
+
+A build-wide 4096-row prefill budget compiled, but the real-model run failed
+to compile the ANE FFN split and fell back to GPU-only. A 1024-row budget is
+below DFlash2's compile-time 2048-row draft-context requirement. The build
+override was removed; 2048 remains the supported geometry. The per-dispatch
+`decode-profile` tool also spent over 10 minutes waiting inside 50K prefill;
+at 10K it again remained in the GPU prefill command without producing a
+usable profile. Use end-to-end `backend-benchmark` for these long prompts, and
+reserve `decode-profile` for short prompts where its per-dispatch trace can
+finish promptly.

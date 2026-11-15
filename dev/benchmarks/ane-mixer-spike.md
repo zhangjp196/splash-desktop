@@ -108,6 +108,47 @@ So the mixer split as built pays about 16% on a QKV-shaped projection, not
 the ~50% the spike hoped. The projected end-to-end gain is ~4–5% of a 2K
 prefill, not 13%.
 
+To isolate the two sides of that cost on a Metal-capable host, run
+`make benchmark-ane-weight-stage`. The first output reports the one-time row
+scale pass and the repeated per-chunk GGUF-to-ANE int8 weight staging GPU
+time, output bytes and effective write bandwidth. The second reports the
+standalone ANE projection evaluation for the same shape. The default is
+`8192x5120`, 2048 rows, IQ3_S; set `ANE_STAGE_N`, `ANE_STAGE_K`,
+`ANE_STAGE_ROWS`, `ANE_STAGE_ROUNDS` and `ANE_STAGE_FORMAT` to select another
+projection. For the Qwen3.8 27B full-attention QKV and output shapes, use
+`ANE_STAGE_N=14336 ANE_STAGE_K=5120` and `ANE_STAGE_N=5120 ANE_STAGE_K=6144`
+respectively. These are isolated GPU/ANE costs; compare them with a full
+prefill profile before changing dispatch or overlap.
+
+Keeping every transformed weight resident to skip staging across prompt chunks
+would need about 2.97 GiB for one int8 staging set across the Qwen3.8 27B
+QKV projections (16 × 14336 × 5120) and output projections
+(64 × 5120 × 6144), before surface alignment and row scales. The current
+double-buffered staging set is much smaller. That cache should only be built
+if measurements show staging remains on the critical path after GPU/ANE
+overlap, and if that extra memory is acceptable on the target machine.
+
+### Staging measurement (M3 Max, 2026-11-15)
+
+`make benchmark-ane-weight-stage` on an M3 Max with macOS 27.2, IQ3_S weights,
+2048 rows and seven staging samples measured:
+
+| projection | one-time row scales | repeated staging | bytes written | ANE evaluation |
+| --- | ---: | ---: | ---: | ---: |
+| QKV, 14336×5120 | 0.830 ms | 0.887 ms | 70.03 MiB | 21.756 ms |
+| output, 5120×6144 | 0.422 ms | 0.569 ms | 30.01 MiB | 9.604 ms |
+
+Staging uses the GPU command's time and is the median of seven samples. The
+projection benchmark's evaluation column is its last of seven rounds; the
+first round was slower (30.869 ms for QKV and 13.827 ms for output), while the
+last six had settled. If every layer's staging were exposed on the critical
+path, the measured costs sum to about 51 ms for a 2048-row Qwen3.8-27B chunk
+(16 QKV and 64 output projections), about 0.7% of the recorded 7.1–7.6 s
+2K prefill. In the runtime, staging overlaps GPU work, so its actual exposed
+cost should be lower. This does not justify holding roughly 2.97 GiB of
+transformed weights resident; profiling the complete prefill remains the gate
+for a cache or a staging-path redesign.
+
 Things that could change that, in order of expected value:
 
 1. Stage the ANE's weights once per layer for the whole prompt and reuse
