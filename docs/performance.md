@@ -89,9 +89,11 @@ the 27B with `--language-only` for them; with `--disable-ane` and
 
 Splash grows its caches only while macOS reports no memory pressure and its
 spare memory, the free, file-backed and purgeable pages and half of what
-compressing other applications would free, keeps a reserve of 7% of the Mac's
-memory (2 to 7 GiB) and a 1 GiB margin, 3 GiB on these Macs. It gives cached
-memory back when that memory runs short or macOS warns, but a request in service
+compressing other applications would free, leaves a combined reserve of 7% of
+physical memory, including the 1 GiB margin above the spare reserve. On 16 and
+24 GB Macs, this lets cache growth reach 93% of physical memory before reclaim
+starts. It gives cached memory back when that memory runs short or macOS warns,
+but a request in service
 still takes the memory it needs within `--max-memory`, so these models leave
 other applications little room. A request that cannot get memory waits for it,
 and so does every request that arrived after it, except one of a higher

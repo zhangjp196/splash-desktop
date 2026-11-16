@@ -1104,8 +1104,10 @@ not try, which still waits for memory) and those waiting for a disk restore
 current wait age, which for a request holding admission closed runs from when
 its wait began. Memory transitions also appear in the console. Growth that no
 request in service needs, and so the cache, leaves other applications their
-memory: it keeps a spare reserve of 7% of the Mac's memory (2 to 7 GiB) and a
-1 GiB margin free of the host's spare memory, the free, file-backed and
+memory: it leaves 7% of physical memory as a combined reserve, including the
+1 GiB margin above the spare reserve. On 16 and 24 GB Macs this raises the
+cache growth threshold to 93% of physical memory. Host spare memory is the
+free, file-backed and
 purgeable pages and half of what compressing the anonymous pages would free at
 the compressor's present ratio, at most a quarter of them. When the spare memory
 runs short of that, such growth pauses and the cache gives memory back, a paced

@@ -118,11 +118,11 @@ void testHostAvailabilityCountsReclaimablePages() {
               EngineMemoryPolicy::hostAvailableReserveBytes(128 * kGiB) ==
                   2 * kGiB,
           "the macOS reserve is a tenth of a small machine, 2 GiB above 20 GiB");
-  require(EngineMemoryPolicy::hostSpareReserveBytes(16 * kGiB) == 2 * kGiB &&
-              EngineMemoryPolicy::hostSpareReserveBytes(24 * kGiB) == 2 * kGiB &&
-              EngineMemoryPolicy::hostSpareReserveBytes(64 * kGiB) == 64 * kGiB / 100 * 7 &&
-              EngineMemoryPolicy::hostSpareReserveBytes(128 * kGiB) == 7 * kGiB,
-          "the spare reserve is 7% of the Mac's memory, from 2 to 7 GiB");
+  require(EngineMemoryPolicy::hostSpareReserveBytes(16 * kGiB) == 16 * kGiB / 100 * 7 - kGiB &&
+              EngineMemoryPolicy::hostSpareReserveBytes(24 * kGiB) == 24 * kGiB / 100 * 7 - kGiB &&
+              EngineMemoryPolicy::hostSpareReserveBytes(64 * kGiB) == 64 * kGiB / 100 * 7 - kGiB &&
+              EngineMemoryPolicy::hostSpareReserveBytes(128 * kGiB) == 128 * kGiB / 100 * 7 - kGiB,
+          "the spare reserve plus the 1 GiB warning margin is 7% of physical memory");
 }
 
 // A Mac whose recommended working set is numerator/denominator of its memory,

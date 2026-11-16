@@ -89,8 +89,9 @@ memory a request in service needs: only the memory plan's budget and macOS's
 critical pressure refuse it, and the run stops at critical pressure, naming
 what it asked for. Production grants that only to its start, a request it
 serves alone and the KV of the requests it serves; a start beside a resident
-request, and the cache, are held to the spare reserve, the 1 GiB margin above
-it and macOS's warning. A Neural Engine split leaves the plan room for what the
+request, and the cache, are held to a combined reserve of 7% of physical
+memory, including the 1 GiB margin above the host spare reserve, and macOS's
+warning. A Neural Engine split leaves the plan room for what the
 checks hold at once (every lane's state, six cached states and the oracle's KV
 pages), as a start's split leaves `--max-context`, so the oracle's split may
 take fewer of the Neural Engine's units than a server's does. With only desktop
