@@ -999,11 +999,25 @@ fn responses_stream(
             return Ok(Response::error(503, &error.to_string(), "server_error"));
         }
     };
-    let _disconnect_watch = DisconnectWatch::start(stream, pipeline.client.clone(), vec![call.clone()])?;
+    let _disconnect_watch = match DisconnectWatch::start(
+        stream,
+        pipeline.client.clone(),
+        vec![call.clone()],
+    ) {
+        Ok(watch) => Some(watch),
+        Err(_) => {
+            // Streaming may already have started. Cancel through the normal
+            // completion path instead of writing an HTTP error after SSE.
+            pipeline.client.cancel(&call);
+            let _ = call.result(None);
+            None
+        }
+    };
     let _ = call.result(None);
-    let started = writer.lock().expect("Responses stream socket lock").1;
-    if !started {
-        write_response_with_cors(stream, &Response::sse_head(), cors_origin)?;
+    let mut output = writer.lock().expect("Responses stream socket lock");
+    if !output.1 {
+        write_response_with_cors(&mut output.0, &Response::sse_head(), cors_origin)?;
+        output.1 = true;
     }
     Ok(Response { status: 200, content_type: "text/event-stream", body: Vec::new() })
 }
@@ -2005,6 +2019,7 @@ fn stream_answer(
         include_usage: body.pointer("/stream_options/include_usage").and_then(Value::as_bool).unwrap_or(false),
         compaction: prepared.compaction.clone(),
     });
+    let error_sink = sink.clone();
     // The output constraint the request generates under, and the projector
     // that reads its calls as they arrive.
     let projector = Arc::new(std::sync::Mutex::new(match &prepared.tool_policy {
@@ -2053,7 +2068,20 @@ fn stream_answer(
         Ok(call) => call,
         Err(error) => {
             crate::diagnostics::request_error("runtime_unavailable");
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, error.to_string()));
+            let error = crate::serve::pipeline::PipelineError::from(error);
+            let api_error = ApiError::new(
+                error.status,
+                error.message,
+                error.code.unwrap_or_else(|| "server_error".into()),
+            );
+            error_sink.error(&api_error).map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)
+            })?;
+            return Ok(Response {
+                status: 200,
+                content_type: "text/event-stream",
+                body: Vec::new(),
+            });
         }
     };
     let _ = call.result(None);

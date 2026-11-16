@@ -74,7 +74,7 @@ impl StreamSink {
     /// The error a stream answers with when it has already started: the
     /// refusal as a data event, then the end, as the Python's
     /// `_sse_error` writes.
-    fn error(&self, error: &crate::support::errors::ApiError) -> Result<(), String> {
+    pub(crate) fn error(&self, error: &crate::support::errors::ApiError) -> Result<(), String> {
         self.sse(&error.openai_payload())?;
         self.write.lock().expect("write lock")("[DONE]")
     }

@@ -643,9 +643,17 @@ pub fn stream(
         vec![call.clone()],
     ) {
         Ok(watch) => watch,
-        Err(error) => {
+        Err(_) => {
             pipeline.client.cancel(&call);
-            return Err(error);
+            // The SSE headers are already on the wire. Let cancellation
+            // reach the completion callback so it can close the stream with
+            // a finish chunk (or an engine error) and [DONE].
+            let _ = call.result(None);
+            return Ok(Ok(Response {
+                status: 200,
+                content_type: "text/event-stream",
+                body: Vec::new(),
+            }));
         }
     };
     let _ = call.result(None);
