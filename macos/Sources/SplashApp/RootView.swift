@@ -212,14 +212,12 @@ struct RootView: View {
             } label: {
                 Image(systemName: "command")
             }
-            .help(L10n.string("palette.shortcut"))
 
             Button {
                 showTerminal = true
             } label: {
                 Image(systemName: "terminal")
             }
-            .help(L10n.string("terminal.title"))
             .keyboardShortcut("j", modifiers: .command)
 
             Menu {
@@ -237,7 +235,6 @@ struct RootView: View {
             } label: {
                 Image(systemName: appearance.systemImage)
             }
-            .help(L10n.string("appearance.title"))
 
             Menu {
                 ForEach(AppModel.InterfaceLanguage.allCases) { language in
@@ -255,7 +252,6 @@ struct RootView: View {
             } label: {
                 Image(systemName: "globe")
             }
-            .help(L10n.string("settings.language"))
 
             Button {
                 model.openInBrowser()
@@ -263,7 +259,6 @@ struct RootView: View {
                 Image(systemName: "safari")
             }
             .disabled(model.phase != .ready)
-            .help(L10n.string("open.in.browser"))
         }
     }
 

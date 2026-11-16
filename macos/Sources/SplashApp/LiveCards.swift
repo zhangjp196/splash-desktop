@@ -97,12 +97,6 @@ struct MemoryPanel: View, Equatable {
                         .foregroundStyle(SplashPalette.faint)
                         .lineLimit(1)
                 }
-                if let peak = live.peakPhysicalBytes ?? live.peakBytes {
-                    Text(L10n.format("live.caption.peak_of", bytes(peak)))
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(SplashPalette.faint)
-                        .lineLimit(1)
-                }
                 Sparkline(values: history, tint: tint, upperBound: 1)
                     .frame(height: 24)
                 HStack(spacing: 6) {
@@ -164,11 +158,10 @@ struct MemoryPanel: View, Equatable {
 /// calling the same refresh and carries nothing to compare.
 struct ClientsPanel: View, Equatable {
     let clients: [ConnectedClient]
-    let endpoint: String
     let onRefresh: () -> Void
 
     static func == (lhs: ClientsPanel, rhs: ClientsPanel) -> Bool {
-        lhs.clients == rhs.clients && lhs.endpoint == rhs.endpoint
+        lhs.clients == rhs.clients
     }
 
     var body: some View {
@@ -200,7 +193,6 @@ struct ClientsPanel: View, Equatable {
                         )
                 }
                 .buttonStyle(.plain)
-                .help(L10n.string("clients.refresh"))
             }
 
             if clients.isEmpty {
@@ -212,10 +204,6 @@ struct ClientsPanel: View, Equatable {
                         Text(L10n.string("clients.empty"))
                             .font(.system(size: 10.5, weight: .medium))
                             .foregroundStyle(SplashPalette.muted)
-                        Text(L10n.format("clients.hint", endpoint))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(SplashPalette.faint)
-                            .lineLimit(1)
                     }
                     Spacer(minLength: 0)
                 }

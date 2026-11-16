@@ -2,17 +2,13 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The groups the configuration editor's rail switches between. Each one owns
-/// a short description, so the rail explains the form instead of only naming
-/// it.
+/// The groups the configuration editor's rail switches between.
 enum SettingsSection: String, CaseIterable, Identifiable, RailSection {
     case model, draft, memory, serving
 
     var id: String { rawValue }
 
     var title: String { L10n.string("section.\(rawValue)") }
-    var summary: String { L10n.string("section.\(rawValue).help") }
-
     var systemImage: String {
         switch self {
         case .model: return "cube.box"
@@ -95,11 +91,6 @@ struct SettingsEditor: View {
 
             Spacer(minLength: 10)
 
-            Text(L10n.string("config.hint"))
-                .font(.system(size: 10))
-                .foregroundStyle(SplashPalette.faint)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 9)
         }
         .padding(12)
         .frame(width: 226, alignment: .top)
@@ -157,10 +148,6 @@ struct SettingsEditor: View {
                 Text(section.title)
                     .font(.system(size: 19, weight: .bold, design: .rounded))
                     .tracking(-0.2)
-                Text(section.summary)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(SplashPalette.muted)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
@@ -193,18 +180,6 @@ struct SettingsEditor: View {
     // MARK: Model
 
     @ViewBuilder private var modelPage: some View {
-        // Local models only: an online model is fetched by the downloader
-        // beside the configurations, and then chosen here as a local target.
-        // A configuration saved by the older online mode keeps its repository
-        // ID and still starts, and editing it here moves it to local.
-        if settings.modelMode == .upstream {
-            EditorNote(
-                text: L10n.string("help.legacy_upstream"),
-                tone: SplashPalette.amber,
-                systemImage: "exclamationmark.triangle"
-            )
-        }
-
         EditorCard(
             title: L10n.string("config.group.files"),
             systemImage: "folder",
@@ -265,13 +240,6 @@ struct SettingsEditor: View {
                         .tint(SplashPalette.cyan)
                 }
             }
-        }
-        if settings.localKind == "gguf" && profile.vision && settings.languageOnly {
-            EditorNote(
-                text: L10n.string("help.mmproj.text_only"),
-                tone: SplashPalette.muted,
-                systemImage: "info.circle"
-            )
         }
     }
 
@@ -509,20 +477,17 @@ struct SettingsEditor: View {
                 reviewDivider
                 ReviewStat(
                     title: L10n.string("config.group.budget"),
-                    value: settings.maxMemory,
-                    caption: L10n.format("config.review.context", settings.maxContext)
+                    value: settings.maxMemory
                 )
                 reviewDivider
                 ReviewStat(
                     title: L10n.string("field.kv"),
-                    value: settings.kvFormat.uppercased(),
-                    caption: settings.stateFormat.uppercased()
+                    value: settings.kvFormat.uppercased()
                 )
                 reviewDivider
                 ReviewStat(
                     title: L10n.string("field.speculation"),
-                    value: L10n.string("speculation.\(settings.speculation)"),
-                    caption: draftLabel
+                    value: L10n.string("speculation.\(settings.speculation)")
                 )
             }
             .padding(.top, 7)
@@ -542,12 +507,6 @@ struct SettingsEditor: View {
         }
     }
 
-    private var draftLabel: String {
-        let draft = settings.draftDirectory.trimmingCharacters(in: .whitespaces)
-        guard !draft.isEmpty else { return L10n.string("models.none") }
-        return (draft as NSString).lastPathComponent
-    }
-
     private var reviewDivider: some View {
         Rectangle()
             .fill(SplashPalette.hairline.opacity(0.55))
@@ -565,7 +524,6 @@ struct SettingsEditor: View {
 struct ReviewStat: View {
     let title: String
     let value: String
-    var caption: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -577,12 +535,6 @@ struct ReviewStat: View {
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .lineLimit(1)
                 .truncationMode(.middle)
-            if let caption, !caption.isEmpty {
-                Text(caption)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(SplashPalette.muted)
-                    .lineLimit(1)
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
@@ -636,12 +588,6 @@ struct FieldColumn<Control: View>: View {
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(SplashPalette.muted)
                     .lineLimit(1)
-                if let help, !help.isEmpty {
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 9))
-                        .foregroundStyle(SplashPalette.faint)
-                        .help(help)
-                }
             }
             control
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -664,18 +610,6 @@ struct SettingRow<Control: View>: View {
                 HStack(spacing: 4) {
                     Text(title)
                         .font(.system(size: 12.5, weight: .medium))
-                    if let help, !help.isEmpty {
-                        Image(systemName: "info.circle")
-                            .font(.system(size: 10))
-                            .foregroundStyle(SplashPalette.faint)
-                            .help(help)
-                    }
-                }
-                if let help, !help.isEmpty {
-                    Text(help)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(SplashPalette.muted)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: 12)
@@ -683,32 +617,6 @@ struct SettingRow<Control: View>: View {
                 .frame(width: controlWidth, alignment: .trailing)
         }
         .padding(.vertical, 9)
-    }
-}
-
-/// A short note under a page or inside a card: a warning, or a quiet hint.
-struct EditorNote: View {
-    let text: String
-    var tone: Color = SplashPalette.amber
-    var systemImage: String = "exclamationmark.triangle.fill"
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 7) {
-            Image(systemName: systemImage)
-                .font(.system(size: 10.5, weight: .semibold))
-            Text(text)
-                .font(.system(size: 11))
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .foregroundStyle(tone)
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .background(tone.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(tone.opacity(0.24), lineWidth: 0.7)
-        )
     }
 }
 
@@ -768,7 +676,6 @@ struct EditorField: View {
                         .foregroundStyle(SplashPalette.faint)
                 }
                 .buttonStyle(.plain)
-                .help(L10n.string("field.clear"))
             }
         }
         .modifier(EditorFieldShell(focused: focused))
@@ -945,7 +852,6 @@ struct SecretField: View {
                     .foregroundStyle(SplashPalette.faint)
             }
             .buttonStyle(.plain)
-            .help(L10n.string(revealed ? "field.hide_key" : "field.show_key"))
         }
         .modifier(EditorFieldShell(focused: focused))
     }
@@ -978,7 +884,6 @@ struct DirectoryPicker: View {
                     )
             }
             .buttonStyle(.plain)
-            .help(L10n.string("field.browse"))
         }
     }
 

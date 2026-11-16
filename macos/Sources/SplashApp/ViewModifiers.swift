@@ -2,18 +2,16 @@ import SwiftUI
 
 // MARK: - Rail
 
-/// What a rail of sections needs from its sections: the name, the one-line
-/// explanation, the icon, and the tint the rail paints them with. The
+/// What a rail of sections needs from its sections: the name, icon, and tint. The
 /// configuration editor's sections and the app-wide settings' ones both
 /// qualify, so one rail item serves both pages.
 protocol RailSection: Identifiable {
     var title: String { get }
-    var summary: String { get }
     var systemImage: String { get }
     var tint: Color { get }
 }
 
-/// One section in a rail: an icon, a name, a one-line explanation, and — where
+/// One section in a rail: an icon, a name, and — where
 /// the caller tracks a draft — a dot when the section differs from the value it
 /// opened on. The selected row wears a flat tint wash with a hairline of the
 /// same tint, and a hover lays a quiet surface wash under the pointer; there is
@@ -45,11 +43,6 @@ struct RailItem<Section: RailSection>: View {
                     Text(section.title)
                         .font(.system(size: 12, weight: selected ? .semibold : .medium))
                         .foregroundStyle(.primary)
-                    Text(section.summary)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(SplashPalette.muted)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
                 }
                 Spacer(minLength: 0)
                 if changed {

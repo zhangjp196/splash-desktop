@@ -30,7 +30,7 @@ struct LogPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PaneHeader(title: L10n.string("view.log"), subtitle: logSubtitle, eyebrow: L10n.string("log.eyebrow")) {
+            PaneHeader(title: L10n.string("view.log")) {
                 HStack(spacing: 8) {
                     if model.isRunning {
                         HStack(spacing: 5) {
@@ -257,10 +257,6 @@ struct LogPane: View {
         .transition(.opacity)
     }
 
-    private var logSubtitle: String? {
-        guard model.isRunning else { return nil }
-        return logIsEmpty ? nil : L10n.string("log.live")
-    }
 }
 
 /// The transcript's bottom edge in the viewport's space, and its height:

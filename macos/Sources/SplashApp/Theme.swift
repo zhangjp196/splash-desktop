@@ -297,33 +297,17 @@ extension View {
     }
 }
 
-/// A pane's own title band: what the page is, one line of context, and its
-/// actions. Every pane starts with one so the window reads the same way
-/// whichever page is open.
+/// A pane's title and actions, shared across the window.
 struct PaneHeader<Trailing: View>: View {
     let title: String
-    var subtitle: String?
-    var eyebrow: String?
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 5) {
-                if let eyebrow, !eyebrow.isEmpty {
-                    Text(eyebrow.uppercased())
-                        .font(.system(size: 10, weight: .bold))
-                        .tracking(1.6)
-                        .foregroundStyle(SplashPalette.cyan)
-                }
                 Text(title)
                     .font(.system(size: 27, weight: .bold, design: .rounded))
                     .tracking(-0.4)
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(SplashPalette.muted)
-                        .lineLimit(2)
-                }
             }
             Spacer(minLength: 12)
             trailing()
@@ -332,9 +316,9 @@ struct PaneHeader<Trailing: View>: View {
 }
 
 extension PaneHeader where Trailing == EmptyView {
-    init(title: String, subtitle: String? = nil, eyebrow: String? = nil) {
+    init(title: String) {
         self.init(
-            title: title, subtitle: subtitle, eyebrow: eyebrow,
+            title: title,
             trailing: { EmptyView() }
         )
     }
@@ -366,11 +350,10 @@ struct SectionLabel: View {
     }
 }
 
-/// An empty page, with the same shape everywhere: an icon, a sentence, and the
-/// one action that gets the pane going.
+/// An empty page, with the same shape everywhere: an icon, a title, and an
+/// optional action.
 struct PaneEmpty: View {
     let title: String
-    let message: String
     var systemImage: String
     var actionTitle: String?
     var action: (() -> Void)?
@@ -396,11 +379,6 @@ struct PaneEmpty: View {
             }
             Text(title)
                 .font(.system(size: 18, weight: .semibold, design: .rounded))
-            Text(message)
-                .font(.system(size: 12.5))
-                .foregroundStyle(SplashPalette.muted)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 360)
             if let actionTitle, let action {
                 Button(action: action) {
                     Label(actionTitle, systemImage: "play.fill")

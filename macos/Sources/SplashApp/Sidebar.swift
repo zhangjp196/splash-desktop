@@ -91,7 +91,6 @@ struct Sidebar: View {
                     )
             }
             .buttonStyle(.plain)
-            .help(L10n.string("palette.shortcut"))
         }
     }
 
@@ -331,7 +330,6 @@ private struct ServerControls: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(title)
     }
 
     private var indicator: Color {

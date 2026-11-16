@@ -98,9 +98,6 @@ struct DownloadSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(L10n.string("download.title"))
                         .font(.system(size: 15, weight: .semibold))
-                    Text(L10n.string("download.subtitle"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
@@ -162,7 +159,6 @@ struct DownloadSheet: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
-                .help(L10n.string("examples"))
             }
         }
     }
@@ -181,9 +177,6 @@ struct DownloadSheet: View {
                         .lineLimit(2)
                         .textSelection(.enabled)
                 }
-                Text(L10n.string("download.done.help"))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
             }
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill")

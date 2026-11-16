@@ -191,10 +191,6 @@ struct CommandPalette: View {
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
-                    Text(action.subtitle)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(SplashPalette.faint)
-                        .lineLimit(1)
                 }
                 Spacer(minLength: 6)
                 if selected {

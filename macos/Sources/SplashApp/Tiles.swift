@@ -7,8 +7,7 @@ import SwiftUI
 /// The tile rows are deliberately uniform: a metrics board is read by
 /// comparing neighbours, so every rectangle in a row is the same size rather
 /// than sized to its own text. The heights hold the tallest content a tile can
-/// have (a value, a bar and one line of caption), and captions are kept to one
-/// line so nothing grows past them.
+/// have (a value and a bar), so nothing grows past them.
 enum TileMetrics {
     static let heroHeight: CGFloat = 168
     static let cardHeight: CGFloat = 112
@@ -102,12 +101,6 @@ struct MetricCard: View, Identifiable, Equatable {
                     .padding(.top, 2)
             }
 
-            if let note = progressCaption ?? (caption.isEmpty ? nil : caption) {
-                Text(note)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(SplashPalette.faint)
-                    .lineLimit(1)
-            }
         }
         .padding(13)
         .frame(maxWidth: .infinity, minHeight: TileMetrics.cardHeight,
@@ -120,7 +113,7 @@ struct MetricCard: View, Identifiable, Equatable {
 }
 
 /// The bar under a card's value: how much of a known total it uses. A metric
-/// that only counts (requests, failures) keeps a plain caption instead.
+/// that only counts (requests, failures) keeps its value without a bar.
 struct Meter: View {
     let fraction: Double
     let tint: Color
@@ -146,8 +139,7 @@ struct Meter: View {
 
 /// The headline tile: the number is the point, so it is set large and the
 /// icon and label stay quiet around it. `history` draws the last minute behind
-/// the number; `note` is one quiet line under it, for the figure the headline
-/// hides — the peak behind an average.
+/// the number.
 /// Equatable like the card it headlines, for the same reason.
 struct HeroCard: View, Equatable {
     let title: String
@@ -208,10 +200,6 @@ struct HeroCard: View, Equatable {
                 Meter(fraction: progress, tint: tint)
             }
 
-            Text(note.isEmpty ? " " : note)
-                .font(.system(size: 9.5))
-                .foregroundStyle(SplashPalette.faint)
-                .lineLimit(1)
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: TileMetrics.heroHeight,

@@ -92,15 +92,15 @@ struct ChatPane: View {
                         .foregroundStyle(SplashPalette.faint)
                         .lineLimit(1)
                 }
-                iconButton("square.and.pencil", help: L10n.string("chat.new")) {
+                iconButton("square.and.pencil") {
                     bridge.newChat()
                 }
                 .disabled(model.phase != .ready || bridge.running)
-                iconButton("trash", help: L10n.string("chat.clear")) {
+                iconButton("trash") {
                     bridge.clearHistory()
                 }
                 .disabled(bridge.recents.isEmpty || bridge.running)
-                iconButton("safari", help: L10n.string("open.in.browser")) {
+                iconButton("safari") {
                     model.openInBrowser()
                 }
                 .disabled(model.phase != .ready)
@@ -195,7 +195,6 @@ struct ChatPane: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(model.phase != .ready)
-        .help(L10n.string("chat.history"))
     }
 
     private var undoBar: some View {
@@ -237,7 +236,6 @@ struct ChatPane: View {
         } else {
             PaneEmpty(
                 title: L10n.string("chat.empty.title"),
-                message: isFailed ? model.statusText : L10n.string("chat.empty.message"),
                 systemImage: "bubble.left.and.bubble.right",
                 actionTitle: model.canStart ? L10n.string("start") : nil,
                 action: model.canStart ? { model.start() } : nil
@@ -245,12 +243,7 @@ struct ChatPane: View {
         }
     }
 
-    private var isFailed: Bool {
-        if case .failed = model.phase { return true }
-        return false
-    }
-
-    private func iconButton(_ systemImage: String, help: String, action: @escaping () -> Void) -> some View {
+    private func iconButton(_ systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 12, weight: .medium))
@@ -258,7 +251,6 @@ struct ChatPane: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
-        .help(help)
     }
 }
 

@@ -301,7 +301,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let alert = NSAlert()
             alert.alertStyle = .informational
             alert.messageText = L10n.string("background.alert.title")
-            alert.informativeText = L10n.string("background.alert.message")
             alert.addButton(withTitle: L10n.string("background.alert.ok"))
             alert.runModal()
         }

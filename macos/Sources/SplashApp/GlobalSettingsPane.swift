@@ -8,8 +8,6 @@ enum GlobalSection: String, CaseIterable, Identifiable, RailSection {
     var id: String { rawValue }
 
     var title: String { L10n.string("settings.section.\(rawValue)") }
-    var summary: String { L10n.string("settings.section.\(rawValue).help") }
-
     var systemImage: String {
         switch self {
         case .application: return "macwindow"
@@ -70,9 +68,7 @@ struct GlobalSettingsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             PaneHeader(
-                title: L10n.string("view.settings"),
-                subtitle: L10n.string("settings.subtitle"),
-                eyebrow: L10n.string("settings.eyebrow")
+                title: L10n.string("view.settings")
             ) {
                 if model.isRunning && section != .application {
                     Pill(text: L10n.string("settings.next_start"), tint: SplashPalette.amber)
@@ -85,7 +81,6 @@ struct GlobalSettingsPane: View {
                             .font(.system(size: 12, weight: .semibold))
                     }
                     .buttonStyle(.bordered)
-                    .help(L10n.string("settings.reset.help"))
                 }
             }
 
@@ -129,8 +124,6 @@ struct GlobalSettingsPane: View {
                 model.restoreDefaultGlobalSettings()
             }
             Button(L10n.string("config.cancel"), role: .cancel) {}
-        } message: {
-            Text(L10n.string("settings.reset.message"))
         }
     }
 
@@ -156,11 +149,6 @@ struct GlobalSettingsPane: View {
 
             Spacer(minLength: 10)
 
-            Text(L10n.string("settings.hint"))
-                .font(.system(size: 10))
-                .foregroundStyle(SplashPalette.faint)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 9)
         }
         .padding(12)
         .frame(width: 226, alignment: .top)
@@ -185,10 +173,6 @@ struct GlobalSettingsPane: View {
                 Text(section.title)
                     .font(.system(size: 19, weight: .bold, design: .rounded))
                     .tracking(-0.2)
-                Text(section.summary)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(SplashPalette.muted)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
@@ -201,7 +185,6 @@ struct GlobalSettingsPane: View {
         case .connection:
             VStack(alignment: .leading, spacing: 14) {
                 endpointCard
-                endpointNote
             }
         case .access:
             VStack(alignment: .leading, spacing: 14) {
@@ -282,11 +265,6 @@ struct GlobalSettingsPane: View {
                     )
                 }
                 rowDivider
-                Text(L10n.string("download.source.help"))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(SplashPalette.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.vertical, 7)
             }
         }
         .onChange(of: model.source) { _, _ in model.saveSource() }
@@ -319,14 +297,6 @@ struct GlobalSettingsPane: View {
                 FieldColumn(title: L10n.string("field.allowed_origins"), help: L10n.string("help.allowed_origins")) {
                     EditorField(text: $model.global.allowedOrigins, prompt: "tauri://localhost")
                 }
-            }
-        }
-    }
-
-    private var endpointNote: some View {
-        Group {
-            if model.global.lanAccess && model.global.apiKey.isEmpty {
-                EditorNote(text: L10n.string("help.lan_access.no_key"))
             }
         }
     }
@@ -564,10 +534,7 @@ struct GlobalSettingsPane: View {
             HStack(spacing: 0) {
                 ReviewStat(
                     title: L10n.string("field.port"),
-                    value: String(model.global.port),
-                    caption: model.global.lanAccess
-                        ? L10n.string("config.review.lan")
-                        : L10n.string("config.review.local")
+                    value: String(model.global.port)
                 )
                 reviewDivider
                 ReviewStat(
@@ -581,8 +548,7 @@ struct GlobalSettingsPane: View {
                     title: L10n.string("field.disk_cache"),
                     value: model.global.diskCache
                         ? L10n.string("settings.review.on")
-                        : L10n.string("settings.review.off"),
-                    caption: model.global.diskCache ? model.global.maxCacheDisk : nil
+                        : L10n.string("settings.review.off")
                 )
             }
             .padding(.top, 7)

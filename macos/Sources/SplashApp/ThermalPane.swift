@@ -124,9 +124,7 @@ struct ThermalPane: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 PaneHeader(
-                    title: L10n.string("view.thermal"),
-                    subtitle: L10n.string("thermal.subtitle"),
-                    eyebrow: L10n.string("thermal.eyebrow")
+                    title: L10n.string("view.thermal")
                 )
                 ladder
                 if model.live.updated {
@@ -135,7 +133,6 @@ struct ThermalPane: View {
                 } else {
                     PaneEmpty(
                         title: L10n.string("thermal.empty.title"),
-                        message: L10n.string("thermal.empty.description"),
                         systemImage: "fan",
                         actionTitle: model.canStart ? L10n.string("start") : nil,
                         action: model.canStart ? { model.start() } : nil
@@ -187,9 +184,6 @@ struct ThermalPane: View {
             } else if model.thermalRung == .fixed {
                 fixedLevelRow
             }
-            Text(costLine())
-                .font(.callout)
-                .foregroundStyle(.secondary)
             HStack(spacing: 6) {
                 Image(systemName: running ? "bolt.fill" : "moon.zzz.fill")
                     .font(.caption)
@@ -259,21 +253,6 @@ struct ThermalPane: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
-    }
-
-    /// The price of the mode in effect, which while a server runs is the one
-    /// the engine holds: a server started elsewhere, or a change made through
-    /// the CLI, need not be the mode the app would start. `smart` has no fixed
-    /// price: it is whatever the fans and temperatures ask for.
-    private func costLine() -> String {
-        if model.thermalRung == .smart {
-            return L10n.string("thermal.cost.smart")
-        }
-        let duty = model.live.updated
-            ? model.engineDutyPercent
-            : (model.thermalRung == .fixed ? model.fixedLevel.duty : model.thermalRung.duty)
-        guard let duty, duty < 100 else { return L10n.string("thermal.cost.full") }
-        return L10n.format("thermal.cost.paced", 100 / duty)
     }
 
     /// The duty a mode carries in effect, for its button's label: the mode's
@@ -461,7 +440,6 @@ private struct RungButton: View {
             )
         }
         .buttonStyle(.plain)
-        .help(helpText)
     }
 
     private var dutyLabel: String {
@@ -469,8 +447,4 @@ private struct RungButton: View {
         return "\(Int(duty))%"
     }
 
-    private var helpText: String {
-        guard let duty else { return L10n.string("thermal.rung.help.smart") }
-        return L10n.format("thermal.rung.help", Int(duty))
-    }
 }

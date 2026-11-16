@@ -24,7 +24,6 @@ struct LivePane: View {
                     if !live.updated {
                         PaneEmpty(
                             title: L10n.string("live.empty.title"),
-                            message: L10n.string("live.empty.description"),
                             systemImage: "waveform.path.ecg",
                             actionTitle: model.canStart ? L10n.string("start") : nil,
                             action: model.canStart ? { model.start() } : nil
@@ -59,8 +58,6 @@ struct LivePane: View {
 
         var id: String { rawValue }
         var title: String { L10n.string("live.tab.\(rawValue)") }
-        var summary: String { L10n.string("live.tab.\(rawValue).help") }
-
         var systemImage: String {
             switch self {
             case .overview: return "rectangle.grid.2x2.fill"
@@ -91,7 +88,6 @@ struct LivePane: View {
                 ) {
                     withAnimation(.easeOut(duration: 0.16)) { tab = item }
                 }
-                .help(item.summary)
             }
             Spacer(minLength: 0)
         }
@@ -116,8 +112,7 @@ struct LivePane: View {
                 }
                 .frame(height: 212)
                 ClientsPanel(
-                    clients: model.connectedClients,
-                    endpoint: model.apiBaseURL
+                    clients: model.connectedClients
                 ) {
                     model.refreshConnectedClients()
                 }
@@ -229,9 +224,7 @@ struct LivePane: View {
     /// timestamp costs one small re-render, not the board under it.
     private func header(_ live: LiveStatus) -> some View {
         PaneHeader(
-            title: L10n.string("view.live"),
-            subtitle: L10n.string("live.subtitle"),
-            eyebrow: L10n.string("live.eyebrow")
+            title: L10n.string("view.live")
         ) {
             if live.updated {
                 LiveStageBadge(stage: model.stage, pollAt: { model.statusUpdatedAt })

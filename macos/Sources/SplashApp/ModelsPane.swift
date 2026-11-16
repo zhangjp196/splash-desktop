@@ -14,9 +14,7 @@ struct ModelsPane: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 PaneHeader(
-                    title: L10n.string("view.models"),
-                    subtitle: subtitle,
-                    eyebrow: L10n.string("models.eyebrow")
+                    title: L10n.string("view.models")
                 ) {
                     Button {
                         downloader.reset()
@@ -39,7 +37,7 @@ struct ModelsPane: View {
                     runningCard
                 }
                 if model.configs.isEmpty {
-                    EmptyHint(L10n.string("models.empty.configs"))
+                    EmptyView()
                 } else {
                     LazyVGrid(
                         columns: [GridItem(.adaptive(minimum: 164, maximum: 196),
@@ -92,8 +90,6 @@ struct ModelsPane: View {
         ) { config in
             Button(L10n.string("config.cancel"), role: .cancel) { pendingRemoval = nil }
             Button(L10n.string("models.remove"), role: .destructive) { model.removeConfig(config) }
-        } message: { config in
-            Text(verbatim: L10n.format("models.remove.message", config.displayName))
         }
     }
 
@@ -160,7 +156,6 @@ struct ModelsPane: View {
                     .font(.system(size: 10.5))
             }
             .buttonStyle(.borderless)
-            .help(L10n.string("menu.copy_api"))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
@@ -180,11 +175,6 @@ struct ModelsPane: View {
         return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .memory)
     }
 
-    private var subtitle: String {
-        model.configs.isEmpty
-            ? L10n.string("models.empty.subtitle")
-            : L10n.format("models.count", model.configs.count)
-    }
 }
 
 /// A saved configuration, as a rectangle: the icon and the kind inside, the
@@ -276,7 +266,6 @@ private struct ConfigTile: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help(L10n.string("models.edit"))
                     }
                 }
                 Spacer(minLength: 0)
@@ -306,9 +295,6 @@ private struct ConfigTile: View {
             .lineLimit(1)
         }
         .frame(maxWidth: .infinity)
-        .help(config.settings.modelMode == .local
-              ? config.settings.modelDirectory
-              : config.settings.modelID)
     }
 
     private var fill: AnyShapeStyle {
@@ -368,8 +354,7 @@ private struct ConfigTile: View {
     }
 }
 
-/// The configuration editor: a name, the model settings form, and a summary of
-/// what saving will start, in one sheet. Each instance owns an independent
+/// The configuration editor: a name and the model settings form, in one sheet. Each instance owns an independent
 /// draft, so editing one configuration never bleeds into another.
 private struct ConfigEditor: View {
     let isNew: Bool
@@ -405,13 +390,6 @@ private struct ConfigEditor: View {
     }
 
     private var hasChanges: Bool { draft != original }
-
-    private var summary: String {
-        let mode = draft.settings.modelMode == .local
-            ? L10n.string("mode.local.short")
-            : L10n.string("mode.upstream.short")
-        return "\(mode) · \(draft.settings.kvFormat.uppercased()) · \(L10n.string("speculation.\(draft.settings.speculation)"))"
-    }
 
     var body: some View {
         ZStack {
@@ -524,10 +502,6 @@ private struct ConfigEditor: View {
                 Text(verbatim: draft.displayName)
                     .font(.system(size: 11.5, weight: .semibold))
                     .lineLimit(1)
-                Text(verbatim: summary)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(SplashPalette.muted)
-                    .lineLimit(1)
             }
 
             Spacer(minLength: 12)
@@ -572,32 +546,6 @@ private struct EditingConfig: Identifiable {
 
 /// A placeholder for the empty configuration list: dashed, quiet, and the
 /// same shape as the cards that replace it.
-private struct EmptyHint: View {
-    let text: String
-
-    init(_ text: String) { self.text = text }
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "square.stack.3d.up")
-                .font(.system(size: 22, weight: .light))
-                .foregroundStyle(.tertiary)
-            Text(text)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 30)
-        .background(.quaternary.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardRadius)
-                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
-                .foregroundStyle(.separator)
-        )
-    }
-}
-
 
 /// One number in the running card: a quiet label and a figure big enough to
 /// read across the desk.

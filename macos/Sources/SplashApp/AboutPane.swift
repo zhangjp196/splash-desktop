@@ -29,7 +29,6 @@ struct AboutPane: View {
                         tint: SplashPalette.mint
                     )
                 }
-                footer
             }
             .padding(Theme.pagePadding)
             .frame(maxWidth: 760, alignment: .leading)
@@ -66,54 +65,15 @@ struct AboutPane: View {
                         if let version {
                             Pill(text: version, tint: SplashPalette.cyan)
                         }
-                        Pill(text: L10n.string("about.badge"), tint: SplashPalette.mint)
                     }
                 }
                 Spacer(minLength: 0)
             }
 
-            Text(L10n.string("about.description"))
-                .font(.system(size: 13))
-                .foregroundStyle(SplashPalette.muted)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 8) {
-                feature("bolt.fill", L10n.string("about.feature.speed"), SplashPalette.amber)
-                feature("memorychip.fill", L10n.string("about.feature.memory"), SplashPalette.mint)
-                feature("lock.shield.fill", L10n.string("about.feature.local"), SplashPalette.violet)
-            }
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassPanel(tint: SplashPalette.blue, raised: true)
-    }
-
-    private func feature(_ icon: String, _ text: String, _ tint: Color) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(tint)
-            Text(text)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(SplashPalette.muted)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(SplashPalette.surface.opacity(0.45), in: Capsule())
-        .overlay(Capsule().strokeBorder(SplashPalette.border.opacity(0.4), lineWidth: 0.7))
-    }
-
-    private var footer: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "heart.fill")
-                .font(.system(size: 9))
-                .foregroundStyle(SplashPalette.rose)
-            Text(L10n.string("about.footer"))
-                .font(.system(size: 10))
-                .foregroundStyle(SplashPalette.faint)
-        }
-        .padding(.top, 4)
     }
 
     private var version: String? {
@@ -163,6 +123,5 @@ struct AboutPane: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(destination.absoluteString)
     }
 }
