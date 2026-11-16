@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -81,15 +81,20 @@ pub fn prepare_local_with_draft(
         }
     }
     let family = model_check(engine, vision_format, &config_path, draft_config.as_deref())?;
+    let tied_head = materialize_tied_head(&config_path, &target_weights, models_root)?;
+    let assembly_config = tied_head.as_ref().map_or(&config_path, |(config, _)| config);
 
     let mut files = BTreeMap::new();
-    files.insert("config.json".to_owned(), config_path.clone());
-    files.insert("target/config.json".to_owned(), config_path.clone());
-    files.insert("tokenizer/config.json".to_owned(), config_path.clone());
+    files.insert("config.json".to_owned(), assembly_config.clone());
+    files.insert("target/config.json".to_owned(), assembly_config.clone());
+    files.insert("tokenizer/config.json".to_owned(), assembly_config.clone());
     for path in &target_weights {
         let name = path.file_name().and_then(|name| name.to_str())
             .ok_or("local MLX checkpoint has an invalid shard filename")?;
         files.insert(format!("target/{name}"), path.clone());
+    }
+    if let Some((_, shard)) = tied_head.as_ref() {
+        files.insert("target/tied-lm-head.safetensors".to_owned(), shard.clone());
     }
     for name in TOKENIZER_FILES {
         let path = target_dir.join(name);
@@ -98,7 +103,7 @@ pub fn prepare_local_with_draft(
         }
     }
     if vision_format == "safetensors" {
-        files.insert("vision/config.json".to_owned(), config_path.clone());
+        files.insert("vision/config.json".to_owned(), assembly_config.clone());
         for path in &vision_weights {
             let name = path.file_name().and_then(|name| name.to_str())
                 .ok_or("local MLX vision checkpoint has an invalid shard filename")?;
@@ -140,6 +145,147 @@ pub fn prepare_local_with_draft(
         })
     };
     crate::assembly::publish(models_root, record, &files)
+}
+
+#[derive(Clone)]
+struct TensorSource {
+    path: PathBuf,
+    payload_offset: u64,
+    bytes: u64,
+    dtype: String,
+    shape: Value,
+}
+
+/// Materialize the tied input embedding as the separate output projection the
+/// native weight planner expects. Keep the user's checkpoint untouched and
+/// link the generated shard into this local assembly, like install/tied.py.
+fn materialize_tied_head(
+    config_path: &Path,
+    shards: &[PathBuf],
+    models_root: &Path,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let mut config = read_json(config_path, "model config")?;
+    let tied = config.get("tie_word_embeddings").and_then(Value::as_bool).unwrap_or(false)
+        || config.get("text_config").and_then(|text| text.get("tie_word_embeddings"))
+            .and_then(Value::as_bool).unwrap_or(false);
+    if !tied { return Ok(None); }
+    if shards.is_empty() { return Err("a tied MLX checkpoint has no safetensors shard".into()); }
+
+    if let Some(text) = config.get_mut("text_config").and_then(Value::as_object_mut) {
+        text.insert("tie_word_embeddings".to_owned(), Value::Bool(false));
+    }
+    if let Some(root) = config.as_object_mut() {
+        root.insert("tie_word_embeddings".to_owned(), Value::Bool(false));
+    }
+    let encoded_config = serde_json::to_vec(&config)
+        .map_err(|error| format!("cannot encode untied MLX config: {error}"))?;
+    let key = &crate::support::sha256::hex_digest(&encoded_config)[..16];
+    let directory = models_root.join(".metadata").join(format!("tied-{key}"));
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("cannot create tied-head metadata directory: {error}"))?;
+    let prepared_config = directory.join("config.json");
+    fs::write(&prepared_config, encoded_config)
+        .map_err(|error| format!("cannot write tied-head model config: {error}"))?;
+
+    let mut sources = Vec::new();
+    let mut header = serde_json::Map::new();
+    let mut offset = 0u64;
+    for suffix in ["weight", "scales", "biases"] {
+        let source_name = format!("language_model.model.embed_tokens.{suffix}");
+        let source = find_tensor_source(shards, &source_name)?
+            .ok_or_else(|| format!("a tied checkpoint has no embed_tokens.{suffix}"))?;
+        let end = offset.checked_add(source.bytes)
+            .ok_or("tied embedding tensor size overflow")?;
+        header.insert(format!("language_model.lm_head.{suffix}"), serde_json::json!({
+            "dtype": source.dtype,
+            "shape": source.shape,
+            "data_offsets": [offset, end],
+        }));
+        offset = end;
+        sources.push(source);
+    }
+    let mut encoded_header = serde_json::to_vec(&Value::Object(header))
+        .map_err(|error| format!("cannot encode tied-head safetensors header: {error}"))?;
+    let padded = (encoded_header.len() + 7) & !7;
+    encoded_header.resize(padded, b' ');
+
+    let prepared_shard = directory.join("tied-lm-head.safetensors");
+    let temporary = directory.join(format!(".tied-lm-head-{}.tmp", std::process::id()));
+    let write_result = (|| {
+        let mut destination = File::create(&temporary)
+            .map_err(|error| format!("cannot create tied-head safetensors: {error}"))?;
+        destination.write_all(&(encoded_header.len() as u64).to_le_bytes())
+            .and_then(|_| destination.write_all(&encoded_header))
+            .map_err(|error| format!("cannot write tied-head safetensors header: {error}"))?;
+        for source in &sources {
+            let mut file = File::open(&source.path)
+                .map_err(|error| format!("cannot read tied embedding shard: {error}"))?;
+            file.seek(SeekFrom::Start(source.payload_offset))
+                .map_err(|error| format!("cannot seek to tied embedding tensor: {error}"))?;
+            let copied = std::io::copy(&mut file.take(source.bytes), &mut destination)
+                .map_err(|error| format!("cannot copy tied embedding tensor: {error}"))?;
+            if copied != source.bytes {
+                return Err("truncated tied embedding tensor".into());
+            }
+        }
+        destination.sync_all()
+            .map_err(|error| format!("cannot flush tied-head safetensors: {error}"))?;
+        fs::rename(&temporary, &prepared_shard)
+            .map_err(|error| format!("cannot publish tied-head safetensors: {error}"))
+    })();
+    if write_result.is_err() { let _ = fs::remove_file(&temporary); }
+    write_result?;
+    Ok(Some((prepared_config, prepared_shard)))
+}
+
+fn find_tensor_source(shards: &[PathBuf], name: &str) -> Result<Option<TensorSource>, String> {
+    for path in shards {
+        let mut file = File::open(path)
+            .map_err(|error| format!("cannot inspect safetensors shard {}: {error}", path.display()))?;
+        let file_bytes = file.metadata()
+            .map_err(|error| format!("cannot inspect safetensors shard {}: {error}", path.display()))?.len();
+        let mut length = [0u8; 8];
+        file.read_exact(&mut length)
+            .map_err(|error| format!("invalid safetensors header in {}: {error}", path.display()))?;
+        let header_bytes = u64::from_le_bytes(length);
+        if !(2..=MAX_HEADER_BYTES).contains(&header_bytes) || header_bytes + 8 > file_bytes {
+            return Err(format!("invalid safetensors header length in {}", path.display()));
+        }
+        let mut encoded_header = vec![0u8; header_bytes as usize];
+        file.read_exact(&mut encoded_header)
+            .map_err(|error| format!("truncated safetensors header in {}: {error}", path.display()))?;
+        let header: Value = serde_json::from_slice(&encoded_header)
+            .map_err(|error| format!("invalid safetensors header in {}: {error}", path.display()))?;
+        let Some(entry) = header.get(name) else { continue; };
+        let dtype = entry.get("dtype").and_then(Value::as_str)
+            .ok_or_else(|| format!("invalid safetensors dtype for {name}"))?.to_owned();
+        let shape = entry.get("shape").and_then(Value::as_array)
+            .ok_or_else(|| format!("invalid safetensors shape for {name}"))?;
+        let elements = shape.iter().try_fold(1u64, |size, dimension| {
+            dimension.as_u64().and_then(|dimension| size.checked_mul(dimension))
+        }).ok_or_else(|| format!("invalid or oversized safetensors shape for {name}"))?;
+        let expected = elements.checked_mul(safetensors_dtype_width(&dtype)
+            .ok_or_else(|| format!("unsupported safetensors dtype {dtype}: {name}"))?)
+            .ok_or_else(|| format!("oversized safetensors tensor: {name}"))?;
+        let offsets = entry.get("data_offsets").and_then(Value::as_array)
+            .filter(|offsets| offsets.len() == 2)
+            .ok_or_else(|| format!("invalid safetensors offsets for {name}"))?;
+        let start = offsets[0].as_u64().ok_or_else(|| format!("invalid safetensors offsets for {name}"))?;
+        let end = offsets[1].as_u64().ok_or_else(|| format!("invalid safetensors offsets for {name}"))?;
+        let data_offset = 8 + header_bytes;
+        let data_bytes = file_bytes - data_offset;
+        if end < start || end > data_bytes || end - start != expected {
+            return Err(format!("invalid safetensors payload for {name}"));
+        }
+        return Ok(Some(TensorSource {
+            path: path.clone(),
+            payload_offset: data_offset + start,
+            bytes: end - start,
+            dtype,
+            shape: Value::Array(shape.clone()),
+        }));
+    }
+    Ok(None)
 }
 
 fn read_json(path: &Path, description: &str) -> Result<Value, String> {
