@@ -361,6 +361,9 @@
 "chat.restoring" = "正在恢复模型…";
 "chat.cleared" = "历史已清空";
 "chat.undo" = "撤销";
+"chat.load_failed.title" = "聊天页面没能加载";
+"chat.load_failed.retry" = "重试";
+"chat.load_failed.log" = "打开日志";
 
 // 仪表盘外壳：外观、命令面板与实时请求阶段。
 "appearance.title" = "外观";

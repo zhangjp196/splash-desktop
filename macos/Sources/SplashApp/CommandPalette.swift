@@ -17,6 +17,8 @@ extension Notification.Name {
     /// A short confirmation shown at the bottom of the window, such as a
     /// copied API address. The object is the already-localized message.
     static let splashToast = Notification.Name("splash.toast")
+    /// Asks the window to open the server's log, from a pane that needs it.
+    static let showLog = Notification.Name("splash.show-log")
 }
 
 /// The ⌘K palette: a quick way to move between pages and run the server's

@@ -165,6 +165,12 @@ pub fn normalize_responses_input(
             let Some(arguments) = map.get("arguments").and_then(|a| a.as_str()) else {
                 return Err(bad("function_call arguments must be JSON text"));
             };
+            // A call the server made inside a namespace goes back to the
+            // engine under the alias it was generated as.
+            let name = match map.get("namespace").and_then(|n| n.as_str()) {
+                Some(namespace) => &namespace_alias(namespace, name)?,
+                None => name,
+            };
             let current = pending.get_or_insert_with(|| json!({"role": "assistant", "content": ""}));
             current["tool_calls"]
                 .as_array_mut()
@@ -464,6 +470,16 @@ impl ResponseStore {
         self.entries.lock().expect("response store lock").pop(&id.to_owned()).is_some()
     }
 
+}
+
+/// The history a stored response keeps: the items it was given followed by
+/// the output it produced. A continuation replays both, so the next turn
+/// sees what the assistant said and which calls it made; keeping only the
+/// input would drop that turn's answer from the prompt.
+pub fn history_with_output(items: &[Value], output: &[Value]) -> Vec<Value> {
+    let mut history = items.to_vec();
+    history.extend(output.iter().cloned());
+    history
 }
 
 /// Convert the generated Chat choice into ordered Responses output items.
@@ -821,7 +837,8 @@ impl ResponsesStreamState {
         ).map_err(|error| error.to_string())?;
         if self.store_enabled {
             let id = response["id"].as_str().unwrap_or_default().to_owned();
-            self.response_store.put(id, response.clone(), self.history.clone());
+            let history = history_with_output(&self.history, &response["output"].as_array().cloned().unwrap_or_default());
+            self.response_store.put(id, response.clone(), history);
         }
         self.emit(events, &format!("response.{status}"), json!({"response":response}));
         Ok(())

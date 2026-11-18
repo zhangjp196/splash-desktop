@@ -14,4 +14,4 @@ pub mod server;
 pub mod stream;
 
 pub use pipeline::Pipeline;
-pub use server::Server;
+pub use server::{RecoveryListener, Server};

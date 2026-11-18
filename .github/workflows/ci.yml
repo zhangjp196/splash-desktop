@@ -69,6 +69,17 @@ jobs:
           actual=$(.venv/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
           test "$actual" = "${{ matrix.python-version }}"
 
+  macos-desktop:
+    name: macOS desktop build and settings selfcheck
+    runs-on: blacksmith-6vcpu-macos-27
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the desktop app
+        run: swift build --package-path macos
+      - name: Check settings persistence
+        run: macos/.build/debug/SplashDesktop --selfcheck-settings
+
   rust-server:
     name: Rust server compatibility suite
     runs-on: blacksmith-6vcpu-macos-27

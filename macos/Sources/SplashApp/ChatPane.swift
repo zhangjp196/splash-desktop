@@ -18,8 +18,19 @@ final class ChatBridge: ObservableObject {
     @Published private(set) var activeID: String?
     @Published private(set) var running = false
     @Published private(set) var canUndo = false
+    /// Why the embedded page is not showing, when a load gave up: the pane
+    /// offers a retry and the log instead of leaving a blank surface.
+    @Published private(set) var loadFailure: String?
 
     weak var webView: WKWebView?
+
+    func loading() {
+        if loadFailure != nil { loadFailure = nil }
+    }
+
+    func failed(_ message: String) {
+        loadFailure = message
+    }
 
     func apply(_ payload: [String: Any]) {
         guard payload["type"] as? String == "state" else { return }
@@ -140,7 +151,10 @@ struct ChatPane: View {
         .background(Color.clear)
         .animation(.easeOut(duration: 0.16), value: undoVisible)
         .onChange(of: model.phase) { _, phase in
-            if phase == .ready { reloadToken += 1 }
+            if phase == .ready {
+                bridge.loading()
+                reloadToken += 1
+            }
         }
         .onChange(of: bridge.canUndo) { _, canUndo in
             undoVisible = canUndo
@@ -217,14 +231,64 @@ struct ChatPane: View {
         .background(Color.green.opacity(0.09))
     }
 
+    /// A page that could not load: the reason, one way to try again, and the
+    /// server's log where the cause usually is. A blank pane that only tries
+    /// silently leaves the user with nothing to act on.
+    private func loadFailure(_ message: String) -> some View {
+        VStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(SplashPalette.amber.opacity(0.16))
+                    .frame(width: 64, height: 64)
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 25, weight: .light))
+                    .foregroundStyle(SplashPalette.amber)
+            }
+            Text(L10n.string("chat.load_failed.title"))
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .frame(maxWidth: 340)
+            HStack(spacing: 8) {
+                Button {
+                    bridge.loading()
+                    reloadToken += 1
+                } label: {
+                    Text(L10n.string("chat.load_failed.retry"))
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 7)
+                        .background(SplashPalette.accentFill, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                Button(L10n.string("chat.load_failed.log")) {
+                    NotificationCenter.default.post(name: .showLog, object: nil)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(SplashPalette.cyan)
+            }
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     @ViewBuilder private var content: some View {
         if model.phase == .ready, let url = model.chatEmbedURL {
-            WebChat(
-                url: url,
-                reloadToken: reloadToken,
-                bridge: bridge,
-                dark: colorScheme == .dark
-            )
+            if let failure = bridge.loadFailure {
+                loadFailure(failure)
+            } else {
+                WebChat(
+                    url: url,
+                    reloadToken: reloadToken,
+                    bridge: bridge,
+                    dark: colorScheme == .dark
+                )
+            }
         } else if model.phase == .starting || model.phase == .stopping {
             VStack(spacing: 10) {
                 ProgressView()
@@ -292,6 +356,10 @@ private struct WebChat: NSViewRepresentable {
                 || context.coordinator.loadedToken != reloadToken else { return }
         context.coordinator.loadedURL = url
         context.coordinator.loadedToken = reloadToken
+        // A new load, from a retry or a restarted server, gets the full
+        // retry budget: the previous attempt's failures are spent.
+        context.coordinator.retries = 0
+        context.coordinator.failure = nil
         view.load(URLRequest(url: url))
     }
 
@@ -308,6 +376,8 @@ private struct WebChat: NSViewRepresentable {
         /// The server may still be opening its port when the first request
         /// goes out; two quiet retries turn a blank pane into the page.
         var retries = 0
+        /// The last load error the retries could not clear.
+        var failure: String?
 
         init(bridge: ChatBridge) {
             self.bridge = bridge
@@ -323,6 +393,8 @@ private struct WebChat: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             retries = 0
+            failure = nil
+            bridge.loading()
         }
 
         func webView(
@@ -330,15 +402,21 @@ private struct WebChat: NSViewRepresentable {
             didFailProvisionalNavigation navigation: WKNavigation!,
             withError error: Error
         ) {
-            retry(webView)
+            retry(webView, error: error)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            retry(webView)
+            retry(webView, error: error)
         }
 
-        private func retry(_ webView: WKWebView) {
-            guard retries < 2, let url = loadedURL else { return }
+        private func retry(_ webView: WKWebView, error: Error) {
+            failure = error.localizedDescription
+            guard retries < 2, let url = loadedURL else {
+                // Every attempt failed: say why, so the pane is not a blank
+                // surface the user has to guess about.
+                bridge.failed(failure ?? error.localizedDescription)
+                return
+            }
             retries += 1
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak webView] in
                 webView?.load(URLRequest(url: url))

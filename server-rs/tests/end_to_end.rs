@@ -1990,3 +1990,149 @@ fn a_constrained_request_generates_under_a_token_mask() {
     let the = tokenizer.encode("The", false).expect("encodes")[0];
     assert!(!allowed(1, the), "plain text cannot follow the call's opening");
 }
+
+/// The prompts the engine was asked to continue, decoded: what a
+/// continuation actually carries from the turn before.
+fn fake_engine_recording_prompts(
+    mut stream: UnixStream,
+    answer: &'static str,
+    report: std::sync::mpsc::Sender<String>,
+) {
+    let ready = wire_event(&json!({
+        "frame_type": 0x0100,
+        "max_concurrent_requests": 4,
+        "max_context_tokens": 524288,
+        "vision": false,
+    }));
+    let _ = stream.write_all(&ready);
+    let tokenizer = FastTokenizer::from_file(&qwen_directory().expect("qwen tokenizer"))
+        .expect("loads tokenizer");
+    loop {
+        let mut header = [0u8; 16];
+        if stream.read_exact(&mut header).is_err() {
+            return;
+        }
+        let raw_type = u16::from_le_bytes([header[6], header[7]]);
+        let payload_bytes = u64::from_le_bytes(header[8..16].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8; payload_bytes];
+        if payload_bytes > 0 {
+            stream.read_exact(&mut payload).expect("engine reads payload");
+        }
+        if raw_type != 0x0001 {
+            continue;
+        }
+        let request_id = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        let prompt_count = u32::from_le_bytes(payload[30..34].try_into().unwrap()) as usize;
+        let mut prompt = Vec::with_capacity(prompt_count);
+        for index in 0..prompt_count {
+            let at = 122 + index * 4;
+            prompt.push(u32::from_le_bytes(payload[at..at + 4].try_into().unwrap()));
+        }
+        let _ = report.send(tokenizer.decode(&prompt, true).expect("decodes prompt"));
+        for event in [
+            json!({"frame_type": 0x0101, "request_id": request_id, "lane": 0,
+                   "matched_prompt_tokens": 0}),
+            json!({"frame_type": 0x0102, "request_id": request_id, "sequence_offset": 0,
+                   "tokens": answer_tokens(answer)}),
+            json!({"frame_type": 0x0104, "request_id": request_id, "reason": 0,
+                   "bounded": false, "prompt_tokens": prompt_count as u32,
+                   "completion_tokens": answer_tokens(answer).len(),
+                   "prefill_micros": 1000, "decode_micros": 2000,
+                   "wall_micros": 3500, "deduplicated_tokens": 0,
+                   "drafted_tokens": 0, "accepted_draft_tokens": 0,
+                   "draft_cycles": 0, "logit_count": 0}),
+        ] {
+            let _ = stream.write_all(&wire_event(&event));
+        }
+    }
+}
+
+/// A continuation replays the turn it continues: `previous_response_id`
+/// must put the assistant's answer and its call back into the next prompt.
+#[test]
+fn a_continuation_carries_the_previous_turns_output() {
+    use splash_server::serve::Server;
+
+    let Some(directory) = qwen_directory() else {
+        eprintln!("no local Qwen tokenizer; skipped");
+        return;
+    };
+    let (engine_side, client_read) = UnixStream::pair().expect("socket pair");
+    let client_write = client_read.try_clone().expect("clone");
+    let (report, prompts) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        fake_engine_recording_prompts(engine_side, "The answer is 42.", report)
+    });
+    let client = EngineClient::over_streams(Box::new(client_read), Box::new(client_write), 8);
+    let format = qwen();
+    let tokenizer = Arc::new(FastTokenizer::from_file(&directory).expect("loads"));
+    let pipeline = pipeline_of(&tokenizer, &directory, &format, client);
+    let server = Server::new(pipeline);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+    let address = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || server.serve(listener));
+
+    let call = |body: Value| -> Value {
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut stream = std::net::TcpStream::connect(&address).expect("connects");
+        write!(stream, "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+        stream.write_all(&bytes).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("reads response");
+        let body = response.split_once("\r\n\r\n").expect("HTTP response").1;
+        if response.contains("Content-Type: text/event-stream") {
+            for frame in body.split("\n\n") {
+                let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) else { continue };
+                let Ok(event) = serde_json::from_str::<Value>(data) else { continue };
+                if event["type"] == "response.completed" {
+                    return event["response"].clone();
+                }
+            }
+            panic!("Responses SSE had no completion event: {response}");
+        }
+        serde_json::from_str(body).expect("JSON body")
+    };
+
+    let first = call(json!({"input": "What is the answer?", "reasoning": {"effort": "none"}}));
+    assert_eq!(first["status"], "completed", "{first}");
+    let id = first["id"].as_str().expect("response id").to_owned();
+    let first_prompt = prompts.recv().expect("first prompt");
+
+    let second = call(json!({"previous_response_id": id, "input": "Continue", "stream": true, "reasoning": {"effort": "none"}}));
+    assert_eq!(second["status"], "completed", "{second}");
+    let continued_prompt = prompts.recv().expect("continued prompt");
+
+    // The first turn's prompt is the question alone; the second turn must
+    // carry both the question and what the assistant answered.
+    assert!(first_prompt.contains("What is the answer?"), "{first_prompt}");
+    assert!(continued_prompt.contains("What is the answer?"), "{continued_prompt}");
+    assert!(
+        continued_prompt.contains("The answer is 42."),
+        "the continuation dropped the previous assistant output: {continued_prompt}"
+    );
+    assert!(continued_prompt.contains("Continue"), "{continued_prompt}");
+
+    // And a streamed response must itself be replayable by the next turn.
+    let third = call(json!({"previous_response_id": second["id"], "input": "One more", "reasoning": {"effort": "none"}}));
+    assert_eq!(third["status"], "completed", "{third}");
+    let streamed_continued_prompt = prompts.recv().expect("streamed continuation prompt");
+    assert!(streamed_continued_prompt.contains("The answer is 42."), "{streamed_continued_prompt}");
+    assert!(streamed_continued_prompt.contains("One more"), "{streamed_continued_prompt}");
+}
+
+/// A stored response fetched by id keeps the output the turn produced, so a
+/// client that re-reads it sees the same items a continuation replays.
+#[test]
+fn a_stored_response_keeps_the_history_it_is_continued_from() {
+    let store = splash_server::dialects::responses::ResponseStore::new();
+    let items = vec![json!({"type": "message", "role": "user", "content": "hi"})];
+    let output = vec![json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello", "annotations": []}]})];
+    let history = splash_server::dialects::responses::history_with_output(&items, &output);
+    assert_eq!(history.len(), 2, "history is the input plus the output");
+    assert_eq!(history[1], output[0]);
+    store.put("resp_x".into(), json!({"id": "resp_x", "output": output}), history);
+    let stored = store.get("resp_x").expect("stored response");
+    assert_eq!(stored.history.len(), 2);
+    assert_eq!(stored.history[1]["type"], "message");
+}

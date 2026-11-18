@@ -145,6 +145,9 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .splashToast)) { note in
             showToast(note.object as? String)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showLog)) { _ in
+            selectionRaw = Section.log.rawValue
+        }
         .animation(.easeOut(duration: 0.16), value: showPalette)
         .frame(minWidth: 810, idealWidth: 990, minHeight: 540, idealHeight: 660)
     }

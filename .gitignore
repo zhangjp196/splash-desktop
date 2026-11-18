@@ -20,3 +20,4 @@ install/download-token
 .dsh-tmp/
 .openchamber/
 .cursor/
+.alma-snapshots

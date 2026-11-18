@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use splash_server::chat_format::{flint, qwen};
 use splash_server::engine::EngineClient;
-use splash_server::serve::{Pipeline, Server};
+use splash_server::serve::{Pipeline, RecoveryListener, Server};
 use splash_server::templates::load_chat_templates;
 use splash_server::tokenization::{FastTokenizer, PromptTokenizer};
 
@@ -502,6 +502,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     };
     serve_record.entered("loading");
+    let mut recovery_listener = Some(RecoveryListener::start(
+        listener.try_clone()?,
+        key.clone(),
+        std::iter::once(host.to_string()).chain(allowed_hosts.iter().cloned()).collect(),
+        allowed_origins.clone(),
+        "engine is loading".into(),
+        (pending as usize).saturating_add(64),
+    )?);
     splash_server::diagnostics::print_status(&format!("Loading · {model}"));
     let tokenizer_directory = path.join("tokenizer");
     let tokenizer = Arc::new(FastTokenizer::from_file(&tokenizer_directory)?);
@@ -625,10 +633,17 @@ fn run() -> Result<(), Box<dyn Error>> {
             if STOP.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let delay = recorded_restart_delay(
+            let delay = match recorded_restart_delay(
                 &mut restart_count, &reason, MAX_ENGINE_RESTARTS, &serve_record,
                 "native engine failed during startup",
-            )?;
+            ) {
+                Ok(delay) => delay,
+                Err(_) => {
+                    if let Some(listener) = &recovery_listener { listener.mark_failed(); }
+                    wait_until_stopped();
+                    return Ok(());
+                }
+            };
             restart_total.fetch_add(1, Ordering::Relaxed);
             if !wait_restart_backoff(delay) {
                 return Ok(());
@@ -640,6 +655,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             splash_server::diagnostics::print_status("Engine restarted");
         }
         serve_record.ready()?;
+        // The normal server takes over the same bound listener once the
+        // engine is ready; until this point the recovery listener answered
+        // requests promptly instead of leaving them queued in the kernel.
+        drop(recovery_listener.take());
         splash_server::diagnostics::print_status(&format!("Ready · {model} · http://{}", listener.local_addr()?));
         let ready_since = Instant::now();
         let monitor_client = engine_client.clone();
@@ -708,13 +727,28 @@ fn run() -> Result<(), Box<dyn Error>> {
             .or_else(|| engine_exited.map(|status| format!("engine exited: {status}")))
             .or_else(|| process_error.map(|error| format!("could not inspect engine process: {error}")))
             .unwrap_or_else(|| "HTTP listener stopped unexpectedly".into());
+        recovery_listener = Some(RecoveryListener::start(
+            listener.try_clone()?,
+            key.clone(),
+            std::iter::once(host.to_string()).chain(allowed_hosts.iter().cloned()).collect(),
+            allowed_origins.clone(),
+            reason.clone(),
+            (pending as usize).saturating_add(64),
+        )?);
         if ready_since.elapsed() >= Duration::from_secs(600) {
             restart_count = 0;
         }
-        let delay = recorded_restart_delay(
+        let delay = match recorded_restart_delay(
             &mut restart_count, &reason, MAX_ENGINE_RESTARTS, &serve_record,
             "native engine failed after restart limit",
-        )?;
+        ) {
+            Ok(delay) => delay,
+            Err(_) => {
+                if let Some(listener) = &recovery_listener { listener.mark_failed(); }
+                wait_until_stopped();
+                return Ok(());
+            }
+        };
         restart_total.fetch_add(1, Ordering::Relaxed);
         if !wait_restart_backoff(delay) {
             return Ok(());
@@ -835,6 +869,12 @@ fn next_restart_delay(
         delay.as_secs_f64(),
     ));
     Ok(delay)
+}
+
+fn wait_until_stopped() {
+    while !STOP.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn wait_restart_backoff(delay: Duration) -> bool {

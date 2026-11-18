@@ -361,6 +361,9 @@
 "chat.restoring" = "Restoring model…";
 "chat.cleared" = "History cleared";
 "chat.undo" = "Undo";
+"chat.load_failed.title" = "The chat page did not load";
+"chat.load_failed.retry" = "Try again";
+"chat.load_failed.log" = "Open Log";
 
 // The dashboard's shell: appearance, the command palette, and the live
 // request lifecycle.

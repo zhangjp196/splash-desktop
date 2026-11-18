@@ -23,6 +23,127 @@ use crate::serve::stream::{stream_callbacks_with_request_log, StreamSink};
 use crate::serve::Pipeline;
 use crate::support::errors::ApiError;
 
+/// Accepts connections while the native engine is loading or restarting.
+/// Dropping it stops and joins the accept loop before the normal server takes
+/// over the same listener.
+pub struct RecoveryListener {
+    stop: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RecoveryListener {
+    pub fn start(
+        listener: TcpListener,
+        key: Option<String>,
+        mut allowed_hosts: Vec<String>,
+        allowed_origins: Vec<AllowedOrigin>,
+        failure: String,
+        connection_limit: usize,
+    ) -> std::io::Result<Self> {
+        listener.set_nonblocking(true)?;
+        for host in ["localhost", "127.0.0.1", "::1"] {
+            if !allowed_hosts.iter().any(|allowed| allowed == host) {
+                allowed_hosts.push(host.to_owned());
+            }
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let thread_failed = failed.clone();
+        let thread = std::thread::spawn(move || {
+            let admission = Arc::new(HttpAdmission::new(connection_limit.max(1)).expect("positive limit"));
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
+                        if !admission.acquire(1) {
+                            let _ = write_response(&mut stream, &Response::error(503, "HTTP connection capacity is exhausted", "frontend_overloaded"));
+                            continue;
+                        }
+                        let admission = admission.clone();
+                        let key = key.clone();
+                        let allowed_hosts = allowed_hosts.clone();
+                        let allowed_origins = allowed_origins.clone();
+                        let failure = failure.clone();
+                        let failed = thread_failed.clone();
+                        std::thread::spawn(move || {
+                            let _slot = RecoveryConnectionSlot(admission);
+                            let _ = serve_recovery_connection(&mut stream, key.as_deref(), &allowed_hosts, &allowed_origins, &failure, &failed);
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self { stop, failed, thread: Some(thread) })
+    }
+
+    /// Keep the listener open but report the terminal engine failure.
+    pub fn mark_failed(&self) {
+        self.failed.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for RecoveryListener {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+    }
+}
+
+struct RecoveryConnectionSlot(Arc<HttpAdmission>);
+impl Drop for RecoveryConnectionSlot {
+    fn drop(&mut self) { let _ = self.0.release(1); }
+}
+
+fn serve_recovery_connection(
+    stream: &mut TcpStream,
+    key: Option<&str>,
+    allowed_hosts: &[String],
+    allowed_origins: &[AllowedOrigin],
+    failure: &str,
+    failed: &AtomicBool,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+    let Some(request) = crate::http::read_request(stream)? else { return Ok(()) };
+    let mut hosts = vec!["localhost".to_owned(), "127.0.0.1".to_owned(), "::1".to_owned()];
+    hosts.extend(allowed_hosts.iter().cloned());
+    let cors_origin = match validate_headers(&request.headers, &hosts, allowed_origins) {
+        Err(error) => return write_response(stream, &Response::json(error.status, &error_payload(error.status, &error.message, &error.code))),
+        Ok(origin) => origin,
+    };
+    if requires_api_key(&request.method, &request.path) {
+        if let Some(key) = key {
+            if let Err(error) = authenticate(&request.headers, key) {
+                return write_response_with_cors(stream, &Response::json(error.status, &error_payload(error.status, &error.message, &error.code)), cors_origin.as_deref());
+            }
+        }
+    }
+    let response = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/health") => Response::json(200, &json!({"status":"ok"})),
+        ("GET", "/ready") => Response::json(503, &json!({"status":"unavailable"})),
+        _ if failed.load(Ordering::Relaxed) => Response::error(500, &format!("engine failed after restart attempts (last failure: {failure})"), "engine_failed"),
+        _ => Response::error(503, &format!("engine is recovering; retry shortly (last failure: {failure})"), "engine_recovering"),
+    };
+    write_response_with_cors(stream, &response, cors_origin.as_deref())
+}
+
+fn error_payload(status: u16, message: &str, code: &str) -> Value {
+    let error_type = match status {
+        401 => "authentication_error",
+        403 => "permission_error",
+        _ if status >= 500 => "server_error",
+        _ => "invalid_request_error",
+    };
+    json!({"error":{"message":message,"type":error_type,"code":code}})
+}
+
 /// The server: the pipeline it serves, listening on one address.
 pub struct Server {
     pipeline: Pipeline,
@@ -870,7 +991,9 @@ fn responses_create(
     };
     if store {
         let id = response.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
-        server.responses.put(id, response.clone(), items);
+        let output = response.get("output").and_then(Value::as_array).cloned().unwrap_or_default();
+        let history = crate::dialects::responses::history_with_output(&items, &output);
+        server.responses.put(id, response.clone(), history);
     }
     Ok(Response::json(200, &response))
 }
@@ -2132,5 +2255,49 @@ mod status_cache_tests {
         assert!(requires_api_key("GET", "/status"));
         assert!(!requires_api_key("GET", "/health"));
         assert!(requires_api_key("POST", "/anything"));
+    }
+
+    #[test]
+    fn recovery_listener_answers_health_readiness_auth_and_generation() {
+        use std::io::{Read, Write};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+        let address = listener.local_addr().unwrap();
+        let recovery = RecoveryListener::start(
+            listener,
+            Some("test-key".into()),
+            vec!["127.0.0.1".into()],
+            Vec::new(),
+            "engine exited: test crash".into(),
+            4,
+        ).expect("recovery listener");
+        let request = |path: &str, auth: Option<&str>, host: &str| {
+            let mut stream = TcpStream::connect(address).expect("connects");
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let method = if matches!(path, "/health" | "/ready") { "GET" } else { "POST" };
+            write!(stream, "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{}Connection: close\r\n\r\n",
+                auth.map(|value| format!("Authorization: Bearer {value}\r\n")).unwrap_or_default()).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        };
+
+        let ready = request("/ready", None, "localhost");
+        assert!(ready.starts_with("HTTP/1.1 503"), "{ready}");
+        let health = request("/health", None, "localhost");
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        let unauthorized = request("/v1/chat/completions", None, "localhost");
+        assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
+        let generation = request("/v1/chat/completions", Some("test-key"), "localhost");
+        assert!(generation.starts_with("HTTP/1.1 503"), "{generation}");
+        assert!(generation.contains("engine_recovering"), "{generation}");
+        assert!(generation.contains("engine exited: test crash"), "{generation}");
+        let forbidden_host = request("/health", None, "evil.example");
+        assert!(forbidden_host.starts_with("HTTP/1.1 403"), "{forbidden_host}");
+        recovery.mark_failed();
+        let failed = request("/v1/chat/completions", Some("test-key"), "localhost");
+        assert!(failed.starts_with("HTTP/1.1 500"), "{failed}");
+        assert!(failed.contains("engine_failed"), "{failed}");
+        drop(recovery);
     }
 }
