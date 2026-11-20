@@ -57,8 +57,20 @@ struct GdnStateLayout final {
   [[nodiscard]] constexpr uint64_t recurrentBytes() const noexcept {
     return uint64_t{layers} * recurrentLayerBytes();
   }
+  // Cached recurrent rows store int8 codes and one bf16 scale per 32 values.
+  [[nodiscard]] constexpr uint64_t cachedRecurrentLayerBytes() const noexcept {
+    const uint64_t rows = uint64_t{recurrentGroups} * recurrentRows;
+    const uint64_t blocks = (recurrentColumns + 31) / 32;
+    return alignUp(rows * recurrentColumns + rows * blocks * bfloat16Bytes);
+  }
+  [[nodiscard]] constexpr uint64_t cachedRecurrentBytes() const noexcept {
+    return uint64_t{layers} * cachedRecurrentLayerBytes();
+  }
   [[nodiscard]] constexpr uint64_t cellBytes() const noexcept {
     return convolutionBytes() + recurrentBytes() + alignUp(auxiliaryBytes);
+  }
+  [[nodiscard]] constexpr uint64_t cachedCellBytes() const noexcept {
+    return convolutionBytes() + cachedRecurrentBytes() + alignUp(auxiliaryBytes);
   }
   // A cell holds every layer's convolution state, then every layer's
   // recurrent state, then the auxiliary state.
@@ -105,8 +117,9 @@ struct DraftStateLayout final {
 
 // A lane holds two GDN cells, its draft rings and their context window; a
 // cached state one GDN cell and the window, from which a restore that needs
-// the rings computes them again. A cell of no bytes takes no memory
-// (QwenGdnCell).
+// the rings computes them again. Cached recurrent state is int8 with one
+// shared bf16 scale per 32 values; live lane state keeps its configured format.
+// A cell of no bytes takes no memory (QwenGdnCell).
 struct CompositeStateLayout final {
   static constexpr uint32_t kLaneGdnCells = 2;
 
@@ -121,7 +134,7 @@ struct CompositeStateLayout final {
            draft.windowBytes();
   }
   [[nodiscard]] constexpr uint64_t cachedBytes() const noexcept {
-    return target.cellBytes() + draft.windowBytes();
+    return target.cachedCellBytes() + draft.windowBytes();
   }
 
   bool operator==(const CompositeStateLayout &) const = default;

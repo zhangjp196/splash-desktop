@@ -25,13 +25,14 @@ struct GdnParityBuffers final {
   metal::MetalBuffer auxiliary;
 };
 
-// A cell of `layout` in `base` (layout.cellBytes()): every layer's
-// convolution state, then every layer's recurrent state, then the auxiliary.
+// A cell of `layout` in `base`: convolution state, recurrent state, then
+// auxiliary. `cached` selects the int8 recurrent layout for snapshot cells.
 [[nodiscard]] GdnParityBuffers gdnCellBuffers(metal::MetalBackend &backend, metal::MetalBuffer base,
-                                              const GdnStateLayout &layout);
+                                              const GdnStateLayout &layout,
+                                              bool cached = false);
 
-// One GDN cell: one buffer of layout.cellBytes() and its views. A cell of no
-// bytes (a target without GDN layers or other state) has no buffer, views
+// One GDN cell: a runtime or encoded-cache buffer and its views. A cell of
+// no bytes (a target without GDN layers or other state) has no buffer, views
 // or memory.
 class QwenGdnCell final {
 public:
@@ -47,7 +48,7 @@ private:
   QwenGdnCell(metal::MetalBackend &backend,
               std::shared_ptr<StateAllocationTracker> tracker,
               GdnStateLayout layout,
-              std::string_view label);
+              std::string_view label, bool cached = false);
 
   std::shared_ptr<StateAllocationTracker> tracker_;
   GdnParityBuffers buffers_;
@@ -94,7 +95,7 @@ struct QwenLaneMetadata final {
 
 class QwenStateStorage;
 
-// One GDN cell plus one context window: the buffers a cached state occupies.
+// One encoded GDN cell plus one context window: a cached state's buffers.
 struct QwenCachedBuffers final {
   std::shared_ptr<QwenGdnCell> gdn;
   std::shared_ptr<DFlashContextWindow> window;
@@ -106,6 +107,7 @@ struct QwenCachedBuffers final {
 // of no bytes (QwenStateStorage) is never pooled.
 struct QwenBufferPool final {
   std::vector<std::shared_ptr<QwenGdnCell>> cells;
+  std::vector<std::shared_ptr<QwenGdnCell>> cachedCells;
   std::vector<std::shared_ptr<DFlashDraftRing>> rings;
   std::vector<std::shared_ptr<DFlashContextWindow>> windows;
   // Cleared when the storage goes away; late returns then just free.
@@ -116,11 +118,16 @@ struct QwenBufferPool final {
     if (cell->buffers().stateBase)
       cells.push_back(std::move(cell));
   }
-  // Takes back the buffers of a cached state.
+  void giveCachedCell(std::shared_ptr<QwenGdnCell> cell) {
+    if (open && cell && cell->buffers().stateBase)
+      cachedCells.push_back(std::move(cell));
+  }
+  // Takes back the encoded cell and window of a cached state.
   void give(QwenCachedBuffers buffers) {
     if (!open)
       return;
-    giveCell(std::move(buffers.gdn));
+    if (buffers.gdn->buffers().stateBase)
+      cachedCells.push_back(std::move(buffers.gdn));
     windows.push_back(std::move(buffers.window));
   }
 };
@@ -147,14 +154,19 @@ public:
   QwenStateReservation(const QwenStateReservation &) = delete;
   QwenStateReservation &operator=(const QwenStateReservation &) = delete;
 
-  // Its buffers until it is sealed.
+  // Its cached buffers until it is sealed.
   [[nodiscard]] const QwenCachedBuffers &buffers() const;
+  // Raw-layout cell written by a prefill capture; ordinary snapshots have
+  // no separate capture cell and use the cached cell directly.
+  [[nodiscard]] const GdnParityBuffers &captureBuffers() const;
 
 private:
-  QwenStateReservation(std::shared_ptr<QwenBufferPool> pool, QwenCachedBuffers buffers);
+  QwenStateReservation(std::shared_ptr<QwenBufferPool> pool, QwenCachedBuffers buffers,
+                       std::shared_ptr<QwenGdnCell> captureCell = {});
 
   std::shared_ptr<QwenBufferPool> pool_;
   QwenCachedBuffers buffers_;
+  std::shared_ptr<QwenGdnCell> captureCell_;
 
   friend class QwenStateStorage;
 };
@@ -274,11 +286,10 @@ public:
   [[nodiscard]] uint32_t idleCells() const noexcept;
   [[nodiscard]] uint32_t idleRings() const noexcept;
   [[nodiscard]] uint32_t idleWindows() const noexcept;
-  // What activating a lane lacks in the idle pool, in cached states: each
-  // holds one GDN cell and one context window, a lane two cells (none of the
-  // pool's when cells have no bytes), a window and the draft rings, which no
-  // cached state holds: without idle rings no number of states makes up the
-  // lack.
+  // Number of cached states' reusable windows needed to satisfy the lane's
+  // window allocation, plus lane GDN cells absent from the runtime-cell pool.
+  // Encoded cache cells cannot serve as runtime GDN cells. Without idle rings
+  // no number of cached states makes up a lane.
   [[nodiscard]] uint32_t statesToActivate() const noexcept;
 
   // Hot-path metadata operations; none performs a buffer copy. A step makes
@@ -305,7 +316,10 @@ public:
   // buffers into the cached state of `lengths`, which leaves the
   // reservation empty.
   [[nodiscard]] std::shared_ptr<QwenStateReservation> reserve(metal::AllocationFailure &refusal);
+  [[nodiscard]] std::shared_ptr<QwenStateReservation>
+  reserveCapture(metal::AllocationFailure &refusal);
   void copyState(uint32_t lane, QwenStateReservation &reservation) const;
+  void copyCapturedState(QwenStateReservation &reservation) const;
   void copyWindow(uint32_t lane, QwenStateReservation &reservation) const;
   [[nodiscard]] std::shared_ptr<const QwenCompositeState>
   seal(QwenStateReservation &reservation, QwenLogicalLengths lengths) const;
@@ -370,9 +384,12 @@ private:
   // from the pool.
   [[nodiscard]] metal::AllocationResult
   acquire(uint32_t cells, bool rings, std::string_view label, Buffers &buffers,
-          uint64_t extraBytes = 0, const std::function<void()> &allocateExtra = {});
+          uint64_t extraBytes = 0, const std::function<void()> &allocateExtra = {},
+          bool cached = false);
   // The bytes of those buffers the pool lacks.
-  [[nodiscard]] uint64_t missingBytes(uint32_t cells, bool rings) const noexcept;
+  [[nodiscard]] uint64_t missingBytes(uint32_t cells, bool rings,
+                                      bool cached = false) const noexcept;
+  [[nodiscard]] std::shared_ptr<QwenGdnCell> acquireCachedCellForRestore();
   void restore(uint32_t lane, const QwenCompositeState &state,
                bool restoreDraftState);
   void restoreLengths(uint32_t lane, QwenLogicalLengths lengths, bool restoreDraft);

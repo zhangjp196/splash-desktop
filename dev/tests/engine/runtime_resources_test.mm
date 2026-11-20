@@ -497,13 +497,12 @@ void testPersistentCacheNamespace() {
               persistentCacheNamespace(identity('a', "build", kv::Format::Int8), states) != name &&
               persistentCacheNamespace(identity('a', "build", kv::Format::Int8), bfloatStates) != name,
           "other models, layouts or state formats shared a cache namespace");
-  // A dense layout's namespace is the one main (be3b083c) names, with FP32
-  // and BF16 states: a change of its lines would leave every 27B's and 35B's
-  // persistent cache cold.
-  require(name == "6365d687c8be103a3bbcc6d2a83b1543" &&
-              persistentCacheNamespace(identity('a', "build", kv::Format::Int8), bfloatStates) ==
+  // Encoded GDN cells must not reuse persistent namespaces written with the
+  // former raw-state payload, while build changes still leave the name stable.
+  require(name != "6365d687c8be103a3bbcc6d2a83b1543" &&
+              persistentCacheNamespace(identity('a', "build", kv::Format::Int8), bfloatStates) !=
                   "172879058b5e2bcc713e129a2b62393a",
-          "a dense layout's cache namespace is not the one main names");
+          "the compressed GDN format reused a raw-state cache namespace");
   // A QSA layout's pages hold token-major values and the index's pooled
   // keys, and its states the PLE history and the index's pending keys.
   RuntimeCacheIdentity tokenMajor = identity('a', "build", kv::Format::Int8), indexed = tokenMajor;

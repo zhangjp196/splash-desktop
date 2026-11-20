@@ -8,6 +8,7 @@
 #include "model/KvBlockCache.hpp"
 #include "model/KvHistoryStream.hpp"
 #include "model/LoopGuard.hpp"
+#include "model/PromptLookup.hpp"
 #include "model/QwenState.hpp"
 #include "model/QwenTarget.hpp"
 #include "model/RuntimeArenas.hpp"
@@ -1677,6 +1678,8 @@ struct Runtime::Impl {
     for (const PrefillStateCapture &capture : captures) {
       if (capture.atEnd)
         states.copyState(entry.stateLane, *capture.reservation);
+      else
+        states.copyCapturedState(*capture.reservation);
       sealed.push_back(holdStraddledRows(entry, capture.lengths.targetTokens,
                                          states.seal(*capture.reservation, capture.lengths)));
     }
@@ -1733,7 +1736,7 @@ struct Runtime::Impl {
     std::vector<QwenTargetStateCapture> inside;
     for (const PrefillStateCapture &capture : captures) {
       if (capture.row == rows) continue;
-      const GdnParityBuffers &cell = capture.reservation->buffers().gdn->buffers();
+      const GdnParityBuffers &cell = capture.reservation->captureBuffers();
       inside.push_back({capture.row, cell.convolutionLayers, cell.recurrentLayers, cell.auxiliary});
     }
     return inside;
@@ -1965,7 +1968,7 @@ struct Runtime::Impl {
           if (!capture.atEnd && capture.row == sequence.part.tokenCount) boundary = &capture;
         const GdnParityBuffers *cell = next;
         if (boundary)
-          cell = &boundary->reservation->buffers().gdn->buffers();
+          cell = &boundary->reservation->captureBuffers();
         else if (after == next)
           cell = prefillArena->groupCell();
         if (!cell) throw std::logic_error("a prefill group has no scratch cell");
@@ -2214,6 +2217,9 @@ struct Runtime::Impl {
          d(DecodeTensor::SamplingUniforms), d(DecodeTensor::ProposedTokens),
          d(DecodeTensor::ProposalProbs), d(DecodeTensor::VerifyConfidence)},
         std::span(anchors).first(lanes), std::span(policies).first(lanes));
+    // Prompt lookup remains a fallback for targets without a DFlash model.
+    // Replacing a trained DFlash proposal chain on every decode step can
+    // increase verify work when the historical continuation is not accepted.
     ops::VerifyRowsModel verify;
     if (verifyBudget && !verifyBudget->explores(lanes, constrained)) {
       const VerifyBudget::Acceptance &acceptance = verifyBudget->acceptance();
@@ -3450,18 +3456,59 @@ Runtime::decodeAsync(const BatchPlan &plan,
                                  {logicalPositions.data(), width},
                                  {maximumRetained.data(), width}, constrained);
   } else {
-    // No draft proposes anything: row 0 of every lane's draft input is its
-    // anchor, and the verify keeps the anchor's own successor alone. The
-    // proposal rows repeat the anchor so no uninitialized token reaches the
-    // target's clamped verify input.
+    // A model without DFlash can still speculate with deterministic
+    // continuations found in its own prompt history. The existing verifier
+    // handles acceptance and correction; a delta q distribution keeps sampled
+    // speculation exact. Sentinel proposals after the lookup chain stop the
+    // acceptance loop while remaining safe for the clamped verify embedding.
     auto *proposed = contents<uint32_t>(
         impl_->decodeArena->batchSlice(DecodeTensor::ProposedTokens, width), "proposed tokens");
     auto *verifyRows = contents<uint32_t>(
         impl_->decodeArena->batchSlice(DecodeTensor::VerifyRows, width), "verify rows");
+    auto *candidates = contents<uint32_t>(
+        impl_->decodeArena->batchSlice(DecodeTensor::Candidates, width), "lookup candidates");
+    auto *proposalProbabilities = contents<float>(
+        impl_->decodeArena->batchSlice(DecodeTensor::ProposalProbs, width), "lookup probabilities");
+    constexpr uint32_t candidateCount = SPLASH_DRAFT_CANDIDATES;
+    constexpr uint32_t proposalCount = SPLASH_DRAFT_PROPOSAL_TOKENS;
     for (uint32_t lane = 0; lane < width; ++lane) {
-      for (uint32_t row = 0; row < kDraftProposalTokens; ++row)
-        proposed[lane * kDraftProposalTokens + row] = *requests[lane]->pendingToken;
-      verifyRows[lane] = 1;
+      Impl::Request &entry = *requests[lane];
+      const uint32_t anchor = *entry.pendingToken;
+      const PromptLookupConfig lookupConfig{};
+      const size_t historyCount = std::min<size_t>(
+          entry.tokens.size(), lookupConfig.maxContextTokens - 1);
+      std::vector<uint32_t> context(
+          entry.tokens.end() - historyCount, entry.tokens.end());
+      context.push_back(anchor);
+      std::vector<uint32_t> lookup =
+          promptLookupProposals(context, lookupConfig);
+      // The no-draft path has no draft-cutoff kernel to replace proposals
+      // with a thinking-end sequence, so leave those cycles on ordinary
+      // target decoding.
+      if (entry.constraint != ConstraintMode::None ||
+          Impl::samplingPolicy(entry).thinkingCutoff)
+        lookup.clear();
+      const uint32_t maximumProposals = std::min(
+          proposalCount, maximumRetained[lane] - 1);
+      if (lookup.size() > maximumProposals) lookup.resize(maximumProposals);
+      const uint32_t count = static_cast<uint32_t>(lookup.size());
+
+      const uint32_t fallbackToken =
+          entry.constraint == ConstraintMode::None
+              ? impl_->geometry.target.vocabularySize
+              : anchor;
+      for (uint32_t row = 0; row < proposalCount; ++row) {
+        const uint32_t token = row < count ? lookup[row] : fallbackToken;
+        proposed[lane * proposalCount + row] = token;
+        const uint64_t candidateBase =
+            (uint64_t{lane} * proposalCount + row) * candidateCount;
+        for (uint32_t candidate = 0; candidate < candidateCount; ++candidate) {
+          candidates[candidateBase + candidate] = candidate ? 0 : token;
+          proposalProbabilities[candidateBase + candidate] =
+              candidate == 0 ? 1.0F : 0.0F;
+        }
+      }
+      verifyRows[lane] = count + 1;
     }
   }
   std::shared_ptr<SpilledKvReads> reads = impl_->decodeReads(items);
@@ -3499,7 +3546,7 @@ std::shared_ptr<StateReservation> Runtime::reserveState(uint64_t requestId, uint
   static_cast<void>(residentLane(requestId));
   if (!tokens || tokens % kv::kPageTokens)
     throw std::invalid_argument("a state boundary is page-aligned");
-  return impl_->states.reserve(refusal);
+  return impl_->states.reserveCapture(refusal);
 }
 
 std::shared_ptr<const CompositeState> Runtime::snapshot(uint64_t requestId) {

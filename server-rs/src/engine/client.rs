@@ -21,7 +21,7 @@ use crate::protocol as wire;
 
 /// How long the engine's loop may leave a status request unanswered before
 /// its engine counts as stuck and fails: far above any legitimate tick.
-pub const STATUS_ANSWER_LIMIT: Duration = Duration::from_secs(30);
+pub const STATUS_ANSWER_LIMIT: Duration = Duration::from_secs(120);
 const LIVENESS_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 const READ_CHUNK_BYTES: usize = 64 * 1024;
@@ -799,12 +799,12 @@ fn liveness_loop(client: EngineClient) {
         // Status is answered by the engine's main loop, so its response
         // distinguishes a live reader thread from a loop stalled in native
         // work. A missing response fails every call in this generation.
-        if client.status(STATUS_ANSWER_LIMIT).is_err() {
+        if let Err(error) = client.status(STATUS_ANSWER_LIMIT) {
             fail_shared(
                 &client.shared,
-                EngineError::EngineUnhealthy(
-                    "native engine did not answer its liveness status request".into(),
-                ),
+                EngineError::EngineUnhealthy(format!(
+                    "native engine did not answer its liveness status request: {error}"
+                )),
             );
             return;
         }

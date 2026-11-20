@@ -2,11 +2,14 @@
 #include "engine/MemoryGovernor.hpp"
 #include "tests/engine/AllocationFailure.hpp"
 #include "model/QwenState.hpp"
+#include "model/GdnStateCodec.hpp"
+#include "tests/engine/LinearNumerics.hpp"
 #include "tests/engine/TestChecks.hpp"
 
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -67,11 +70,15 @@ bool sameBytes(const metal::MetalBuffer &buffer, const std::vector<uint8_t> &ima
          std::memcmp(buffer.contents(), image.data(), image.size()) == 0;
 }
 
-// Every byte of a lane's current state, in the order its disk copy holds
-// them: its current GDN cell and its context window.
+// The exact state regions and context window. Cached recurrent values are
+// lossy by design and have dedicated numeric codec checks below.
 std::vector<std::vector<uint8_t>> stateImage(const model::QwenStateStorage &storage,
                                              uint32_t lane) {
-  return {bytesOf(storage.current(lane).stateBase), bytesOf(storage.window(lane))};
+  const model::CompositeStateLayout layout = storage.layout();
+  std::vector<uint8_t> exact = bytesOf(storage.current(lane).stateBase);
+  std::fill(exact.begin() + layout.target.convolutionBytes(),
+            exact.begin() + layout.target.convolutionBytes() + layout.target.recurrentBytes(), 0);
+  return {std::move(exact), bytesOf(storage.window(lane))};
 }
 
 // The lengths of a lane at `tokens` whose rings and window hold the last
@@ -117,15 +124,17 @@ void testLayoutFormulas() {
                   kStateLayout.laneBytes() ==
               1'424'490'496,
           "four-lane byte formula is wrong");
-  require(kStateLayout.cachedBytes() == 160'038'912,
-          "prefix byte formula is wrong");
+  require(kTargetState.cachedRecurrentLayerBytes() == 835'584 &&
+              kTargetState.cachedCellBytes() == 43'253'760 &&
+              kStateLayout.cachedBytes() == 49'152'000,
+          "compressed prefix byte formula is wrong");
   // A bf16 recurrent state takes half the bytes; the convolution rows keep
   // theirs.
   model::CompositeStateLayout bfloat = kStateLayout;
   bfloat.target.format = ops::GdnStateFormat::BFloat16;
   require(bfloat.target.recurrentLayerBytes() == 1'572'864 &&
               bfloat.target.convolutionBytes() == 3'145'728 &&
-              bfloat.laneBytes() == 205'127'680 && bfloat.cachedBytes() == 84'541'440,
+              bfloat.laneBytes() == 205'127'680 && bfloat.cachedBytes() == 49'152'000,
           "bf16 state byte formula is wrong");
   // A plan without a draft has the target's state alone: the zero draft
   // layout is complete, and no bytes belong to it.
@@ -133,7 +142,7 @@ void testLayoutFormulas() {
   require(noDraft.valid() && noDraft.draft.layers == 0 &&
               noDraft.laneBytes() ==
                   model::CompositeStateLayout::kLaneGdnCells * kTargetState.cellBytes() &&
-              noDraft.cachedBytes() == kTargetState.cellBytes(),
+              noDraft.cachedBytes() == kTargetState.cachedCellBytes(),
           "a state layout without a draft is wrong");
 }
 
@@ -199,8 +208,15 @@ void testOffloadAllocationFailure(metal::MetalBackend &backend) {
 void testDiskRestore(metal::MetalBackend &backend) {
   MemoryGovernor governor(backend, backend.capabilities().recommendedMaxWorkingSetBytes, 1, 1,
                           queryHostMemory, 0);
+  bool allowDecodeCell = true;
+  const metal::AllocationAdmission admission =
+      [base = governor.allocationAdmission(), &allowDecodeCell](
+          uint64_t bytes, const std::function<void()> &allocate) {
+        if (!allowDecodeCell) return metal::AllocationResult{metal::AllocationFailure::EngineBudget};
+        return base(bytes, allocate);
+      };
   model::QwenStateStorage storage(
-      backend, governor.allocationAdmission(), kStateLayout,
+      backend, admission, kStateLayout,
       std::make_shared<model::SlotFile>(kStateSlotBytes,
                                         std::make_shared<model::DiskBudget>(kStateSlotBytes)));
   require(static_cast<bool>(storage.tryActivateLane(0, 123)), "disk source activation failed");
@@ -237,18 +253,24 @@ void testDiskRestore(metal::MetalBackend &backend) {
   require(read && !committed, "disk restore committed before IO was consumed");
   require(finishWhenReady(*read) && committed, "disk restore failed");
   read.reset();
-  require(storage.actualAllocatedBytes() == beforeRestore, "restore allocated a second state");
-  require(stateImage(storage, 0) == images, "disk restore did not reproduce every state byte");
+  require(storage.actualAllocatedBytes() >=
+              beforeRestore + kStateLayout.target.cachedCellBytes(),
+          "disk restore did not retain its budgeted decode cell");
+  require(storage.releaseOneIdle(false) >= kStateLayout.target.cachedCellBytes(),
+          "disk restore did not return its decode cell to the pool");
+  require(stateImage(storage, 0) == images, "disk restore changed exact state regions");
   require(word(gdn.stateBase) == 0x12345678 &&
               storage.metadata(0).lengths.targetTokens == 4096,
           "disk state changed target values or metadata");
   require(word(window) == 0x0c0c0c0c && word(keys) == 0x5a5a5a5a,
           "disk state changed the window, or a restore wrote the rings");
+  allowDecodeCell = false;
   read = storage.beginRestore(0, *disk, false, {}, [] {});
   require(finishWhenReady(*read) && storage.metadata(0).lengths.draftLength == 0 &&
               storage.metadata(0).lengths.draftBase == 4096 &&
               storage.metadata(0).lengths.windowEnd == 4096,
           "skipped draft restore retained stale context");
+  allowDecodeCell = true;
   auto promoted = read->snapshot();
   require(promoted && promoted->residentBytes() == kStateLayout.cachedBytes(),
           "completed disk restore could not create a resident snapshot");
@@ -570,9 +592,9 @@ void testReservations(metal::MetalBackend &backend) {
                 sameBytes(buffers.gdn->buffers().stateBase, cell),
             "copyWindow did not copy the lane's window alone");
     storage.copyState(0, *reservation);
-    require(sameBytes(buffers.gdn->buffers().stateBase, images[0]) &&
+    require(!sameBytes(buffers.gdn->buffers().stateBase, cell) &&
                 sameBytes(buffers.window->buffer(), images[1]),
-            "copyState did not copy the lane's cell and window");
+            "copyState did not encode the lane's cell and copy its window");
 
     // A refused seal leaves the reservation as it was.
     rejects([&] { static_cast<void>(storage.seal(*reservation, {4096, 2048, 2048, 4000})); },
@@ -598,9 +620,10 @@ void testReservations(metal::MetalBackend &backend) {
     read.reset();
     write.reset();
     state.reset();
-    require(storage.idleCells() == 1 && storage.idleWindows() == 1 &&
-                storage.actualAllocatedBytes() == slotted,
-            "a dropped sealed state did not return its slot to the pool once");
+    require(storage.idleCells() == 2 && storage.idleWindows() == 1 &&
+                storage.actualAllocatedBytes() >=
+                    slotted + layout.target.cachedCellBytes(),
+            "a dropped state and its disk decode cell did not return to the pool");
 
     // Another storage's reservation is refused.
     model::QwenStateStorage other(backend, admit, layout, nullptr);
@@ -712,13 +735,220 @@ void testAttentionOnlyTarget(metal::MetalBackend &backend) {
           "an attention-only storage's buffers outlived it");
 }
 
+void testGdnCacheCodec() {
+  constexpr model::GdnStateLayout layout{1, 1, 2, 1, 64, 256,
+                                        ops::GdnStateFormat::Float32, 8};
+  std::vector<std::byte> running(layout.cellBytes(), std::byte{0});
+  std::fill_n(running.begin(), layout.convolutionBytes(), std::byte{0x5a});
+  std::fill_n(running.begin() + layout.convolutionBytes() + layout.recurrentBytes(),
+              layout.auxiliaryBytes, std::byte{0x7b});
+  const uint64_t recurrentOffset = layout.convolutionBytes();
+  for (uint32_t i = 0; i < 256; ++i) {
+    const float value = i < 128 ? float(i + 1) * 0.0001f : float(i - 127) * 0.01f;
+    std::memcpy(running.data() + recurrentOffset + i * sizeof(value), &value, sizeof(value));
+  }
+  std::vector<std::byte> cached(layout.cachedCellBytes());
+  model::encodeCachedGdnState(cached, running, layout);
+  require(cached.size() < running.size(), "cached GDN state did not shrink");
+  const uint64_t scaleOffset = layout.convolutionBytes() + 64 * 256;
+  uint16_t firstScale, secondScale;
+  std::memcpy(&firstScale, cached.data() + scaleOffset, sizeof(firstScale));
+  std::memcpy(&secondScale, cached.data() + scaleOffset + sizeof(firstScale), sizeof(secondScale));
+  require(firstScale != secondScale, "GDN cache scales were not block-local");
+  std::vector<std::byte> decoded(layout.cellBytes());
+  model::decodeCachedGdnState(decoded, cached, layout);
+  for (uint64_t i = 0; i < 256; ++i) {
+    const float original = [&] {
+      float value;
+      std::memcpy(&value, running.data() + recurrentOffset + i * sizeof(value), sizeof(value));
+      return value;
+    }();
+    float value;
+    std::memcpy(&value, decoded.data() + recurrentOffset + i * sizeof(value), sizeof(value));
+    const float tolerance = i < 128 ? 0.0002f : 0.006f;
+    require(std::isfinite(value) && std::fabs(value - original) <= tolerance,
+            "cached GDN quantization exceeded the block's error bound");
+  }
+  std::vector<std::byte> inPlace(layout.cellBytes());
+  std::copy(cached.begin(), cached.end(), inPlace.begin());
+  model::decodeCachedGdnStateInPlace(inPlace, layout);
+  require(inPlace == decoded &&
+              std::equal(running.begin(), running.begin() + layout.convolutionBytes(), decoded.begin()) &&
+              std::equal(running.end() - layout.auxiliaryBytes, running.end(),
+                         decoded.end() - layout.auxiliaryBytes),
+          "GDN cache codec changed exact state regions or restore paths disagree");
+
+  model::GdnStateLayout bf16Layout = layout;
+  bf16Layout.format = ops::GdnStateFormat::BFloat16;
+  std::vector<std::byte> bf16Running(bf16Layout.cellBytes(), std::byte{0});
+  for (uint32_t i = 0; i < 256; ++i) {
+    const uint16_t value = test::floatToBf16(float(i % 128 + 1) * 0.01f);
+    std::memcpy(bf16Running.data() + bf16Layout.convolutionBytes() + i * sizeof(value),
+                &value, sizeof(value));
+  }
+  std::vector<std::byte> bf16Cached(bf16Layout.cachedCellBytes());
+  std::vector<std::byte> bf16Restored(bf16Layout.cellBytes());
+  model::encodeCachedGdnState(bf16Cached, bf16Running, bf16Layout);
+  model::decodeCachedGdnState(bf16Restored, bf16Cached, bf16Layout);
+  for (uint32_t i = 0; i < 256; ++i) {
+    uint16_t original, restored;
+    std::memcpy(&original, bf16Running.data() + bf16Layout.convolutionBytes() + i * sizeof(original),
+                sizeof(original));
+    std::memcpy(&restored, bf16Restored.data() + bf16Layout.convolutionBytes() + i * sizeof(restored),
+                sizeof(restored));
+    require(std::isfinite(test::bf16ToFloat(restored)) &&
+                std::fabs(test::bf16ToFloat(restored) - test::bf16ToFloat(original)) < 0.04f,
+            "bf16 GDN cache roundtrip exceeded its quantization bound");
+  }
+}
+
+void testGpuGdnCacheCodec(metal::MetalBackend &backend) {
+  constexpr model::CompositeStateLayout layout{{1, 1, 2, 1, 64, 256}, {}};
+  MemoryGovernor governor(backend, backend.capabilities().recommendedMaxWorkingSetBytes, 1, 1,
+                          queryHostMemory, 0);
+  model::QwenStateStorage storage(backend, governor.allocationAdmission(), layout, nullptr);
+  require(static_cast<bool>(storage.tryActivateLane(0, 71)) &&
+              static_cast<bool>(storage.tryActivateLane(1, 72)),
+          "GPU codec fixture lanes did not activate");
+  const uint64_t recurrentOffset = layout.target.convolutionBytes();
+  auto *state = static_cast<std::byte *>(storage.current(0).stateBase.contents());
+  for (uint32_t i = 0; i < 64 * 256; ++i) {
+    const float value = i % 256 < 128 ? float(i % 128 + 1) * 0.0001f
+                                      : float(i % 128 + 1) * 0.01f;
+    std::memcpy(state + recurrentOffset + i * sizeof(value), &value, sizeof(value));
+  }
+  const auto raw = bytesOf(storage.current(0).stateBase);
+  std::vector<std::byte> expected(layout.target.cachedCellBytes());
+  model::encodeCachedGdnState(expected,
+      {reinterpret_cast<const std::byte *>(raw.data()), raw.size()}, layout.target);
+  metal::AllocationFailure refusal;
+  auto reservation = storage.reserve(refusal);
+  require(reservation && refusal == metal::AllocationFailure::None,
+          "GPU codec fixture could not reserve a cache cell");
+  storage.copyState(0, *reservation);
+  const auto *actual = static_cast<const std::byte *>(
+      reservation->buffers().gdn->buffers().stateBase.contents());
+  require(std::equal(expected.begin(), expected.end(), actual),
+          "Metal GDN quantizer differs from the reference codec");
+  storage.copyWindow(0, *reservation);
+  auto cached = storage.seal(*reservation, {128, 128, 0, 128});
+  require(!storage.beginRestore(1, *cached, false, {}, [] {}),
+          "GPU cached restore returned asynchronous work");
+  std::vector<std::byte> decoded(layout.target.cellBytes());
+  model::decodeCachedGdnState(decoded, expected, layout.target);
+  const auto *restored = static_cast<const std::byte *>(storage.current(1).stateBase.contents());
+  require(std::equal(decoded.begin(), decoded.end(), restored),
+          "Metal GDN dequantizer differs from the reference codec");
+  cached.reset();
+  storage.releaseLane(0, 71);
+  storage.releaseLane(1, 72);
+}
+
+void testPrefillCaptureCell(metal::MetalBackend &backend) {
+  constexpr model::CompositeStateLayout layout{{1, 1, 2, 1, 64, 256}, {}};
+  MemoryGovernor governor(backend, backend.capabilities().recommendedMaxWorkingSetBytes, 1, 1,
+                          queryHostMemory, 0);
+  model::QwenStateStorage storage(backend, governor.allocationAdmission(), layout, nullptr);
+  require(static_cast<bool>(storage.tryActivateLane(0, 75)) &&
+              static_cast<bool>(storage.tryActivateLane(1, 76)),
+          "prefill capture fixture lanes did not activate");
+  metal::AllocationFailure refusal;
+  auto reservation = storage.reserveCapture(refusal);
+  require(reservation && refusal == metal::AllocationFailure::None,
+          "prefill capture fixture could not reserve state buffers");
+  const model::GdnParityBuffers &capture = reservation->captureBuffers();
+  require(capture.stateBase.sizeBytes() == layout.target.cellBytes() &&
+              capture.recurrentLayers[0].sizeBytes() == layout.target.recurrentLayerBytes(),
+          "prefill capture reservation did not provide raw recurrent-state capacity");
+
+  std::memset(capture.stateBase.contents(), 0, capture.stateBase.sizeBytes());
+  const uint64_t recurrentOffset = layout.target.convolutionBytes();
+  auto *state = static_cast<std::byte *>(capture.stateBase.contents());
+  for (uint32_t i = 0; i < 64 * 256; ++i) {
+    const float value = i % 256 < 128 ? float(i % 128 + 1) * 0.0001f
+                                      : float(i % 128 + 1) * 0.01f;
+    std::memcpy(state + recurrentOffset + i * sizeof(value), &value, sizeof(value));
+  }
+  const auto raw = bytesOf(capture.stateBase);
+  std::vector<std::byte> expected(layout.target.cachedCellBytes());
+  model::encodeCachedGdnState(expected,
+      {reinterpret_cast<const std::byte *>(raw.data()), raw.size()}, layout.target);
+  storage.copyCapturedState(*reservation);
+  const auto *encoded = static_cast<const std::byte *>(
+      reservation->buffers().gdn->buffers().stateBase.contents());
+  require(std::equal(expected.begin(), expected.end(), encoded),
+          "prefill capture was not encoded into the cached-state layout");
+
+  auto cached = storage.seal(*reservation, {128, 128, 0, 128});
+  require(cached && cached->bytes() == layout.cachedBytes(),
+          "prefill capture did not seal as a compressed cached state");
+  require(!storage.beginRestore(1, *cached, false, {}, [] {}),
+          "prefill capture state unexpectedly restored asynchronously");
+  std::vector<std::byte> decoded(layout.target.cellBytes());
+  model::decodeCachedGdnState(decoded, expected, layout.target);
+  const auto *restored = static_cast<const std::byte *>(storage.current(1).stateBase.contents());
+  require(std::equal(decoded.begin(), decoded.end(), restored),
+          "sealed prefill capture did not restore to the runtime layout");
+  cached.reset();
+  storage.releaseLane(0, 75);
+  storage.releaseLane(1, 76);
+}
+
+void testGpuBf16GdnCacheCodec(metal::MetalBackend &backend) {
+  model::CompositeStateLayout layout{{1, 1, 2, 1, 64, 256}, {}};
+  layout.target.format = ops::GdnStateFormat::BFloat16;
+  MemoryGovernor governor(backend, backend.capabilities().recommendedMaxWorkingSetBytes, 1, 1,
+                          queryHostMemory, 0);
+  model::QwenStateStorage storage(backend, governor.allocationAdmission(), layout, nullptr);
+  require(static_cast<bool>(storage.tryActivateLane(0, 73)) &&
+              static_cast<bool>(storage.tryActivateLane(1, 74)),
+          "bf16 GPU codec fixture lanes did not activate");
+  const uint64_t recurrentOffset = layout.target.convolutionBytes();
+  auto *state = static_cast<std::byte *>(storage.current(0).stateBase.contents());
+  for (uint32_t i = 0; i < 64 * 256; ++i) {
+    const float source = i % 256 < 128 ? float(i % 128 + 1) * 0.0001f
+                                       : float(i % 128 + 1) * 0.01f;
+    const uint16_t value = test::floatToBf16(source);
+    std::memcpy(state + recurrentOffset + i * sizeof(value), &value, sizeof(value));
+  }
+  const auto raw = bytesOf(storage.current(0).stateBase);
+  std::vector<std::byte> expected(layout.target.cachedCellBytes());
+  model::encodeCachedGdnState(expected,
+      {reinterpret_cast<const std::byte *>(raw.data()), raw.size()}, layout.target);
+  metal::AllocationFailure refusal;
+  auto reservation = storage.reserve(refusal);
+  require(reservation && refusal == metal::AllocationFailure::None,
+          "bf16 GPU codec fixture could not reserve a cache cell");
+  storage.copyState(0, *reservation);
+  const auto *actual = static_cast<const std::byte *>(
+      reservation->buffers().gdn->buffers().stateBase.contents());
+  require(std::equal(expected.begin(), expected.end(), actual),
+          "Metal bf16 GDN quantizer differs from the reference codec");
+  storage.copyWindow(0, *reservation);
+  auto cached = storage.seal(*reservation, {128, 128, 0, 128});
+  require(!storage.beginRestore(1, *cached, false, {}, [] {}),
+          "bf16 GPU cached restore returned asynchronous work");
+  std::vector<std::byte> decoded(layout.target.cellBytes());
+  model::decodeCachedGdnState(decoded, expected, layout.target);
+  const auto *restored = static_cast<const std::byte *>(storage.current(1).stateBase.contents());
+  require(std::equal(decoded.begin(), decoded.end(), restored),
+          "Metal bf16 GDN dequantizer differs from the reference codec");
+  cached.reset();
+  storage.releaseLane(0, 73);
+  storage.releaseLane(1, 74);
+}
+
 void run(const std::string &metallib) {
   using model::QwenCompositeState;
   using model::QwenLogicalLengths;
   using model::QwenStateStorage;
 
   testLayoutFormulas();
+  testGdnCacheCodec();
   metal::MetalBackend backend(metallib);
+  testGpuGdnCacheCodec(backend);
+  testPrefillCaptureCell(backend);
+  testGpuBf16GdnCacheCodec(backend);
   testOffloadAllocationFailure(backend);
   testDiskRestore(backend);
   testDirectDiskSnapshot(backend);
@@ -831,6 +1061,7 @@ void run(const std::string &metallib) {
     void *laneActiveGdnBase = storage.current(0).stateBase.contents();
     std::shared_ptr<const QwenCompositeState> prefix = storage.snapshot(0);
     require(prefix != nullptr, "snapshot could not obtain a cache slot");
+    const auto quantizedExpected = stateImage(storage, 0);
     observedPrefixActual = backend.memoryStats().allocatedBytes - beforePrefix;
     require(prefix->bytes() == kStateLayout.cachedBytes(),
             "cached state footprint is not the declared cached bytes");
@@ -868,8 +1099,8 @@ void run(const std::string &metallib) {
                 storage.draft(1)[0].keys.contents() == destinationDraftBase,
             "restore replaced the destination's buffers");
     require(word(storage.current(1).convolutionLayers[0]) == 0x21212121 &&
-                word(storage.current(1).recurrentLayers[0]) == 0x31313131,
-            "restore did not deliver the pre-mutation GDN snapshot");
+                stateImage(storage, 1) == quantizedExpected,
+            "restore did not deliver the cached GDN snapshot");
     require(word(storage.next(1).convolutionLayers[0]) == 0xb1b1b1b1,
             "restore overwrote inactive parity");
     require(word(storage.window(1)) == 0x41414141 &&
@@ -1045,7 +1276,7 @@ void run(const std::string &metallib) {
     require(storage.metadata(1).activeParity == 1 &&
                 storage.metadata(1).lengths == lengths &&
                 word(storage.current(1).convolutionLayers[0]) == 0xe1e1e1e1 &&
-                word(storage.current(1).recurrentLayers[0]) == 0xe2e2e2e2 &&
+                stateImage(storage, 1) == stateImage(storage, 0) &&
                 word(storage.window(1)) == 0xe3e3e3e3,
             "reused cache slot served stale contents");
     require(word(storage.next(1).convolutionLayers[0]) == 0x21212121,
