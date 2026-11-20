@@ -163,7 +163,13 @@ class FrontendServer(HTTPServer):
     def server_close(self):
         super().server_close()
         self.connections.stop()
-        self.connections.idle.wait(min(2.0, http_handler.HTTP_IO_TIMEOUT))
+        if not self.connections.idle.wait(min(2.0, http_handler.HTTP_IO_TIMEOUT)):
+            stats = self.connections.stats()
+            diagnostics.print_status(
+                "Warning · HTTP connection drain timed out · "
+                f"{stats['active']}/{stats['capacity']} active",
+                error=True,
+            )
 
     def handle_error(self, request, client_address):
         error = sys.exc_info()[1]

@@ -418,13 +418,15 @@ def main():
             signal.SIG_IGN if runtime is None else lambda *_: runtime.kill(),
         )
         try:
-            if backend is not None:
-                print_status("Stopping · releasing engine resources")
-                backend.close()
-        finally:
-            signal.signal(signal.SIGINT, signal.SIG_IGN)
             if server is not None:
                 server.server_close()
-            # The last lines the console holds reach it before the process
-            # ends; after this a print writes in place again.
-            diagnostics.close_console()
+        finally:
+            try:
+                if backend is not None:
+                    print_status("Stopping · releasing engine resources")
+                    backend.close()
+            finally:
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
+                # The last lines the console holds reach it before the process
+                # ends; after this a print writes in place again.
+                diagnostics.close_console()

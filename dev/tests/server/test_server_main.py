@@ -9,7 +9,7 @@ from unittest import mock
 
 from dev.tests.server_fixtures import main_args, unprepared_hold
 from install import families
-from server import diagnostics, serve_record
+from server import diagnostics, http_handler, http_server, serve_record
 from server import protocol as native_wire
 from server import serve as serve_api
 from server import server as api
@@ -17,6 +17,25 @@ from server.origins import ANY_ORIGIN
 
 
 class ServerMainTests(unittest.TestCase):
+    def test_server_close_warns_with_active_connection_counts_after_drain_timeout(self):
+        server = object.__new__(http_server.FrontendServer)
+        server.connections = mock.Mock()
+        server.connections.idle.wait.return_value = False
+        server.connections.stats.return_value = {"active": 3, "capacity": 68}
+        with (
+            mock.patch.object(http_server.HTTPServer, "server_close"),
+            mock.patch.object(diagnostics, "print_status") as print_status,
+        ):
+            http_server.FrontendServer.server_close(server)
+
+        server.connections.stop.assert_called_once_with()
+        server.connections.idle.wait.assert_called_once_with(
+            min(2.0, http_handler.HTTP_IO_TIMEOUT)
+        )
+        print_status.assert_called_once_with(
+            "Warning · HTTP connection drain timed out · 3/68 active", error=True
+        )
+
     def test_sigterm_uses_the_normal_main_cleanup_path(self):
         args = main_args()
         runtime = mock.Mock()
@@ -39,7 +58,11 @@ class ServerMainTests(unittest.TestCase):
             if handler is not signal.SIG_IGN:
                 self.assertEqual(signum, signal.SIGINT)
 
-        backend.close.side_effect = lambda: closing_handlers.append(dict(handlers))
+        backend.close.side_effect = lambda: (
+            order.append("backend.close"),
+            closing_handlers.append(dict(handlers)),
+        )
+        server.server_close.side_effect = lambda: order.append("server.close")
 
         def serve():
             self.assertEqual(set(handlers), {signal.SIGTERM, signal.SIGINT})
@@ -115,7 +138,7 @@ class ServerMainTests(unittest.TestCase):
         backend.close.assert_called_once()
         server.server_bind.assert_called_once_with()
         server.server_activate.assert_called_once_with()
-        self.assertEqual(order, ["bind", "runtime"])
+        self.assertEqual(order, ["bind", "runtime", "server.close", "backend.close"])
 
     def test_main_takes_vision_from_the_ready_event(self):
         args = main_args()
