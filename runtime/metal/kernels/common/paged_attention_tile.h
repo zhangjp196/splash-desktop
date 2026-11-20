@@ -178,8 +178,7 @@ inline void splash_attention_page_softmax(
     threadgroup float *previous_scale, threadgroup atomic_uint *rescale,
     device const float4 *key_scales, device const float4 *value_scales,
     uint token_start,
-    uint visible_tokens, uint committed_tokens, uint active_rows,
-    uint thread_index) {
+    uint row_start, uint row_limit, uint thread_index) {
   constexpr uint N = SplashKvPageTokens;
   constexpr uint FusedRows = RowsPerTile * QueryHeadsPerKVHead;
   constexpr uint TokensPerLane = 8;
@@ -192,16 +191,9 @@ inline void splash_attention_page_softmax(
     return;
   const uint fused_row = thread_index / LanesPerRow;
   const uint column = thread_index % LanesPerRow * TokensPerLane;
-  const uint query_row = fused_row / QueryHeadsPerKVHead;
-  const uint causal_end =
-      committed_tokens + min(query_row, active_rows - 1) + 1;
-  // The row sees the tokens of [start, its causal end): its window's, or
-  // with no window its whole history's. Tokens and limit count from start,
-  // so one unsigned comparison tests both ends: a token before start wraps
-  // past every limit.
-  const uint start = splash_attention_window_start<Window>(causal_end - 1);
-  const uint limit = min(visible_tokens, causal_end) - start;
-  const uint token = token_start + column - start;
+  // The row sees [row_start, row_start + row_limit). Tokens and row_limit are
+  // relative to the window start, so one unsigned comparison tests both ends.
+  const uint token = token_start + column - row_start;
   threadgroup const float4 *scores4 =
       reinterpret_cast<threadgroup const float4 *>(scores + fused_row * N +
                                                    column);
@@ -221,7 +213,7 @@ inline void splash_attention_page_softmax(
   float local_max = -INFINITY;
 #pragma unroll
   for (uint j = 0; j < TokensPerLane; ++j) {
-    score[j] = token + j < limit ? score[j] : -INFINITY;
+    score[j] = token + j < row_limit ? score[j] : -INFINITY;
     local_max = max(local_max, score[j]);
   }
   local_max = max(local_max, simd_shuffle_xor(local_max, 1));
@@ -232,7 +224,7 @@ inline void splash_attention_page_softmax(
   float local_sum = 0.0f;
 #pragma unroll
   for (uint j = 0; j < TokensPerLane; ++j) {
-    probability[j] = token + j < limit ? fast::exp(score[j] - next_max) : 0.0f;
+    probability[j] = token + j < row_limit ? fast::exp(score[j] - next_max) : 0.0f;
     local_sum += probability[j];
   }
   local_sum += simd_shuffle_xor(local_sum, 1);
@@ -253,14 +245,14 @@ inline void splash_attention_page_softmax(
     low_scales = value_scales[vector];
     high_scales = value_scales[vector + 1];
   }
-  const float4 low(token + 0 < limit ? probability[0] * low_scales.x : 0.0f,
-                   token + 1 < limit ? probability[1] * low_scales.y : 0.0f,
-                   token + 2 < limit ? probability[2] * low_scales.z : 0.0f,
-                   token + 3 < limit ? probability[3] * low_scales.w : 0.0f);
-  const float4 high(token + 4 < limit ? probability[4] * high_scales.x : 0.0f,
-                    token + 5 < limit ? probability[5] * high_scales.y : 0.0f,
-                    token + 6 < limit ? probability[6] * high_scales.z : 0.0f,
-                    token + 7 < limit ? probability[7] * high_scales.w : 0.0f);
+  const float4 low(token + 0 < row_limit ? probability[0] * low_scales.x : 0.0f,
+                   token + 1 < row_limit ? probability[1] * low_scales.y : 0.0f,
+                   token + 2 < row_limit ? probability[2] * low_scales.z : 0.0f,
+                   token + 3 < row_limit ? probability[3] * low_scales.w : 0.0f);
+  const float4 high(token + 4 < row_limit ? probability[4] * high_scales.x : 0.0f,
+                    token + 5 < row_limit ? probability[5] * high_scales.y : 0.0f,
+                    token + 6 < row_limit ? probability[6] * high_scales.z : 0.0f,
+                    token + 7 < row_limit ? probability[7] * high_scales.w : 0.0f);
   threadgroup bfloat4 *probabilities4 = reinterpret_cast<threadgroup bfloat4 *>(
       probabilities + fused_row * N + column);
   probabilities4[0] = bfloat4(low);
@@ -354,6 +346,16 @@ inline void splash_paged_attention_tile(
   // Equality proves no padding; otherwise only valid entries may be accessed.
   const bool running_full =
       uint(running.get_capacity()) * (8u * 32u) == uint(M) * D;
+  constexpr uint SoftmaxLanesPerRow = N / 8;
+  uint row_start = 0, row_limit = 0;
+  if (thread_index < SoftmaxLanesPerRow * M) {
+    const uint query_row =
+        (thread_index / SoftmaxLanesPerRow) / QueryHeadsPerKVHead;
+    const uint causal_end =
+        committed_tokens + min(query_row, active_rows - 1) + 1;
+    row_start = splash_attention_window_start<Window>(causal_end - 1);
+    row_limit = min(visible_tokens, causal_end) - row_start;
+  }
 #pragma unroll
   for (ushort index = 0; index < running.get_capacity(); ++index) {
     if (running_full || running.is_valid_element(index))
@@ -400,7 +402,7 @@ inline void splash_paged_attention_tile(
         scores, probabilities, row_max, row_sum, previous_scale, rescale,
         reinterpret_cast<device const float4 *>(key_scales),
         reinterpret_cast<device const float4 *>(value_scales), token_start,
-        visible_tokens, committed_tokens, active_rows, thread_index);
+        row_start, row_limit, thread_index);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (atomic_load_explicit(rescale, memory_order_relaxed)) {
 #pragma unroll

@@ -2528,7 +2528,7 @@ struct Runtime::Impl {
         observed[lane].labels = lanes[lane].endDrafts == 0;
       }
       verifyBudget->observe(std::span(observed).first(items.size()), constrained,
-                            timing.wallSeconds * 1000.0);
+                            timing.wallSeconds * 1000.0, timing.hostSeconds * 1000.0);
     }
 
     std::vector<ModelStepResult> results;
@@ -3474,24 +3474,25 @@ Runtime::decodeAsync(const BatchPlan &plan,
     for (uint32_t lane = 0; lane < width; ++lane) {
       Impl::Request &entry = *requests[lane];
       const uint32_t anchor = *entry.pendingToken;
-      const PromptLookupConfig lookupConfig{};
-      const size_t historyCount = std::min<size_t>(
-          entry.tokens.size(), lookupConfig.maxContextTokens - 1);
-      std::vector<uint32_t> context(
-          entry.tokens.end() - historyCount, entry.tokens.end());
-      context.push_back(anchor);
-      std::vector<uint32_t> lookup =
-          promptLookupProposals(context, lookupConfig);
-      // The no-draft path has no draft-cutoff kernel to replace proposals
-      // with a thinking-end sequence, so leave those cycles on ordinary
-      // target decoding.
-      if (entry.constraint != ConstraintMode::None ||
-          Impl::samplingPolicy(entry).thinkingCutoff)
-        lookup.clear();
       const uint32_t maximumProposals = std::min(
           proposalCount, maximumRetained[lane] - 1);
-      if (lookup.size() > maximumProposals) lookup.resize(maximumProposals);
-      const uint32_t count = static_cast<uint32_t>(lookup.size());
+      // Constrained lanes, thinking cutoffs, and a zero proposal budget use
+      // ordinary target decoding. Keep history copying inside the gate so
+      // these paths do no lookup work.
+      const auto lookup = promptLookupIfAllowed(
+          entry.constraint != ConstraintMode::None,
+          Impl::samplingPolicy(entry).thinkingCutoff.has_value(),
+          maximumProposals, [&] {
+            const PromptLookupConfig lookupConfig{};
+            const size_t historyCount = std::min<size_t>(
+                entry.tokens.size(), lookupConfig.maxContextTokens - 1);
+            std::vector<uint32_t> context(
+                entry.tokens.end() - historyCount, entry.tokens.end());
+            context.push_back(anchor);
+            return promptLookupProposals(context, lookupConfig);
+          });
+      const uint32_t count = static_cast<uint32_t>(
+          std::min<size_t>(lookup.size(), maximumProposals));
 
       const uint32_t fallbackToken =
           entry.constraint == ConstraintMode::None

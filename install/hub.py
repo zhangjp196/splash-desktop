@@ -393,17 +393,31 @@ class Repository:
 
         blobs = folder(self.name) / "blobs"
         # (bytes, blob ID) of each file whose blob the cache lacks.
-        fetch = [
-            (size, blob)
-            for size, blob in (self.sizes[n] for n in names if n in self.sizes)
-            if not (blob and (blobs / blob).exists())
-        ]
+        fetch = []
+        counted_blobs = set()
+        for size, blob in (self.sizes[n] for n in names if n in self.sizes):
+            # A repository can expose the same content under multiple names;
+            # the Hub stores one blob, so reserve its bytes only once.
+            identity = blob or ("file", size, len(fetch))
+            if identity in counted_blobs or (blob and (blobs / blob).exists()):
+                continue
+            counted_blobs.add(identity)
+            fetch.append((size, blob))
         total = sum(size for size, _ in fetch)
-        if fetch:
+        known_names = {name for name in names if name in self.sizes}
+        unknown = sorted(
+            name
+            for name in set(names) - known_names
+            if not (snapshot(self.name, self.revision) / name).is_file()
+        )
+        if fetch or unknown:
             _remove_abandoned_downloads(blobs)
-            _require_room(self.name, blobs, total)
+            _require_room(self.name, blobs, total, unknown)
+            detail = f"{total / 1e9:.2f} GB with known sizes"
+            if unknown:
+                detail += "; size unknown for " + ", ".join(unknown)
             print(
-                f"Fetching {len(fetch)} file(s), {total / 1e9:.2f} GB, "
+                f"Fetching {len(fetch)} file(s), {detail}, "
                 f"from {self.name}@{self.revision[:12]}; cached files are reused.",
                 flush=True,
             )
@@ -569,16 +583,83 @@ def _interruptible(call, *args, **kwargs):
     return outcome["result"]
 
 
-def _require_room(repo_id, blobs, needed):
-    """Refuse a download of needed bytes into the blobs folder that its volume
-    has no room for, before it fills the disk: the Hub cache can be on
-    another volume (HF_HOME, HF_HUB_CACHE) than the home folder."""
-    existing = next(p for p in (blobs, *blobs.parents) if p.exists())
-    available = _available_bytes(existing)
-    if needed > available:
+def plan_space(items):
+    """Group (destination, retained bytes, unknowns, peak bytes, peak unknowns).
+
+    The three-field form and the legacy four-field form with peak unknowns
+    remain accepted. Destinations on one device share a capacity measurement.
+    Callers omit reusable files and deduplicate hard-linked inputs.
+    """
+    volumes = {}
+    for item in items:
+        destination, needed, unknown, *peak = item
+        peak_bytes = peak[0] if len(peak) > 1 else 0
+        peak_unknown = peak[1] if len(peak) > 1 else (peak[0] if peak else ())
+        path = Path(destination)
+        existing = next(p for p in (path, *path.parents) if p.exists())
+        device = existing.stat().st_dev
+        volume = volumes.setdefault(
+            device,
+            {
+                "path": existing,
+                "needed": 0,
+                "unknown": [],
+                "peak_bytes": 0,
+                "peak_unknown": [],
+            },
+        )
+        volume["needed"] += needed or 0
+        volume["unknown"].extend(unknown or ())
+        volume["peak_bytes"] = max(volume["peak_bytes"], peak_bytes or 0)
+        volume["peak_unknown"].extend(peak_unknown or ())
+    for volume in volumes.values():
+        try:
+            volume["available"] = _available_bytes(volume["path"])
+            volume["free"] = volume["available"]
+        except OSError as error:
+            volume["available"] = None
+            volume["free"] = None
+            volume["error"] = error
+    return list(volumes.values())
+
+
+def _report_plan(volumes):
+    for volume in volumes:
+        unknown = "; unknown required: " + ", ".join(volume["unknown"]) if volume["unknown"] else ""
+        peak = (
+            f"; known peak including staging: {volume['peak_bytes'] / 1e9:.2f} GB"
+            if volume["peak_bytes"]
+            else ""
+        )
+        if volume["peak_unknown"]:
+            peak += "; unknown peak: " + ", ".join(volume["peak_unknown"])
+        available = (
+            f"{volume['available'] / 1e9:.2f} GB free"
+            if volume["available"] is not None
+            else f"free space unknown ({volume['error']})"
+        )
+        print(
+            f"Disk plan for {volume['path']}: {volume['needed'] / 1e9:.2f} GB known required, "
+            f"{available}{unknown}{peak}.",
+            flush=True,
+        )
+
+
+def _require_room(repo_id, blobs, needed, unknown=()):
+    """Refuse known download bytes that the Hub blobs volume cannot hold."""
+    volumes = plan_space([(blobs, needed, unknown)])
+    _report_plan(volumes)
+    volume = volumes[0]
+    if volume["available"] is None:
+        models.warn(
+            f"could not check free space for {blobs.parent.parent}: "
+            f"{volume['error']}; continuing without a disk space check"
+        )
+        return
+    if needed > volume["available"]:
         raise models.ModelError(
             f"not enough disk space for {repo_id}: the download needs "
-            f"{needed / 1e9:.2f} GB and {available / 1e9:.2f} GB is available "
+            f"{needed / 1e9:.2f} GB and {volume['available'] / 1e9:.2f} GB is available "
             f"in {blobs.parent.parent}"
         )
 

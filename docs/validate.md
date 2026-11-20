@@ -107,6 +107,48 @@ Compare performance on the same idle Mac with the same model and workload.
 Keep generated reports, profiles, local paths and experiment notes out of the
 source tree and commits.
 
+## Correctness coverage and run evidence
+
+This matrix separates what the repository can exercise from what a dated run
+record proves. A test, model list, or configured CI runner establishes coverage
+support/configuration only. A hardware entry below counts as run evidence only
+where the repository records the device, date, exercised combination, and
+result. “Not recorded” means this checkout contains no such evidence for that
+cell; do not infer a pass from a test target or workflow configuration.
+
+| Dimension | Test support / configured coverage | Recorded real-device evidence | Status / gap |
+| --- | --- | --- | --- |
+| Hardware generation | The manual `release-hardware` workflow configures self-hosted M3 Max, M4 Pro/Max, and M5 Pro/Max runners; it schedules the Metal suite and release models. This is configuration, not a run receipt. | [KV-format validation](../dev/benchmarks/kv-formats.md#validation-on-2026-09-21) records M3 Max and M5 Pro runs; [combined serving validation](../dev/benchmarks/kv-formats.md#combined-serving-validation-with-pr-92) records M5 Pro 20 and M5 Pro 16. | M3 and M5 Pro have dated records for the listed work. M4 and other configured runner variants: not recorded here. |
+| Model family / weight source | Release check lists Qwen3.8 27B and Qwen3.6 35B, each MLX and GGUF; GGUF 27B is language-only. `test-real` runs the configured model runtime oracle. | The 2026-09-21 record covers 27B/35B on M3 Max and M5 Pro; combined serving records 27B/35B in MLX/GGUF combinations on M5 Pro 20. | Evidence applies only to those recorded revisions, devices, and combinations; the workflow's current pinned revisions are configuration until artifacts/logs are retained and linked. |
+| Quantization / weight format | Tests and release commands cover MLX 4-bit and GGUF UD-Q4_K_M. Unit/reference suites cover supported GGUF decoding formats; those do not establish end-to-end model quality. | The combined serving record covers named 27B/35B model builds; [upstream loading validation](../dev/benchmarks/upstream-loading.md) records particular GGUF reference checks. | No general real-device matrix across every weight quantization is recorded. K8V4 specifically still lacks a real-model logit comparison, as noted in its dated record. |
+| KV format | Oracle and HTTP smoke accept `int8`, `int4`, `bf16`; tools also accept `k8v4`. `ORACLE_ARGS` selects KV format. | The 2026-09-21 record reports both 27B/35B models in INT8/BF16 on M3 Max and M5 Pro; the combined record reports four 27B/35B INT8/BF16 combinations on M5 Pro. The 2026-11-05 K8V4 record is explicitly kernel/geometry only, with no installed model. | INT4 and K8V4 end-to-end real-model correctness: not recorded in these release notes. K8V4 kernel coverage must not be described as model-runtime validation. |
+| KV / recurrent state | Runtime oracle checks restore, prefill partitioning, preemption, batching, and state-related cycle behavior; CPU and kernel references cover individual layouts/operations. | The 2026-09-21 oracle runs record state restore and the listed runtime behaviors. The state-oracle investigation documents a focused recurrence/cycle check and an older whole-network BF16 cosine failure (0.984408 vs 0.99 on M5). | Record the exact oracle scope; do not imply the focused checks prove a universal whole-network state bound. |
+| Context length / paths | Oracle supports `--max-context`; default oracle includes partitioned prefill and request paths. Spill checks exercise block-sparse targets; HTTP smoke and persistent-cache options cover serving/cache paths. | The 2026-09-21 record reports native 256K runs for 35B in both formats on both devices and 27B in both formats on both devices, including exact-prefix replay. Combined serving records HTTP feature paths; the K8V4 record covers kernel histories, not model generation. | Evidence is specific to the recorded synthetic prompt/replay and configurations. Other model/format/device/context combinations: not recorded. |
+| Release workflow | `.github/workflows/ci.yml` defines the manually dispatched hardware matrix, model revisions, and artifact upload path. `release-check` compares against a retained baseline and invokes `test-real` and HTTP checks. | A workflow definition or successful build is not evidence by itself. The dated benchmark notes above are the repository's run records for their explicitly named cases. | For a release claim, retain and link the run artifact or report for each claimed matrix cell. |
+
+### Minimum run registration
+
+For each real-device correctness result, register at least:
+
+- Run date/time and outcome, with the report/log or artifact link (including the
+  workflow run URL when applicable).
+- Repository commit and model revision; model family/size and source/weight
+  format, including quantization.
+- Device identifier and chip generation, RAM/GPU configuration, macOS version,
+  and whether the run was on AC when known.
+- Runtime path and test command/target, including relevant arguments and
+  environment overrides (for example `ORACLE_ARGS`, KV/state format, maximum
+  context, and language-only mode).
+- Scope actually exercised and result: pass/fail, skipped/not applicable
+  reason, and any known limitation. Keep separate rows for distinct formats,
+  models, or devices rather than broadening one result to an unrun cell.
+
+Update this matrix only from retained evidence: after a run, add or link its
+record under the matching cell and state the exact combinations it covers. If a
+workflow was configured but no artifact or result can be located, keep that cell
+“not recorded / needs registration.” Do not convert configuration, source-code
+support, or a kernel-only check into a real-model pass.
+
 ## Release check
 
 A release is checked once per source identity, and then on each Apple GPU
@@ -327,7 +369,13 @@ scenario; and stops the server with SIGINT, or, when it outlasts that, SIGTERM
 after 60 s and SIGKILL after 30 s more. Beside the client's
 `LABEL.events.jsonl` and `LABEL.status.jsonl` it writes `LABEL.out`, whose last
 line is `DONE` only once everything completed, `LABEL.meta.json` (binary
-SHA-256, build id, model, spawn-to-ready seconds and whether the binary had
+SHA-256, build id, model, effective scenario configuration, client Python and
+host OS versions, and Git commit and dirty state for both the measured tree
+and the benchmark tools when available; unavailable Git values are null.
+The `commit` field is the caller's `--commit`, which can differ from the
+observed `source_state`. Git state describes the checkout at run time, not the
+compiler or source used to produce an existing binary. It also records
+spawn-to-ready seconds and whether the binary had
 started on that Mac before, host memory and pressure, process snapshots at
 the start, middle and end of the scenario while the server serves, the pids
 the run started, each server's stop, the signals it took and its exit code,
@@ -348,10 +396,13 @@ directory.
 - `compare A1 B1 B2 A2`, each run as `RESULTS/LABEL`, compares two builds on
   four runs in ABBA order on one Mac: each run must pass its own check on a
   quiet machine, the two A runs and the two B runs must each be one build,
-  and every per-request metric the four share (churn's TTFT, completion latency and
-  decode milliseconds per token, ttft's TTFT per concurrency, serve1's TTFT
-  and decode per size, warm's prompt time per depth) must pass the release check's speed rule
-  (`dev/benchmarks/abba.py`).
+  and every per-request metric measured by any run must be present in all four
+  runs and pass the release check's speed rule (`dev/benchmarks/abba.py`). All
+  four runs must use the same scenario and the same recorded scenario
+  configuration; the listening port is ignored because it does not affect the
+  workload. This prevents an absent metric or a changed workload dimension
+  (such as TTFT concurrency or serve1 size) from silently dropping out of the
+  comparison.
 
 A run measured nothing and is to be repeated when it did not end with `DONE`
 for a reason other than the server's, served a build other than `--build`,
@@ -385,6 +436,79 @@ leaves `dev/tests` and `dev/benchmarks` out (`.gitattributes`), and a copy
 that keeps the files' old times leaves make running stale binaries. For a
 gate, delete the test binary before building it and record the commit, an
 empty `git status --porcelain`, the binary's SHA-256 and its test count.
+
+### Streamed expert routes
+
+For an opt-in diagnostic run, set `SPLASH_EXPERT_ROUTE_TRACE` to a new file
+path in the engine's environment. Each JSONL record contains version `v`,
+zero-based `block`, `phase`, `rows`, and the sorted unique `experts` selected
+by one streamed block load. Multiple grouped steps contribute their union;
+repeated tiles and load rounds do not add records. File order is load order,
+including work from concurrent requests. There are no request or token IDs,
+route weights, prompts, or timestamps. A route can still reveal information
+about the workload; protect and delete the file accordingly.
+
+Only blocks that use the streamed load path appear: fully resident experts,
+read-ahead predictions, and per-token frequencies are not represented. A
+record describes routing even if a later load or command fails. The trace is
+not a cache hit log. Use the same model and workload when comparing profiles.
+
+The file is created exclusively with mode 0600 (subject to umask), never
+appended to or overwritten. Give each process/store a separate path; if two
+stores use the same path only the first can trace. Creation or write errors
+are reported to stderr and disable tracing without failing inference. A failed
+write can leave a partial last line, which offline readers must reject. Tracing
+flushes each load under the store lock and can affect performance; leave the
+variable unset for normal operation and performance measurements.
+
+Analyze a completed trace offline, without loading a model:
+
+```sh
+python3 -m dev.benchmarks.expert_route_profile /path/to/routes.jsonl > profile.json
+```
+
+New trace records use version 2 and include `model_identity`, `weight_manifest_hash`,
+and `identity_status`. The fingerprint hashes the complete contents of every
+selected target source file, with stable logical names: every part of a split
+GGUF and every Safetensors shard is included. Weight files are read for hashing
+only when route tracing or `SPLASH_EXPERT_PRIORITY_PROFILE` is explicitly set.
+If a source is unsupported, missing, or unreadable, the record says
+`identity_status: "unknown"`, `priority_eligible: false`, and
+`weight_manifest_hash: "unknown"`; profiles from that trace cannot supply
+priority hints. The offline report preserves the eligibility flag. Offline processing rejects a trace
+that mixes fingerprints, known and unknown identities, or model identities.
+Legacy v1 traces remain analyzable but produce an unknown fingerprint.
+
+The JSON report uses schema version 3, groups streamed loads by block and phase,
+sums rows, and ranks experts by the number of load records containing each
+expert. The offline `load_priority_hints(path, current_identity,
+current_weight_manifest_hash, opt_in=True, top_k=8)` helper exposes hints only
+when explicitly enabled and both the descriptor identity and complete weight
+fingerprint exactly match. Unknown fingerprints, mixed-source traces, malformed
+profiles, and either identity mismatch reject the profile as a whole. The C++
+runtime applies the same checks through `SPLASH_EXPERT_PRIORITY_PROFILE`;
+startup passes at most eight ranked experts per block to `ExpertStore` only
+when the entire profile validates. Route tracing and profile loading remain
+disabled by default; without either explicit setting, startup does not read
+weight contents for hashing. These are set
+membership counts, not token counts or routing weights. For locality, it also
+counts intersections with the preceding record of the same block, provided that
+record has the same phase. Records of other blocks may intervene; a different
+phase on the same block breaks the pair. `reuse_fraction` divides the shared
+expert selections by all current selections in those pairs, and is null when
+that denominator is zero. This is route-set overlap, not a cache hit rate.
+Concurrent requests are interleaved in file order, and incomplete or failed
+loads can appear; a trace can also stop early after a write error. The tool
+rejects malformed, unsupported, or unterminated records rather than reporting
+a partial profile. An empty file is a valid empty profile, not proof that a
+workload ran or tracing succeeded.
+
+The trace lacks cache capacities and state, size classes, eviction and staging
+transitions, read-ahead results and completed-load outcomes. It cannot strictly
+replay the existing ARC behavior or establish actual hits, I/O, latency, or
+performance. The tool therefore makes no cache-policy comparison. Profiles
+are comparable only with compatible model/block identities and representative
+workloads; the trace itself cannot verify either condition.
 
 For how one running server scales under concurrent chat requests, with the
 fans and hot sensors it reports, connect the benchmark to that server:

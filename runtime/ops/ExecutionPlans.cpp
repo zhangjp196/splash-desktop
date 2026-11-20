@@ -1,6 +1,7 @@
 #include "ops/ExecutionPlans.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace splash::ops {
@@ -25,7 +26,11 @@ void include(Workspace &bound, const Workspace &required,
 
 ExecutionPlans::ExecutionPlans(const DeviceCapabilities &device)
     : linear_(device), family_(gpuFamilyClass(device.appleGpuFamily)),
-      gpuCores_(plannedGpuCores(device)) {}
+      gpuCores_(plannedGpuCores(device)),
+      cpuBf16Experts_([] {
+        const char *value = std::getenv("SPLASH_CPU_BF16_EXPERTS");
+        return value && cpuBf16ExpertsEnabled(value);
+      }()) {}
 
 PrefillAttentionPlan ExecutionPlans::prefillAttention(
     uint32_t rows, uint32_t queryHeads, kv::Layout layout, AttentionVariant variant) const {
@@ -55,6 +60,7 @@ MoeConfig ExecutionPlans::moeConfig(MoeShape shape, uint32_t rows, MoePhase phas
   config.expertTile =
       phase == MoePhase::Prefill ? moeGgufPrefillTile(shape, rows, config.ggufTile) : MoeExpertTile::M8;
   config.ggufRouterTile = linear_.ggufFloatTile(rows, shape.experts, shape.routerFormat);
+  config.cpuBf16Experts = cpuBf16Experts_;
   return config;
 }
 

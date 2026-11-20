@@ -90,6 +90,24 @@ def decode_samples(document, width):
 
 
 class BackendRegressionTests(unittest.TestCase):
+    def test_duplicate_sample_cannot_hide_changed_output(self):
+        for group in ("decode", "partial", "short", "transcripts"):
+            with self.subTest(group=group):
+                records = rounds()
+                samples = next(iter(records[1][group].values()))
+                duplicate = dict(samples[0])
+                if group == "decode":
+                    duplicate["output_token_hash"] = "changed"
+                else:
+                    duplicate["output_tokens"] = [999]
+                # The final duplicate restores the original output: a dict
+                # overwrite would otherwise hide the changed output entirely.
+                samples.extend([duplicate, dict(samples[0])])
+                with self.assertRaisesRegex(
+                    regression.RegressionError, "duplicate benchmark sample"
+                ):
+                    regression.summarize(records, False)
+
     def test_identical_rounds_pass_every_rule(self):
         summary = regression.summarize(rounds(), False)
         self.assertEqual(summary["failures"], [])

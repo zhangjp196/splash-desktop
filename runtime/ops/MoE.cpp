@@ -4,6 +4,14 @@
 #include "metal/abi/Gguf.h"
 #include "metal/abi/MoE.h"
 #include "ops/BufferExtent.hpp"
+#include "ops/CpuExpertPrototype.hpp"
+
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstring>
+#include <limits>
 
 #include <stdexcept>
 #include <string>
@@ -216,12 +224,222 @@ MoeGroupParams groupParams(const MoePlan &plan) {
 
 void MoE::add(metal::CommandGraph &graph, const MoeBuffers &buffers,
               const BlockMoeWeights &weights, const MoePlan &plan) {
+  const MoeShape shape = plan.shape();
+  bool cpuGrouped = false;
+  bool cpuQ4_0 = false;
+  bool cpuStreamedQ4_0 = false;
+  auto originalQ4_0Sink = std::shared_ptr<MoeOriginalQ4_0Sink>{};
+  std::vector<cpu_prototype::Bf16Expert> bf16Experts;
+  std::vector<cpu_prototype::Q4_0Expert> q4Experts;
+  // Streamed CPU Q4_0 is selected before graph construction, so unsupported
+  // layouts always take the complete Metal route.
+  if (plan.configuration().cpuBf16Experts && weights.stream &&
+      weights.stream->supportsCpuQ4_0(weights.streamBlock) && !shape.rotated() &&
+      shape.sharedSlices == 1 && !buffers.verifyRows && plan.configuration().ggufTile == MoeGgufTile::Staged) {
+    try {
+      validate(weights, shape);
+      const std::array<const QuantizedSegment *, 3> shared{
+          &weights.gate.shared, &weights.up.shared, &weights.down.shared};
+      for (const QuantizedSegment *segment : shared)
+        if (segment->formatId != GGUF_FMT_Q40 || segment->layout != QuantizedSegment::Layout::Rows ||
+            segment->inputSize % 32 || segment->plane0.storage() != metal::BufferStorage::Shared ||
+            !segment->plane0.contents())
+          throw std::invalid_argument("CPU streamed Q4_0 requires host-visible native shared rows");
+      const uint64_t activationBytes = uint64_t{plan.rows()} * shape.hiddenSize * sizeof(uint16_t);
+      requireBytes(buffers.input, activationBytes, "MoE input");
+      requireBytes(buffers.residual, activationBytes, "MoE residual");
+      requireBytes(buffers.output, activationBytes, "MoE output");
+      for (const MoeScratchField &field : kMoeScratchFields) {
+        const metal::MetalBuffer &buffer = buffers.scratch.*field.buffer;
+        requireBytes(buffer, plan.workspace().*field.bytes, field.name);
+        if (buffer.storage() != metal::BufferStorage::Shared || !buffer.contents())
+          throw std::invalid_argument("CPU streamed Q4_0 requires host-visible scratch");
+      }
+      cpuStreamedQ4_0 = true;
+      originalQ4_0Sink = std::make_shared<MoeOriginalQ4_0Sink>();
+    } catch (const std::exception &) {
+      cpuStreamedQ4_0 = false;
+      originalQ4_0Sink.reset();
+    }
+  }
+  // Decide before emitting any graph work. A failure here leaves the graph
+  // untouched, so the established Metal route remains a complete fallback.
+  if (!cpuStreamedQ4_0 && plan.configuration().cpuBf16Experts && !weights.stream && !shape.rotated() &&
+      shape.sharedSlices == 1 && !buffers.verifyRows &&
+      plan.configuration().ggufTile == MoeGgufTile::Staged) {
+    try {
+      validate(weights, shape);
+      const uint64_t hiddenRows = uint64_t{plan.rows()} * shape.hiddenSize * sizeof(uint16_t);
+      requireBytes(buffers.input, hiddenRows, "MoE input");
+      requireBytes(buffers.residual, hiddenRows, "MoE residual");
+      requireBytes(buffers.output, hiddenRows, "MoE output");
+      const MoeWorkspace &required = plan.workspace();
+      for (const MoeScratchField &field : kMoeScratchFields)
+        requireBytes(buffers.scratch.*field.buffer, required.*field.bytes, field.name);
+      const MoeScratch &scratch = buffers.scratch;
+      for (const metal::MetalBuffer *buffer : {&buffers.input, &buffers.residual, &buffers.output,
+                                               &scratch.tileDescriptors, &scratch.tileCount,
+                                               &scratch.groupedRoutes, &scratch.routeRows,
+                                               &scratch.groupedInput, &scratch.expertOutput,
+                                               &scratch.routingWeights})
+        if (buffer->storage() != metal::BufferStorage::Shared || !buffer->contents())
+          throw std::invalid_argument("CPU MoE requires host-visible Shared buffers");
+      if (weights.slotTable.storage() != metal::BufferStorage::Shared || !weights.slotTable.contents())
+        throw std::invalid_argument("CPU MoE requires a host-visible Shared slot table");
+      const std::span<const uint32_t> slots{
+          static_cast<const uint32_t *>(weights.slotTable.contents()), shape.experts};
+      const std::array<const QuantizedSegment *, 6> segments{
+          &weights.gate.routed, &weights.up.routed, &weights.down.routed,
+          &weights.gate.shared, &weights.up.shared, &weights.down.shared};
+      const bool allBf16 = std::all_of(segments.begin(), segments.end(), [](const auto *s) {
+        return s->isFloat() && s->layout == QuantizedSegment::Layout::Rows &&
+               s->formatId == GGUF_FMT_BF16;
+      });
+      const bool allQ4_0 = std::all_of(segments.begin(), segments.end(), [](const auto *s) {
+        return !s->isFloat() && s->layout == QuantizedSegment::Layout::Rows &&
+               s->formatId == GGUF_FMT_Q40 && s->inputSize % 32 == 0;
+      });
+      if (allBf16) {
+        bf16Experts = cpu_prototype::makeBf16ExpertViews(
+            weights.gate.routed, weights.up.routed, weights.down.routed, slots,
+            weights.gate.shared, weights.up.shared, weights.down.shared);
+        cpuGrouped = true;
+      } else if (allQ4_0) {
+        q4Experts = cpu_prototype::makeQ4_0ExpertViews(
+            weights.gate.routed, weights.up.routed, weights.down.routed, slots,
+            weights.gate.shared, weights.up.shared, weights.down.shared);
+        cpuGrouped = cpuQ4_0 = true;
+      }
+    } catch (const std::exception &) {
+      bf16Experts.clear();
+      q4Experts.clear();
+    }
+  }
   addRouting(graph, buffers, weights, plan);
   if (weights.stream) {
-    const MoeLoadPart part{&buffers, &plan};
+    const MoeLoadPart part{&buffers, &plan, cpuStreamedQ4_0 ? originalQ4_0Sink : nullptr};
     weights.stream->addLoad(graph, {&part, 1}, weights.streamBlock);
   }
-  addRouted(graph, buffers, weights, plan);
+  if (cpuStreamedQ4_0) {
+    const MoeScratch &scratch = buffers.scratch;
+    const uint32_t rows = plan.rows(), tileRows = plan.tileRows(), tiles = plan.maximumTiles();
+    graph.add("moe_gather_rows",
+              {buffers.input, scratch.groupedRoutes, scratch.tileDescriptors, scratch.tileCount, scratch.groupedInput},
+              MoeGatherParams{tileRows, shape.hiddenSize, shape.routesPerToken()},
+              {tiles, shape.hiddenSize / 256, 1});
+    graph.host([sink = std::move(originalQ4_0Sink), weightsKeepalive = weights, scratch,
+                residual = buffers.residual, output = buffers.output, rows,
+                routes = shape.routesPerToken(), tileRows, hidden = shape.hiddenSize,
+                maximum = plan.maximumTiles(), experts = shape.experts,
+                sharedGate = weights.gate.shared, sharedUp = weights.up.shared,
+                sharedDown = weights.down.shared] {
+      (void)weightsKeepalive;
+      const auto entries = sink->snapshot();
+      std::vector<cpu_prototype::Q4_0Expert> cpuExperts(size_t{experts} + 1);
+      std::vector<bool> present(experts, false);
+      for (const MoeOriginalQ4_0Expert &entry : entries) {
+        if (!entry.supported || entry.expert >= experts)
+          throw std::runtime_error("unsupported streamed Q4_0 expert reached CPU execution");
+        const std::array<uint32_t, 3> outputs{sharedGate.outputSize, sharedUp.outputSize, sharedDown.outputSize};
+        const std::array<uint32_t, 3> inputs{sharedGate.inputSize, sharedUp.inputSize, sharedDown.inputSize};
+        std::array<cpu_prototype::Q4_0Matrix, 3> matrices;
+        for (size_t z = 0; z < 3; ++z) {
+          const uint64_t expected = uint64_t{outputs[z]} * ((inputs[z] + 31) / 32) * 18;
+          if (entry.projections[z].size() != expected)
+            throw std::runtime_error("streamed Q4_0 expert bytes have an invalid extent");
+          matrices[z] = {std::span<const std::byte>{
+                             reinterpret_cast<const std::byte *>(entry.projections[z].data()),
+                             entry.projections[z].size()}, outputs[z], inputs[z]};
+        }
+        cpuExperts[entry.expert] = {matrices[0], matrices[1], matrices[2]};
+        present[entry.expert] = true;
+      }
+      const auto sharedMatrix = [](const QuantizedSegment &segment) {
+        return cpu_prototype::Q4_0Matrix::fromRows(segment);
+      };
+      cpuExperts[experts] = {sharedMatrix(sharedGate), sharedMatrix(sharedUp), sharedMatrix(sharedDown)};
+      const auto *count = static_cast<const MoeTileCount *>(scratch.tileCount.contents());
+      if (!count || count->tiles > maximum)
+        throw std::runtime_error("invalid CPU streamed MoE tile count");
+      const size_t groupedRows = size_t{count->tiles} * tileRows;
+      const size_t routeCount = size_t{rows} * routes;
+      const auto *descriptors = static_cast<const MoeTileDescriptor *>(scratch.tileDescriptors.contents());
+      const auto *groupedRoutes = static_cast<const uint32_t *>(scratch.groupedRoutes.contents());
+      const auto *routeRows = static_cast<const uint32_t *>(scratch.routeRows.contents());
+      const auto *groupedInput = static_cast<const uint16_t *>(scratch.groupedInput.contents());
+      const auto *routingWeights = static_cast<const float *>(scratch.routingWeights.contents());
+      auto *expertOutput = static_cast<uint16_t *>(scratch.expertOutput.contents());
+      if (!descriptors || !groupedRoutes || !routeRows || !groupedInput || !routingWeights || !expertOutput ||
+          !residual.contents() || !output.contents())
+        throw std::runtime_error("CPU streamed MoE buffers are not host visible");
+      for (uint32_t t = 0; t < count->tiles; ++t) {
+        const uint32_t expert = descriptors[t].expert;
+        if (expert < experts && !present[expert])
+          throw std::runtime_error("CPU streamed Q4_0 sink missed a routed expert");
+      }
+      const size_t inputCount = groupedRows * hidden;
+      const auto values = cpu_prototype::runQ4_0GroupedExperts(
+          cpuExperts, {descriptors, count->tiles}, {groupedRoutes, groupedRows}, {routeRows, routeCount},
+          {groupedInput, inputCount}, rows, routes, tileRows, hidden);
+      for (size_t i = 0; i < values.size(); ++i) {
+        const uint32_t bits = std::bit_cast<uint32_t>(values[i]);
+        expertOutput[i] = static_cast<uint16_t>((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+      }
+      cpu_prototype::mergeBf16Experts(
+          {expertOutput, inputCount}, {routeRows, routeCount}, {routingWeights, routeCount},
+          {static_cast<const uint16_t *>(residual.contents()), size_t{rows} * hidden},
+          {static_cast<uint16_t *>(output.contents()), size_t{rows} * hidden}, rows, routes, hidden);
+    });
+    return;
+  }
+  if (!cpuGrouped) {
+    addRouted(graph, buffers, weights, plan);
+    return;
+  }
+
+  const MoeScratch &scratch = buffers.scratch;
+  const uint32_t rows = plan.rows(), tileRows = plan.tileRows(), tiles = plan.maximumTiles();
+  const MoeGatherParams gather{tileRows, shape.hiddenSize, shape.routesPerToken()};
+  graph.add("moe_gather_rows",
+            {buffers.input, scratch.groupedRoutes, scratch.tileDescriptors,
+             scratch.tileCount, scratch.groupedInput},
+            gather, {tiles, shape.hiddenSize / 256, 1});
+  graph.host([bf16Experts = std::move(bf16Experts), q4Experts = std::move(q4Experts),
+              cpuQ4_0, weightKeepalive = weights, scratch, residual = buffers.residual,
+              output = buffers.output, rows, routes = shape.routesPerToken(), tileRows,
+              hidden = shape.hiddenSize, maximum = plan.maximumTiles()] {
+    (void)weightKeepalive;
+    const auto *count = static_cast<const MoeTileCount *>(scratch.tileCount.contents());
+    if (!count || count->tiles > maximum)
+      throw std::runtime_error("invalid CPU MoE tile count");
+    const size_t groupedRows = size_t{count->tiles} * tileRows;
+    const size_t routeCount = size_t{rows} * routes;
+    const size_t inputCount = groupedRows * hidden;
+    const auto *descriptors = static_cast<const MoeTileDescriptor *>(scratch.tileDescriptors.contents());
+    const auto *groupedRoutes = static_cast<const uint32_t *>(scratch.groupedRoutes.contents());
+    const auto *routeRows = static_cast<const uint32_t *>(scratch.routeRows.contents());
+    const auto *groupedInput = static_cast<const uint16_t *>(scratch.groupedInput.contents());
+    const auto *weights = static_cast<const float *>(scratch.routingWeights.contents());
+    auto *expertOutput = static_cast<uint16_t *>(scratch.expertOutput.contents());
+    if (!descriptors || !groupedRoutes || !routeRows || !groupedInput || !weights || !expertOutput ||
+        !residual.contents() || !output.contents())
+      throw std::runtime_error("CPU MoE buffers are not host visible");
+    const auto values = cpuQ4_0
+        ? cpu_prototype::runQ4_0GroupedExperts(
+              q4Experts, {descriptors, count->tiles}, {groupedRoutes, groupedRows},
+              {routeRows, routeCount}, {groupedInput, inputCount}, rows, routes, tileRows, hidden)
+        : cpu_prototype::runBf16GroupedExperts(
+              bf16Experts, {descriptors, count->tiles}, {groupedRoutes, groupedRows},
+              {routeRows, routeCount}, {groupedInput, inputCount}, rows, routes, tileRows, hidden);
+    for (size_t i = 0; i < values.size(); ++i) {
+      const uint32_t bits = std::bit_cast<uint32_t>(values[i]);
+      expertOutput[i] = static_cast<uint16_t>((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+    }
+    cpu_prototype::mergeBf16Experts(
+        {expertOutput, inputCount}, {routeRows, routeCount}, {weights, routeCount},
+        {static_cast<const uint16_t *>(residual.contents()), size_t{rows} * hidden},
+        {static_cast<uint16_t *>(output.contents()), size_t{rows} * hidden}, rows, routes, hidden);
+  });
 }
 
 void MoE::addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers,

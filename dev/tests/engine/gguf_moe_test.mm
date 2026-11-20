@@ -46,6 +46,7 @@
 #include "../../../runtime/metal/MetalBackend.hpp"
 #include "../../../runtime/ops/Linear.hpp"
 #include "../../../runtime/ops/MoE.hpp"
+#include "../../../runtime/ops/CpuExpertPrototype.hpp"
 #include "GgufFormatReference.hpp"
 #include "MoeExtents.hpp"
 #include "MoeFixture.hpp"
@@ -234,6 +235,43 @@ int floatProjection(MetalBackend &backend) {
       }
     }
   return failures;
+}
+
+int q4_0CpuExpertViews(MetalBackend &backend) {
+  using namespace splash::ops::cpu_prototype;
+  constexpr uint32_t input = 32, routedRows = 64, sharedRows = 32;
+  std::vector<std::byte> routed(size_t{routedRows} * 18), shared(size_t{sharedRows} * 18);
+  for (size_t row = 0; row < routedRows; ++row) {
+    const uint16_t scale = static_cast<uint16_t>(row < sharedRows ? 0x3800 : 0x4000);
+    std::memcpy(routed.data() + row * 18, &scale, sizeof(scale));
+  }
+  for (size_t row = 0; row < sharedRows; ++row) {
+    const uint16_t scale = 0x4400;
+    std::memcpy(shared.data() + row * 18, &scale, sizeof(scale));
+  }
+  const auto routedSegment = QuantizedSegment::rows(
+      GGUF_FMT_Q40, routedRows, input, upload(backend, routed.data(), routed.size(), "cpu-q4-routed"));
+  const auto sharedSegment = QuantizedSegment::rows(
+      GGUF_FMT_Q40, sharedRows, input, upload(backend, shared.data(), shared.size(), "cpu-q4-shared"));
+  const std::array<uint32_t, 2> slots{1, 0};
+  const auto experts = makeQ4_0ExpertViews(routedSegment, routedSegment, routedSegment, slots,
+                                            sharedSegment, sharedSegment, sharedSegment);
+  if (experts.size() != 3 || experts[0].gate.outputSize != 32 ||
+      experts[0].gate.bytes.size() != size_t{32} * 18 ||
+      experts[0].gate.bytes[0] != routed[32 * 18] ||
+      experts[1].gate.bytes[0] != routed[0] ||
+      experts[2].gate.bytes[0] != shared[0])
+    return 1;
+  bool rejected = false;
+  try {
+    const auto mixed = QuantizedSegment::rows(
+        GGUF_FMT_BF16, 32, input, upload(backend, shared.data(), shared.size(), "cpu-q4-mixed"));
+    static_cast<void>(makeQ4_0ExpertViews(routedSegment, routedSegment, routedSegment, slots,
+                                           mixed, sharedSegment, sharedSegment));
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  return rejected ? 0 : 1;
 }
 
 // BF16 weights, as some GGUFs store the MoE router: on both tiles, at every
@@ -1476,7 +1514,7 @@ int main(int argc, const char *argv[]) {
     try {
       MetalBackend backend(argv[1]);
       bufferExtents(backend);
-      const int failures = floatProjection(backend) + bfloat16Weights(backend) + nativeRowWeights(backend) +
+      const int failures = floatProjection(backend) + bfloat16Weights(backend) + q4_0CpuExpertViews(backend) + nativeRowWeights(backend) +
                            nativePairs(backend) + floatPairs(backend) +
                            floatSegments(backend, 64) + floatSegments(backend, 96) + floatOnlyChain(backend) +
                            moe(backend) + routingLoads(backend) + nativeRouter(backend) + permutedSlots(backend) +

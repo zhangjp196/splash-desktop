@@ -572,11 +572,31 @@ def compare(runs: list[Run]) -> tuple[list[str], list[str]]:
         problems.append(f"the rounds are not A B B A of two builds: {[a1, b1, b2, a2]}")
     elif a1 == b1:
         problems.append(f"both builds are {a1}")
+    scenarios = [run.meta.get("scenario", "churn") for run in runs]
+    if len(set(scenarios)) != 1:
+        problems.append(f"the four runs use different scenarios: {scenarios}")
+    configurations = [
+        {
+            key: value
+            for key, value in (run.meta.get("configuration") or {}).items()
+            if key != "port"
+        }
+        for run in runs
+    ]
+    if any(configuration != configurations[0] for configuration in configurations[1:]):
+        problems.append("the four runs use different scenario configurations")
     rounds = [metrics(run) for run in runs]
-    shared = sorted(set.intersection(*(set(r) for r in rounds)))
+    metric_sets = [set(round_metrics) for round_metrics in rounds]
+    shared = sorted(set.union(*metric_sets))
     if not shared:
         problems.append("the four runs share no metric")
     for name in shared:
+        missing = [
+            runs[i].label for i, names in enumerate(metric_sets) if name not in names
+        ]
+        if missing:
+            problems.append(f"{name}: missing from runs {missing}")
+            continue
         result = abba.compare_samples([r[name] for r in rounds])
         lines.append(f"{name}: {abba.describe(result)}")
         if not result["pass"]:

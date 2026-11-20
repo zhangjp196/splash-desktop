@@ -20,6 +20,7 @@ void expect(bool condition, const char *what) {
 
 int main() {
   using splash::model::PromptLookupConfig;
+  using splash::model::promptLookupIfAllowed;
   using splash::model::promptLookupProposals;
 
   expect((promptLookupProposals(std::vector<uint32_t>{1, 2, 3, 4, 1, 2, 3}) ==
@@ -43,6 +44,28 @@ int main() {
   invalid.minNgram = 0;
   expect(promptLookupProposals(std::vector<uint32_t>{1, 2, 3, 1, 2, 3}, invalid).empty(),
          "invalid configuration safely returns no proposals");
+
+  int lookupCalls = 0;
+  const auto forbiddenLookup = [&] {
+    ++lookupCalls;
+    return std::vector<uint32_t>{99};
+  };
+  expect(promptLookupIfAllowed(true, false, 4, forbiddenLookup).empty(),
+         "constrained decoding skips prompt lookup");
+  expect(lookupCalls == 0, "constrained decoding does not call history lookup");
+  expect(promptLookupIfAllowed(false, true, 4, forbiddenLookup).empty(),
+         "thinking cutoff skips prompt lookup");
+  expect(lookupCalls == 0, "thinking cutoff does not call history lookup");
+  expect(promptLookupIfAllowed(false, false, 0, forbiddenLookup).empty(),
+         "zero proposal budget skips prompt lookup");
+  expect(lookupCalls == 0, "zero proposal budget does not call history lookup");
+  const auto allowed = promptLookupIfAllowed(false, false, 4, [&] {
+    ++lookupCalls;
+    return promptLookupProposals(std::vector<uint32_t>{1, 2, 3, 4, 1, 2, 3});
+  });
+  expect(lookupCalls == 1, "ordinary decoding calls history lookup once");
+  expect((allowed == std::vector<uint32_t>{4, 1, 2, 3}),
+         "ordinary decoding preserves prompt lookup proposals");
 
   if (failures) {
     std::cerr << failures << " prompt lookup checks failed\n";

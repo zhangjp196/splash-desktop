@@ -308,28 +308,37 @@ def outputs(record: dict) -> dict:
     """What must repeat: per width and sample the output hash and draft
     counts, per partial, short and transcript request its output tokens."""
     result = {}
+
+    def add(key, value):
+        if key in result:
+            raise RegressionError(f"duplicate benchmark sample: {key}")
+        result[key] = value
+
     for width, samples in record["decode"].items():
         for sample in samples:
-            result[f"B{width} sample {sample['sample']}"] = (
-                sample["output_token_hash"],
-                sample["accepted_draft_tokens"],
-                sample["drafted_tokens"],
+            add(
+                f"B{width} sample {sample['sample']}",
+                (
+                    sample["output_token_hash"],
+                    sample["accepted_draft_tokens"],
+                    sample["drafted_tokens"],
+                ),
             )
     for scenario, requests in record["partial"].items():
         for request in requests:
-            result[f"{scenario} sample {request['sample']}"] = tuple(
-                request["output_tokens"]
+            add(
+                f"{scenario} sample {request['sample']}",
+                tuple(request["output_tokens"]),
             )
     for rows, requests in record["short"].items():
         for request in requests:
-            result[f"short {rows} rows sample {request['sample']}"] = tuple(
-                request["output_tokens"]
+            add(
+                f"short {rows} rows sample {request['sample']}",
+                tuple(request["output_tokens"]),
             )
     for name, requests in record["transcripts"].items():
         for request in requests:
-            result[f"{name} sample {request['sample']}"] = tuple(
-                request["output_tokens"]
-            )
+            add(f"{name} sample {request['sample']}", tuple(request["output_tokens"]))
     return result
 
 

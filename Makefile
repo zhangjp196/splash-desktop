@@ -262,6 +262,7 @@ ENGINE_CPP_SOURCES := \
 	runtime/ops/Linear.cpp \
 	runtime/ops/LinearGguf.cpp \
 	runtime/ops/MoE.cpp \
+	runtime/ops/CpuExpertPrototype.cpp \
 	runtime/ops/Normalization.cpp \
 	runtime/ops/HyperConnection.cpp \
 	runtime/ops/NgramEmbedding.cpp \
@@ -335,10 +336,13 @@ ENGINE_CPP_SOURCES := \
 	runtime/model/Runtime.cpp \
 	runtime/model/RuntimeArenas.cpp
 ENGINE_MM_SOURCES := \
+	runtime/ops/CpuExpertHostStep.mm \
 	runtime/ane/Handoff.mm \
 	runtime/ane/Program.mm \
 	runtime/model/SafetensorsCheckpoint.mm \
 	runtime/model/ModelDescriptor.mm \
+	runtime/model/ExpertPriorityProfile.mm \
+	runtime/model/WeightManifestHash.mm \
 	runtime/engine/ThermalState.mm \
 	runtime/engine/RuntimeResources.mm \
 	runtime/engine/Bootstrap.mm

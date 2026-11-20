@@ -989,6 +989,30 @@ class CheckTests(unittest.TestCase):
         problems, _ = check.compare(rounds("mixed", "abab"))
         self.assertTrue(any("A B B A" in p for p in problems))
 
+        incomplete = rounds("incomplete", "abba")
+        for record in incomplete[1].done:
+            record.pop("decode_tps", None)
+        problems, _ = check.compare(incomplete)
+        self.assertTrue(
+            any(
+                "churn_decode_ms_per_token: missing from runs ['incomplete1']" == p
+                for p in problems
+            ),
+            problems,
+        )
+
+        mismatched_scenario = rounds("scenario", "abba")
+        mismatched_scenario[2].meta["scenario"] = "ttft"
+        problems, _ = check.compare(mismatched_scenario)
+        self.assertTrue(any("different scenarios" in p for p in problems), problems)
+
+        mismatched_configuration = rounds("configuration", "abba")
+        for benchmark_run in mismatched_configuration:
+            benchmark_run.meta["configuration"] = {"sizes": [1, 2]}
+        mismatched_configuration[2].meta["configuration"] = {"sizes": [1, 4]}
+        problems, _ = check.compare(mismatched_configuration)
+        self.assertIn("the four runs use different scenario configurations", problems)
+
         def ttft_rounds(name, slower):
             for i, build in enumerate("abba"):
                 label = f"{name}{i}"
@@ -1107,6 +1131,13 @@ class RunTests(unittest.TestCase):
                         directory,
                         "--scenario",
                         "serve1",
+                        "--samples",
+                        "5",
+                        "--sizes",
+                        "123,456",
+                        "--request-seconds",
+                        "42",
+                        "--no-language-only",
                         "--label",
                         "s",
                         "--out",
@@ -1115,6 +1146,15 @@ class RunTests(unittest.TestCase):
                 )
             meta = json.loads((tree / "out" / "s.meta.json").read_text())
         self.assertEqual(code, 0)
+        self.assertEqual(meta["configuration"]["samples"], 5)
+        self.assertEqual(meta["configuration"]["sizes"], [123, 456])
+        self.assertEqual(meta["configuration"]["request_seconds"], 42)
+        self.assertFalse(meta["configuration"]["language_only"])
+        self.assertEqual(
+            meta["configuration"]["churn_base"], clients.CHURN_DEFAULT_BASE
+        )
+        self.assertEqual(meta["source_state"], {"commit": None, "dirty": None})
+        self.assertEqual(meta["runtime"]["python_executable"], sys.executable)
         self.assertEqual(events[0], "ready")
         self.assertEqual(events[-1], "stop")
         snapshots = events[1:-1]

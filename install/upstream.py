@@ -1083,6 +1083,18 @@ def _select_draft_gguf(names):
     return candidates[0]
 
 
+def _has_converted_draft(source, config: Path, models_root: Path) -> bool:
+    sources = [source] if isinstance(source, (str, Path)) else list(source)
+    identity = {
+        "version": draftgguf.VERSION,
+        "source": [models.sha256(path) for path in sources],
+        "config": models.sha256(config),
+        "bytes": sum(path.stat().st_size for path in sources),
+    }
+    key = "draft-" + hashlib.sha256(models.json_bytes(identity)).hexdigest()
+    return (models_root / ".metadata" / key / "model.safetensors").is_file()
+
+
 def _converted_draft(source, config: Path, models_root: Path) -> dict[str, Path]:
     """The converted BF16 safetensors of source (a draft GGUF or its ordered
     split parts), under models/.metadata, by the release's names. The entry
@@ -1170,6 +1182,29 @@ def draft_files(repo, target, models_root=None):
             raise models.ModelError("a GGUF draft needs the models directory")
         chosen = _select_draft_gguf(gguf_names)
         downloaded = repo.download({"config.json", *chosen})
+        cached_conversion = _has_converted_draft(
+            [downloaded[name] for name in chosen], downloaded["config.json"], models_root
+        )
+        if not cached_conversion:
+            output_bytes = draftgguf.planned_output_bytes(
+                [downloaded[name] for name in chosen]
+            )
+            plan = hub.plan_space(
+                [(models_root / ".metadata", output_bytes, (), output_bytes, ())]
+            )
+            hub._report_plan(plan)
+            for volume in plan:
+                if volume["available"] is None:
+                    models.warn(
+                        f"could not check free space for {volume['path']}: "
+                        f"{volume['error']}; continuing without a disk space check"
+                    )
+                elif volume["available"] < output_bytes:
+                    models.warn(
+                        f"draft GGUF conversion needs {output_bytes / 1e9:.2f} GB on "
+                        f"{volume['path']}, with {volume['available'] / 1e9:.2f} GB free; "
+                        "continuing with the conversion"
+                    )
         converted = _converted_draft(
             [downloaded[name] for name in chosen],
             downloaded["config.json"],

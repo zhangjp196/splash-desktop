@@ -422,9 +422,9 @@ metal::CommandGraph caseGraph(const AttentionFixture &fixture, bool prefill, con
   return graph;
 }
 
-// Both cache payloads of every lane's history and rows, including scales
-// only for INT8: what the page loop reads, of which a sparse selection reads
-// its blocks only.
+// KV payload footprint per layer across lanes, including scales only for
+// quantized formats. This is the cache footprint; prefill reads it once per
+// query tile, so it is not an estimate of total memory traffic.
 uint64_t historyBytes(const AttentionFixturePlan &plan) {
   uint64_t tokens = 0;
   for (uint32_t lane = 0; lane < plan.lanes; ++lane)

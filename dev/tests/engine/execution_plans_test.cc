@@ -55,6 +55,31 @@ void covers(const Workspace &stride, const Workspace &needed, uint32_t lanes,
             "workspace does not cover an installed plan");
 }
 
+void cpuBf16ExpertsConfiguration() {
+  require(!cpuBf16ExpertsEnabled(""), "an empty CPU BF16 experts setting opted in");
+  require(!cpuBf16ExpertsEnabled("0") && !cpuBf16ExpertsEnabled("true") &&
+              !cpuBf16ExpertsEnabled("01"),
+          "an unsupported CPU BF16 experts setting opted in");
+  require(cpuBf16ExpertsEnabled("1"), "the explicit CPU BF16 experts setting was ignored");
+
+  unsetenv("SPLASH_CPU_BF16_EXPERTS");
+  const ExecutionPlans defaults(device());
+  require(!defaults.moePrefill(routedShape, 16).configuration().cpuBf16Experts &&
+              !defaults.moeDecode(routedShape, 1).configuration().cpuBf16Experts,
+          "unset CPU BF16 experts setting changed the Metal default");
+  setenv("SPLASH_CPU_BF16_EXPERTS", "1", 1);
+  const ExecutionPlans enabled(device());
+  require(enabled.moePrefill(routedShape, 16).configuration().cpuBf16Experts &&
+              enabled.moeDecode(routedShape, 1).configuration().cpuBf16Experts,
+          "CPU BF16 experts setting did not reach every MoE phase");
+  setenv("SPLASH_CPU_BF16_EXPERTS", "true", 1);
+  const ExecutionPlans unsupported(device());
+  require(!unsupported.moePrefill(routedShape, 16).configuration().cpuBf16Experts &&
+              !unsupported.moeDecode(routedShape, 1).configuration().cpuBf16Experts,
+          "unsupported CPU BF16 experts setting changed the Metal default");
+  unsetenv("SPLASH_CPU_BF16_EXPERTS");
+}
+
 void baselinePlans() {
   for (uint32_t family : {9U, 10U, 11U}) {
     const ExecutionPlans plans(device(family));
@@ -313,6 +338,7 @@ void invalidLookupsAndContextEdges() {
 
 int main() {
   try {
+    cpuBf16ExpertsConfiguration();
     baselinePlans();
     ggufMoePlans();
     unknownCoreCount();

@@ -129,8 +129,10 @@ VerifyBudget::costs(uint32_t lanes, bool constrained) const {
   const Cost &cost = table(lanes, constrained);
   // Nondecreasing and positive: a negative intercept leaves the fewest rows
   // a twentieth of the mean.
+  const double streamedHostStep = cost.streamedHostStepTime / cost.weight;
   for (uint32_t rows = first; rows <= last; ++rows)
-    result[rows] = static_cast<float>(std::max(fit->first + fit->second * rows, 0.05 * cost.time / cost.weight));
+    result[rows] = static_cast<float>(std::max(fit->first + fit->second * rows, 0.05 * cost.time / cost.weight) +
+                                      streamedHostStep);
   return result;
 }
 
@@ -139,7 +141,8 @@ bool VerifyBudget::explores(uint32_t lanes, bool constrained) const {
   return tableCycles_[constrained ? 1 : 0][lanes - 1] % kExploreCycles == kExploreCycles - 1;
 }
 
-void VerifyBudget::observe(std::span<const Lane> lanes, bool constrained, double milliseconds) {
+void VerifyBudget::observe(std::span<const Lane> lanes, bool constrained, double milliseconds,
+                           double streamedHostStepMilliseconds) {
   if (lanes.empty() || lanes.size() > kLanes)
     throw std::invalid_argument("invalid verify budget cycle");
   uint32_t rows = 0;
@@ -151,16 +154,24 @@ void VerifyBudget::observe(std::span<const Lane> lanes, bool constrained, double
   const uint32_t count = static_cast<uint32_t>(lanes.size());
   ++tableCycles_[constrained ? 1 : 0][count - 1];
   if (std::isfinite(milliseconds) && milliseconds > 0.0) {
+    const double hostStep = std::isfinite(streamedHostStepMilliseconds)
+                                ? std::clamp(streamedHostStepMilliseconds, 0.0, milliseconds)
+                                : 0.0;
+    double nonHostMilliseconds = milliseconds - hostStep;
     if (const auto fit = line(count, constrained)) {
-      const double expected = std::max(fit->first + fit->second * rows, 1.0e-3);
-      milliseconds = std::clamp(milliseconds, 0.5 * expected, 2.0 * expected);
+      const Cost &prior = table(count, constrained);
+      const double expectedTotal = std::max(fit->first + fit->second * rows, 1.0e-3) +
+                                   (prior.weight > 0.0 ? prior.streamedHostStepTime / prior.weight : 0.0);
+      const double clampedTotal = std::clamp(milliseconds, 0.5 * expectedTotal, 2.0 * expectedTotal);
+      nonHostMilliseconds = std::max(clampedTotal - hostStep, 0.0);
     }
     Cost &cost = tables_[constrained ? 1 : 0][count - 1];
     cost.weight = kDecay * cost.weight + 1.0;
     cost.rows = kDecay * cost.rows + rows;
     cost.rowsSquared = kDecay * cost.rowsSquared + double(rows) * rows;
-    cost.time = kDecay * cost.time + milliseconds;
-    cost.rowsTime = kDecay * cost.rowsTime + rows * milliseconds;
+    cost.time = kDecay * cost.time + nonHostMilliseconds;
+    cost.rowsTime = kDecay * cost.rowsTime + rows * nonHostMilliseconds;
+    cost.streamedHostStepTime = kDecay * cost.streamedHostStepTime + hostStep;
   }
   // Proposal j is checked against the target's row j, so a lane that
   // verified r rows labels its proposals up to r - 1, to the first rejection.

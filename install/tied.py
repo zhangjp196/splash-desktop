@@ -13,6 +13,7 @@ import hashlib
 import json
 import struct
 
+from . import hub, models
 from .models import ModelError
 
 
@@ -36,7 +37,7 @@ def _find_tensor(paths, suffix):
     return None
 
 
-def _write_shard(paths, destination):
+def _shard_plan(paths):
     tensors = {}
     for suffix in ("weight", "scales", "biases"):
         found = _find_tensor(paths, suffix)
@@ -54,6 +55,10 @@ def _write_shard(paths, destination):
         offset += length
     encoded = json.dumps(header, separators=(",", ":")).encode()
     encoded += b" " * ((8 - len(encoded) % 8) % 8)
+    return tensors, encoded, 8 + len(encoded) + offset
+
+
+def _write_shard(tensors, encoded, destination):
     with destination.open("wb") as stream:
         stream.write(struct.pack("<Q", len(encoded)))
         stream.write(encoded)
@@ -77,12 +82,30 @@ def prepare(config_path, paths, models_root):
     text["tie_word_embeddings"] = False
     config["tie_word_embeddings"] = False
     encoded = json.dumps(config, separators=(",", ":")).encode()
+    tensors, header, shard_bytes = _shard_plan(shards)
+    output_bytes = len(encoded) + shard_bytes
     key = hashlib.sha256(encoded).hexdigest()[:16]
     directory = models_root / ".metadata" / ("tied-" + key)
+    volumes = hub.plan_space(
+        [(directory, output_bytes, (), output_bytes, ())]
+    )
+    hub._report_plan(volumes)
+    for volume in volumes:
+        if volume["available"] is None:
+            models.warn(
+                f"could not check free space for {volume['path']}: "
+                f"{volume['error']}; continuing without a disk space check"
+            )
+        elif volume["available"] < output_bytes:
+            models.warn(
+                f"tied-head preparation needs {output_bytes / 1e9:.2f} GB "
+                f"on {volume['path']}, with {volume['available'] / 1e9:.2f} GB free; "
+                "continuing with preparation"
+            )
     directory.mkdir(parents=True, exist_ok=True)
     written = directory / "config.json"
     written.write_bytes(encoded)
-    shard = _write_shard(shards, directory / "lm_head.safetensors")
+    shard = _write_shard(tensors, header, directory / "lm_head.safetensors")
     return {
         "config.json": written,
         "target/config.json": written,

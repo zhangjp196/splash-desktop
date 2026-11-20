@@ -620,7 +620,7 @@ protected:
       for (Step &step : steps) ++(layers.attends(index) ? step.attentionLayer : step.gdnLayer);
     std::vector<ops::MoeLoadPart> parts;
     if (geometry_.ffnKind == QwenFfnKind::SparseMoe)
-      for (const Step &step : steps) parts.push_back({&step.ffn, &*step.moe});
+      for (const Step &step : steps) parts.push_back({&step.ffn, &*step.moe, {}});
     for (uint32_t index = range.first; index < range.end; ++index) {
       const uint32_t attentionLayer = steps.front().attentionLayer;
       for (Step &step : steps) layers.addPrefillLayer(step, index);

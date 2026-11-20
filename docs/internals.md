@@ -113,6 +113,21 @@ the network has brought or what the Hub cache holds, whichever is more), and
 done equal to total once it succeeds. It is an interface between Splash's front
 ends and its installer, not a public one.
 
+Before each Hub download, `hub.plan_space` measures the volume containing the
+Hub `blobs` directory and reserves only missing blob bytes with known sizes.
+Blob IDs are deduplicated and existing blobs are reused, so snapshot hard links
+are not counted as another copy. Repository metadata without a size is reported
+as unknown. The planner groups destinations by device, allowing model cache,
+model preparation and conversion outputs on different volumes to be reported
+separately; each report names known required bytes, free bytes, unknown required
+bytes and unknown temporary peak. Local model installations publish symlinks to
+source weights, so they do not consume another copy of each weight. Draft GGUF
+conversion writes new safetensors under `models/.metadata`; its output and
+staging peak are not derivable from the selected file sizes alone, so they are
+reported as unknown and never cause a refusal. A failed free space query also
+warns and proceeds. Known download bytes that exceed the measured free space
+remain a hard refusal.
+
 huggingface_hub downloads on threads it joins, which finish their files
 before an interrupt reaches the program, so the download runs on a thread of
 its own (`hub._interruptible`) and Ctrl+C stops the installer within a

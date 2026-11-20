@@ -74,6 +74,7 @@ TEST_MEMORY_TEST := $(ENGINE_TEST_BUILD)/engine-memory-plan
 TEST_VISION_PREPARATION := $(ENGINE_TEST_BUILD)/vision-preparation
 TEST_DRAFT_PREPARATION := $(ENGINE_TEST_BUILD)/draft-preparation
 TEST_SAFETENSORS_CHECKPOINT := $(ENGINE_TEST_BUILD)/safetensors-checkpoint
+TEST_WEIGHT_MANIFEST_HASH := $(ENGINE_TEST_BUILD)/weight-manifest-hash
 TEST_MODEL_CONFIGURATION := $(ENGINE_TEST_BUILD)/model-configuration
 TEST_FAMILY_VALUES := $(ENGINE_TEST_BUILD)/family-values
 TEST_WEIGHT_SOURCE := $(ENGINE_TEST_BUILD)/weight-source
@@ -91,12 +92,14 @@ TEST_GGUF_MOE := $(ENGINE_TEST_BUILD)/gguf-moe
 TEST_GGUF_MOE_E512 := $(ENGINE_TEST_BUILD)/gguf-moe-e512
 TEST_GGUF_MOE_SIGMOID := $(ENGINE_TEST_BUILD)/gguf-moe-sigmoid
 TEST_EXPERT_STORE := $(ENGINE_TEST_BUILD)/expert-store
+TEST_EXPERT_PRIORITY_PROFILE := $(ENGINE_TEST_BUILD)/expert-priority-profile
 TEST_KV_BLOCK_CACHE := $(ENGINE_TEST_BUILD)/kv-block-cache
 TEST_KV_HISTORY_STREAM := $(ENGINE_TEST_BUILD)/kv-history-stream
 TEST_QWEN4_KERNELS := $(ENGINE_TEST_BUILD)/qwen4-kernels
 TEST_GGUF_REFERENCE := $(ENGINE_TEST_BUILD)/gguf-reference
 TEST_GGUF_PLANNER := $(ENGINE_TEST_BUILD)/gguf-planner
 TEST_GGUF_PREPARATION := $(ENGINE_TEST_BUILD)/gguf-preparation
+TEST_CPU_EXPERT_PROTOTYPE := $(ENGINE_TEST_BUILD)/cpu-expert-prototype
 TEST_GGUF_DEQUANT_AIR := $(ENGINE_TEST_BUILD)/gguf-dequant.air
 TEST_GGUF_DEQUANT_LIB := $(ENGINE_TEST_BUILD)/gguf-dequant.metallib
 # Every hash the weight tests compare against, and how to update them.
@@ -201,9 +204,9 @@ TEST_CACHE_DIRECTORY := $(ENGINE_TEST_BUILD)/cache-directory
 TEST_DISK_SPACE := $(ENGINE_TEST_BUILD)/disk-space
 TEST_PERSISTENT_CACHE := $(ENGINE_TEST_BUILD)/persistent-cache
 
-TEST_CPU_TARGETS := $(TEST_SLOT_FILE) $(TEST_SPARSE_ROW_STORE) $(TEST_SSD_READERS) $(TEST_SLOT_RECYCLER) \
+TEST_CPU_TARGETS := $(TEST_CPU_EXPERT_PROTOTYPE) $(TEST_EXPERT_PRIORITY_PROFILE) $(TEST_SLOT_FILE) $(TEST_SPARSE_ROW_STORE) $(TEST_SSD_READERS) $(TEST_SLOT_RECYCLER) \
 	$(TEST_VERIFY_BUDGET) $(TEST_PROMPT_LOOKUP) \
-	$(TEST_CACHE_DIRECTORY) $(TEST_DISK_SPACE) $(TEST_LEGACY_WEIGHT_CACHE) $(TEST_VISION_PREPARATION) $(TEST_SAFETENSORS_CHECKPOINT) $(TEST_WEIGHT_SOURCE) $(TEST_OPERATOR_WORKSPACE) \
+	$(TEST_CACHE_DIRECTORY) $(TEST_DISK_SPACE) $(TEST_LEGACY_WEIGHT_CACHE) $(TEST_VISION_PREPARATION) $(TEST_SAFETENSORS_CHECKPOINT) $(TEST_WEIGHT_MANIFEST_HASH) $(TEST_WEIGHT_SOURCE) $(TEST_OPERATOR_WORKSPACE) \
 	$(TEST_MODEL_CONFIGURATION) $(TEST_FAMILY_VALUES) \
 	$(TEST_KV_SLOT_FORMAT) $(TEST_KV_PAGE_TIER_HOST) \
 	$(TEST_GGUF_FILE) \
@@ -325,6 +328,8 @@ $(ENGINE_TEST_BUILD) $(ENGINE_SANITIZER_BUILD):
 # CPU tests built from the runtime sources they check, without the engine
 # library or a framework. Those that also run under the sanitizers list their
 # sources with the sanitizer builds.
+$(TEST_EXPERT_PRIORITY_PROFILE): dev/tests/engine/expert_priority_profile_test.mm runtime/model/ExpertPriorityProfile.mm | $(ENGINE_TEST_BUILD)
+	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc dev/tests/engine/expert_priority_profile_test.mm runtime/model/ExpertPriorityProfile.mm -framework Foundation -framework CoreFoundation -o $@
 $(TEST_WEIGHT_SOURCE): dev/tests/engine/weight_source_test.cpp runtime/model/WeightSource.cpp
 $(TEST_VERIFY_BUDGET): dev/tests/engine/verify_budget_test.cpp runtime/model/VerifyBudget.cpp
 $(TEST_PROMPT_LOOKUP): dev/tests/engine/prompt_lookup_test.cpp
@@ -354,6 +359,11 @@ $(TEST_Q8_CPU_TEST): dev/tests/engine/q8_paged_kv_test.cc
 $(TEST_Q4_CPU_TEST): dev/tests/engine/q4_paged_kv_test.cc
 $(TEST_K8V4_CPU_TEST): dev/tests/engine/k8v4_paged_kv_test.cc
 $(TEST_LEGACY_WEIGHT_CACHE): dev/tests/engine/legacy_weight_cache_test.cpp
+$(TEST_CPU_EXPERT_PROTOTYPE): dev/tests/engine/cpu_expert_prototype_test.cpp \
+		$(ENGINE_LIBRARY)
+	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) \
+		dev/tests/engine/cpu_expert_prototype_test.cpp $(ENGINE_LIBRARY) \
+		$(ENGINE_LINKFLAGS) -o $@
 
 $(TEST_WEIGHT_SOURCE) $(TEST_GGUF_FILE) $(TEST_MEMORY_TEST) $(TEST_KV_PAGE_CACHE_TEST) \
 		$(TEST_DRAFT_CONTEXT_PLAN_TEST) $(TEST_RAGGED_SCHEDULER_TEST) \
@@ -371,6 +381,9 @@ $(TEST_WEIGHT_SOURCE) $(TEST_GGUF_FILE) $(TEST_MEMORY_TEST) $(TEST_KV_PAGE_CACHE
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) $(TEST_INPUTS) -o $@
 
 # C++ tests linked with the frameworks.
+$(TEST_WEIGHT_MANIFEST_HASH): dev/tests/engine/weight_manifest_hash_test.mm runtime/model/WeightManifestHash.mm runtime/model/WeightManifestHash.hpp
+	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -x objective-c++ dev/tests/engine/weight_manifest_hash_test.mm runtime/model/WeightManifestHash.mm $(ENGINE_LINKFLAGS) -o $@
+
 $(TEST_SAFETENSORS_CHECKPOINT): dev/tests/engine/safetensors_checkpoint_test.cpp $(ENGINE_LIBRARY)
 $(TEST_MODEL_CONFIGURATION): dev/tests/engine/model_configuration_test.cpp $(ENGINE_LIBRARY)
 $(TEST_FAMILY_VALUES): dev/tests/engine/family_values_test.cpp $(ENGINE_LIBRARY)
@@ -602,6 +615,7 @@ test-engine-cpu: $(TEST_CPU_TARGETS) $(TEST_ATTENTION_SWEEP) $(TEST_BACKEND_BENC
 	$(TEST_LEGACY_WEIGHT_CACHE)
 	$(BUILD_SCRIPT_PYTHON) dev/tests/engine/run_vision_preparation.py $(TEST_VISION_PREPARATION) $(WEIGHT_GOLDENS)
 	$(TEST_SAFETENSORS_CHECKPOINT)
+	$(TEST_WEIGHT_MANIFEST_HASH)
 	$(TEST_MODEL_CONFIGURATION) $(MODEL_CONFIGS)
 	$(TEST_FAMILY_VALUES) dev/tests/engine/family_values_golden.txt
 	$(TEST_WEIGHT_SOURCE)

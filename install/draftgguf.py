@@ -211,6 +211,64 @@ def _write_safetensors(path: Path, tensors) -> None:
     path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + bytes(data))
 
 
+def _safetensors_size(tensors) -> int:
+    """Exact file bytes for `(name, shape, bf16_bytes)` tensors."""
+    header = {}
+    data_bytes = 0
+    for name, shape, byte_count in tensors:
+        begin = data_bytes
+        data_bytes += byte_count
+        header[name] = {
+            "dtype": "BF16",
+            "shape": list(shape),
+            "data_offsets": [begin, data_bytes],
+        }
+    encoded = json.dumps(header, separators=(",", ":"), ensure_ascii=False).encode()
+    return 8 + len(encoded) + (-len(encoded) % 8) + data_bytes
+
+
+def planned_output_bytes(source) -> int:
+    """Exact output size from GGUF metadata, without reading tensor payloads."""
+    sources = [source] if isinstance(source, (str, Path)) else list(source)
+    parts = _split_parts(sources)
+    model, mask = [], []
+    seen = set()
+    for header, path in parts:
+        alignment = header.values.get("general.alignment", GGUF_ALIGNMENT)
+        if type(alignment) is not int or alignment <= 0:
+            raise ModelError("invalid GGUF alignment in the draft")
+        data_start = header.consumed + (-header.consumed % alignment)
+        source_size = Path(path).stat().st_size
+        for name, kind_id in header.tensors.items():
+            kind = gguf.TENSOR_TYPES.get(kind_id)
+            if kind not in SUPPORTED:
+                raise ModelError(
+                    f"draft GGUF tensor {name} is {kind or f'type {kind_id}'}; a draft "
+                    "GGUF must be BF16, F16, F32, Q8_0, Q4_K, Q5_K or Q6_K"
+                )
+            shape = tuple(reversed(header.extents[name]))
+            elements = 1
+            for extent in shape:
+                elements *= extent
+            block_elements, block_bytes = SUPPORTED[kind]
+            if elements % block_elements:
+                raise ModelError(f"draft GGUF tensor {name} is not whole {kind} blocks")
+            # Keep the source-size validation identical to convert(): malformed
+            # metadata must fail before the planner claims an exact result.
+            source_bytes = elements // block_elements * block_bytes
+            if data_start + header.offsets[name] + source_bytes > source_size:
+                raise ModelError(f"truncated draft GGUF tensor {name}")
+            mapped = tensor_name(name)
+            if mapped in seen:
+                raise ModelError(f"duplicate draft tensor {mapped}")
+            seen.add(mapped)
+            item = (mapped, shape, elements * 2)
+            (mask if mapped == MASK_EMBEDDING else model).append(item)
+    if not model:
+        raise ModelError("the draft GGUF holds no tensors")
+    return _safetensors_size(sorted(model)) + (_safetensors_size(mask) if mask else 0)
+
+
 def _split_parts(sources):
     """The metadata of a split draft's parts, in split order, and each
     part's data start: a single file is one part."""

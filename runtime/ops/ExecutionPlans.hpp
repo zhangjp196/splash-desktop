@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ops/CpuBf16ExpertsConfig.hpp"
 #include "ops/DraftAttention.hpp"
 #include "ops/Linear.hpp"
 #include "ops/MoE.hpp"
@@ -49,6 +50,7 @@ private:
   Linear linear_;
   GpuFamilyClass family_;
   uint32_t gpuCores_;
+  bool cpuBf16Experts_;
 };
 
 } // namespace splash::ops

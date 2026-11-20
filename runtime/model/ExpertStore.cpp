@@ -12,9 +12,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 #include <exception>
 #include <mutex>
+#include <limits>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -246,6 +251,7 @@ struct ExpertStore::Impl {
   // pieces they took before it goes.
   ~Impl() {
     if (ahead.batch) readers->stop(*ahead.batch);
+    if (trace) std::fclose(trace);
   }
 
   // Round `round` of the `rounds` of block `block`'s load (addLoad) of `rows`
@@ -254,7 +260,8 @@ struct ExpertStore::Impl {
   // rows `verifyRows` names when the step routes its verify rows alone
   // (ops::MoeBuffers::verifyRows).
   void load(uint32_t block, ops::MoePhase phase, uint32_t rows, bool predicted, std::span<const PartTiles> parts,
-            uint32_t round, uint32_t rounds, const metal::MetalBuffer &verifyRows);
+            std::span<const std::shared_ptr<ops::MoeOriginalQ4_0Sink>> originalSinks, uint32_t round,
+            uint32_t rounds, const metal::MetalBuffer &verifyRows);
   void route(uint32_t block, std::span<const std::span<const MoeTileDescriptor>> parts, ops::MoePhase phase,
              uint32_t rows, ExpertStoreStats::Use &use);
   // Whether a load of `rows` rows of `phase` is a long prefill chunk's,
@@ -358,6 +365,12 @@ struct ExpertStore::Impl {
   // the engine thread's own flag: neither waits for a load's reads.
   mutable std::mutex mutex;
   uint64_t serial = 0;
+  // Optional diagnostic stream, accessed only while holding mutex.
+  std::FILE *trace = nullptr;
+  std::string modelIdentity;
+  std::string weightManifestHash;
+  bool weightIdentityKnown = false;
+  ExpertPriorityHints priorityHints;
   // The routed experts of block pendingBlock's load that were not resident
   // and are not staged yet (`waiting`), in expert order, with the slots they
   // claimed, and those the round being staged stages: their slots hold no
@@ -485,8 +498,19 @@ void ExpertStore::Impl::route(uint32_t index, std::span<const std::span<const Mo
       }
       pending.push_back({expert, kNoSlot});
     }
-  // Consecutive experts read together (stage).
-  std::ranges::sort(pending);
+  // Profile-ranked experts claim the best slots first on this explicit load
+  // event. The staging order remains expert-sorted below for coalesced reads.
+  const auto hintBlock = priorityHints.find(index);
+  const auto rank = [&](uint32_t expert) {
+    if (hintBlock == priorityHints.end()) return std::numeric_limits<size_t>::max();
+    const auto found = std::ranges::find(hintBlock->second, expert);
+    return found == hintBlock->second.end() ? std::numeric_limits<size_t>::max()
+                                             : static_cast<size_t>(found - hintBlock->second.begin());
+  };
+  std::ranges::sort(pending, [&](const auto &a, const auto &b) {
+    const size_t ar = rank(a.first), br = rank(b.first);
+    return ar != br ? ar < br : a.first < b.first;
+  });
   uint32_t *table = static_cast<uint32_t *>(tables.contents()) + uint64_t{index} * shape.experts;
   for (auto &[expert, slot] : pending) {
     slot = size.recycling.claim(uint64_t{index} << 32 | expert, serial, chunk);
@@ -819,8 +843,9 @@ void ExpertStore::Impl::publish() {
 }
 
 void ExpertStore::Impl::load(uint32_t index, ops::MoePhase phase, uint32_t rows, bool predicted,
-                             std::span<const PartTiles> parts, uint32_t round, uint32_t rounds,
-                             const metal::MetalBuffer &verifyRows) {
+                             std::span<const PartTiles> parts,
+                             std::span<const std::shared_ptr<ops::MoeOriginalQ4_0Sink>> originalSinks,
+                             uint32_t round, uint32_t rounds, const metal::MetalBuffer &verifyRows) {
   std::lock_guard lock(mutex);
   // No job runs until the round's are staged; the last round's ran.
   static_cast<uint32_t *>(grid.contents())[1] = 0;
@@ -843,6 +868,52 @@ void ExpertStore::Impl::load(uint32_t index, ops::MoePhase phase, uint32_t rows,
         partTiles.push_back({descriptors, counted->tiles});
       }
       route(index, partTiles, phase, rows, use);
+      if (!originalSinks.empty()) {
+        Block &routedBlock = blocks[index];
+        const ExpertLayout &layout = sizes[routedBlock.size].layout;
+        for (const auto &sink : originalSinks) {
+          for (uint32_t expert = 0; expert < shape.experts; ++expert) {
+            if (routedIn[expert] != serial) continue;
+            ops::MoeOriginalQ4_0Expert entry;
+            entry.expert = expert;
+            entry.supported = true;
+            for (size_t z = 0; z < entry.projections.size(); ++z) {
+              const ProjectionLayout &projection = layout[z];
+              auto &bytes = entry.projections[z];
+              bytes.resize(static_cast<size_t>(projection.nativeBytes()));
+              if (!readOriginalQ4_0Rows(routedBlock.experts.projections[z],
+                                        uint64_t{expert} * projection.rows, projection.rows, bytes.data())) {
+                entry.supported = false;
+                bytes.clear();
+              }
+            }
+            sink->append(std::move(entry));
+          }
+        }
+      }
+      if (trace) {
+        std::fprintf(trace, "{\"v\":2,\"model_identity\":\"");
+        for (const unsigned char c : modelIdentity) {
+          if (c == '\\' || c == '\"') std::fputc('\\', trace);
+          if (c >= 0x20) std::fputc(c, trace);
+        }
+        std::fprintf(trace, "\",\"weight_manifest_hash\":\"%s\",\"identity_status\":\"%s\",\"priority_eligible\":%s,\"block\":%u,\"phase\":\"%s\",\"rows\":%u,\"experts\":[",
+                     weightIdentityKnown ? weightManifestHash.c_str() : "unknown",
+                     weightIdentityKnown ? "known" : "unknown", weightIdentityKnown ? "true" : "false", index,
+                     phase == ops::MoePhase::Prefill ? "prefill" : "decode", rows);
+        bool first = true;
+        for (uint32_t expert = 0; expert < shape.experts; ++expert) {
+          if (routedIn[expert] != serial) continue;
+          std::fprintf(trace, "%s%u", first ? "" : ",", expert);
+          first = false;
+        }
+        std::fputs("]}\n", trace);
+        if (std::fflush(trace) != 0 || std::ferror(trace)) {
+          std::fprintf(stderr, "expert route trace: write failed; tracing disabled\n");
+          std::fclose(trace);
+          trace = nullptr;
+        }
+      }
       ++use.loads;
     } else if (pendingBlock != index) {
       throw std::logic_error("an expert load's round follows another block's load");
@@ -899,6 +970,10 @@ ExpertStore::ExpertStore(metal::MetalBackend &backend, StreamedBlocks streamed, 
   Impl &impl = *impl_;
   const Geometry &geometry = impl.geometry;
   if (!options.memoryBytes || !impl.readers) throw std::invalid_argument("invalid expert store");
+  impl.modelIdentity = options.modelIdentity;
+  impl.weightManifestHash = options.weightManifestHash;
+  impl.weightIdentityKnown = options.weightIdentityKnown;
+  impl.priorityHints = std::move(options.priorityHints);
   impl.files = std::move(streamed.sources);
   impl.checks = std::move(streamed.checks);
   for (uint32_t block = 0; block < streamed.blocks.size(); ++block)
@@ -1044,6 +1119,14 @@ ExpertStore::ExpertStore(metal::MetalBackend &backend, StreamedBlocks streamed, 
   }
   impl.fill();
   impl.publish();
+  if (const char *path = std::getenv("SPLASH_EXPERT_ROUTE_TRACE"); path && *path) {
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+      impl.trace = ::fdopen(fd, "w");
+      if (!impl.trace) ::close(fd);
+    }
+    if (!impl.trace) std::fprintf(stderr, "expert route trace: cannot create file; tracing disabled\n");
+  }
 }
 
 ExpertStore::~ExpertStore() = default;
@@ -1078,6 +1161,23 @@ void ExpertStore::attach(uint32_t block, ops::BlockMoeWeights &weights) {
   impl_->blocks.at(block).weights = &weights;
 }
 
+bool ExpertStore::supportsCpuQ4_0(uint32_t block) const noexcept {
+  if (block >= impl_->blocks.size()) return false;
+  const Impl::Block &routed = impl_->blocks[block];
+  if (!impl_->streams(block)) return false;
+  const ExpertLayout &layout = impl_->sizes[routed.size].layout;
+  for (size_t z = 0; z < layout.size(); ++z) {
+    const ProjectionLayout &projection = layout[z];
+    const gguf::Repack &repack = routed.experts.projections[z];
+    if (projection.format != GGUF_FMT_Q40 || projection.columns % 32 ||
+        projection.rowBytes != ggufRowBytes(kQuantFormats[GGUF_FMT_Q40], projection.columns))
+      return false;
+    for (uint32_t expert = 0; expert < impl_->shape.experts; ++expert)
+      if (!supportsOriginalQ4_0Rows(repack, uint64_t{expert} * projection.rows, projection.rows)) return false;
+  }
+  return true;
+}
+
 void ExpertStore::addLoad(metal::CommandGraph &graph, std::span<const ops::MoeLoadPart> parts,
                           uint32_t block) const {
   const Impl &impl = *impl_;
@@ -1089,10 +1189,14 @@ void ExpertStore::addLoad(metal::CommandGraph &graph, std::span<const ops::MoeLo
   uint32_t rows = 0;
   std::vector<Impl::PartTiles> tiles;
   tiles.reserve(parts.size());
+  std::vector<std::shared_ptr<ops::MoeOriginalQ4_0Sink>> originalSinks;
   for (const ops::MoeLoadPart &part : parts) {
     if (part.plan->phase() != phase) throw std::invalid_argument("an expert load's steps differ in phase");
     rows += part.plan->rows();
     tiles.push_back({part.buffers->scratch.tileDescriptors, part.buffers->scratch.tileCount});
+    if (part.originalQ4_0Sink &&
+        std::ranges::find(originalSinks, part.originalQ4_0Sink) == originalSinks.end())
+      originalSinks.push_back(part.originalQ4_0Sink);
   }
   const uint64_t routable = impl.routable(rows);
   const uint64_t perRound = impl.roundPlaces(phase, routable);
@@ -1124,8 +1228,8 @@ void ExpertStore::addLoad(metal::CommandGraph &graph, std::span<const ops::MoeLo
   const metal::MetalBuffer verifyRows = predicted ? parts.front().buffers->verifyRows : metal::MetalBuffer{};
   for (uint32_t round = 0; round < rounds; ++round) {
     graph.host(
-        [impl = impl_, block, phase, rows, predicted, tiles, round, rounds, verifyRows] {
-          impl->load(block, phase, rows, predicted, tiles, round, rounds, verifyRows);
+        [impl = impl_, block, phase, rows, predicted, tiles, originalSinks, round, rounds, verifyRows] {
+          impl->load(block, phase, rows, predicted, tiles, originalSinks, round, rounds, verifyRows);
         },
         timed, gpu, startAhead);
     ops::MoE::addExpertLoad(graph, impl.staging, size.arena, impl.jobs, impl.sources, size.load,

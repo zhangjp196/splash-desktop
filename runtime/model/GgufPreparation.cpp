@@ -660,6 +660,32 @@ void readRepackRows(const gguf::Repack &repack, uint64_t first, uint64_t count, 
   }
 }
 
+bool readOriginalQ4_0Rows(const gguf::Repack &repack, uint64_t first, uint64_t count, uint8_t *to) {
+  // GGML_TYPE_Q4_0 is type id 2 in the GGUF specification. Check the source
+  // type as well as the destination format: repacked plane bytes are not Q4_0.
+  constexpr uint32_t kGgmlTypeQ4_0 = 2;
+  if (repack.format != GGUF_FMT_Q40 || !count || !to) return false;
+  const uint64_t rowBytes = ggufRowBytes(kQuantFormats[repack.format], repack.columns);
+  if (!rowBytes || rowBytes != ggufRowBytes(kQuantFormats[GGUF_FMT_Q40], repack.columns)) return false;
+  const auto stored = storedRepackRows(repack, first, count);
+  if (!stored) return false;
+  uint64_t start = 0;
+  uint64_t sourceRows = 0;
+  for (const gguf::TensorRows &tensor : repack.sources) {
+    sourceRows += tensor.rows;
+    if (first >= start && first - start < tensor.rows) {
+      if (tensor.type != kGgmlTypeQ4_0 || tensor.windows != 1 || tensor.rowBytes != rowBytes ||
+          tensor.safetensors.codes || tensor.safetensors.bfloat16 || tensor.order.from != UINT64_MAX)
+        return false;
+      stored->file->readFile(stored->offset, {to, static_cast<size_t>(count * rowBytes)});
+      return true;
+    }
+    start += tensor.rows;
+  }
+  if (first > sourceRows || count > sourceRows - first) throw GgufError("repack rows are out of bounds");
+  return false;
+}
+
 std::optional<StoredRows> storedRepackRows(const gguf::Repack &repack, uint64_t first, uint64_t count) {
   const uint64_t rowBytes = ggufRowBytes(kQuantFormats[repack.format], repack.columns);
   uint64_t start = 0;
@@ -675,6 +701,25 @@ std::optional<StoredRows> storedRepackRows(const gguf::Repack &repack, uint64_t 
     start += tensor.rows;
   }
   throw GgufError("repack rows are out of bounds");
+}
+
+bool supportsOriginalQ4_0Rows(const gguf::Repack &repack, uint64_t first, uint64_t count) noexcept {
+  constexpr uint32_t kGgmlTypeQ4_0 = 2;
+  if (repack.format != GGUF_FMT_Q40 || !count) return false;
+  try {
+    const uint64_t rowBytes = ggufRowBytes(kQuantFormats[GGUF_FMT_Q40], repack.columns);
+    if (!rowBytes || !storedRepackRows(repack, first, count)) return false;
+    uint64_t start = 0;
+    for (const gguf::TensorRows &tensor : repack.sources) {
+      if (first >= start && first - start < tensor.rows)
+        return tensor.type == kGgmlTypeQ4_0 && tensor.windows == 1 && tensor.rowBytes == rowBytes &&
+               !tensor.safetensors.codes && !tensor.safetensors.bfloat16 && tensor.order.from == UINT64_MAX;
+      start += tensor.rows;
+    }
+  } catch (...) {
+    return false;
+  }
+  return false;
 }
 
 void writeGgufImage(metal::MetalBackend &backend, const metal::MetalBuffer &image, const gguf::Image &plan) {

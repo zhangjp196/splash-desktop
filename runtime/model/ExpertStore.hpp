@@ -68,6 +68,7 @@
 
 #include "metal/MetalBackend.hpp"
 #include "model/ExpertStoreStats.hpp"
+#include "model/ExpertPriorityProfile.hpp"
 #include "model/GgufImage.hpp"
 #include "model/SsdReaders.hpp"
 #include "model/WeightMemory.hpp"
@@ -96,6 +97,13 @@ struct ExpertStoreOptions final {
   // (ExpertStore::fixedBytes), and in the rest the arenas' slots, which hold
   // at least a block's experts of each size and all of a size of one block.
   uint64_t memoryBytes = 0;
+  // Human-assigned descriptor name; useful for grouping, not a weight fingerprint.
+  std::string modelIdentity;
+  std::string weightManifestHash;
+  bool weightIdentityKnown = false;
+  // Ranked route profile hints keyed by block; supplied only by an opted-in,
+  // identity-checked profile loader.
+  ExpertPriorityHints priorityHints;
   // The readers its reads run on: the engine's one pool, which the other
   // streamed weights and KV reads share.
   std::shared_ptr<SsdReaders> readers;
@@ -128,6 +136,7 @@ public:
   // the store, which loads them; the store keeps the block's router and
   // shared-expert gate, set before, which predict its routes.
   void bind(uint32_t block, ops::BlockMoeWeights &weights);
+  [[nodiscard]] bool supportsCpuQ4_0(uint32_t block) const noexcept override;
   void addLoad(metal::CommandGraph &graph, std::span<const ops::MoeLoadPart> parts, uint32_t block) const override;
   [[nodiscard]] ExpertStoreStats stats() const;
   // The bytes the store holds now, and the least and most it may hold: its

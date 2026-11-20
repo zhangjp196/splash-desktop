@@ -25,6 +25,15 @@ void writeGgufImage(metal::MetalBackend &backend, const metal::MetalBuffer &imag
 // expert's rows are read with it (model/ExpertStore.hpp), from any thread.
 void readRepackRows(const gguf::Repack &repack, uint64_t first, uint64_t count, uint8_t *to);
 
+// Reads original GGUF Q4_0 rows without passing through the Metal repacker.
+// Returns false unless every requested row is a direct, ordered GGUF Q4_0
+// source row with the exact native row width. `to` receives count rows.
+[[nodiscard]] bool readOriginalQ4_0Rows(const gguf::Repack &repack, uint64_t first,
+                                        uint64_t count, uint8_t *to);
+// Metadata-only eligibility check for a row range accepted by the reader above.
+[[nodiscard]] bool supportsOriginalQ4_0Rows(const gguf::Repack &repack, uint64_t first,
+                                            uint64_t count) noexcept;
+
 // Where rows [first, first + count) of a repack are in a file, when one of
 // its sources stores them as they are and in order, so that they are read
 // with the file's bytes alone: the file and the offset of the first row from

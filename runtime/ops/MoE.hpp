@@ -9,8 +9,12 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace splash::ops {
 
@@ -143,11 +147,34 @@ struct BlockMoeWeights final {
   InputRotation intermediateRotation;
 };
 
+// Original Q4_0 rows captured for a routed expert by an expert store load.
+// Unsupported entries remain present with supported=false and no bytes.
+struct MoeOriginalQ4_0Expert final {
+  uint32_t expert = 0;
+  bool supported = false;
+  std::array<std::vector<uint8_t>, 3> projections;
+};
+
+// Shared, thread-safe collection point for original routed Q4_0 rows.
+struct MoeOriginalQ4_0Sink final {
+  void append(MoeOriginalQ4_0Expert entry) {
+    std::lock_guard lock(mutex);
+    experts.push_back(std::move(entry));
+  }
+  [[nodiscard]] std::vector<MoeOriginalQ4_0Expert> snapshot() const {
+    std::lock_guard lock(mutex);
+    return experts;
+  }
+  mutable std::mutex mutex;
+  std::vector<MoeOriginalQ4_0Expert> experts;
+};
+
 // One MoE step of a block a load serves: its plan, and its buffers once the
 // grouping wrote their tiles (MoeScratch::tileDescriptors and tileCount).
 struct MoeLoadPart final {
   const MoeBuffers *buffers = nullptr;
   const MoePlan *plan = nullptr;
+  std::shared_ptr<MoeOriginalQ4_0Sink> originalQ4_0Sink;
 };
 
 // Routed experts that stream into the slots of a store (model::ExpertStore),
@@ -159,6 +186,9 @@ struct MoeLoadPart final {
 class MoeExpertStream {
 public:
   virtual ~MoeExpertStream() = default;
+  // Whether every streamed routed projection is already stored as native
+  // Q4_0 rows suitable for the CPU grouped expert path.
+  [[nodiscard]] virtual bool supportsCpuQ4_0(uint32_t block) const noexcept = 0;
   virtual void addLoad(metal::CommandGraph &graph, std::span<const MoeLoadPart> parts, uint32_t block) const = 0;
 };
 
@@ -309,6 +339,9 @@ struct MoeConfig final {
   // The router's float tile; the execution plans derive it from the device,
   // the plan's rows and the router's format (Linear::ggufFloatTile).
   FloatTile ggufRouterTile = FloatTile::Simdgroup;
+  // Explicit opt-in for resident BF16/Q4_0 and streamed native Q4_0 experts.
+  // Every CPU path validates the source layout before adding graph work.
+  bool cpuBf16Experts = false;
   bool operator==(const MoeConfig &) const = default;
 };
 

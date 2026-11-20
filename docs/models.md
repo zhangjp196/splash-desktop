@@ -1,5 +1,34 @@
 # Models
 
+## CPU MoE experts (opt in)
+
+The runtime normally executes MoE experts on Metal. To opt in to CPU execution
+for eligible expert tensors, set `SPLASH_CPU_BF16_EXPERTS=1` in the process
+environment before starting Splash. The setting is captured when runtime
+execution plans are created and is applied to every MoE block. The resident
+CPU path supports six uniformly BF16 or uniformly native Q4_0 expert segments
+across gate, up, and down. BF16 segments must be contiguous Shared Rows; Q4_0
+segments must be host-readable Shared native Rows with 32-value blocks and
+`inputSize` divisible by 32. For streamed weights, the CPU path supports native
+GGUF Q4_0 routed rows when all routed projections and the resident shared
+projections are host-readable Q4_0 Rows. It reads the routed experts selected
+by that step and computes them in the grouped CPU path. Tensor shapes, source
+row mappings, and grouped route mappings are checked. Mixed BF16/Q4_0 segments
+and unsupported source or buffer layouts use the complete Metal expert pass.
+Metal-repacked planes, rotated experts, and separately scheduled routed steps
+remain on Metal. The variable is disabled by default; unset, empty, or
+unsupported values (anything other than exactly `1`) keep the Metal default.
+
+## Installation disk planning
+
+Downloads account for uncached Hub blobs on the cache volume and reuse existing
+blobs without counting them again. Installation reports each destination volume
+separately; files without size metadata stay listed as unknown. GGUF draft
+conversion computes its BF16 safetensors output and staged peak from GGUF tensor
+metadata without reading the weight payloads. The conversion is advisory when
+free space is low or cannot be queried. Model publication uses links to the
+prepared files, so it does not count the same weight bytes twice.
+
 ## Upstream model loading
 
 A target is identified by its own configuration: an MLX `config.json`, or the

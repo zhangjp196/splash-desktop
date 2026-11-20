@@ -38,6 +38,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -238,7 +239,15 @@ int streamedExperts(MetalBackend &backend, const MoeShape &shape, const std::fil
                       storeOptions(arenaBytes(m, slots) + kSpareBytes, file.blocks, shape));
     require(store.stats().slots == slots, formats + ": the arena holds another number of slots");
     std::array<BlockMoeWeights, 2> streamed{m.weights, m.weights};
-    for (uint32_t block = 0; block < 2; ++block) store.bind(block, streamed[block]);
+    for (uint32_t block = 0; block < 2; ++block) {
+      store.bind(block, streamed[block]);
+      const bool nativeQ4_0 = std::all_of(m.formats.begin(), m.formats.begin() + 3,
+                                          [](Fmt format) { return format == Q40; });
+      if (store.supportsCpuQ4_0(block) != nativeQ4_0) {
+        printf("  %s block %u: streamed CPU Q4_0 capability differs from native rows FAIL\\n", fmtName(f), block);
+        ++failures;
+      }
+    }
     Buffers b;
     const int before = failures;
     // Decode steps of one to four lanes and prefill chunks of fresh rows, the
@@ -386,12 +395,24 @@ int streamedChunkOrder(MetalBackend &backend, const MoeShape &shape, const std::
 // evicts the other block's experts; each load counts once.
 int streamedUnionLoads(MetalBackend &backend, const MoeShape &shape, const std::filesystem::path &directory) {
   int failures = 0;
-  for (const Fmt f : {Q4K, IQ3XXS}) {
+  for (const Fmt f : {Q40, Q4K, IQ3XXS}) {
     const Model m = makeModel(backend, shape, f, true);
     ExpertFile file(m, directory / "experts.bin");
     const uint64_t slots = shape.experts + 3;
+    const auto tracePath = directory / (std::string("routes-") + std::to_string(shape.experts) + "-" +
+                                        std::to_string(shape.expertsPerToken) + "-" + fmtName(f));
+    setenv("SPLASH_EXPERT_ROUTE_TRACE", tracePath.c_str(), 1);
     ExpertStore store(backend, file.blocks, shape,
                       storeOptions(arenaBytes(m, slots) + kSpareBytes, file.blocks, shape));
+    unsetenv("SPLASH_EXPERT_ROUTE_TRACE");
+    if (shape.experts == 16 && f == Q4K) {
+      // A second store cannot truncate or share the first store's trace.
+      setenv("SPLASH_EXPERT_ROUTE_TRACE", tracePath.c_str(), 1);
+      ExpertStore collision(backend, file.blocks, shape,
+                            storeOptions(arenaBytes(m, slots) + kSpareBytes, file.blocks, shape));
+      unsetenv("SPLASH_EXPERT_ROUTE_TRACE");
+      if (!std::filesystem::exists(tracePath) || std::filesystem::file_size(tracePath) != 0) ++failures;
+    }
     std::array<BlockMoeWeights, 2> streamed{m.weights, m.weights};
     for (uint32_t block = 0; block < 2; ++block) store.bind(block, streamed[block]);
     constexpr std::array<uint32_t, 3> kRows{kMaximumRows, 27, 9};
@@ -403,12 +424,13 @@ int streamedUnionLoads(MetalBackend &backend, const MoeShape &shape, const std::
       const uint32_t block = turn % 2;
       std::vector<std::vector<uint16_t>> want;
       std::vector<MoeLoadPart> parts;
+      auto originalRows = std::make_shared<splash::ops::MoeOriginalQ4_0Sink>();
       for (size_t step = 0; step < steps.size(); ++step) {
         Buffers &b = steps[step];
         freshRows(backend, b, shape);
         want.push_back(runWeights(backend, m.weights, b, plans[step]));
         std::memset(b.moe.output.contents(), 0, b.moe.output.sizeBytes());
-        parts.push_back({&b.moe, &plans[step]});
+        parts.push_back({&b.moe, &plans[step], originalRows});
       }
       const ExpertStoreStats::Use used = store.stats().uses[0];
       CommandGraph graph;
@@ -418,6 +440,35 @@ int streamedUnionLoads(MetalBackend &backend, const MoeShape &shape, const std::
       for (size_t step = 0; step < steps.size(); ++step)
         MoE::addRouted(graph, steps[step].moe, streamed[block], plans[step]);
       static_cast<void>(backend.submitCommandAsync(graph.command()).wait());
+      const auto captured = originalRows->snapshot();
+      std::set<uint32_t> capturedExperts;
+      bool captureValid = true;
+      bool capturedQ4_0Bytes = false;
+      for (const auto &entry : captured) {
+        captureValid &= capturedExperts.insert(entry.expert).second;
+        const bool allQ4_0 = std::all_of(m.formats.begin(), m.formats.begin() + 3,
+                                         [](Fmt format) { return format == Q40; });
+        captureValid &= entry.supported == allQ4_0;
+        for (size_t z = 0; z < 3; ++z) {
+          if (m.formats[z] != Q40) {
+            captureValid &= entry.projections[z].empty();
+            continue;
+          }
+          const auto &tensor = m.routed[z];
+          const size_t nativeRowBytes = rowBytes(Q40, tensor.columns);
+          const size_t expectedBytes = size_t(tensor.rows / shape.experts) * nativeRowBytes;
+          const auto begin = tensor.native.begin() + size_t(entry.expert) * expectedBytes;
+          capturedQ4_0Bytes |= !entry.projections[z].empty();
+          captureValid &= entry.projections[z].size() == expectedBytes &&
+                          std::equal(entry.projections[z].begin(), entry.projections[z].end(), begin);
+        }
+      }
+      const bool hasQ4_0Projection = std::find(m.formats.begin(), m.formats.begin() + 3, Q40) != m.formats.begin() + 3;
+      if (!captureValid || (f == Q40 && hasQ4_0Projection && !capturedQ4_0Bytes) ||
+          capturedExperts.size() != store.stats().uses[0].routed - used.routed) {
+        printf("  %s: original Q4_0 capture differs from routed experts FAIL\\n", fmtName(f));
+        ++failures;
+      }
       for (size_t step = 0; step < steps.size(); ++step) {
         const auto *output = static_cast<const uint16_t *>(steps[step].moe.output.contents());
         if (!std::equal(want[step].begin(), want[step].end(), output) ||
@@ -428,8 +479,38 @@ int streamedUnionLoads(MetalBackend &backend, const MoeShape &shape, const std::
           ++failures;
         }
       }
-      const ExpertStoreStats::Use &use = store.stats().uses[0];
+      const ExpertStoreStats::Use use = store.stats().uses[0];
       const uint32_t rounds = loadSteps(shape, prefillPlan(shape, kRows[0] + kRows[1] + kRows[2]), block == 0);
+      std::ifstream trace(tracePath);
+      std::string line;
+      for (uint32_t i = 0; i <= turn; ++i) std::getline(trace, line);
+      const std::string prefix = ",\"experts\":[";
+      std::set<uint32_t> traced;
+      bool valid = line.starts_with("{\"v\":2,\"model_identity\":") &&
+                   line.find("\"weight_manifest_hash\":") != std::string::npos &&
+                   line.find("\"identity_status\":") != std::string::npos &&
+                   line.find("\"priority_eligible\":") != std::string::npos &&
+                   line.find("\"block\":" + std::to_string(block)) != std::string::npos &&
+                   line.find("\"phase\":\"prefill\"") != std::string::npos &&
+                   line.find("\"rows\":" + std::to_string(kRows[0] + kRows[1] + kRows[2])) !=
+                       std::string::npos &&
+                   line.ends_with("]}");
+      const size_t expertStart = line.find(prefix);
+      valid &= expertStart != std::string::npos;
+      if (valid) {
+        const char *p = line.c_str() + expertStart + prefix.size();
+        while (*p != ']') {
+          char *end = nullptr;
+          const unsigned long expert = std::strtoul(p, &end, 10);
+          if (end == p || expert >= shape.experts || !traced.insert(static_cast<uint32_t>(expert)).second ||
+              (*end != ',' && *end != ']')) { valid = false; break; }
+          p = *end == ',' ? end + 1 : end;
+        }
+      }
+      if (!valid || traced.size() != use.routed - used.routed) {
+        printf("  route trace differs from routed expert count FAIL\n");
+        ++failures;
+      }
       if (use.loads != used.loads + 1 || use.pickup.count != used.pickup.count + rounds) {
         printf("  %s: a union load counted %llu loads in %llu host steps, not %u FAIL\n", fmtName(f),
                (unsigned long long)(use.loads - used.loads),
@@ -446,6 +527,53 @@ int streamedUnionLoads(MetalBackend &backend, const MoeShape &shape, const std::
 
 // Replaces a method of the class of `object`, every command buffer's, while
 // it lives.
+int streamedCpuQ4_0(MetalBackend &backend, const MoeShape &shape, const std::filesystem::path &directory) {
+  Model model = makeModel(backend, shape, Q40, true);
+  model.formats[2] = Q40;
+  model.routed[2] = quantized(backend, Q40, shape.experts * shape.hiddenSize, shape.expertIntermediateSize);
+  model.weights.down.routed = model.routed[2].segment;
+  model.shared[0] = quantized(backend, Q40, shape.sharedSlices * shape.expertIntermediateSize, shape.hiddenSize);
+  model.shared[1] = quantized(backend, Q40, shape.sharedSlices * shape.expertIntermediateSize, shape.hiddenSize);
+  model.shared[2] = quantized(backend, Q40, shape.sharedSlices * shape.hiddenSize, shape.expertIntermediateSize);
+  model.weights.gate.shared = model.shared[0].segment;
+  model.weights.up.shared = model.shared[1].segment;
+  model.weights.down.shared = model.shared[2].segment;
+  ExpertFile file(model, directory / "cpu-q4-stream.bin");
+  const uint64_t slots = shape.experts;
+  StreamedBlocks blocks = file.blocks;
+  blocks.blocks.push_back(blocks.blocks.front());
+  blocks.checks.push_back(blocks.checks.front());
+  ExpertStore store(backend, blocks, shape, storeOptions(arenaBytes(model, slots), blocks, shape));
+  std::array<BlockMoeWeights, 2> streamed{model.weights, model.weights};
+  store.bind(0, streamed[0]);
+  store.bind(1, streamed[1]);
+  if (!store.supportsCpuQ4_0(0)) {
+    printf("streamed CPU Q4_0: native source capability was not recognized (stream=%d, formats=%u/%u/%u) FAIL\n",
+           streamed[0].stream != nullptr, streamed[0].gate.routed.formatId,
+           streamed[0].up.routed.formatId, streamed[0].down.routed.formatId);
+    return 1;
+  }
+  MoeConfig cpuConfig{};
+  cpuConfig.cpuBf16Experts = true;
+  const MoePlan metalDecode = MoE::decodePlan(shape, 1, MoeConfig{});
+  const MoePlan cpuDecode = MoE::decodePlan(shape, 1, cpuConfig);
+  const MoePlan metalPrefill = MoE::prefillPlan(shape, 9, MoeConfig{});
+  const MoePlan cpuPrefill = MoE::prefillPlan(shape, 9, cpuConfig);
+  for (const auto &[metalPlan, cpuPlan] : {std::pair{metalDecode, cpuDecode},
+                                           std::pair{metalPrefill, cpuPrefill}}) {
+    Buffers buffers;
+    freshRows(backend, buffers, shape);
+    const auto expected = runWeights(backend, model.weights, buffers, metalPlan);
+    const auto actual = runWeights(backend, streamed[0], buffers, cpuPlan);
+    if (actual != expected) {
+      printf("streamed CPU Q4_0: opt-in output differs from Metal\n");
+      return 1;
+    }
+  }
+  printf("streamed CPU Q4_0: explicit decode/prefill opt-in matches Metal output\n");
+  return 0;
+}
+
 class MethodReplacement final {
 public:
   MethodReplacement(id object, SEL selector, IMP replacement)
@@ -990,6 +1118,7 @@ int main(int argc, const char *argv[]) {
         printf("%u experts, top %u, hidden %u, %u wide:\n", shape.experts, shape.expertsPerToken, shape.hiddenSize,
                shape.expertIntermediateSize);
         failures += streamedExperts(backend, shape, directory.path()) +
+                    (shape == kShapes[0] ? streamedCpuQ4_0(backend, shape, directory.path()) : 0) +
                     streamedChunkOrder(backend, shape, directory.path()) +
                     streamedUnionLoads(backend, shape, directory.path()) +
                     streamedLoneBlockSize(backend, shape, directory.path()) +

@@ -142,5 +142,11 @@ const SourceTensor &SafetensorsCheckpoint::require(std::string_view name) const 
   return *tensor;
 }
 void SafetensorsCheckpoint::checkUnchanged() const { for (const auto &source : impl_->files) source->checkUnchanged(); }
+std::vector<std::filesystem::path> SafetensorsCheckpoint::sourcePaths() const {
+  std::vector<std::filesystem::path> paths;
+  paths.reserve(impl_->files.size());
+  for (const auto &source : impl_->files) paths.push_back(source->path());
+  return paths;
+}
 
 } // namespace splash::model

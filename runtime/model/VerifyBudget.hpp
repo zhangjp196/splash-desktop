@@ -17,9 +17,14 @@
 //
 // The costs: a cycle of L lanes that verify R rows in all takes about
 // a + b * R milliseconds, fit to the wall times of the latest cycles of L
-// lanes (which for streamed experts include the store's reads of its
-// misses) by least squares that weigh each cycle kDecay times the next. The
-// latest cycles stand for the requests the batch serves now: what a row costs
+// lanes by least squares that weigh each cycle kDecay times the next. Each
+// command also reports the GPU time spent waiting at its streamed expert host
+// steps. The fit models wall time with that same-command component removed,
+// then adds its recent average to future costs. This keeps the component out
+// of the historical total while still pricing it, and avoids global store
+// counters, whose completed reads cannot safely identify candidate rows or
+// read-ahead.
+// The latest cycles stand for the requests the batch serves now: what a row costs
 // varies with them (a Qwen3.6-35B-A3B cycle with 4 GB of experts adds about
 // 3 ms a row on prose and 8 ms on reasoning), so the cycles of other requests
 // must not price it. The slope shrinks toward the seed's, the shape the
@@ -94,8 +99,12 @@ public:
   [[nodiscard]] std::array<float, kBlockRows * kLanes + 1> costs(uint32_t lanes, bool constrained) const;
   // Whether the next cycle of `lanes` lanes verifies every row.
   [[nodiscard]] bool explores(uint32_t lanes, bool constrained) const;
-  // A completed cycle and its commands' wall time.
-  void observe(std::span<const Lane> lanes, bool constrained, double milliseconds);
+  // A completed cycle's command wall time and, from that same command, the
+  // portion spent waiting for streamed expert host steps. The latter is
+  // already included in milliseconds and is modeled separately for future
+  // cycles.
+  void observe(std::span<const Lane> lanes, bool constrained, double milliseconds,
+               double streamedHostStepMilliseconds = 0.0);
 
   // The labels kept, oldest first.
   [[nodiscard]] std::vector<Label> labels() const;
@@ -113,6 +122,7 @@ private:
     double rowsSquared = 0.0;
     double time = 0.0;
     double rowsTime = 0.0;
+    double streamedHostStepTime = 0.0;
   };
 
   [[nodiscard]] const Cost &table(uint32_t lanes, bool constrained) const;

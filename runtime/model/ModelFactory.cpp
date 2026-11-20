@@ -1,10 +1,15 @@
 #include "ModelFactory.hpp"
 #include "model/DraftCheckpoint.hpp"
+#include "model/ExpertPriorityProfile.hpp"
 #include "model/GgufTarget.hpp"
 #include "model/QwenTargetLoader.hpp"
 #include "model/SafetensorsTarget.hpp"
 #include "model/VisionLoader.hpp"
+#include "model/WeightManifestHash.hpp"
 
+#include <algorithm>
+#include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <stdexcept>
 #include <string_view>
@@ -39,6 +44,23 @@ QwenVisionWeights loadVisionWeights(metal::MetalBackend &backend, WeightImages &
 }
 
 namespace {
+
+std::string loadedTargetWeightHash(const std::filesystem::path &directory, TargetSource source) {
+  std::vector<std::filesystem::path> paths;
+  if (source == TargetSource::Gguf) {
+    paths = findTargetGgufs(directory);
+  } else {
+    for (const auto &entry : std::filesystem::directory_iterator(directory))
+      if (entry.path().extension() == ".safetensors") paths.push_back(entry.path());
+    std::sort(paths.begin(), paths.end());
+    if (paths.empty()) throw std::runtime_error("target directory holds no safetensors shards");
+  }
+  std::vector<WeightManifestEntry> manifest;
+  manifest.reserve(paths.size());
+  for (const auto &path : paths)
+    manifest.push_back({path.lexically_relative(directory).generic_string(), path});
+  return sha256WeightManifest(manifest);
+}
 
 TargetWeights readTarget(metal::MetalBackend &backend, const Qwen3_8Layout &layout,
                          const QwenTargetFiles &files) {
@@ -90,7 +112,28 @@ LoadedModel loadModel(metal::MetalBackend &backend,
   if (result.descriptor.hasDraft())
     draft = std::make_unique<DraftCheckpointLoader>(backend, images, root / "draft", result.descriptor.draft);
   // The weights that stream from their files read on the engine's readers.
+  ExpertPriorityHints priorityHints;
+  const char *profilePath = std::getenv("SPLASH_EXPERT_PRIORITY_PROFILE");
+  const char *tracePath = std::getenv("SPLASH_EXPERT_ROUTE_TRACE");
+  const bool identityRequested = (profilePath && *profilePath) || (tracePath && *tracePath);
+  std::string weightManifestHash;
+  bool weightIdentityKnown = false;
+  if (identityRequested) {
+    try {
+      weightManifestHash = loadedTargetWeightHash(root / "target", result.descriptor.targetSource);
+      weightIdentityKnown = true;
+    } catch (const std::exception &error) {
+      std::fprintf(stderr, "expert weight identity: %s; identity unknown\n", error.what());
+    }
+  }
+  if (profilePath && *profilePath && weightIdentityKnown)
+    priorityHints = loadExpertPriorityProfile(std::filesystem::path(profilePath), result.descriptor.name,
+                                              weightManifestHash);
   const ExpertStoreOptions experts{.memoryBytes = options.streamedMemoryBytes,
+                                   .modelIdentity = result.descriptor.name,
+                                   .weightManifestHash = weightManifestHash,
+                                   .weightIdentityKnown = weightIdentityKnown,
+                                   .priorityHints = std::move(priorityHints),
                                    .readers = options.readers,
                                    .elastic = options.streamedMemoryElastic,
                                    .grow = options.streamedMemoryGrow};

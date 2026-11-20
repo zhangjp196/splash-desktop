@@ -18,7 +18,8 @@ struct ExpertStoreStats final {
   uint64_t experts = 0;  // every block's routed experts
   uint64_t resident = 0; // slots holding an expert
   // Per ops::MoePhase, at its value (uses[0] prefill, uses[1] decode): the
-  // blocks loaded, the distinct experts they routed, those not resident and
+  // cumulative completed-load counters: blocks loaded, distinct experts
+  // routed, those not resident and
   // of them those read ahead, the experts read ahead whole (routed or not),
   // the bytes read from the sources (ahead or not, routed or not), and the
   // round trips of the loads' host steps, one per round (metal::

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace splash::model {
@@ -17,6 +18,16 @@ struct PromptLookupConfig final {
   uint32_t maxCandidates = 4;
   uint32_t maxContextTokens = 4096;
 };
+
+// Run prompt history lookup only for ordinary, non-cutoff decoding. Keeping
+// the gate callable based lets CPU tests prove disallowed paths never search.
+template <typename Lookup>
+[[nodiscard]] inline std::vector<uint32_t>
+promptLookupIfAllowed(bool constrained, bool thinkingCutoff,
+                       uint32_t maximumProposals, Lookup &&lookup) {
+  if (constrained || thinkingCutoff || maximumProposals == 0) return {};
+  return std::forward<Lookup>(lookup)();
+}
 
 [[nodiscard]] inline std::vector<uint32_t>
 promptLookupProposals(std::span<const uint32_t> context,

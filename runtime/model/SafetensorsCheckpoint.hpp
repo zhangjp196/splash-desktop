@@ -20,6 +20,7 @@ public:
   [[nodiscard]] const SourceTensor *find(std::string_view name) const noexcept;
   [[nodiscard]] const SourceTensor &require(std::string_view name) const;
   void checkUnchanged() const;
+  [[nodiscard]] std::vector<std::filesystem::path> sourcePaths() const;
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

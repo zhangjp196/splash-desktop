@@ -42,6 +42,7 @@ import contextlib
 import hashlib
 import json
 import os
+import platform
 import shlex
 import signal
 import socket
@@ -572,6 +573,32 @@ def parse_args(argv=None):
     return args
 
 
+def source_state(directory: Path) -> dict:
+    """Record Git's actual state when available; synced trees may lack Git."""
+
+    def git(*arguments):
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(directory), *arguments],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            )
+            return result.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    top = git("rev-parse", "--show-toplevel")
+    if top is None or Path(top).resolve() != directory.resolve():
+        return {"commit": None, "dirty": None}
+    commit = git("rev-parse", "--verify", "HEAD")
+    status = (
+        git("status", "--porcelain", "--untracked-files=normal") if commit else None
+    )
+    return {"commit": commit, "dirty": bool(status) if status is not None else None}
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     out = refuse_protected(args.out)
@@ -604,7 +631,35 @@ def main(argv=None) -> int:
         "repeat": args.repeat,
         "env": args.environment,
         "client_python": sys.version.split()[0],
+        "runtime": {
+            "python_executable": sys.executable,
+            "python_version": sys.version,
+            "system": platform.system(),
+            "release": platform.release(),
+            "macos_version": platform.mac_ver()[0] or None,
+            "architecture": platform.machine(),
+        },
+        "configuration": {
+            "language_only": args.language_only,
+            "minutes": args.minutes,
+            "request_seconds": args.request_seconds,
+            "levels": args.levels,
+            "rounds": args.rounds,
+            "samples": args.samples,
+            "sizes": args.size_list,
+            "trial": args.trial,
+            "gpu_idle_percent": args.gpu_idle_percent,
+            "port": args.port,
+            "churn_base": args.environment.get(
+                "CHURN_BASE", clients.CHURN_DEFAULT_BASE
+            ),
+            "churn_step": args.environment.get(
+                "CHURN_STEP", clients.CHURN_DEFAULT_STEP
+            ),
+        },
+        "source_state": source_state(tree),
         "tools_root": str(Path(__file__).resolve().parents[3]),
+        "tools_source_state": source_state(Path(__file__).resolve().parents[3]),
         "started": time.time(),
     }
     ours = {os.getpid()}

@@ -183,7 +183,7 @@ class DownloadTest(unittest.TestCase):
                 self.assertIsNone(self.stdout.calls[index + 1])
         # Beside the line people read, unchanged.
         self.assertIn(
-            f"Fetching 2 file(s), 0.00 GB, from {REPO}@{'c' * 12}; "
+            f"Fetching 2 file(s), 0.00 GB with known sizes, from {REPO}@{'c' * 12}; "
             "cached files are reused.\n",
             self.stdout.getvalue(),
         )
@@ -228,6 +228,99 @@ class DownloadTest(unittest.TestCase):
         with mock.patch.object(hub, "_available_bytes", return_value=1):
             with self.assertRaisesRegex(hub.models.ModelError, "not enough disk space"):
                 self.download()
+
+    def test_a_failed_space_query_warns_and_does_not_block_download(self):
+        with (
+            mock.patch.object(
+                hub, "_available_bytes", side_effect=OSError("unavailable")
+            ),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            downloaded = self.download()
+        self.assertEqual(set(downloaded), WEIGHTS)
+        self.assertEqual(self.downloads, [sorted(WEIGHTS)])
+        self.assertIn("could not check free space", stderr.getvalue())
+        self.assertIn("continuing without a disk space check", stderr.getvalue())
+
+    def test_files_without_size_metadata_are_reported_as_unknown(self):
+        repository = self.repository()
+        repository.sizes.pop("model-1.safetensors")
+        with (
+            mock.patch.object(hub, "json_progress", False),
+            contextlib.redirect_stdout(self.stdout),
+        ):
+            repository.download({"model-1.safetensors"})
+        self.assertIn(
+            "0.00 GB with known sizes; size unknown for model-1.safetensors",
+            self.stdout.getvalue(),
+        )
+        self.assertEqual(self.downloads, [["model-1.safetensors"]])
+        self.assertIn("unknown required: model-1.safetensors", self.stdout.getvalue())
+
+    def test_space_planner_aggregates_destinations_on_one_volume(self):
+        with mock.patch.object(hub, "_available_bytes", return_value=900):
+            plan = hub.plan_space(
+                [
+                    (self.cache / "hub" / "blobs", 300, ()),
+                    (self.cache / "models" / ".metadata", 200, ("conversion temporary space",)),
+                ]
+            )
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]["needed"], 500)
+        self.assertEqual(plan[0]["available"], 900)
+        self.assertEqual(plan[0]["unknown"], ["conversion temporary space"])
+        self.assertEqual(plan[0]["free"], 900)
+
+    def test_space_planner_reports_distinct_volumes_separately(self):
+        original_stat = Path.stat
+        cache_destination = self.cache / "blobs"
+        model_destination = self.cache / "models"
+        cache_destination.mkdir(parents=True)
+        model_destination.mkdir(parents=True)
+
+        def stat_on_distinct_devices(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            device = 101 if path == cache_destination else 202
+            values = list(result)
+            values[2] = device
+            return os.stat_result(values)
+
+        with (
+            mock.patch.object(Path, "stat", stat_on_distinct_devices),
+            mock.patch.object(hub, "_available_bytes", side_effect=[700, 800]),
+        ):
+            plan = hub.plan_space(
+                [(self.cache / "blobs", 300, ()), (self.cache / "models", 400, ())]
+            )
+        self.assertEqual(len(plan), 2)
+        self.assertEqual({volume["needed"] for volume in plan}, {300, 400})
+        self.assertEqual({volume["available"] for volume in plan}, {700, 800})
+
+    def test_space_planner_reports_known_peak_separately(self):
+        with mock.patch.object(hub, "_available_bytes", return_value=900):
+            plan = hub.plan_space(
+                [(self.cache / "models", 125, (), 125, ())]
+            )
+        self.assertEqual(plan[0]["needed"], 125)
+        self.assertEqual(plan[0]["peak_bytes"], 125)
+        self.assertEqual(plan[0]["peak_unknown"], [])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            hub._report_plan(plan)
+        self.assertIn("known peak including staging: 0.00 GB", output.getvalue())
+
+    def test_space_planner_keeps_unknown_peak_separate(self):
+        with mock.patch.object(hub, "_available_bytes", return_value=900):
+            plan = hub.plan_space(
+                [(self.cache / "models", 125, (), ("conversion staging peak",))]
+            )
+        self.assertEqual(plan[0]["needed"], 125)
+        self.assertEqual(plan[0]["peak_unknown"], ["conversion staging peak"])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            hub._report_plan(plan)
+        self.assertIn("known required", output.getvalue())
+        self.assertIn("unknown peak: conversion staging peak", output.getvalue())
 
     def test_a_download_of_cached_blobs_reports_nothing(self):
         self.download({"config.json"})

@@ -65,7 +65,9 @@ class DraftGgufTests(unittest.TestCase):
                 ),
             ],
         )
+        planned = draftgguf.planned_output_bytes(source)
         files = draftgguf.convert(source, self.root / "out")
+        self.assertEqual(planned, sum(path.stat().st_size for path in files.values()))
         self.assertEqual(
             set(files), {"model.safetensors", "mask_embedding.safetensors"}
         )
@@ -81,7 +83,9 @@ class DraftGgufTests(unittest.TestCase):
             "draft.gguf",
             [("draft.fc.weight", [32], GGML["Q8_0"], block)],
         )
+        planned = draftgguf.planned_output_bytes(source)
         files = draftgguf.convert(source, self.root / "out")
+        self.assertEqual(planned, sum(path.stat().st_size for path in files.values()))
         raw = files["model.safetensors"].read_bytes()
         header_bytes = struct.unpack("<Q", raw[:8])[0]
         header = json.loads(raw[8 : 8 + header_bytes])
@@ -131,7 +135,9 @@ class DraftGgufTests(unittest.TestCase):
                 )
             ],
         )
+        planned = draftgguf.planned_output_bytes([one, two])
         files = draftgguf.convert([one, two], self.root / "out")
+        self.assertEqual(planned, sum(path.stat().st_size for path in files.values()))
         raw = files["model.safetensors"].read_bytes()
         header_bytes = struct.unpack("<Q", raw[:8])[0]
         header = json.loads(raw[8 : 8 + header_bytes])
