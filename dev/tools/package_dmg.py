@@ -258,7 +258,12 @@ def overlay_engine(runtime: Path) -> None:
 
 def build_swift(package: Path) -> Path:
     command = [
-        "swift", "build", "--package-path", package, "-c", "release",
+        "swift",
+        "build",
+        "--package-path",
+        package,
+        "-c",
+        "release",
     ]
     run(command)
     binary = package / ".build/release" / PRODUCT_NAME

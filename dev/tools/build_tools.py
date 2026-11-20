@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dev.tools import build_config, build_identity
+from dev.tools import build_config, build_identity  # noqa: E402
 
 
 def main(argv=None) -> int:
@@ -32,7 +32,13 @@ def main(argv=None) -> int:
     record.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(arguments)
     if args.action == "stale":
-        print(" ".join(path for path in args.outputs if not build_config.matches(path, args.config)))
+        print(
+            " ".join(
+                path
+                for path in args.outputs
+                if not build_config.matches(path, args.config)
+            )
+        )
         return 0
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:

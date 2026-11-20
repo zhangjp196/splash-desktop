@@ -29,15 +29,20 @@ class TiedPreparationTest(unittest.TestCase):
                 offset += len(payload)
             encoded = json.dumps(header, separators=(",", ":")).encode()
             encoded += b" " * ((8 - len(encoded) % 8) % 8)
-            source.write_bytes(struct.pack("<Q", len(encoded)) + encoded + b"".join(bodies))
+            source.write_bytes(
+                struct.pack("<Q", len(encoded)) + encoded + b"".join(bodies)
+            )
             config = root / "config.json"
             config.write_text(json.dumps({"tie_word_embeddings": True}))
             models_root = root / "models"
             models_root.mkdir()
 
-            with mock.patch.object(tied.hub, "_report_plan") as report, mock.patch.object(
-                tied.hub, "plan_space", wraps=tied.hub.plan_space
-            ) as plan_space:
+            with (
+                mock.patch.object(tied.hub, "_report_plan") as report,
+                mock.patch.object(
+                    tied.hub, "plan_space", wraps=tied.hub.plan_space
+                ) as plan_space,
+            ):
                 files = tied.prepare(config, {source.name: source}, models_root)
 
             self.assertEqual(report.call_count, 1)

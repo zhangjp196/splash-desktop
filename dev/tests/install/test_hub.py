@@ -262,7 +262,11 @@ class DownloadTest(unittest.TestCase):
             plan = hub.plan_space(
                 [
                     (self.cache / "hub" / "blobs", 300, ()),
-                    (self.cache / "models" / ".metadata", 200, ("conversion temporary space",)),
+                    (
+                        self.cache / "models" / ".metadata",
+                        200,
+                        ("conversion temporary space",),
+                    ),
                 ]
             )
         self.assertEqual(len(plan), 1)
@@ -298,9 +302,7 @@ class DownloadTest(unittest.TestCase):
 
     def test_space_planner_reports_known_peak_separately(self):
         with mock.patch.object(hub, "_available_bytes", return_value=900):
-            plan = hub.plan_space(
-                [(self.cache / "models", 125, (), 125, ())]
-            )
+            plan = hub.plan_space([(self.cache / "models", 125, (), 125, ())])
         self.assertEqual(plan[0]["needed"], 125)
         self.assertEqual(plan[0]["peak_bytes"], 125)
         self.assertEqual(plan[0]["peak_unknown"], [])

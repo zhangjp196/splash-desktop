@@ -173,24 +173,26 @@ class ConstraintCacheTests(unittest.TestCase):
         ):
             factory = constraints.ConstraintFactory(object(), QWEN)
         unsatisfiable = {"type": "array", "minItems": 5, "maxItems": 2}
-        # More grammar symbols than the compiler can index make it panic.
-        array = {"type": "array", "maxItems": tool_schema.MAX_GRAMMAR_BOUND}
-        oversized = {"properties": {f"p{i}": array for i in range(1000)}}
-        for schema, reason in (
-            (unsatisfiable, "minItems (5) is greater than maxItems (2)"),
-            (oversized, "tool or output schema is too large to compile"),
-        ):
-            with (
-                self.subTest(reason=reason),
-                self.assertRaises(constraints.APIError) as caught,
-            ):
-                factory.create(
-                    tool_schema.json_grammar(schema, False, chat_format=QWEN)
-                )
-            self.assertEqual(caught.exception.status, 400)
-            self.assertIn(reason, caught.exception.message)
-            self.assertNotIn("\n", caught.exception.message)
-            self.assertNotIn("%llguidance", caught.exception.message)
+        with self.assertRaises(constraints.APIError) as caught:
+            factory.create(
+                tool_schema.json_grammar(unsatisfiable, False, chat_format=QWEN)
+            )
+        self.assertEqual(caught.exception.status, 400)
+        self.assertIn(
+            "minItems (5) is greater than maxItems (2)", caught.exception.message
+        )
+        self.assertNotIn("\n", caught.exception.message)
+        # llguidance 1.9.1 indexes the symbols a schema past the 16-bit limit
+        # of earlier releases used to panic on; the report for a compiler that
+        # still panics stays one line and names none of its internals.
+        panic = (
+            "panic: assertion failed: grammar.symbols.len() < u16::MAX\n"
+            "<backtrace>\n   0: <std::backtrace::Backtrace>"
+        )
+        error = constraints._grammar_error(panic)
+        self.assertEqual(error.status, 400)
+        self.assertEqual(error.message, "tool or output schema is too large to compile")
+        self.assertNotIn("%llguidance", error.message)
 
     def test_real_matchers_compile_and_copy_independently_under_concurrency(self):
         tokenizer, guidance = grammar_tokenizers()

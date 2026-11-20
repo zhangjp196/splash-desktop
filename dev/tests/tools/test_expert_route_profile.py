@@ -88,7 +88,9 @@ class ExpertRouteProfileTest(unittest.TestCase):
                 [{**base, "model_identity": "one"}, base],
                 [{**base, "model_identity": ""}],
             ):
-                path.write_text("".join(json.dumps(record) + "\n" for record in records))
+                path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records)
+                )
                 with self.assertRaises(ValueError):
                     profile(path)
 
@@ -111,13 +113,25 @@ class ExpertRouteProfileTest(unittest.TestCase):
             self.assertEqual(result["schema_version"], 3)
             self.assertEqual(result["weight_manifest_hash"], "a" * 64)
             self.assertTrue(result["priority_eligible"])
-            path.write_text("".join(json.dumps({**base, **record}) + "\n" for record in (
-                {},
-                {"weight_manifest_hash": "b" * 64},
-            )))
-            with self.assertRaisesRegex(ValueError, "mixed or missing weight fingerprints"):
+            path.write_text(
+                "".join(
+                    json.dumps({**base, **record}) + "\n"
+                    for record in (
+                        {},
+                        {"weight_manifest_hash": "b" * 64},
+                    )
+                )
+            )
+            with self.assertRaisesRegex(
+                ValueError, "mixed or missing weight fingerprints"
+            ):
                 profile(path)
-            unknown = {**base, "weight_manifest_hash": "unknown", "identity_status": "unknown", "priority_eligible": False}
+            unknown = {
+                **base,
+                "weight_manifest_hash": "unknown",
+                "identity_status": "unknown",
+                "priority_eligible": False,
+            }
             path.write_text(json.dumps(unknown) + "\n")
             self.assertFalse(profile(path)["priority_eligible"])
 
@@ -129,17 +143,27 @@ class ExpertRouteProfileTest(unittest.TestCase):
             "priority_eligible": True,
             "records": 3,
             "groups": [
-                {"block": 2, "experts": [{"expert": 4, "loads": 3}, {"expert": 1, "loads": 2}]},
-                {"block": 2, "experts": [{"expert": 1, "loads": 5}, {"expert": 7, "loads": 1}]},
+                {
+                    "block": 2,
+                    "experts": [{"expert": 4, "loads": 3}, {"expert": 1, "loads": 2}],
+                },
+                {
+                    "block": 2,
+                    "experts": [{"expert": 1, "loads": 5}, {"expert": 7, "loads": 1}],
+                },
             ],
         }
         with TemporaryDirectory() as directory:
             path = Path(directory) / "profile.json"
             path.write_text(json.dumps(document))
             self.assertEqual(load_priority_hints(path, "descriptor-name", "a" * 64), {})
-            self.assertEqual(load_priority_hints(path, "other", "a" * 64, opt_in=True), {})
             self.assertEqual(
-                load_priority_hints(path, "descriptor-name", "a" * 64, opt_in=True, top_k=2),
+                load_priority_hints(path, "other", "a" * 64, opt_in=True), {}
+            )
+            self.assertEqual(
+                load_priority_hints(
+                    path, "descriptor-name", "a" * 64, opt_in=True, top_k=2
+                ),
                 {2: [1, 4]},
             )
             for change in (
@@ -150,9 +174,14 @@ class ExpertRouteProfileTest(unittest.TestCase):
                 {"groups": [{"block": 2, "experts": [{"expert": 1, "loads": True}]}]},
             ):
                 path.write_text(json.dumps({**document, **change}))
-                self.assertEqual(load_priority_hints(path, "descriptor-name", "a" * 64, opt_in=True), {})
+                self.assertEqual(
+                    load_priority_hints(path, "descriptor-name", "a" * 64, opt_in=True),
+                    {},
+                )
             path.write_text("{broken")
-            self.assertEqual(load_priority_hints(path, "descriptor-name", "a" * 64, opt_in=True), {})
+            self.assertEqual(
+                load_priority_hints(path, "descriptor-name", "a" * 64, opt_in=True), {}
+            )
 
     def test_cli_rejects_partial_input_without_output(self):
         with TemporaryDirectory() as directory:

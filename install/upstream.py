@@ -1183,7 +1183,9 @@ def draft_files(repo, target, models_root=None):
         chosen = _select_draft_gguf(gguf_names)
         downloaded = repo.download({"config.json", *chosen})
         cached_conversion = _has_converted_draft(
-            [downloaded[name] for name in chosen], downloaded["config.json"], models_root
+            [downloaded[name] for name in chosen],
+            downloaded["config.json"],
+            models_root,
         )
         if not cached_conversion:
             output_bytes = draftgguf.planned_output_bytes(

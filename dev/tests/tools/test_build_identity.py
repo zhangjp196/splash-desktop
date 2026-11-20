@@ -90,9 +90,10 @@ class BuildIdentityTests(unittest.TestCase):
             sources.mkdir(parents=True)
             geometry = sources / "ExecutionGeometry.h"
             geometry.write_text("#define SPLASH_DFLASH_QUERY_ROWS 8\n")
-            tool = root / "dev/tools/build_identity.py"
-            tool.parent.mkdir(parents=True)
-            tool.write_text("fixture tool")
+            tools = root / "dev/tools"
+            tools.mkdir(parents=True)
+            for name in ("build_config.py", "build_identity.py", "build_tools.py"):
+                (tools / name).write_text(f"fixture {name}\n")
             first = build_identity.build_id(root)
             geometry.write_text("#define SPLASH_DFLASH_QUERY_ROWS 7\n")
             self.assertNotEqual(first, build_identity.build_id(root))
@@ -100,9 +101,10 @@ class BuildIdentityTests(unittest.TestCase):
     def test_alternate_root_shader_add_edit_and_remove_change_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tool = root / "dev/tools/build_identity.py"
-            tool.parent.mkdir(parents=True)
-            shutil.copy2(build_identity.ROOT / "dev/tools/build_identity.py", tool)
+            tools = root / "dev/tools"
+            tools.mkdir(parents=True)
+            for name in ("build_config.py", "build_identity.py", "build_tools.py"):
+                shutil.copy2(build_identity.ROOT / "dev/tools" / name, tools / name)
             shader = root / "runtime/metal/kernels/shared/alternate.metal"
             shader.parent.mkdir(parents=True)
             header = root / "generated/BuildIdentity.hpp"
@@ -211,6 +213,7 @@ class CompileConfigurationTests(unittest.TestCase):
             "dev/native.mk",
             "dev/tools/build_config.py",
             "dev/tools/build_identity.py",
+            "dev/tools/build_tools.py",
         ):
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)

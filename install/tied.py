@@ -86,9 +86,7 @@ def prepare(config_path, paths, models_root):
     output_bytes = len(encoded) + shard_bytes
     key = hashlib.sha256(encoded).hexdigest()[:16]
     directory = models_root / ".metadata" / ("tied-" + key)
-    volumes = hub.plan_space(
-        [(directory, output_bytes, (), output_bytes, ())]
-    )
+    volumes = hub.plan_space([(directory, output_bytes, (), output_bytes, ())])
     hub._report_plan(volumes)
     for volume in volumes:
         if volume["available"] is None:

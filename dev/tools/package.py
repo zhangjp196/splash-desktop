@@ -15,10 +15,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON_URL = (
-    "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/"
-    "cpython-3.13.15%2B20260825-aarch64-apple-darwin-install_only_stripped.tar.gz"
+    "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/"
+    "cpython-3.14.10%2B20261110-aarch64-apple-darwin-install_only_stripped.tar.gz"
 )
-PYTHON_SHA256 = "149038dd0c194c25d4616d7e42a35f67f2edee96412788f74115819b6a4c8548"
+PYTHON_SHA256 = "f15ec3d15460dd66c2eb88639b152cd9040e7d1ece11e38bf89e8f53f0171e02"
 INSTALL_FILES = (
     "__init__.py",
     "launcher.py",

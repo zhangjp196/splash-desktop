@@ -625,7 +625,11 @@ def plan_space(items):
 
 def _report_plan(volumes):
     for volume in volumes:
-        unknown = "; unknown required: " + ", ".join(volume["unknown"]) if volume["unknown"] else ""
+        unknown = (
+            "; unknown required: " + ", ".join(volume["unknown"])
+            if volume["unknown"]
+            else ""
+        )
         peak = (
             f"; known peak including staging: {volume['peak_bytes'] / 1e9:.2f} GB"
             if volume["peak_bytes"]

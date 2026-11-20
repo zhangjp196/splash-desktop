@@ -1204,7 +1204,9 @@ class UpstreamTest(unittest.TestCase):
         fake = fake_hub(self, self.cache)
         chosen = selection(self.root)
         output, _ = self.prepare(chosen)
-        self.assertIn("Fetching 4 file(s), 0.00 GB with known sizes, from " + MODEL, output)
+        self.assertIn(
+            "Fetching 4 file(s), 0.00 GB with known sizes, from " + MODEL, output
+        )
         old = chosen.link.resolve()
         fake.publish(MODEL, "b" * 40, lambda p: mlx_target(p, DENSE))
         fake.requests.clear(), fake.downloads.clear()

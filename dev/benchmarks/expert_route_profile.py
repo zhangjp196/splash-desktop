@@ -27,7 +27,8 @@ def profile(path):
                     raise ValueError("unsupported trace version")
                 current_identity = record.get("model_identity")
                 if current_identity is not None and (
-                    not isinstance(current_identity, str) or not current_identity.strip()
+                    not isinstance(current_identity, str)
+                    or not current_identity.strip()
                 ):
                     raise ValueError("invalid model_identity")
                 if identity_seen and current_identity != identity:
@@ -36,18 +37,29 @@ def profile(path):
                 if record["v"] == 2:
                     if record.get("identity_status") not in ("known", "unknown"):
                         raise ValueError("invalid identity_status")
-                    if record.get("priority_eligible") is not (record["identity_status"] == "known"):
-                        raise ValueError("priority_eligible disagrees with identity_status")
+                    if record.get("priority_eligible") is not (
+                        record["identity_status"] == "known"
+                    ):
+                        raise ValueError(
+                            "priority_eligible disagrees with identity_status"
+                        )
                     if record["identity_status"] == "known" and (
                         not isinstance(current_hash, str) or len(current_hash) != 64
                     ):
                         raise ValueError("invalid weight_manifest_hash")
-                    if record["identity_status"] == "unknown" and current_hash != "unknown":
-                        raise ValueError("unknown identity must not carry a fingerprint")
+                    if (
+                        record["identity_status"] == "unknown"
+                        and current_hash != "unknown"
+                    ):
+                        raise ValueError(
+                            "unknown identity must not carry a fingerprint"
+                        )
                 else:
                     current_hash = None
                 if identity_seen and current_hash != weight_hash:
-                    raise ValueError("trace contains mixed or missing weight fingerprints")
+                    raise ValueError(
+                        "trace contains mixed or missing weight fingerprints"
+                    )
                 identity_seen = True
                 identity = current_identity
                 weight_hash = current_hash
@@ -126,14 +138,21 @@ def profile(path):
     }
 
 
-def load_priority_hints(path, current_identity, current_weight_manifest_hash, *, opt_in=False, top_k=8):
+def load_priority_hints(
+    path, current_identity, current_weight_manifest_hash, *, opt_in=False, top_k=8
+):
     """Return block -> ranked experts only for an explicitly trusted profile.
 
     Invalid, unknown-identity, and model or weight-mismatched profiles are
     ignored as a whole.
     """
-    if (not opt_in or not isinstance(current_identity, str) or not current_identity.strip()
-            or not isinstance(current_weight_manifest_hash, str) or len(current_weight_manifest_hash) != 64):
+    if (
+        not opt_in
+        or not isinstance(current_identity, str)
+        or not current_identity.strip()
+        or not isinstance(current_weight_manifest_hash, str)
+        or len(current_weight_manifest_hash) != 64
+    ):
         return {}
     try:
         with Path(path).open("r", encoding="utf-8") as stream:
@@ -155,7 +174,11 @@ def load_priority_hints(path, current_identity, current_weight_manifest_hash, *,
             if not isinstance(group, dict):
                 return {}
             block, entries = group.get("block"), group.get("experts")
-            if type(block) is not int or not 0 <= block <= 0xFFFFFFFF or not isinstance(entries, list):
+            if (
+                type(block) is not int
+                or not 0 <= block <= 0xFFFFFFFF
+                or not isinstance(entries, list)
+            ):
                 return {}
             ranked = []
             seen = set()
@@ -163,8 +186,13 @@ def load_priority_hints(path, current_identity, current_weight_manifest_hash, *,
                 if not isinstance(entry, dict):
                     return {}
                 expert, loads = entry.get("expert"), entry.get("loads")
-                if (type(expert) is not int or not 0 <= expert <= 0xFFFFFFFF
-                        or type(loads) is not int or loads <= 0 or expert in seen):
+                if (
+                    type(expert) is not int
+                    or not 0 <= expert <= 0xFFFFFFFF
+                    or type(loads) is not int
+                    or loads <= 0
+                    or expert in seen
+                ):
                     return {}
                 seen.add(expert)
                 ranked.append((expert, loads))
@@ -174,7 +202,12 @@ def load_priority_hints(path, current_identity, current_weight_manifest_hash, *,
             aggregate = hints.setdefault(block, Counter())
             aggregate.update(dict(ranked))
         return {
-            block: [expert for expert, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:top_k]]
+            block: [
+                expert
+                for expert, _ in sorted(
+                    counts.items(), key=lambda item: (-item[1], item[0])
+                )[:top_k]
+            ]
             for block, counts in hints.items()
         }
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):

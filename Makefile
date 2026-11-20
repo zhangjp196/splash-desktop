@@ -15,7 +15,7 @@ INSTALL_LOCK = $(VENV).install.lock
 ANNOUNCE_INSTALL_WAIT = /usr/bin/lockf -s -k -t 0 "$(INSTALL_LOCK)" true \
 	|| echo "Another setup of $(VENV) is running; waiting..."
 REQUIREMENTS := install/requirements.txt
-PYTHON_CANDIDATES ?= python3.13 python3 python3.12 python3.14
+PYTHON_CANDIDATES ?= python3.14 python3.13 python3 python3.12
 BUILD_SCRIPT_PYTHON ?= python3
 SPLASH_MAKEFILE := $(abspath $(firstword $(MAKEFILE_LIST)))
 MODEL ?=
