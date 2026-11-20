@@ -341,6 +341,49 @@ fn a_request_error_ends_its_call() {
         other => panic!("expected a request failure, got {other}"),
     }
     assert_eq!(client.pending_count(), 0);
+    assert!(client.fatal_error().is_none());
+    assert!(client.ready(), "a request error must leave the engine generation ready");
+}
+
+#[test]
+fn engine_unhealthy_error_fails_the_generation() {
+    let script = vec![vec![wire::EngineEvent::Error(wire::ErrorEvent {
+        failure_class: wire::FailureClass::EngineUnhealthy,
+        request_id: 0,
+        retryable: false,
+        code: b"metal_error".to_vec(),
+        message: b"private native diagnostic detail".to_vec(),
+        retry_after_seconds: 0,
+    })]];
+    let (client, _engine) = paired_client(script);
+    assert!(client.wait_ready(Some(Duration::from_secs(5))));
+    let call = client.submit(&generation_request(), None, None).expect("submit");
+    assert!(matches!(
+        call.result(Some(Duration::from_secs(5))),
+        Err(EngineError::EngineUnhealthy(_))
+    ));
+    assert!(client.fatal_error().is_some());
+    assert!(!client.ready(), "an unhealthy engine generation must stop serving");
+}
+
+#[test]
+fn a_protocol_fatal_error_fails_the_generation() {
+    let script = vec![vec![wire::EngineEvent::Error(wire::ErrorEvent {
+        failure_class: wire::FailureClass::ProtocolFatal,
+        request_id: 0,
+        retryable: false,
+        code: b"bad_frame".to_vec(),
+        message: b"malformed native frame".to_vec(),
+        retry_after_seconds: 0,
+    })]];
+    let (client, _engine) = paired_client(script);
+    assert!(client.wait_ready(Some(Duration::from_secs(5))));
+    let call = client.submit(&generation_request(), None, None).expect("submit");
+    assert!(matches!(
+        call.result(Some(Duration::from_secs(5))),
+        Err(EngineError::ProtocolFatal(_))
+    ));
+    assert!(client.fatal_error().is_some());
 }
 
 #[test]
