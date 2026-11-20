@@ -15,12 +15,33 @@ if CommandLine.arguments.contains("--print-runtime") {
     let runtime = Runtime.root
     print(runtime?.path ?? "")
     if let runtime {
-        print("server: \(Runtime.server?.path ?? "missing")")
+        print("python: \(Runtime.python?.path ?? "missing")")
+        print("launcher: \(Runtime.launcher?.path ?? "missing")")
         print("catalog: \(Runtime.catalog.count) model(s)")
         _ = runtime
         exit(0)
     }
     exit(1)
+}
+
+if CommandLine.arguments.contains("--probe-python-launch") {
+    guard let python = Runtime.python, let launcher = Runtime.launcher else { exit(1) }
+    let process = Process()
+    process.executableURL = python
+    let probeArguments = Array(CommandLine.arguments.dropFirst(2))
+    process.arguments = [launcher.path] + (probeArguments.isEmpty ? ["serve", "--help"] : probeArguments)
+    var environment = ProcessInfo.processInfo.environment
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONUNBUFFERED"] = "1"
+    process.environment = environment
+    do {
+        try process.run()
+        process.waitUntilExit()
+        exit(process.terminationStatus)
+    } catch {
+        fputs("Python launcher probe failed: \\(error.localizedDescription)\\n", stderr)
+        exit(1)
+    }
 }
 
 if CommandLine.arguments.contains("--selfcheck-settings") { SelfCheck.settings() }

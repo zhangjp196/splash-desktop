@@ -257,7 +257,10 @@ def overlay_engine(runtime: Path) -> None:
 
 
 def build_swift(package: Path) -> Path:
-    run(["swift", "build", "--package-path", package, "-c", "release"])
+    command = [
+        "swift", "build", "--package-path", package, "-c", "release",
+    ]
+    run(command)
     binary = package / ".build/release" / PRODUCT_NAME
     if not binary.is_file():
         raise SystemExit(f"swift build produced no {binary}")

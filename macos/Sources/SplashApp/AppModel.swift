@@ -4,7 +4,7 @@ import Darwin
 import Foundation
 
 /// Owns the server subprocess and the settings the control panel edits.
-/// The app starts the bundled Rust server, streams its output, watches `/status`, and
+/// The app starts the bundled Python server, streams its output, watches `/status`, and
 /// opens the conversation in the web browser.
 @MainActor
 final class AppModel: ObservableObject {
@@ -673,7 +673,7 @@ final class AppModel: ObservableObject {
     }
 
     var canStart: Bool {
-        guard !isBusy, !isRunning, Runtime.server != nil else {
+        guard !isBusy, !isRunning, Runtime.python != nil, Runtime.launcher != nil else {
             return false
         }
         switch modelMode {
@@ -710,7 +710,7 @@ final class AppModel: ObservableObject {
 
     // MARK: Lifecycle
 
-    /// The bundled Rust server runs with the settings the panel holds. The
+    /// The bundled Python server runs with the settings the panel holds. The
     /// headless selfcheck reads these arguments too, so a panel setting is
     /// also one the command carries.
     func launchArguments(launcherPath: String) -> [String] {
@@ -720,16 +720,9 @@ final class AppModel: ObservableObject {
         case .upstream:
             arguments += ["--model", modelID.trimmingCharacters(in: .whitespaces)]
         case .local:
-            if localKind == "gguf" {
-                arguments += ["--gguf-target", modelDirectory]
-            } else if draftMode == "hub" && draftDirectory.trimmingCharacters(in: .whitespaces).isEmpty {
-                // Keep repository-ID drafts on the prepared-assembly lookup
-                // path; only a local draft directory can be assembled here.
-                arguments += ["--model-dir", modelDirectory]
-            } else {
-                arguments += ["--mlx-target", modelDirectory]
-            }
-            // Text only loads no tower, so it names no projector: the server
+            arguments += ["--model-dir", modelDirectory]
+            // Text only loads no tower: the Python launcher rejects a
+            // projector with language-only mode. Only GGUF has a projector.
             // refuses the two together, and the form keeps the path for the
             // configuration that turns vision back on. Only a GGUF target has
             // one; an MLX target is vision or text as its own files say.
@@ -906,7 +899,7 @@ final class AppModel: ObservableObject {
 
     func start() {
         guard canStart else { return }
-        guard let server = Runtime.server else {
+        guard let executable = Runtime.python, let launcher = Runtime.launcher else {
             phase = .failed(L10n.string("error.no_runtime"))
             return
         }
@@ -925,7 +918,8 @@ final class AppModel: ObservableObject {
         statusUpdatedAt = nil
         runningConfigID = nil
         stopping = false
-        let arguments = launchArguments(launcherPath: server.path)
+        let serverPath = launcher.path
+        let arguments = launchArguments(launcherPath: serverPath)
 
         // The engine reports settings a model cannot use ("--ple-memory
         // ignored: ... has no PLE table to stream"), and the log keeps those
@@ -935,18 +929,13 @@ final class AppModel: ObservableObject {
         logLaunch(arguments)
 
         let process = Process()
-        process.executableURL = server
-        var serverArguments = Array(arguments.dropFirst())
+        process.executableURL = executable
         var environment = ProcessInfo.processInfo.environment
-        if let index = serverArguments.firstIndex(of: "--api-key") {
-            environment["SPLASH_API_KEY"] = serverArguments[index + 1]
-            serverArguments.removeSubrange(index...index + 1)
-        }
-        if environment["SPLASH_PDFIUM_PATH"] == nil,
-           let pdfium = Runtime.pdfiumLibrary {
-            environment["SPLASH_PDFIUM_PATH"] = pdfium.path
-        }
-        process.arguments = serverArguments
+        process.arguments = arguments
+        environment["PYTHONUNBUFFERED"] = "1"
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["TRANSFORMERS_VERBOSITY"] = "error"
+        environment.merge(source.environment) { _, source in source }
         process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe

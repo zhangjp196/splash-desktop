@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 
-/// Locates an existing prepared model through the bundled server.
+/// Locates an existing prepared model through the bundled Python installer.
 @MainActor
 final class Downloader: ObservableObject {
     enum Phase: Equatable {
@@ -24,13 +24,14 @@ final class Downloader: ObservableObject {
         guard !isRunning else { return }
         let identifier = model.trimmingCharacters(in: .whitespaces)
         guard !identifier.isEmpty else { return }
-        guard let server = Runtime.server else {
+        guard let python = Runtime.python, let root = Runtime.root else {
             phase = .failed(L10n.string("download.no_runtime"))
             return
         }
+        let installer = root.appendingPathComponent("install/models.py")
         log = ""
         phase = .running
-        run(server: server, model: identifier)
+        run(python: python, installer: installer, model: identifier)
     }
 
     func cancel() {
@@ -44,10 +45,14 @@ final class Downloader: ObservableObject {
         log = ""
     }
 
-    private func run(server: URL, model: String) {
+    private func run(python: URL, installer: URL, model: String) {
         let process = Process()
-        process.executableURL = server
-        process.arguments = ["model-path", model]
+        process.executableURL = python
+        process.arguments = [installer.path, "--model", model, "link"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PYTHONUNBUFFERED"] = "1"
+        process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe

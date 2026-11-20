@@ -14,12 +14,12 @@ package-bottle:
 package-check:
 	$(PYTHON) dev/tools/package_brew.py check --version "$(RELEASE_VERSION)"
 
-# The desktop bundle ships the Rust server and native engine.
-.PHONY: package-app package-dmg package-rust-dmg
-package-app: all
-	/bin/bash dev/tools/package_rust_dmg.sh "$(RELEASE_VERSION)" --app-only
-package-dmg package-rust-dmg: all
-	/bin/bash dev/tools/package_rust_dmg.sh "$(RELEASE_VERSION)"
+# The Python runtime is the desktop app's only release path.
+.PHONY: package-app package-dmg
+package-app: package
+	$(PYTHON) dev/tools/package_dmg.py --version "$(RELEASE_VERSION)" --app-only
+package-dmg: package
+	$(PYTHON) dev/tools/package_dmg.py --version "$(RELEASE_VERSION)"
 
 # Uploads the built RELEASE_VERSION archive, its checksum, the tester installer
 # and the `latest` pointer to the private Hugging Face repo testers install
@@ -47,9 +47,8 @@ HTTP_SMOKE_ARGS ?=
 
 .PHONY: agent-preflight architecture-check check check-source \
 	check-native-engine check-native-cpu check-native-metal check-native-build \
-	check-python check-rust-server check-rust-tools \
-	install-development _install-development release-check test test-rust-server \
-	test-rust-tools \
+	check-python \
+	install-development _install-development release-check test \
 	test-agent-real test-http-real test-performance-real test-pressure-real \
 	test-release-real test-python test-real verify-models \
 	test-engine test-engine-cpu test-engine-metal test-sanitizers
@@ -102,20 +101,12 @@ check-python: install-development test-python
 	$(PYTHON) -m ruff format --check --config dev/ruff.toml server \
 		install/*.py dev/tools dev/tests dev/benchmarks
 
-# The Rust server's protocol, dialect, and end-to-end coverage runs without
-# preparing the Python environment or installing Python test dependencies.
-check-rust-server:
-	cargo test --locked --manifest-path server-rs/Cargo.toml
-
-check-rust-tools:
-	cargo test --locked --manifest-path dev/build-tools-rs/Cargo.toml
-
 # It parses the server's sources, which need the development environment's
 # Python (3.12-3.14).
 architecture-check: install-environment
 	$(PYTHON) dev/tools/check_architecture.py
 
-check: check-source check-native-engine check-python check-rust-server check-rust-tools
+check: check-source check-native-engine check-python
 
 check-source: architecture-check
 	$(PYTHON) dev/tools/check_history.py
@@ -123,11 +114,7 @@ check-source: architecture-check
 	@empty_tree=$$(git hash-object -t tree /dev/null); \
 		git diff --check $$empty_tree HEAD
 
-test: test-engine test-python test-rust-server test-rust-tools
-
-test-rust-server: check-rust-server
-
-test-rust-tools: check-rust-tools
+test: test-engine test-python
 
 test-http-real: preflight $(TARGET) verify-build-identity
 	TRANSFORMERS_VERBOSITY=error $(PYTHON) dev/tests/smoke_real.py \

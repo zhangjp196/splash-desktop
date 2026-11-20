@@ -204,14 +204,11 @@ ENGINE_LINKFLAGS := -framework Foundation -framework Metal -framework IOKit \
 ENGINE_DEPFLAGS := -MMD -MP
 # Configuration belongs to each successful output, not to a shared timestamp:
 # macOS make can treat a new stamp and an old binary in the same second as equal.
-BUILD_TOOLS_MANIFEST := dev/build-tools-rs/Cargo.toml
-BUILD_TOOLS_LOCK := dev/build-tools-rs/Cargo.lock
-BUILD_TOOLS_SOURCE_FILES := dev/build-tools-rs/src/lib.rs \
-	dev/build-tools-rs/src/main.rs server-rs/src/support/sha256.rs
-BUILD_TOOLS_BINARY := dev/build-tools-rs/target/release/splash-build-tools
+BUILD_TOOLS_SOURCE_FILES := dev/tools/build_tools.py dev/tools/build_config.py \
+	dev/tools/build_identity.py
+BUILD_TOOLS_BINARY = $(BUILD_SCRIPT_PYTHON) dev/tools/build_tools.py
 BUILD_RULES_DIGEST := $(shell shasum -a 256 Makefile dev/native.mk \
-	$(BUILD_TOOLS_MANIFEST) $(BUILD_TOOLS_LOCK) $(BUILD_TOOLS_SOURCE_FILES) \
-	| shasum -a 256 | cut -c1-16)
+	$(BUILD_TOOLS_SOURCE_FILES) | shasum -a 256 | cut -c1-16)
 shell-quote = '$(subst ','"'"',$(1))'
 CONFIG_DIGEST := $(shell printf '%s\0' $(BUILD_RULES_DIGEST) \
 	$(call shell-quote,$(CXX)) $(call shell-quote,$(ENGINE_CXXFLAGS)) \
@@ -229,8 +226,6 @@ PRODUCTION_ENGINE_INPUTS := $(sort $(shell find runtime -type f \
 		-o -name '*.hpp' -o -name '*.m' -o -name '*.mm' \) \
 	-print))
 
-$(BUILD_TOOLS_BINARY): $(BUILD_TOOLS_MANIFEST) $(BUILD_TOOLS_LOCK) $(BUILD_TOOLS_SOURCE_FILES)
-	cargo build --locked --release --manifest-path $(BUILD_TOOLS_MANIFEST)
 BUILD_ID_CONSTANT_ARGS = \
 	--constant 'runtime=qwen-hybrid-dflash8' \
 	--constant 'engine_cxxflags=$(ENGINE_CXXFLAGS)' \
@@ -365,7 +360,7 @@ force-build-identity:
 $(ENGINE_BUILD): | $(BUILD)
 	mkdir -p $@
 
-$(BUILD_ID_STAMP): force-build-identity | $(ENGINE_BUILD) $(BUILD_TOOLS_BINARY)
+$(BUILD_ID_STAMP): force-build-identity $(BUILD_TOOLS_SOURCE_FILES) | $(ENGINE_BUILD)
 	@$(BUILD_TOOLS_BINARY) build-identity write --root . \
 		--header $(BUILD_ID_HEADER) --stamp $(BUILD_ID_STAMP) \
 		$(BUILD_ID_CONSTANT_ARGS) >/dev/null
@@ -447,12 +442,6 @@ $(SANITIZER_CONFIG_TARGETS): BUILD_CONFIG := $(SANITIZER_CONFIG_DIGEST)
 $(PRODUCTION_AIRS): BUILD_CONFIG := $(PRODUCTION_AIR_CONFIG)
 $(LIB): BUILD_CONFIG := $(PRODUCTION_LIB_CONFIG)
 $(TEST_KERNEL_CONFIG_TARGETS): BUILD_CONFIG := $(TEST_KERNEL_CONFIG)
-ifeq ($(wildcard $(BUILD_TOOLS_BINARY)),)
-# A clean checkout has no native helper yet; conservatively rebuild every
-# configured output. The first recipe builds the helper before the compiler.
-STALE_CONFIG_TARGETS := $(PRODUCTION_CONFIG_TARGETS) $(TEST_CONFIG_TARGETS) \
-	$(SANITIZER_CONFIG_TARGETS) $(PRODUCTION_AIRS) $(LIB) $(TEST_KERNEL_CONFIG_TARGETS)
-else
 STALE_CONFIG_TARGETS := $(shell $(BUILD_TOOLS_BINARY) build-config stale \
 	--config $(CONFIG_DIGEST) $(PRODUCTION_CONFIG_TARGETS)) \
 	$(shell $(BUILD_TOOLS_BINARY) build-config stale \
@@ -465,11 +454,6 @@ STALE_CONFIG_TARGETS := $(shell $(BUILD_TOOLS_BINARY) build-config stale \
 	--config $(PRODUCTION_LIB_CONFIG) $(LIB)) \
 	$(shell $(BUILD_TOOLS_BINARY) build-config stale \
 	--config $(TEST_KERNEL_CONFIG) $(TEST_KERNEL_CONFIG_TARGETS))
-endif
 ifneq ($(strip $(STALE_CONFIG_TARGETS)),)
 $(STALE_CONFIG_TARGETS): force-build-config
 endif
-
-# All configured compiler outputs need the native helper before their recipe.
-$(PRODUCTION_CONFIG_TARGETS) $(TEST_CONFIG_TARGETS) $(SANITIZER_CONFIG_TARGETS) \
-	$(PRODUCTION_AIRS) $(LIB) $(TEST_KERNEL_CONFIG_TARGETS): | $(BUILD_TOOLS_BINARY)

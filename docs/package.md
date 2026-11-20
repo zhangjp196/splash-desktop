@@ -63,19 +63,17 @@ local paths outside the source tree.
 
 ## Desktop app
 
-`macos/` is the SwiftUI control panel. The desktop bundle starts the Rust
+`macos/` is the SwiftUI control panel. The desktop bundle starts the Python
 server and includes the native inference engine. It uses an existing model
 assembly, selected by its model ID or its directory containing `model.json`.
 
 ```sh
-make package-app RELEASE_VERSION=$VERSION   # dist/Splash Desktop Rust.app
-make package-dmg RELEASE_VERSION=$VERSION   # dist/Splash-Desktop-Rust-<version>.dmg
+make package-app RELEASE_VERSION=$VERSION   # dist/Splash Desktop.app
+make package-dmg RELEASE_VERSION=$VERSION  # dist/Splash-Desktop-<version>.dmg
 ```
 
-`dev/tools/package_rust_dmg.sh` builds the Swift app and Rust server and
-copies the native engine from `build/`. The installed app serves Chat
-Completions on IPv4 loopback. Model downloads and assembly creation are
-still pending in Rust. See [the porting status](../server-rs/PORTING.md).
+The DMG contains the self-contained Python runtime archive produced by
+`make package`; the app needs no download except the model the user chooses.
 
 The app is called Splash Desktop: the bundle is `Splash Desktop.app`, the
 executable inside it is `SplashDesktop`, and the volume is
@@ -117,19 +115,17 @@ an archive before uploading it, serve `dist/` (`python3 -m http.server`) and
 run the installer with `SPLASH_BASE_URL` naming that server, `SPLASH_VERSION`
 and any `SPLASH_TOKEN`.
 
-## Legacy Python desktop runtime
+## Python desktop runtime
 
-The following describes the earlier Python desktop distribution.
-The current desktop build is documented in [Desktop app](#desktop-app).
-
-`make package-dmg` packages a self-contained `Splash-Desktop-<version>.dmg`: the
+`make package-dmg` packages a self-contained
+`Splash-Desktop-<version>.dmg`: the
 native SwiftUI control panel (`macos/`) with the runtime archive embedded
 under `Contents/Resources/runtime`, so installing the app needs no other
 download and neither does first run (only the chosen model does):
 
 ```sh
 make package RELEASE_VERSION=1.0.0
-make package-dmg RELEASE_VERSION=1.0.0     # needs the archive above
+make package-dmg RELEASE_VERSION=1.0.0
 ```
 
 The app owns no model or engine code: it locates the embedded runtime,

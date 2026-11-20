@@ -1,9 +1,8 @@
 import Foundation
 
-/// The Rust server and native engine embedded under Contents/Resources/runtime.
+/// The Python server runtime embedded under Contents/Resources/runtime.
 enum Runtime {
-    /// `SPLASH_RUNTIME_DIR` overrides the embedded runtime, for development
-    /// against a source checkout or another build.
+    /// `SPLASH_RUNTIME_DIR` overrides the embedded runtime for development.
     static var root: URL? {
         let environment = ProcessInfo.processInfo.environment["SPLASH_RUNTIME_DIR"]
         let candidates = [environment.map { URL(fileURLWithPath: $0, isDirectory: true) },
@@ -18,30 +17,25 @@ enum Runtime {
     }
 
     private static func isRuntime(_ directory: URL) -> Bool {
-        let server = directory.appendingPathComponent("engine/splash-server")
-        return FileManager.default.isExecutableFile(atPath: server.path)
+        FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("install/launcher.py").path
+        ) && FileManager.default.isExecutableFile(
+            atPath: directory.appendingPathComponent("python/bin/python3").path
+        )
     }
 
-    static var server: URL? {
-        root?.appendingPathComponent("engine/splash-server")
+    static var python: URL? {
+        root?.appendingPathComponent("python/bin/python3")
     }
 
-    /// An optional PDFium dylib can be bundled beside the engine or supplied
-    /// by the launcher environment. The Rust server passes this setting on to
-    /// its isolated document worker.
-    static var pdfiumLibrary: URL? {
-        let environment = ProcessInfo.processInfo.environment["SPLASH_PDFIUM_PATH"]
-        let candidates = [environment.map { URL(fileURLWithPath: $0) },
-                          root?.appendingPathComponent("engine/libpdfium.dylib")]
-            .compactMap { $0 }
-        return candidates.first(where: { FileManager.default.isReadableFile(atPath: $0.path) })
+    static var launcher: URL? {
+        root?.appendingPathComponent("install/launcher.py")
     }
 
-    /// The model IDs the suggested list bundles, for the picker: the first
-    /// column of `suggested-models.tsv`, comments and layout aside.
+    /// The model IDs bundled for the picker, from `suggested-models.tsv`.
     static var catalog: [String] {
         guard let root else { return [] }
-        let file = root.appendingPathComponent("suggested-models.tsv")
+        let file = root.appendingPathComponent("install/suggested-models.tsv")
         guard let text = try? String(contentsOf: file, encoding: .utf8) else { return [] }
         var seen = Set<String>()
         var identifiers: [String] = []
