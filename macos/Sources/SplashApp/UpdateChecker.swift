@@ -1,5 +1,17 @@
 import Foundation
 
+struct ManualUpdateResult: Identifiable {
+    let id: UUID
+    let statusKey: String
+    let version: String?
+
+    init(statusKey: String, version: String?) {
+        id = UUID()
+        self.statusKey = statusKey
+        self.version = version
+    }
+}
+
 @MainActor
 final class UpdateChecker: ObservableObject {
     static let shared = UpdateChecker()
@@ -11,6 +23,9 @@ final class UpdateChecker: ObservableObject {
     @Published private(set) var statusKey = "update.status.idle"
     @Published private(set) var latestVersion: String?
     @Published private(set) var isChecking = false
+    @Published var manualResult: ManualUpdateResult?
+
+    private var manualResultRequested = false
 
     private init() {}
 
@@ -20,6 +35,7 @@ final class UpdateChecker: ObservableObject {
     }
 
     func checkManually() {
+        manualResultRequested = true
         check(force: true)
     }
 
@@ -43,6 +59,7 @@ final class UpdateChecker: ObservableObject {
                       let current = Self.versionComponents(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String),
                       let latest = Self.versionComponents(tag) else {
                     statusKey = "update.status.unavailable"
+                    publishManualResultIfRequested()
                     return
                 }
                 latestVersion = tag
@@ -51,7 +68,23 @@ final class UpdateChecker: ObservableObject {
             } catch {
                 statusKey = "update.status.failed"
             }
+            publishManualResultIfRequested()
         }
+    }
+
+    private func publishManualResultIfRequested() {
+        guard manualResultRequested else { return }
+        manualResultRequested = false
+        let version: String?
+        switch statusKey {
+        case "update.status.current":
+            version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        case "update.status.available":
+            version = latestVersion
+        default:
+            version = nil
+        }
+        manualResult = ManualUpdateResult(statusKey: statusKey, version: version)
     }
 
     private static func latestTag(from url: URL) -> String? {

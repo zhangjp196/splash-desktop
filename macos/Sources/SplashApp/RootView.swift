@@ -157,6 +157,30 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showLog)) { _ in
             selectionRaw = Section.log.rawValue
         }
+        .alert(
+            L10n.string("update.title"),
+            isPresented: Binding(
+                get: { updateChecker.manualResult != nil },
+                set: { if !$0 { updateChecker.manualResult = nil } }
+            ),
+            presenting: updateChecker.manualResult
+        ) { result in
+            if result.statusKey == "update.status.available" {
+                Button(L10n.string("update.open_release")) {
+                    NSWorkspace.shared.open(UpdateChecker.releaseURL)
+                }
+            }
+            Button(L10n.string("background.alert.ok"), role: .cancel) {
+                updateChecker.manualResult = nil
+            }
+        } message: { result in
+            switch result.statusKey {
+            case "update.status.current", "update.status.available":
+                Text(L10n.format(result.statusKey, result.version ?? ""))
+            default:
+                Text(L10n.string(result.statusKey))
+            }
+        }
         .animation(.easeOut(duration: 0.16), value: showPalette)
         .frame(minWidth: 810, idealWidth: 990, minHeight: 540, idealHeight: 660)
     }
