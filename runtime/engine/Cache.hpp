@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -114,6 +115,8 @@ struct KvTierSnapshot final {
   uint32_t pendingPages = 0;
   uint32_t diskBlocks = 0;
   uint64_t diskBytes = 0;
+  // Why a tier the start asked for is off; empty while it is available.
+  std::string offReason;
 };
 
 // What a start took back from a persistent tier: the states and KV blocks
@@ -389,6 +392,7 @@ public:
   // Measures the volume the disk tier lives on and sets the budget's limit
   // (DiskSpace::measure), for keepDiskLimit(); none without such a tier.
   void setDiskMeasure(std::function<void()> measure) { diskMeasure_ = std::move(measure); }
+  void setDiskOff(std::string reason) { kvTier_.offReason = std::move(reason); }
   // At a control pass, and when a write found the volume full: measures it
   // again, then gives up copies while the tier holds more than the limit,
   // in the order a full quota replaces them (freeDiskSpace), never a copy in

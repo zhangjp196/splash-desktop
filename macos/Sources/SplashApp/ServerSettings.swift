@@ -55,6 +55,9 @@ struct ServerSettings: Codable, Equatable {
         // server's own default, so the panel and the engine open on the same
         // number.
         static let maxConcurrency = 8
+        static let maxConcurrentRequests = 4
+        static let recalibrateANE = false
+        static let samplingDefaults = ""
         // The cache eviction presets: level 2 is the default, and protects
         // objects that prove reused; level 1 keeps the engine's plain LRU as
         // it was, and level 3 orders the protected tier by use count. The
@@ -74,6 +77,17 @@ struct ServerSettings: Codable, Equatable {
     /// Where the DFlash2 draft comes from: nothing, a local draft directory,
     /// or a Hugging Face repository ID.
     static let draftModes = ["none", "folder", "hub"]
+    /// A target file is never a draft. Older configurations could store the
+    /// same GGUF path in both fields; reading or saving one clears that draft
+    /// instead of passing a model file to the launcher as --draft-model.
+    static func sanitized(_ settings: inout ServerSettings) {
+        let target = settings.modelDirectory.trimmingCharacters(in: .whitespaces)
+        let draft = settings.draftDirectory.trimmingCharacters(in: .whitespaces)
+        guard settings.modelMode == .local, !target.isEmpty, target == draft else { return }
+        settings.draftDirectory = ""
+        settings.draftMode = "none"
+    }
+
     /// How decode proposes tokens: automatic (a compatible DFlash2 draft,
     /// else none), none (autoregressive), or DFlash2 explicitly.
     static let speculationModes = ["auto", "dflash2"]
@@ -122,6 +136,9 @@ struct ServerSettings: Codable, Equatable {
     /// or bf16 for half the memory and twice as many cached states.
     var stateFormat = First.stateFormat
     var neuralEngine = true
+    var recalibrateANE = First.recalibrateANE
+    var maxConcurrentRequests = First.maxConcurrentRequests
+    var samplingDefaults = First.samplingDefaults
     var maxMemory = First.maxMemory
     var maxContext = First.maxContext
     /// Memory of the stores the engine streams from the SSD: a MoE target's
@@ -250,7 +267,7 @@ struct ServerSettings: Codable, Equatable {
         case maxRequestSize, requestTimeout, maxImagePixels, decodeShare
         case allowIdleSleep, thinkingTokenBudget, thinkingEndText, announceServedName
         case apiKey, servedNames
-        case reasoningEffort, maxConcurrency
+        case reasoningEffort, maxConcurrency, maxConcurrentRequests, recalibrateANE, samplingDefaults
         case diskCache, maxCacheDisk, maxCacheDiskWrites
         case cacheEvictionPreset, cacheEvictionPolicy, cacheEvictionProtect
         case expertMemory, pleMemory, sparseKvMemory, verifyRows
@@ -315,6 +332,9 @@ struct ServerSettings: Codable, Equatable {
         kvFormat = value(String.self, .kvFormat) ?? kvFormat
         stateFormat = value(String.self, .stateFormat) ?? stateFormat
         neuralEngine = value(Bool.self, .neuralEngine) ?? neuralEngine
+        recalibrateANE = value(Bool.self, .recalibrateANE) ?? recalibrateANE
+        maxConcurrentRequests = value(Int.self, .maxConcurrentRequests) ?? maxConcurrentRequests
+        samplingDefaults = value(String.self, .samplingDefaults) ?? samplingDefaults
         maxMemory = value(String.self, .maxMemory) ?? maxMemory
         maxContext = value(String.self, .maxContext) ?? maxContext
         expertMemory = value(String.self, .expertMemory) ?? expertMemory
@@ -366,6 +386,7 @@ struct ServerSettings: Codable, Equatable {
         reasoningEffort = value(String.self, .reasoningEffort) ?? reasoningEffort
         maxConcurrency = value(Int.self, .maxConcurrency) ?? maxConcurrency
         settingsVersion = value(String.self, .settingsVersion) ?? settingsVersion
+        Self.sanitized(&self)
     }
 
     /// A digest that changes exactly when the settings do, so the autosave
@@ -403,6 +424,9 @@ struct ServerSettings: Codable, Equatable {
             ("kvFormat", kvFormat),
             ("stateFormat", stateFormat),
             ("neuralEngine", neuralEngine ? "1" : "0"),
+            ("recalibrateANE", recalibrateANE ? "1" : "0"),
+            ("maxConcurrentRequests", String(maxConcurrentRequests)),
+            ("samplingDefaults", samplingDefaults),
             ("maxMemory", maxMemory),
             ("maxContext", maxContext),
             ("expertMemory", expertMemory),
@@ -469,6 +493,11 @@ struct ServerSettings: Codable, Equatable {
             stateFormat = value
         }
         if let value = rows["neuralEngine"] { neuralEngine = value == "1" }
+        if let value = rows["recalibrateANE"] { recalibrateANE = value == "1" }
+        if let value = Self.number(rows["maxConcurrentRequests"], in: 1...4) {
+            maxConcurrentRequests = value
+        }
+        if let value = rows["samplingDefaults"] { samplingDefaults = value }
         if let value = rows["maxMemory"] { maxMemory = value }
         if let value = rows["maxContext"] { maxContext = value }
         if let value = Self.streamedSetting(rows["expertMemory"]) { expertMemory = value }
@@ -550,6 +579,7 @@ struct ServerSettings: Codable, Equatable {
         if let value = Self.number(rows["maxConcurrency"], in: 1...4096) {
             maxConcurrency = value
         }
+        Self.sanitized(&self)
     }
 
     /// A streamed store's setting: empty (the server's automatic plan),

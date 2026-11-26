@@ -41,7 +41,7 @@ BlockIdentity blockImageIdentity(uint64_t blockBegin, uint32_t blockTokens,
     uint64_t lo = identity.lo ? identity.lo : 0x243f6a8885a308d3ULL;
     uint64_t hi = identity.hi ? identity.hi : 0x13198a2e03707344ULL;
     for (uint64_t value :
-         {span.digestLo, span.digestHi,
+         {span.digestLo, span.digestHi, static_cast<uint64_t>(span.processor),
           (uint64_t{span.gridHeight} << 32) | span.gridWidth,
           (uint64_t{span.offset} << 32) | span.tokens, blockBegin}) {
       lo = mix(lo, value);

@@ -116,6 +116,7 @@ FrameType write(Writer &out, const RequestFrame &request) {
     out.u32(span.gridWidth);
     out.u64(span.digestLo);
     out.u64(span.digestHi);
+    out.u32(static_cast<uint32_t>(span.processor));
   }
   out.raw(request.imagePixels);
   out.words(request.scoreTokens);
@@ -185,6 +186,9 @@ EngineEvent decodeEvent(FrameType type, Reader &in) {
     event.requestId = in.u64();
     event.lane = in.u32();
     event.matchedPromptTokens = in.u32();
+    event.prefixTokens = in.u32();
+    event.stateSource = static_cast<engine::StateSource>(in.u8());
+    event.lostState = in.u8() != 0;
     return event;
   }
   case FrameType::PromptProgress: {

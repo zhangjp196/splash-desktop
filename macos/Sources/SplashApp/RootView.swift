@@ -13,6 +13,8 @@ struct RootView: View {
     @State private var showTerminal = false
     @State private var toast: String?
     @State private var toastToken = 0
+    @AppStorage("updates.automatic") private var automaticUpdates = true
+    @StateObject private var updateChecker = UpdateChecker.shared
 
     private var section: Section { Section(rawValue: selectionRaw) ?? .models }
     private var selection: Binding<Section> {
@@ -137,7 +139,10 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(appearance.colorScheme)
-        .onAppear { applyAppearance() }
+        .onAppear {
+            applyAppearance()
+            updateChecker.checkIfDue(enabled: automaticUpdates)
+        }
         .onChange(of: appearanceRaw) { _, _ in applyAppearance() }
         .onReceive(NotificationCenter.default.publisher(for: .showCommandPalette)) { _ in
             showPalette = true

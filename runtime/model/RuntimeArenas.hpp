@@ -3,6 +3,7 @@
 // Shared Qwen prefill/decode scratch layouts and allocation owners.
 
 #include "model/DFlashDraft.hpp"
+#include "model/Inkling2Loop.hpp"
 #include "model/ModelFactory.hpp"
 #include "model/QwenState.hpp"
 #include "model/QwenTarget.hpp"
@@ -10,6 +11,7 @@
 #include "Checked.hpp"
 #include "metal/MetalBackend.hpp"
 #include "metal/abi/Sampling.h"
+#include "metal/abi/VerifyTree.h"
 #include "ops/ExecutionPlans.hpp"
 #include "ops/PagedKv.hpp"
 
@@ -23,6 +25,14 @@
 #include <vector>
 
 namespace splash::model {
+
+// The Inkling-2 family's weights carry their layout; forward to its
+// layout-based scratch sizing so TargetWeights' std::visit is exhaustive.
+inline QwenTargetScratchBytes qwenTargetScratchBytes(const Inkling2LoopWeights &weights,
+                                                     const QwenTargetGeometry &geometry, uint32_t prefillChunks,
+                                                     uint64_t tableRowBytes) {
+  return qwenTargetScratchBytes(weights.layout, geometry, prefillChunks, tableRowBytes);
+}
 
 inline constexpr uint32_t kLaneCount = ExecutionLimits::maximumBatchWidth;
 inline constexpr uint32_t kDecodeRows = ExecutionLimits::targetVerifyRows;
@@ -50,6 +60,10 @@ inline constexpr uint32_t kMaximumPageTableEntries =
 struct RuntimeGeometry final {
   QwenTargetGeometry target;
   DFlashDraftLayout draft;
+  // The target's family layout, whose attention workspace is sized by its
+  // own operator where it does not use the shared paged attention
+  // (qwenTargetAttentionWorkspace).
+  TargetLayout layout{};
   // Whether the model's speculation plan has a draft. A geometry without one
   // sizes no draft tensor and runs no draft kernel.
   bool hasDraft = true;
@@ -85,6 +99,7 @@ struct RuntimeGeometry final {
                                             ops::GdnStateFormat stateFormat, StreamedParts parts) {
     RuntimeGeometry result;
     result.draft = model.draft.layout;
+    result.layout = model.descriptor.target;
     result.hasDraft = model.descriptor.hasDraft();
     result.target = std::visit(
         [&](const auto &weights) { return qwenTargetGeometry(weights, result.draft.targetLayerIds()); },
@@ -171,6 +186,9 @@ enum class PrefillTensor : uint32_t {
   // A prefill group's scratch GDN cell, which carries the state from a chunk
   // to the next when the lane's cells cannot (Runtime's prefill groups).
   GroupCell,
+  // Each sequence's rows of the chunk (SplashLaneRows), which the host
+  // writes and the attention layers read (ops::AttentionRows).
+  LaneLayout,
   Count,
 };
 
@@ -195,6 +213,7 @@ constexpr Tensor moeScratchTensor(size_t field) noexcept {
   case PrefillTensor::Hidden0:
   case PrefillTensor::Hidden1:
   case PrefillTensor::InputTokens:
+  case PrefillTensor::LaneLayout:
   case PrefillTensor::TargetPositions:
   case PrefillTensor::RopeCos:
   case PrefillTensor::RopeSin:
@@ -254,17 +273,17 @@ public:
       groupCell_ = gdnCellBuffers(backend, get(PrefillTensor::GroupCell), geometry.target.stateLayout);
     if (cursor != bytes_)
       throw std::logic_error("prefill arena mismatch");
+    // A target without RoPE has no table of its pairs; its draft's rotates.
     auto *target = static_cast<float *>(
         get(PrefillTensor::TargetInverseFrequencies).contents());
-    if (!target)
-      throw std::logic_error("RoPE frequencies are not CPU-visible");
-    rotaryInverseFrequencies(geometry.target.rotaryTheta, geometry.target.rotaryPairs,
-                             geometry.target.ropeScaling,
-                             {target, geometry.target.rotaryPairs});
     auto *draft = static_cast<float *>(
         get(PrefillTensor::DraftInverseFrequencies).contents());
-    if (!draft)
-      throw std::logic_error("draft RoPE frequencies are not CPU-visible");
+    if ((geometry.target.rotaryPairs && !target) || !draft)
+      throw std::logic_error("RoPE frequencies are not CPU-visible");
+    if (geometry.target.rotaryPairs)
+      rotaryInverseFrequencies(geometry.target.rotaryTheta, geometry.target.rotaryPairs,
+                               geometry.target.ropeScaling,
+                               {target, geometry.target.rotaryPairs});
     const float theta = geometry.hasDraft ? geometry.draft.rotaryTheta : 10000.0F;
     for (uint32_t dim = 0; dim < SPLASH_DRAFT_ROPE_PAIRS; ++dim) {
       draft[dim] = std::pow(theta, -static_cast<float>(dim) / SPLASH_DRAFT_ROPE_PAIRS);
@@ -361,6 +380,10 @@ enum class DecodeTensor : uint32_t {
   RetainedCount,
   AcceptedCount,
   VerifyRows,
+  // Inkling verify's per-row topological proposal tree and fixed lane slots.
+  VerifyTreeRows,
+  VerifyLaneRows,
+  AcceptedPath,
   VerifyConfidence,
   DraftInputTokens,
   DraftHidden0,

@@ -262,6 +262,11 @@ ENGINE_CPP_SOURCES := \
 	runtime/ops/HyperConnection.cpp \
 	runtime/ops/NgramEmbedding.cpp \
 	runtime/ops/BlockIndexer.cpp \
+	runtime/ops/BlockResidualMix.cpp \
+	runtime/ops/LogitFinish.cpp \
+	runtime/ops/MessageGate.cpp \
+	runtime/ops/inkling2_RelativeAttention.cpp \
+	runtime/ops/inkling2_ShortConvolution.cpp \
 	runtime/ops/PagedAttention.cpp \
 	runtime/ops/PageStorage.cpp \
 	runtime/ops/KvSlotFormat.cpp \
@@ -269,6 +274,9 @@ ENGINE_CPP_SOURCES := \
 	runtime/ops/RowCopy.cpp \
 	runtime/ops/Sampling.cpp \
 	runtime/ops/Vision.cpp \
+	runtime/ops/Inkling2VisionStem.cpp \
+	runtime/ops/Inkling2VisionBlock.cpp \
+	runtime/ops/Inkling2VisionPlan.cpp \
 	runtime/metal/DeviceCapabilities.cpp \
 	runtime/engine/MemoryPlan.cpp \
 	runtime/engine/AneFfnStartup.cpp \
@@ -313,6 +321,13 @@ ENGINE_CPP_SOURCES := \
 	runtime/model/Qwen4Steps.cpp \
 	runtime/model/Qwen4ExpTarget.cpp \
 	runtime/model/Flint.cpp \
+	runtime/model/Inkling2Loop.cpp \
+	runtime/model/Inkling2LoopGguf.cpp \
+	runtime/model/Inkling2LoopSafetensors.cpp \
+	runtime/model/Inkling2LoopSteps.cpp \
+	runtime/model/Inkling2LoopTarget.cpp \
+	runtime/model/Inkling2Vision.cpp \
+	runtime/model/Inkling2VisionLoader.cpp \
 	runtime/model/FlintTarget.cpp \
 	runtime/model/QwenVision.cpp \
 	runtime/model/VisionPreparation.cpp \

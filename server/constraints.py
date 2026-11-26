@@ -114,13 +114,59 @@ class TokenConstraint:
                 )
 
 
+class TokenizerContractError(ValueError):
+    """The model's tokenizer does not encode the tags its chat format reads
+    the model's output by, or the text the engine stops it at, as the format
+    has them. The fork's original checks raise EngineUnhealthy; the checks
+    added with Inkling 2 raise this, as upstream does."""
+
+
+def _upstream_format(chat_format):
+    """Whether a format states its tags and stop texts as upstream does,
+    instead of the fork's fixed tags and (text, id) stop pairs."""
+    return bool(chat_format.visible_tags) or any(
+        isinstance(stop, str) for stop in chat_format.stop_tokens
+    )
+
+
+def _validate_upstream_tags(tokenizer, chat_format):
+    """The checks a format that names its own tags needs, which the fork's
+    single-token ones do not: a reasoning opening of several tokens, the
+    visible tags and the stop texts each of one token."""
+    expected = {
+        chat_format.think_close: (chat_format.think_end_id,),
+        chat_format.call_syntax.call_tag: (chat_format.call_open_id,),
+    }
+    if chat_format.think_start_ids:
+        expected[chat_format.think_open] = chat_format.think_start_ids
+    for text, token_ids in expected.items():
+        if tokenizer.encode(text, add_special_tokens=False) != list(token_ids):
+            native = (
+                f"native token {token_ids[0]}"
+                if len(token_ids) == 1
+                else f"native tokens {list(token_ids)}"
+            )
+            raise TokenizerContractError(
+                f"tokenizer must encode {text!r} as {native}"
+            )
+    for tag in chat_format.visible_tags:
+        if len(tokenizer.encode(tag, add_special_tokens=False)) != 1:
+            raise TokenizerContractError(
+                f"tokenizer must encode the tag {tag!r} as one token"
+            )
+    for stop in chat_format.stop_texts:
+        if len(tokenizer.encode(stop, add_special_tokens=False)) != 1:
+            raise TokenizerContractError(
+                f"tokenizer must encode the stop text {stop!r} as one token"
+            )
+
+
 def validate_tokenizer(tokenizer, chat_format):
-    """Refuse a tokenizer that does not encode chat_format's tokens, which
-    the engine and the server read the model's output by, as that format
-    has them: its vocabulary must fit the model's, the engine's stop tokens,
-    the close of thinking, the model's own opening of it where the model
-    opens it, and a call's opening must each be one token, and its EOS one
-    of the stop tokens."""
+    """Before the engine starts, refuse a tokenizer that does not encode the
+    tags chat_format reads the model's output by as that format has them. A
+    format that names its own tags gets upstream's checks (multi-token think
+    opening, visible tags, stop texts); the fork's Qwen and Flint keep their
+    fixed single-token tags, (text, id) stops and EngineUnhealthy errors."""
     vocabulary = tokenizer.get_vocab()
     if not vocabulary or any(
         type(token_id) is not int or not 0 <= token_id < chat_format.vocabulary
@@ -129,6 +175,13 @@ def validate_tokenizer(tokenizer, chat_format):
         raise engine_runtime.EngineUnhealthy(
             "tokenizer vocabulary does not fit the native model"
         )
+    if _upstream_format(chat_format):
+        _validate_upstream_tags(tokenizer, chat_format)
+        if tokenizer.eos_token_id not in chat_format.stop_ids:
+            raise TokenizerContractError(
+                "tokenizer EOS token does not match the native model"
+            )
+        return
     expected = {
         **dict(chat_format.stop_tokens),
         THINK_END: chat_format.think_end_id,
@@ -147,6 +200,51 @@ def validate_tokenizer(tokenizer, chat_format):
         raise engine_runtime.EngineUnhealthy(
             "tokenizer EOS token does not match the native model"
         )
+
+
+def stop_token_ids(tokenizer, chat_format):
+    """The tokens the tokenizer encodes the chat format's stop texts as, one
+    each (validate_tokenizer), which the engine's Ready must state too."""
+    return tuple(
+        tokenizer.encode(stop, add_special_tokens=False)[0]
+        for stop in chat_format.stop_texts
+    )
+
+
+def check_capabilities(tokenizer, chat_format, ready):
+    """Once the engine is Ready, refuse a tokenizer that does not fit what it
+    serves: its vocabulary must fit the engine's, its stop texts encode as
+    exactly the engine's stop tokens, its EOS be one of them, and, where the
+    engine serves images, the format's image placeholder be one token."""
+    vocabulary = tokenizer.get_vocab()
+    if not vocabulary or any(
+        type(token_id) is not int or not 0 <= token_id < ready.vocabulary_size
+        for token_id in vocabulary.values()
+    ):
+        raise TokenizerContractError(
+            "tokenizer vocabulary does not fit the native model"
+        )
+    stops = stop_token_ids(tokenizer, chat_format)
+    if sorted(stops) != sorted(ready.stop_token_ids):
+        raise TokenizerContractError(
+            f"the tokenizer encodes the stop texts {chat_format.stop_texts} as "
+            f"tokens {stops}, but the native model stops at {ready.stop_token_ids}"
+        )
+    if tokenizer.eos_token_id not in ready.stop_token_ids:
+        raise TokenizerContractError(
+            "tokenizer EOS token does not match the native model"
+        )
+    if ready.vision:
+        pad = chat_format.image_pad
+        if pad is None:
+            raise TokenizerContractError(
+                "the native model serves images, but its chat template has no "
+                "image placeholder"
+            )
+        if len(tokenizer.encode(pad, add_special_tokens=False)) != 1:
+            raise TokenizerContractError(
+                f"tokenizer must encode the image placeholder {pad!r} as one token"
+            )
 
 
 def _grammar_error(error):
@@ -171,6 +269,19 @@ def grammar_for_source(format, source):
 class ConstraintFactory:
     CACHE_SIZE = 32
     CACHE_SOURCE_BYTES = 8 * 1024 * 1024
+
+    @staticmethod
+    def table(tokenizer, chat_format, vocabulary):
+        """llguidance's table of `tokenizer`, which every grammar's masks
+        cover: the model's vocabulary, which the fork also uses to bound
+        logit_bias, and the chat format's stop tokens, one each. Built once
+        while the engine loads its weights."""
+        return guidance_tokenizer(
+            tokenizer,
+            n_vocab=vocabulary,
+            eos_token=list(stop_token_ids(tokenizer, chat_format)),
+            slices=LLTokenizer.json_slices(),
+        )
 
     def __init__(self, tokenizer, chat_format):
         self.chat_format = chat_format

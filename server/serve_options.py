@@ -15,9 +15,9 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 
-from . import images, origins
+from . import generation_options, images, origins
 from .http_security import validate_api_key
-from .protocol import MAX_THINKING_END_TOKENS
+from .protocol import MAX_THINKING_END_TOKENS, SAMPLING_FIELDS
 
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 # The targets' native window, the most context without --max-context, and
@@ -30,6 +30,8 @@ MAX_YARN_CONTEXT_TOKENS = 1010000
 _CONTEXT_UNITS = {"K": 1024, "M": 1000000}
 DEFAULT_MAX_REQUEST_BYTES = 128 * 1024 * 1024
 DEFAULT_QUEUE_SIZE = 8
+DEFAULT_CONCURRENT_REQUESTS = 4
+MAX_CONCURRENT_REQUESTS = 4
 # The lowest duty the engine takes: below it even a short prompt would take
 # longer than a person waits (kMinimumPrefillDutyPercent).
 MINIMUM_PREFILL_DUTY = 10
@@ -312,6 +314,18 @@ def parse_queue_size(value):
     return size
 
 
+def parse_concurrent_requests(value):
+    try:
+        requests = int(value)
+    except ValueError:
+        requests = 0
+    if not 1 <= requests <= MAX_CONCURRENT_REQUESTS:
+        raise argparse.ArgumentTypeError(
+            f"must be a whole number from 1 to {MAX_CONCURRENT_REQUESTS}"
+        )
+    return requests
+
+
 def parse_decode_share(value):
     try:
         share = float(value)
@@ -411,6 +425,27 @@ def parse_served_model_name(value):
             "model alias must be a non-empty name without whitespace or URL delimiters"
         )
     return value
+
+
+def parse_sampling_default(value):
+    """A --sampling-default NAME=VALUE as (name, number), a number a request
+    may set (generation_options.sampling_refusal): `splash serve` refuses one
+    before it downloads anything. The app's Sampling defaults field takes the
+    same names and forms, and leaves the ranges to this check."""
+    name, separator, number = value.partition("=")
+    if not separator or name not in SAMPLING_FIELDS:
+        raise argparse.ArgumentTypeError(
+            f"must be NAME=VALUE, NAME one of {', '.join(SAMPLING_FIELDS)}"
+        )
+    try:
+        parsed = int(number) if name == "top_k" else float(number)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{name} must be {'an integer' if name == 'top_k' else 'a number'}"
+        ) from None
+    if (refusal := generation_options.sampling_refusal(name, parsed)) is not None:
+        raise argparse.ArgumentTypeError(refusal)
+    return name, parsed
 
 
 def parse_allowed_origin(value):
@@ -818,6 +853,21 @@ SERVE_OPTIONS = (
         ),
     ),
     ServeOption(
+        "--sampling-default",
+        "api",
+        dict(
+            action="append",
+            default=[],
+            type=parse_sampling_default,
+            metavar="NAME=VALUE",
+            help="the value of a sampling parameter for requests that set "
+            "none (repeatable): "
+            + ", ".join(SAMPLING_FIELDS)
+            + " (default: the value that leaves the logits unchanged)",
+        ),
+        text=lambda item: f"{item[0]}={item[1]}",
+    ),
+    ServeOption(
         "--default-reasoning-effort",
         "api",
         dict(
@@ -944,6 +994,17 @@ SERVE_OPTIONS = (
         ),
     ),
     ServeOption(
+        "--max-concurrent-requests",
+        "requests",
+        dict(
+            type=parse_concurrent_requests,
+            default=DEFAULT_CONCURRENT_REQUESTS,
+            metavar="REQUESTS",
+            help=f"maximum requests decoding at once, 1 to {MAX_CONCURRENT_REQUESTS} "
+            f"(default: {DEFAULT_CONCURRENT_REQUESTS})",
+        ),
+    ),
+    ServeOption(
         "--decode-share",
         "requests",
         dict(
@@ -1018,6 +1079,16 @@ SERVE_OPTIONS = (
         ),
     ),
     ServeOption(
+        "--recalibrate-ane",
+        "requests",
+        dict(
+            action="store_true",
+            default=False,
+            help="calibrate the Neural Engine's share of long prompts again at "
+            "this start instead of taking the one this Mac kept",
+        ),
+    ),
+    ServeOption(
         "--verify-rows",
         "requests",
         dict(
@@ -1081,6 +1152,10 @@ def check_serve_arguments(parser, args):
         )
     if args.cache_dir is not None and not args.persistent_cache:
         parser.error("--cache-dir needs --persistent-cache")
+    if args.recalibrate_ane and args.disable_ane:
+        parser.error(
+            "--recalibrate-ane needs the Neural Engine --disable-ane turns off"
+        )
 
 
 def serve_argv(args):

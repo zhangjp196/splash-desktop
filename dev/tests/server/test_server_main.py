@@ -204,7 +204,9 @@ class ServerMainTests(unittest.TestCase):
             (1000000, 1010000, False),
             (300000, 262144, False),
             (None, 262144, True),
-            (None, 262145, False),
+            # Inkling-2's native window exceeds the legacy server-side cap;
+            # the native memory plan owns automatic context selection.
+            (None, 1010000, True),
         ):
             with self.subTest(max_context=max_context, window=window):
                 runtime = mock.Mock()

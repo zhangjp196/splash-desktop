@@ -1184,14 +1184,16 @@ void run(const std::string &metallib) {
     rejects([&] { storage.clearForColdStart(0); }, "a cold start begins at logical length zero",
             "a lane past length zero was cleared for a cold start");
     rejects([&] { static_cast<void>(storage.snapshot(0)); },
-            "composite snapshot requires equal page-aligned committed lengths",
+            "composite snapshot requires equal page-aligned committed lengths "
+            "(targetTokens=128, draftBase=0, draftLength=127, draftEnd=127, windowEnd=0",
             "snapshot accepted divergent target/draft lengths");
     rejects(
         [&] {
           storage.updateLengths(0, {129, 0, 129});
           static_cast<void>(storage.snapshot(0));
         },
-        "composite snapshot requires equal page-aligned committed lengths",
+        "composite snapshot requires equal page-aligned committed lengths "
+        "(targetTokens=129, draftBase=0, draftLength=129, draftEnd=129, windowEnd=0",
         "unaligned prefix snapshot was accepted");
     // Decode writes the rings alone: a lane past that has no window to keep.
     rejects(

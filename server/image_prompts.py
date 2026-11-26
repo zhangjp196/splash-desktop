@@ -39,7 +39,9 @@ def prepare_images(frontend, messages, deadline, *, check_context=True):
         remaining_request_time(deadline)
         try:
             payload = image_input.decode_data_url(part["image_url"]["url"])
-            image = frontend.images.prepare(payload, frontend.max_image_pixels)
+            image = frontend.images.prepare(
+                payload, frontend.max_image_pixels, frontend.image_processor
+            )
             tokens += image.tokens
             pixel_bytes += len(image.pixels)
             frontend._check_image_request_size(
@@ -82,6 +84,12 @@ def check_image_request_size(
         raise APIError(400, "images exceed the request size limit")
 
 
+def _image_pad(frontend):
+    """The template's placeholder for one image: the chat format's own where
+    it states one, else the fork's fixed pad of the Qwen templates."""
+    return frontend.chat_format.image_pad or IMAGE_PAD_TOKEN
+
+
 def render_image_tokens(frontend, messages, template):
     """Track placeholders emitted by the template, not quoted in input text.
 
@@ -90,14 +98,13 @@ def render_image_tokens(frontend, messages, template):
     each real image to its placeholder even when a coding agent has read
     documentation or source containing literal vision tokens.
     """
+    pad = _image_pad(frontend)
     rendered = frontend._apply_chat_template(
         messages,
         {
             **template,
             "tokenize": False,
-            "chat_template": template["chat_template"].replace(
-                IMAGE_PAD_TOKEN, IMAGE_RENDER_MARKER
-            ),
+            "chat_template": template["chat_template"].replace(pad, IMAGE_RENDER_MARKER),
         },
     )
     parts = rendered.split(IMAGE_RENDER_MARKER)
@@ -105,9 +112,9 @@ def render_image_tokens(frontend, messages, template):
     offset = 0
     for part in parts[:-1]:
         offset += len(part)
-        image_offsets.add((offset, offset + len(IMAGE_PAD_TOKEN)))
-        offset += len(IMAGE_PAD_TOKEN)
-    rendered = IMAGE_PAD_TOKEN.join(parts)
+        image_offsets.add((offset, offset + len(pad)))
+        offset += len(pad)
+    rendered = pad.join(parts)
     encoded = frontend._tokenize(
         rendered,
         add_special_tokens=False,
@@ -122,7 +129,7 @@ def render_image_tokens(frontend, messages, template):
 
 
 def image_token_count(frontend, prompt_tokens, prepared, positions):
-    pad_id = frontend.tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN)
+    pad_id = frontend.tokenizer.convert_tokens_to_ids(_image_pad(frontend))
     if len(positions) != len(prepared) or any(
         prompt_tokens[position] != pad_id for position in positions
     ):
@@ -142,7 +149,7 @@ def expand_image_pads(frontend, prompt_tokens, prepared, positions):
         sum(len(image.pixels) for image in prepared),
     )
     expanded, spans, cursor = [], [], 0
-    pad_id = frontend.tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN)
+    pad_id = frontend.tokenizer.convert_tokens_to_ids(_image_pad(frontend))
     for position, image in zip(positions, prepared):
         expanded.extend(prompt_tokens[cursor:position])
         spans.append(
@@ -153,6 +160,7 @@ def expand_image_pads(frontend, prompt_tokens, prepared, positions):
                 image.grid_width,
                 image.digest_lo,
                 image.digest_hi,
+                wire.ImageProcessor.INKLING if getattr(image, "processor", "qwen") == "inkling2" else wire.ImageProcessor.QWEN,
             )
         )
         expanded.extend([pad_id] * image.tokens)

@@ -93,6 +93,15 @@ template <class Layout, class Layer> struct QwenTargetWeights final : QwenTarget
   ops::NormWeights finalNorm;
 };
 
+// The rows a decode step's scratch tensors hold for a target of `lanes` lanes
+// (Splash 1.7.2's model::decodeStorageRows, used by the Inkling-2 family).
+// The fork stores decode rows on whole QUANT_TILE_ROWS tiles, so rounding the
+// step's rows up to one is a safe upper bound: kernels read no more rows than
+// this and over-allocating scratch cannot move data.
+[[nodiscard]] constexpr uint32_t decodeStorageRows(uint32_t lanes) noexcept {
+  return (ExecutionLimits::stepRows(lanes) + QUANT_TILE_ROWS - 1) / QUANT_TILE_ROWS * QUANT_TILE_ROWS;
+}
+
 // Runtime-visible tensor geometry shared by the supported Qwen hybrid
 // targets: the target's dimensions, the layers the draft reads and what its
 // loaded weights add. It describes semantics only; operators remain
@@ -113,6 +122,11 @@ struct QwenTargetGeometry final : QwenTargetDimensions {
   // tile takes, the format of most of their routers' rows (ops::MoeShape),
   // and the block of the routed experts' stored input rotation (0 when they
   // were not stored for rotated inputs), which ops::MoeShape holds.
+  // The lanes the runtime runs (Splash 1.7.2's QwenTargetGeometry::lanes),
+  // which Inkling-2 family sources read; the fork otherwise passes lanes as
+  // arguments. Defaults to this build's maximum batch width.
+  uint32_t lanes = ExecutionLimits::defaultLanes;
+  [[nodiscard]] constexpr uint32_t stepRows() const noexcept { return ExecutionLimits::stepRows(lanes); }
   uint32_t moeExpertFormat = GGUF_FMT_COUNT;
   bool moeRegisterFormats = true;
   uint32_t moeRouterFormat = ops::QuantizedSegment::kFloat32;
@@ -200,7 +214,10 @@ struct QwenTargetGeometry final : QwenTargetDimensions {
       if (!captureLayerCount) return true;
       if (captureLayerCount > ExecutionLimits::maximumDraftTargetLayers) return false;
       const auto ids = captureLayers();
-      return std::ranges::adjacent_find(ids, std::ranges::greater_equal{}) == ids.end() && ids.back() < layers;
+      // A capture may name the head's final norm, a readable layer past the
+      // weight layers (Inkling 2's draft; draftReadableLayers counts it).
+      return std::ranges::adjacent_find(ids, std::ranges::greater_equal{}) == ids.end() &&
+             ids.back() < draftReadableLayers();
     };
     const bool dense = intermediateSize && sized(gateUpProjections);
     return captured() && stateLayout.layers + kvLayout.attentionLayers == layers &&
@@ -271,6 +288,10 @@ struct QwenTargetPrefillSequence final {
 struct QwenTargetPrefillBuffers final {
   // Split projections of chunks of up to 32 rows (LinearGguf.cpp).
   ops::LinearScratch linearScratch{};
+  // The device-written lane rows of a decode step (SplashLaneRows), used by
+  // the Inkling-2 family's decode steps; unset for a prompt chunk. Appended so
+  // existing aggregate initializers keep their meaning.
+  metal::MetalBuffer laneRows;
   std::array<metal::MetalBuffer, 2> hidden;
   metal::MetalBuffer normalized;
   metal::MetalBuffer captured;
@@ -312,6 +333,10 @@ struct QwenTargetPrefillChunk final {
   QwenTargetPrefillBuffers buffers;
   std::span<const QwenTargetPrefillSequence> sequences;
   uint32_t rows = 0;
+  // A decode step's own buffers; none for a prompt chunk (Splash 1.7.2's
+  // QwenTargetPrefillChunk::decode). Appended so existing aggregate
+  // initializers keep their meaning.
+  const struct QwenTargetDecodeBuffers *decode = nullptr;
 };
 
 // The layers [first, end) of a prefill command one of its passes runs
@@ -320,6 +345,29 @@ struct QwenTargetPrefillChunk final {
 struct QwenPrefillLayers final {
   uint32_t first = 0;
   uint32_t end = 0;
+};
+
+// A decode step's own buffers in a prefill command (Splash 1.7.2's
+// QwenTargetDecodeBuffers), as the ported Inkling-2 family reads them: the
+// lanes' rows, their states before/after and tapes, the tree rows, the
+// captured hidden rows and the head's outputs.
+struct QwenTargetDecodeBuffers final {
+  ops::StepRows step{};
+  std::array<metal::MetalBuffer, ExecutionLimits::maximumBatchWidth> currentGdnStates;
+  std::array<metal::MetalBuffer, ExecutionLimits::maximumBatchWidth> nextGdnStates;
+  metal::MetalBuffer gdnTape;
+  std::array<ops::GdnTapeLane, ExecutionLimits::maximumBatchWidth> gdnTapeLanes{};
+  metal::MetalBuffer tree;
+  metal::MetalBuffer capturedTargetHidden;
+  metal::MetalBuffer finalHidden;
+  metal::MetalBuffer logits;
+};
+
+struct QwenVerifyInput final {
+  metal::MetalBuffer tokens;
+  metal::MetalBuffer treeRows;
+  metal::MetalBuffer laneRows;
+  ops::StepRows step{};
 };
 
 struct QwenTargetVerifyBuffers final {
@@ -362,9 +410,16 @@ struct QwenTargetVerifyBuffers final {
   // Each lane's verify rows (ops::DraftSelector::addVerifyRows), which a MoE target's
   // steps route alone (ops::MoeBuffers::verifyRows).
   metal::MetalBuffer verifyRows;
+  // Inkling's verify tree and fixed lane slots; unused by other families.
+  metal::MetalBuffer treeRows;
+  metal::MetalBuffer laneRows;
   // Each lane's auxiliary state before the step; the commit writes the one
   // after it (addStateCommit).
   std::array<metal::MetalBuffer, ExecutionLimits::maximumBatchWidth> auxiliary;
+  // The step's lane geometry (Splash 1.7.2's QwenTargetVerifyBuffers::step),
+  // which a family whose verify runs as a prefill reads; appended so existing
+  // aggregate initializers keep their meaning.
+  ops::StepRows step{};
 };
 
 // The auxiliary state after the rows each lane of a verify retained, which
@@ -374,6 +429,23 @@ struct QwenTargetCommitBuffers final {
   metal::MetalBuffer retainedCounts;
   std::array<metal::MetalBuffer, ExecutionLimits::maximumBatchWidth> auxiliaryIn;
   std::array<metal::MetalBuffer, ExecutionLimits::maximumBatchWidth> auxiliaryOut;
+  // Upstream 1.7.2's fields, used by the ported Inkling-2 family's state
+  // commit; appended so existing aggregate initializers keep their meaning.
+  metal::MetalBuffer retainedRows;
+  metal::MetalBuffer laneRows;
+};
+
+// The state after the first rows of a verify's accepted path, folded into a
+// cached cell (Splash 1.7.2's QwenTargetFoldBuffers).
+struct QwenTargetFoldBuffers final {
+  metal::MetalBuffer retainedRows;
+  metal::MetalBuffer laneRows;
+  metal::MetalBuffer state;
+  metal::MetalBuffer gdnTape;
+  uint64_t stepSlot = 0;
+  metal::MetalBuffer auxiliaryIn;
+  metal::MetalBuffer fold;
+  metal::MetalBuffer foldAuxiliary;
 };
 
 // The bytes of a target's own step scratch beside the runtime's arenas, a
@@ -481,25 +553,34 @@ public:
   // them, and starts reading ahead the rows of the prompt rows after them:
   // the command is submitted once it returns, while no other command
   // reading the target's prefill scratch is in flight.
+  // Upstream 1.7.2's six-argument form (no ANE projections), which the
+  // Inkling-2 family overrides. Its default forwards to the nine-argument
+  // form; the nine-argument default forwards back here, so a family overrides
+  // exactly one of them and the other reaches it. Existing fork families
+  // override the nine-argument form unchanged.
   [[nodiscard]] virtual std::vector<metal::MetalBuffer> addPrefill(metal::CommandGraph &graph,
                                                                    std::span<const QwenTargetPrefillChunk> chunks,
                                                                    const kv::PageStorage &kv, SpilledKvReads &spilled,
                                                                    QwenPrefillLayers layers,
-                                                                   ops::AneFfn *aneFfn = nullptr,
-                                                                   ops::AneProjection *aneMixerQkv = nullptr,
-                                                                   ops::AneProjection *aneMixerGdn = nullptr,
-                                                                   ops::AneProjection *aneMixerOut = nullptr) = 0;
+                                                                   ops::AneFfn *aneFfn = nullptr);
+  [[nodiscard]] virtual std::vector<metal::MetalBuffer> addPrefill(metal::CommandGraph &graph,
+                                                                   std::span<const QwenTargetPrefillChunk> chunks,
+                                                                   const kv::PageStorage &kv, SpilledKvReads &spilled,
+                                                                   QwenPrefillLayers layers,
+                                                                   ops::AneFfn *aneFfn,
+                                                                   ops::AneProjection *aneMixerQkv,
+                                                                   ops::AneProjection *aneMixerGdn,
+                                                                   ops::AneProjection *aneMixerOut);
   // Writes the inputs the target makes on the CPU of batch lane `lane`'s
   // verify rows, those from `position` on of `request`, before the cycle's
   // commands are encoded.
   virtual void prepareVerifyLane(uint32_t lane, uint64_t position, const QwenTargetRequest &request);
   // A verify's layers and head over `lanes` lanes, whose blocks on Index
   // pages it reads through `spilled` (the command's SpilledKvReads).
-  virtual void addVerify(
-      metal::CommandGraph &graph, QwenTargetVerifyBuffers buffers,
-      const kv::PageStorage &kv, SpilledKvReads &spilled,
-      std::span<const kv::ChunkedPrefillParams> chunks,
-      uint32_t lanes) const = 0;
+  // A family that runs verify overrides this. The default throws if its
+  // verify path has not been implemented.
+  virtual void addVerify(metal::CommandGraph &graph, QwenTargetVerifyBuffers buffers, const kv::PageStorage &kv,
+                         SpilledKvReads &spilled, std::span<const kv::ChunkedPrefillParams> chunks, uint32_t lanes) const;
   // The head over `lanes` lanes of targetVerifyRows rows of the last layer's
   // output, as verify ends: one sweep of the vocabulary projection for every
   // lane.
@@ -521,6 +602,31 @@ public:
   // the verify computed of its rows. None for a target without auxiliary
   // state.
   virtual void addStateCommit(metal::CommandGraph &graph, QwenTargetCommitBuffers buffers, uint32_t lanes) const;
+  // The decode-step signature of the commit, used by the ported Inkling-2
+  // family (Splash 1.7.2's QwenTarget::addStateCommit). Overriding this leaves
+  // the fork's families' `uint32_t lanes` override and its runtime callers
+  // untouched. Forwards to the fork's commit with the step's lane count.
+  virtual void addStateCommit(metal::CommandGraph &graph, QwenTargetCommitBuffers buffers,
+                              const ops::StepRows &step) const {
+    addStateCommit(graph, std::move(buffers), step.lanes);
+  }
+  // The token rows a DFlash2 draft reads of its own rows (Splash 1.7.2's
+  // addDraftEmbedding): the table's, unless a family normalizes them.
+  virtual void addDraftEmbedding(metal::CommandGraph &graph, metal::MetalBuffer tokens, metal::MetalBuffer hidden,
+                                 uint32_t rows) const;
+  // Whether addStateFold writes the whole state a lane holds at a boundary
+  // inside a verify's retained rows. The fork's families fold none.
+  [[nodiscard]] virtual bool foldsState() const noexcept { return false; }
+  // The state after the first `rows` rows of one lane of a verify (Splash
+  // 1.7.2's addStateFold); no-op for the fork's families, which fold none.
+  virtual void addStateFold(metal::CommandGraph &graph, QwenTargetFoldBuffers buffers, uint32_t rows,
+                            const ops::StepRows &step) const;
+  // The K/V path commit of a family that stores its K/V through its own
+  // operator (Splash 1.7.2's addKvPathCommit).
+  [[nodiscard]] virtual bool commitsKvByPath() const noexcept { return false; }
+  virtual void addKvPathCommit(metal::CommandGraph &graph, kv::Layout layout, uint32_t extentPages,
+                               std::span<const metal::MetalBuffer> pageTables, std::span<const uint32_t> committed,
+                               uint32_t laneRows, const metal::MetalBuffer &paths) const;
   // The table rows batch lane `lane`'s verify rows of the last step read,
   // each row's in order, for tests (RuntimeInstrumentation::lastTableRows);
   // none for a target that reads no table.
@@ -559,6 +665,14 @@ protected:
     uint32_t mixerIndex = 0;
     uint32_t gdnLayer = 0;
     uint32_t attentionLayer = 0;
+    // The rows a step's sequences attend with (Splash 1.7.2's chunks), filled
+    // by the fork's prefillStep; a decode step's own buffers, when it is one.
+    std::array<kv::ChunkedPrefillParams, ExecutionLimits::maximumBatchWidth> chunks{};
+    std::array<metal::MetalBuffer, ExecutionLimits::maximumBatchWidth> pageTables{};
+    const QwenTargetDecodeBuffers *decode = nullptr;
+    [[nodiscard]] std::span<const kv::ChunkedPrefillParams> attentionSequences() const noexcept {
+      return std::span(chunks).first(sequences.size());
+    }
   };
 
   struct VerifyStep {
@@ -584,6 +698,12 @@ protected:
     metal::MetalBuffer residual;
   };
 
+  // The attention plans of a prefill step's sequences, which its attention
+  // layers run: the shared paged attention by default, or a family's own
+  // attention when it overrides this (Inkling-2's relative attention). Called
+  // by prefillSteps for each step, after the step's rows and chunks are set.
+  virtual void planAttention(PrefillStep &step) const;
+
   // The checked steps of a prefill's chunks, each with its plans, as a
   // family's Step (a PrefillStep or one extending it).
   template <class Step = PrefillStep>
@@ -597,8 +717,10 @@ protected:
     requirePrefill(chunks, kv, layers, aneFfn, aneMixerQkv, aneMixerGdn, aneMixerOut);
     std::vector<Step> steps;
     steps.reserve(chunks.size());
-    for (const QwenTargetPrefillChunk &chunk : chunks)
+    for (const QwenTargetPrefillChunk &chunk : chunks) {
       steps.push_back(Step{prefillStep(graph, chunk, kv, spilled, aneFfn, aneMixerQkv, aneMixerGdn, aneMixerOut)});
+      planAttention(steps.back());
+    }
     return steps;
   }
   // A prefill's layers `range` over its steps (addPrefill), through a
@@ -645,6 +767,11 @@ protected:
                                       std::span<const kv::ChunkedPrefillParams> chunks, uint32_t lanes) const;
   // Throws unless a family's `layers` match the geometry's layers and its
   // attention layers.
+  // A family whose layers use the shared paged attention must have its
+  // compiled kernels. Families with their own attention (Inkling-2's
+  // relative attention) do not call this.
+  void requireSharedAttention() const;
+
   template <class Layer> void requireLayers(std::span<const Layer> layers) const {
     requireLayers(layers.size(), static_cast<size_t>(std::ranges::count_if(layers, [](const Layer &layer) {
                     return std::holds_alternative<QwenAttentionWeights>(layer.mixer);
@@ -652,6 +779,15 @@ protected:
   }
   void requireLayers(size_t layers, size_t attentionLayers) const;
   void requireLayerPartition(uint32_t gdnLayers, uint32_t attentionLayers) const;
+  // Throws unless the family's drafts read the rows the target captures and
+  // embeds (QwenTargetDimensions::draftReadsLayerInputs and
+  // draftEmbeddingNorm), as upstream 1.7.2's requireDraftRows does.
+  void requireDraftRows(bool inputs, bool normedTokens) const;
+  // The plans a step's projections run: a decode step's or a prompt chunk's
+  // (ops::StepKind).
+  [[nodiscard]] const ops::Linear &linear(const PrefillStep &step) const noexcept {
+    return step.decode ? operators_.decodeLinear() : operators_.linear();
+  }
 
   // The mixers, of a step's normalized rows (buffers.normalized) into their
   // output projection's `output`: a GDN, and an attention whose rows attend
@@ -676,6 +812,12 @@ protected:
   void addDecodeProjection(metal::CommandGraph &graph, metal::MetalBuffer input, const ops::Projection &projection,
                            metal::MetalBuffer output, uint32_t lanes, ops::LinearScratch scratch,
                            ops::PreparedInput prepared = {}) const;
+  // Upstream 1.7.2's vocabulary-head helper (Splash 1.7.2), which the ported
+  // Inkling-2 family calls. The fork's plans come from operators_, so `linear`
+  // is recognized but the projection is this target's own vocabulary head.
+  void addHead(metal::CommandGraph &graph, const ops::Linear &linear, metal::MetalBuffer input,
+               metal::MetalBuffer logits, uint32_t rows, ops::LinearScratch scratch,
+               ops::PreparedInput prepared) const;
   // The FFNs of a layer whose residual is one row of hiddenSize values: each
   // reads the RMS norm `norm` of the mixer's `residual` rows and adds its
   // output to them into `output`. A dense SwiGLU, in a prefill on the
@@ -712,6 +854,9 @@ protected:
           capture(*slot, sequence.captures[c].sourceStart, sequence.captures[c].destinationStart,
                   sequence.captures[c].rows);
   }
+  // Splash 1.7.2's draft capture of a target layer's rows: a decode step's
+  // every row, a prompt chunk's the rows its sequences' captures name.
+  void addDraftCapture(const PrefillStep &step, uint32_t id, metal::MetalBuffer rows) const;
   // Rows [begin, begin + count) of a row-major buffer of `width` values of T.
   template <class T>
   [[nodiscard]] metal::MetalBuffer rowsOf(const metal::MetalBuffer &buffer, uint32_t begin, uint32_t count,
@@ -745,6 +890,20 @@ template <class Layout, class Layer>
                                                          metal::MetalBackend &backend,
                                                          const ops::ExecutionPlans &operators,
                                                          uint32_t prefillChunks);
+// The attention workspace a target of its layout's steps take: a prompt
+// chunk's sequence's (StepKind::Prefill) or a decode lane's (StepKind::Decode),
+// those of the shared paged attention, which a family whose attention is its
+// own sizes by its own operator instead.
+template <class Layout>
+[[nodiscard]] ops::AttentionWorkspace qwenTargetAttentionWorkspace(const Layout &, const ops::ExecutionPlans &operators,
+                                                                  const QwenTargetGeometry &geometry,
+                                                                  ops::StepKind step) {
+  return step == ops::StepKind::Decode
+             ? operators.verifyAttentionWorkspacePerLane(geometry.attentionQueryHeads, geometry.kvLayout)
+             : operators.prefillAttentionWorkspace(ExecutionLimits::prefillTokenBudget,
+                                                   geometry.attentionQueryHeads, geometry.kvLayout);
+}
+
 template <class Layout, class Layer>
 [[nodiscard]] QwenTargetScratchBytes qwenTargetScratchBytes(const QwenTargetWeights<Layout, Layer> &,
                                                             const QwenTargetGeometry &, uint32_t, uint64_t) {

@@ -30,7 +30,7 @@ constexpr uint64_t kStatusRequestFixedBytes = 8;
 constexpr uint64_t kReleaseRequestFixedBytes = 8;
 constexpr uint64_t kPrefillDutyRequestFixedBytes = 4;
 constexpr uint64_t kReadyFixedBytes = 9;
-constexpr uint64_t kStartFixedBytes = 16;
+constexpr uint64_t kStartFixedBytes = 22;
 constexpr uint64_t kPromptProgressFixedBytes = 20;
 constexpr uint64_t kTokensFixedBytes = 16;
 constexpr uint64_t kMaskRequestFixedBytes = 24;
@@ -451,6 +451,12 @@ std::optional<ProtocolIssue> validateStart(const StartEvent &event) {
     return invalidEvent(IssueCode::InvalidCount, event.requestId,
                         "start event lane is invalid");
   }
+  if (event.stateSource != engine::StateSource::None &&
+      event.stateSource != engine::StateSource::Memory &&
+      event.stateSource != engine::StateSource::Disk) {
+    return invalidEvent(IssueCode::InvalidEnumValue, event.requestId,
+                        "start event state source is invalid");
+  }
   return std::nullopt;
 }
 
@@ -607,6 +613,9 @@ EncodedEvent encodeStart(const StartEvent &event) {
   writer.u64(event.requestId);
   writer.u32(event.lane);
   writer.u32(event.matchedPromptTokens);
+  writer.u32(event.prefixTokens);
+  writer.u8(static_cast<uint8_t>(event.stateSource));
+  writer.u8(event.lostState ? 1 : 0);
   return success(writer.take());
 }
 
@@ -833,14 +842,18 @@ ProtocolResult<ClientMessage> decodeRequest(std::vector<uint8_t> &&payload,
   request.imageSpans.resize(imageSpanCount);
   uint64_t pixelBytes = 0;
   for (ImageSpan &span : request.imageSpans) {
+    uint32_t processor = 0;
     if (!reader.u32(span.offset) || !reader.u32(span.tokens) ||
         !reader.u32(span.gridHeight) || !reader.u32(span.gridWidth) ||
         !reader.u64(span.digestLo) || !reader.u64(span.digestHi) ||
-        !checkedAdd(pixelBytes, span.pixelBytes(), pixelBytes)) {
+        !reader.u32(processor)) {
       return failure<ClientMessage>(
           requestIssue(IssueCode::InvalidPayloadLength, request.requestId,
                        "image span payload is malformed"));
     }
+    span.processor = static_cast<ImageProcessor>(processor);
+    if (!checkedAdd(pixelBytes, span.pixelBytes(), pixelBytes))
+      return failure<ClientMessage>(requestIssue(IssueCode::InvalidPayloadLength, request.requestId, "image pixel size overflows"));
   }
   const size_t pixelsOffset = payload.size() - reader.remaining();
   const uint64_t wordBytes =
@@ -1031,6 +1044,50 @@ std::optional<ProtocolIssue> validateLimits(const ProtocolLimits &limits) {
                      "all configured token, mask, and image limits must be "
                      "non-zero");
   }
+  return std::nullopt;
+}
+
+std::optional<uint64_t> ImageGeometry::pixelBytes() const noexcept {
+  uint64_t pixels = 0;
+  uint64_t bytesPerCell = 0;
+  if (processor == ImageProcessor::Qwen) {
+    if (!checkedMultiply(gridHeight, gridWidth, pixels) ||
+        !checkedMultiply(pixels, 16ULL * 16ULL * 3ULL, pixels))
+      return std::nullopt;
+    return pixels;
+  }
+  if (processor != ImageProcessor::Inkling ||
+      !checkedMultiply(gridHeight, gridWidth, pixels) ||
+      !checkedMultiply(kInklingTileSize, kInklingTileSize, bytesPerCell) ||
+      !checkedMultiply(bytesPerCell, 3ULL * sizeof(float), bytesPerCell) ||
+      !checkedMultiply(pixels, bytesPerCell, pixels))
+    return std::nullopt;
+  return pixels;
+}
+
+std::optional<uint64_t> ImageGeometry::tokenCount() const noexcept {
+  uint64_t cells = 0;
+  if (!checkedMultiply(gridHeight, gridWidth, cells))
+    return std::nullopt;
+  return processor == ImageProcessor::Qwen ? cells / 4 : cells;
+}
+
+std::optional<std::string_view>
+imageGeometryValidationError(const ImageGeometry &geometry) noexcept {
+  const auto bytes = geometry.pixelBytes();
+  const auto tokens = geometry.tokenCount();
+  if (!bytes || !tokens)
+    return "image geometry overflows its processor encoding";
+  if (geometry.processor != ImageProcessor::Qwen &&
+      geometry.processor != ImageProcessor::Inkling)
+    return "image processor is not defined by contract v1";
+  if (!geometry.gridHeight || !geometry.gridWidth ||
+      uint64_t{geometry.gridHeight} * geometry.gridWidth > 16384)
+    return "image grid must be positive and within the processor limit";
+  if (geometry.processor == ImageProcessor::Qwen &&
+      (geometry.gridHeight < 2 || geometry.gridWidth < 2 ||
+       geometry.gridHeight % 2 || geometry.gridWidth % 2))
+    return "Qwen image grid must be even-sided";
   return std::nullopt;
 }
 

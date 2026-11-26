@@ -69,6 +69,13 @@ NativeArguments parse(const ModelDirectory &model,
   return parseCommand(command);
 }
 
+void refuses(const std::vector<std::string> &arguments,
+             std::string_view expected) {
+  static const ModelDirectory model;
+  rejects([&] { static_cast<void>(parse(model, arguments)); }, expected,
+          "the engine read a command line it must refuse");
+}
+
 // Each golden line's arguments after MODEL_DIRECTORY, by its name; the serve
 // options between are the server's to read.
 std::map<std::string, std::vector<std::string>> readGolden(const char *path) {
@@ -195,6 +202,7 @@ void testServerCommandLines(const char *path) {
       {"idle_sleep", [](NativeArguments &read) { read.preventIdleSleep = false; }},
       {"disable_ane", [](NativeArguments &read) { read.neuralEngine = false; }},
       {"verify_rows_all", [](NativeArguments &read) { read.verifyRows = model::VerifyRows::All; }},
+      {"concurrent_requests", [](NativeArguments &read) { read.lanes = 2; }},
       // Auto is the engine's default, which the server leaves out.
       {"verify_rows_auto", [](NativeArguments &) {}},
       // A relaunch keeps the first engine's context; with --max-context,
@@ -278,6 +286,17 @@ void testNeuralEngine() {
           "--ane did not reach the arguments as given");
 }
 
+// --ane-calibration again asks startup to skip the kept calibration.
+void recalibrateAne() {
+  ModelDirectory model;
+  require(!parse(model, {"auto", "auto"}).recalibrateAne &&
+              parse(model, {"auto", "auto", "--ane-calibration", "again"})
+                  .recalibrateAne,
+          "--ane-calibration did not reach the arguments as given");
+  refuses({"auto", "auto", "--ane-calibration", "now"},
+          "--ane-calibration requires again");
+}
+
 // --ane-share, which the server writes only from SPLASH_ANE_SHARE, replaces
 // the calibration; zero runs the GPU alone.
 void testAneShare() {
@@ -287,6 +306,15 @@ void testAneShare() {
               parse(model, {"auto", "auto", "--ane-share", "0.6"}).aneShare == 0.6 &&
               parse(model, {"auto", "auto", "--ane-share", "0"}).aneShare == 0.0,
           "--ane-share did not reach the arguments as given");
+}
+
+// --max-concurrent-requests bounds resident lanes, with the compile-time
+// model capacity as its default and upper bound.
+void testConcurrentRequests() {
+  const ModelDirectory model;
+  require(parse(model, {"auto", "auto"}).lanes == model::ExecutionLimits::maximumBatchWidth &&
+              parse(model, {"auto", "auto", "--max-concurrent-requests", "1"}).lanes == 1,
+          "--max-concurrent-requests did not reach native arguments");
 }
 
 // --verify-rows auto, which the server never writes, is the engine's rule.
@@ -323,11 +351,6 @@ void testWindowTrim() {
 // A command line the server never writes is refused with what is wrong.
 void testRefusals() {
   const ModelDirectory model;
-  const auto refuses = [&](const std::vector<std::string> &arguments,
-                           std::string_view expected) {
-    rejects([&] { static_cast<void>(parse(model, arguments)); }, expected,
-            "the engine read a command line it must refuse");
-  };
   refuses({"auto", "auto", "--kv-format", "fp16"},
           "--kv-format requires int8, bf16, int4 or k8v4");
   // An option's missing value fails its check.
@@ -368,6 +391,9 @@ void testRefusals() {
           "--ane-share requires --ane on");
   for (const char *rows : {"budget", "every", "ALL", ""})
     refuses({"auto", "auto", "--verify-rows", rows}, "--verify-rows requires auto or all");
+  for (const char *lanes : {"0", "5", "many", ""})
+    refuses({"auto", "auto", "--max-concurrent-requests", lanes},
+            "--max-concurrent-requests requires an integer in [1, 4]");
   // The server passes bytes, auto or off.
   for (const char *size : {"0", "2G", "OFF", ""})
     refuses({"auto", "auto", "--ple-memory", size}, "--ple-memory requires a positive byte count, auto or off");
@@ -468,6 +494,8 @@ int main(int argc, char **argv) {
     testServerCommandLines(argv[1]);
     testNeuralEngine();
     testAneShare();
+    recalibrateAne();
+    testConcurrentRequests();
     testVerifyRows();
     testStreamedMemoryAndSpill();
     testWindowTrim();

@@ -1,9 +1,23 @@
 #include "model/RuntimeArenas.hpp"
 
+#include "metal/abi/VerifyTree.h"
 #include "ops/DraftSelector.hpp"
 #include "ops/Sampling.hpp"
 
 namespace splash::model {
+namespace {
+
+// The attention workspace of a step of the target's family: the shared
+// paged attention for most families, the family's own operator where its
+// attention is a different one (Inkling-2's relative attention).
+ops::AttentionWorkspace attentionWorkspace(const RuntimeGeometry &geometry, const ops::ExecutionPlans &operators,
+                                           ops::StepKind step) {
+  return std::visit(
+      [&](const auto &layout) { return qwenTargetAttentionWorkspace(layout, operators, geometry.target, step); },
+      geometry.layout);
+}
+
+} // namespace
 
 std::array<uint64_t, prefillTensorCount>
 prefillTensorBytes(const RuntimeGeometry &geometry,
@@ -66,12 +80,10 @@ prefillTensorBytes(const RuntimeGeometry &geometry,
       bytesFor<uint16_t>(uint64_t{geometry.target.attentionQueryHeads} *
                          kRaggedAttentionRows *
                          geometry.target.attentionHeadDimension));
-  const ops::AttentionWorkspace attentionWorkspace =
-      operators.prefillAttentionWorkspace(
-          kPrefillRows, geometry.target.attentionQueryHeads,
-          geometry.target.kvLayout);
-  put(PrefillTensor::AttentionPartials, attentionWorkspace.partialsBytes);
-  put(PrefillTensor::AttentionStatistics, attentionWorkspace.statisticsBytes);
+  const ops::AttentionWorkspace workspace =
+      attentionWorkspace(geometry, operators, ops::StepKind::Prefill);
+  put(PrefillTensor::AttentionPartials, workspace.partialsBytes);
+  put(PrefillTensor::AttentionStatistics, workspace.statisticsBytes);
   put(PrefillTensor::AttentionHidden,
       bytesFor<uint16_t>(uint64_t{kPrefillRows} *
                          geometry.target.attentionWidth));
@@ -85,6 +97,7 @@ prefillTensorBytes(const RuntimeGeometry &geometry,
   put(PrefillTensor::TargetPositions,
       bytesFor<uint32_t>(uint64_t{kPrefillRows} * 3));
   put(PrefillTensor::DraftPositions, bytesFor<uint32_t>(kPrefillRows));
+  put(PrefillTensor::LaneLayout, bytesFor<SplashLaneRows>(geometry.target.lanes));
   put(PrefillTensor::TargetInverseFrequencies,
       bytesFor<float>(geometry.target.rotaryPairs));
   put(PrefillTensor::DraftInverseFrequencies,
@@ -221,11 +234,10 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
       bytesFor<uint16_t>(uint64_t{geometry.target.attentionQueryHeads} *
                          kv::kVerifyChunkStride *
                          geometry.target.attentionHeadDimension));
-  const ops::AttentionWorkspace attentionWorkspace =
-      operators.verifyAttentionWorkspacePerLane(
-          geometry.target.attentionQueryHeads, geometry.target.kvLayout);
-  put(DecodeTensor::AttentionPartials, attentionWorkspace.partialsBytes);
-  put(DecodeTensor::AttentionStatistics, attentionWorkspace.statisticsBytes);
+  const ops::AttentionWorkspace workspace =
+      attentionWorkspace(geometry, operators, ops::StepKind::Decode);
+  put(DecodeTensor::AttentionPartials, workspace.partialsBytes);
+  put(DecodeTensor::AttentionStatistics, workspace.statisticsBytes);
   put(DecodeTensor::FullAttention,
       bytesFor<uint16_t>(uint64_t{geometry.target.attentionQueryHeads} *
                          kv::kVerifyChunkStride *
@@ -240,6 +252,8 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
       bytesFor<float>(r * geometry.target.rotaryPairs));
   put(DecodeTensor::RopeSin,
       bytesFor<float>(r * geometry.target.rotaryPairs));
+  put(DecodeTensor::CapturedTargetHidden,
+      bytesFor<uint16_t>(r * geometry.target.capturedHiddenSize()));
   if (geometry.hasDraft) {
     put(DecodeTensor::ContextProjected,
         bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
@@ -247,8 +261,6 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
         bytesFor<uint16_t>(r * geometry.draft.hiddenSize));
     put(DecodeTensor::ContextKv,
         bytesFor<uint16_t>(r * geometry.draft.contextKvSize()));
-    put(DecodeTensor::CapturedTargetHidden,
-        bytesFor<uint16_t>(r * geometry.draft.targetHiddenSize()));
     put(DecodeTensor::DraftQueryKeys, draftWorkspace.queryKeysBytes);
     put(DecodeTensor::DraftQueryValues, draftWorkspace.queryValuesBytes);
     // Proposal attention and accepted target-hidden injection use the same
@@ -289,6 +301,9 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
   put(DecodeTensor::RetainedCount, sizeof(uint32_t));
   put(DecodeTensor::AcceptedCount, sizeof(uint32_t));
   put(DecodeTensor::VerifyRows, sizeof(uint32_t));
+  put(DecodeTensor::VerifyTreeRows, bytesFor<SplashTreeRow>(kDecodeRows));
+  put(DecodeTensor::VerifyLaneRows, sizeof(SplashLaneRows));
+  put(DecodeTensor::AcceptedPath, sizeof(uint32_t));
   put(DecodeTensor::VerifyConfidence, bytesFor<float>(kDraftProposalTokens));
   put(DecodeTensor::DraftInputTokens, bytesFor<uint32_t>(r));
   if (geometry.hasDraft) {

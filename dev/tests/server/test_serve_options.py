@@ -69,6 +69,24 @@ OPTIONS = {
         {effort: effort for effort in serve_options.REASONING_EFFORTS},
         ("", "turbo", "XHIGH"),
     ),
+    "--sampling-default": values(
+        "--sampling-default",
+        {
+            "temperature=0.5": ("temperature", 0.5),
+            "top_k=0": ("top_k", 0),
+            "top_p=0.9": ("top_p", 0.9),
+        },
+        (
+            "temperature",
+            "unknown=1",
+            "temperature=nan",
+            "temperature=3",
+            "top_k=1.5",
+            "top_k=-2",
+            "top_k=true",
+        ),
+        repeatable=True,
+    ),
     "--thinking-token-budget": values(
         "--thinking-token-budget", {"0": 0, "4096": 4096}, ("-1", "1.5", "many")
     ),
@@ -90,12 +108,16 @@ OPTIONS = {
         {"lru": "lru", "fifo": "fifo", "lfu": "lfu", "largest": "largest"},
         ("random", "LRU"),
     ),
+    "--max-concurrent-requests": values(
+        "--max-concurrent-requests", {"1": 1, "2": 2, "4": 4}, ("0", "5", "many")
+    ),
     "--cache-eviction-protect": values(
         "--cache-eviction-protect",
         {"0": 0, "3": 3, "8": 8},
         ("-1", "9", "two"),
     ),
     "--disable-ane": ([(["--disable-ane"], True)], []),
+    "--recalibrate-ane": ([(["--recalibrate-ane"], True)], []),
     "--disable-ane-mixer": ([(["--disable-ane-mixer"], True)], []),
     "--loop-guard": ([(["--loop-guard"], True)], []),
     "--compact-at": values(
@@ -412,8 +434,14 @@ class ServeOptionsTests(unittest.TestCase):
                 for accepted, _ in OPTIONS.values()
                 for arguments, _ in accepted[-1:]
                 for argument in arguments
+                if argument not in ("--recalibrate-ane", "--max-concurrent-requests=4")
             ),
+            # --disable-ane and --recalibrate-ane each forward on their own;
+            # together the shared validation refuses them.
+            "--disable-ane-mixer",
+            "--max-concurrent-requests=2",
             # A repeatable option keeps every value, in order.
+            "--sampling-default=repetition_penalty=1.1",
             "--served-model-name=stable",
             "--allowed-host=proxy.local",
             "--allowed-origin=tauri://localhost",
@@ -422,13 +450,14 @@ class ServeOptionsTests(unittest.TestCase):
         argv = serve_options.serve_argv(args)
         environment = serve_options.serve_environment(args)
         # Every option but the key travels on the command line; the key only
-        # in the environment.
+        # in the environment. --recalibrate-ane conflicts with --disable-ane,
+        # so its forwarding round trip below stands alone.
         self.assertEqual(
             {argument.partition("=")[0] for argument in argv},
             {
                 option.flag
                 for option in serve_options.SERVE_OPTIONS
-                if not option.secret
+                if not option.secret and option.flag != "--recalibrate-ane"
             },
         )
         self.assertFalse(any("secret-key" in argument for argument in argv))
@@ -439,6 +468,10 @@ class ServeOptionsTests(unittest.TestCase):
             self.assertEqual(
                 getattr(served, option.dest), getattr(args, option.dest), option.flag
             )
+        recalibrate = launcher.parse_args([*LAUNCHER_ARGS, "--recalibrate-ane"])
+        self.assertEqual(
+            serve_options.serve_argv(recalibrate), ["--recalibrate-ane"]
+        )
         # Defaults stay with the server, which reads them itself.
         defaults = launcher.parse_args(LAUNCHER_ARGS)
         self.assertEqual(serve_options.serve_argv(defaults), [])
@@ -515,6 +548,19 @@ class ServeOptionsTests(unittest.TestCase):
                     ),
                     [args.binary, "serve-native", args.model_root, *arguments],
                 )
+
+    def test_recalibrate_ane_reaches_native_and_conflicts_with_disable(self):
+        model = "community/custom-splash"
+        package = api.ROOT / "install/models" / model
+        required = [str(package), "--model", model]
+        args = api.parse_args([*required, "--recalibrate-ane"])
+        command = api._native_command(args, args.model_root)
+        self.assertIn("--ane-calibration", command)
+        self.assertEqual(
+            command[command.index("--ane-calibration") + 1], "again"
+        )
+        for parse, base in PARSERS:
+            self.refuse(parse, [*base, "--recalibrate-ane", "--disable-ane"])
 
     def test_ane_share_environment_reaches_native(self):
         model = "community/custom-splash"

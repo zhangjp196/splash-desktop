@@ -41,7 +41,6 @@ import weakref
 from dataclasses import dataclass
 
 from .backend import remaining_request_time
-from .chat_format import THINK_END, THINK_START
 from .chat_templates import render_chat_template, template_options
 from .errors import (
     APIError,
@@ -231,8 +230,10 @@ def encode_prompt(
             ),
         },
     )
-    if chat_format.think_start_id is not None:
-        rendered += THINK_START + THINK_END
+    if chat_format.think_start_ids:
+        rendered += chat_format.think_open + chat_format.think_close
+    if chat_format.text_frames:
+        rendered += chat_format.text_frames[0]
     prompt = tokenizable(rendered)
     head, tail = prompt_tokenizer.split(prompt)
     tail_ids = list(tokenizer.encode(tail, add_special_tokens=False))

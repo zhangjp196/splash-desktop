@@ -9,7 +9,7 @@ from server import protocol as wire
 
 _HEADER = struct.Struct("<4sHHQ")
 _REQUEST = struct.Struct("<QBBQQIIIffIffffQIIIIIQQIII")
-_IMAGE_SPAN = struct.Struct("<IIIIQQ")
+_IMAGE_SPAN = struct.Struct("<IIIIQQI")
 _MASK_RESPONSE = struct.Struct("<QQI")
 _ID = struct.Struct("<Q")
 _F32 = struct.Struct("<f")
@@ -69,7 +69,8 @@ def _event_payload(event: wire.EngineEvent) -> tuple[wire.FrameType, bytes]:
             )
         case wire.StartEvent():
             return wire.FrameType.START, struct.pack(
-                "<QII", event.request_id, event.lane, event.matched_prompt_tokens
+                "<QIIIBB", event.request_id, event.lane, event.matched_prompt_tokens,
+                event.prefix_tokens, event.state_source, event.lost_state
             )
         case wire.PromptProgressEvent():
             return wire.FrameType.PROMPT_PROGRESS, struct.pack(

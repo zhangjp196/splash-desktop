@@ -37,6 +37,8 @@ struct GlobalSettingsPane: View {
     @AppStorage("appearance") private var appearanceRaw = AppAppearance.dark.rawValue
     @State private var section: GlobalSection
     @State private var confirmReset = false
+    @AppStorage("updates.automatic") private var automaticUpdates = true
+    @StateObject private var updateChecker = UpdateChecker.shared
 
     init(section: GlobalSection = .application) {
         _section = State(initialValue: section)
@@ -47,6 +49,13 @@ struct GlobalSettingsPane: View {
     /// the Models tab changes this page's rows with it.
     private var profile: ModelProfile {
         ModelProfile.of(modelID: model.modelID, directory: model.modelDirectory)
+    }
+
+    private var updateStatus: String {
+        if updateChecker.statusKey == "update.status.available", let version = updateChecker.latestVersion {
+            return L10n.format(updateChecker.statusKey, version)
+        }
+        return L10n.string(updateChecker.statusKey)
     }
 
     private var appearance: AppAppearance {
@@ -235,6 +244,49 @@ struct GlobalSettingsPane: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                 }
+            }
+
+            EditorCard(
+                title: L10n.string("update.title"),
+                systemImage: "arrow.down.circle",
+                tint: SplashPalette.mint
+            ) {
+                SettingRow(
+                    title: L10n.string("update.automatic"),
+                    help: L10n.string("update.automatic.help"),
+                    controlWidth: 300
+                ) {
+                    Toggle("", isOn: $automaticUpdates)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.mint)
+                }
+                rowDivider
+                SettingRow(
+                    title: L10n.string("update.check"),
+                    help: updateStatus,
+                    controlWidth: 300
+                ) {
+                    HStack(spacing: 10) {
+                        Button {
+                            updateChecker.checkManually()
+                        } label: {
+                            if updateChecker.isChecking {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text(L10n.string("update.check"))
+                            }
+                        }
+                        .disabled(updateChecker.isChecking)
+                        if updateChecker.statusKey == "update.status.available" {
+                            Link(L10n.string("update.open_release"), destination: UpdateChecker.releaseURL)
+                        }
+                    }
+                }
+            }
+            .onAppear { updateChecker.checkIfDue(enabled: automaticUpdates) }
+            .onChange(of: automaticUpdates) { _, enabled in
+                if enabled { updateChecker.checkIfDue(enabled: true) }
             }
 
             EditorCard(

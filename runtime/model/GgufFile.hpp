@@ -107,6 +107,7 @@ struct GgufMetadata {
   std::map<std::string, uint64_t, std::less<>> unsigneds;
   std::map<std::string, double, std::less<>> floats;
   std::map<std::string, std::string, std::less<>> strings;
+  std::map<std::string, std::vector<double>, std::less<>> arrays;
 
   [[nodiscard]] std::optional<uint64_t> unsignedValue(std::string_view key) const;
   [[nodiscard]] std::optional<double> floatValue(std::string_view key) const;

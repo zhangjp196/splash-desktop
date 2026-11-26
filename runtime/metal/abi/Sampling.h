@@ -261,3 +261,14 @@ struct AcceptBatchParams {
 
 static_assert(sizeof(AcceptBatchParams) == 36,
               "Batched acceptance parameters are 36 bytes on both sides");
+
+// The rows a lane's accepted target path retains, inclusive of its anchor.
+// The relative-attention and short-convolution commits consume the resulting
+// row mask, whose low `retained[lane]` bits are set for a linear proposal tree.
+struct RetainedPathParams {
+  uint32_t lanes;
+  uint32_t maximum_rows;
+};
+
+static_assert(sizeof(RetainedPathParams) == 8,
+              "Retained path parameters are 8 bytes on both sides");

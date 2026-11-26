@@ -11,12 +11,20 @@ from .output import StopSearch
 
 
 class CallbackStreamer:
-    def __init__(self, tokenizer, callback, stop_sequences=(), on_stop=None):
+    def __init__(self, tokenizer, callback, stop_sequences=(), on_stop=None, visible_tags=()):
         self.tokenizer = tokenizer
         self.callback = callback
         self.stops = StopSearch(stop_sequences) if stop_sequences else None
         self.on_stop = on_stop
         self.backend = tokenizer.backend_tokenizer
+        # Special tokens whose text the output holds (ChatFormat.visible_tags).
+        self.visible = {
+            tokenizer.convert_tokens_to_ids(tag): tag for tag in visible_tags
+        }
+        # The tokens of the run since the last visible tag, and the text the
+        # stream decoded of them.
+        self.run = []
+        self.run_text = ""
         self.decode_stream = DecodeStream(skip_special_tokens=True)
         self.token_ids = []
         self.emitted = []
@@ -55,6 +63,14 @@ class CallbackStreamer:
         for token_id in token_ids:
             token_id = int(token_id)
             self.token_ids.append(token_id)
+            if token_id in self.visible:
+                self._end_run()
+                self._emit(self.visible[token_id])
+                if self.stop_sequence is not None:
+                    break
+                continue
+            if self.visible:
+                self.run.append(token_id)
             if self.decode_stream is None:
                 continue
             try:
@@ -68,18 +84,26 @@ class CallbackStreamer:
                 self.decode_stream = None
                 continue
             if text:
+                if self.visible:
+                    self.run_text += text
                 self._emit(text)
                 if self.stop_sequence is not None:
                     break
 
+    def _end_run(self):
+        """Finish the run before a visible tag as _decode decodes it, and
+        start a new stream for the run after it."""
+        decoded = self._decode_run(self.run)
+        if not decoded.startswith(self.run_text):
+            raise RuntimeError("incremental tokenizer output diverged")
+        self._emit(decoded[len(self.run_text) :])
+        self.run, self.run_text = [], ""
+        self.decode_stream = DecodeStream(skip_special_tokens=True)
+
     def end(self):
         if self.stop_sequence is not None:
             return
-        decoded = self.tokenizer.decode(
-            self.token_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
+        decoded = self._decode(self.token_ids)
         handled = "".join(self.emitted) + self.pending_text
         if not decoded.startswith(handled):
             raise RuntimeError("incremental tokenizer output diverged")
@@ -91,21 +115,56 @@ class CallbackStreamer:
             self._send(self.pending_text)
             self.pending_text = ""
 
+    def _decode(self, token_ids):
+        """The text of token_ids, each visible tag as its text between the
+        runs of other tokens, decoded without the other special tokens."""
+        if not self.visible:
+            return self._decode_run(token_ids)
+        text, run = [], []
+        for token_id in token_ids:
+            if token_id in self.visible:
+                text += [self._decode_run(run), self.visible[token_id]]
+                run = []
+            else:
+                run.append(token_id)
+        return "".join([*text, self._decode_run(run)])
+
+    def _decode_run(self, token_ids):
+        return self.tokenizer.decode(
+            token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+
     def count_reasoning_tokens(self, chat_format, thinking, tool_calls=False):
         """The reasoning's tokens, as ReasoningSplitter reads the text: from
         the start of the output where the generation prompt opened the
         reasoning (thinking), or after the model's own opening of it
-        (chat_format.think_start_id), to its close or, where a call may follow
-        and a call's opening ends the reasoning, a call's opening; none for
-        a request without a chat format."""
+        (chat_format.think_start_ids), to its close or, where a call may follow
+        and a call's opening ends the reasoning, a call's opening; where the
+        format's reasoning returns after text, those inside each of its
+        reasoning blocks; none for a request without a chat format."""
         if chat_format is None:
             return 0
+        opening = chat_format.think_start_ids
+        if chat_format.reasoning_returns:
+            count, index, inside = 0, 0, thinking
+            while index < len(self.token_ids):
+                if inside:
+                    inside = self.token_ids[index] != chat_format.think_end_id
+                    count += inside
+                    index += 1
+                elif (
+                    opening
+                    and tuple(self.token_ids[index : index + len(opening)]) == opening
+                ):
+                    inside = True
+                    index += len(opening)
+                else:
+                    index += 1
+            return count
         if thinking:
             start = 0
-        elif chat_format.think_start_id is not None and self.token_ids[:1] == [
-            chat_format.think_start_id
-        ]:
-            start = 1
+        elif opening and tuple(self.token_ids[: len(opening)]) == opening:
+            start = len(opening)
         else:
             return 0
         calls_end = tool_calls and chat_format.calls_end_reasoning

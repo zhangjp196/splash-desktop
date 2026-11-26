@@ -42,7 +42,8 @@ public:
     draftedTokens += drafted;
     acceptedDraftTokens += accepted;
   }
-  void started(uint64_t requestId, uint32_t matched, uint32_t) override {
+  void started(uint64_t requestId, uint32_t matched, uint32_t, uint32_t,
+               StateSource, bool) override {
     startIds.push_back(requestId);
     starts.push_back(matched);
   }
@@ -1108,6 +1109,23 @@ void testSharedJunctionEndsBeforeTheGenerationPrompt() {
   require(events.starts.size() == 3 && events.starts[1] == 64 &&
               events.starts[2] == 64,
           "the shared junction was not the waiter's reusable state");
+}
+
+void testInklingImageReachesModelExecution() {
+  test::TestKvStorage storage(32, 4096, 4);
+  KvPool pool(storage, 0);
+  engine::Cache resources(pool, nullptr, nullptr);
+  Executor executor;
+  Events events;
+  engine::Engine engine(test::engineConfig(), resources, executor, events);
+  auto value = request(1, std::vector<uint32_t>(4, 7));
+  value.images = {{0, 1, 1, 1, 1, 1, ImageProcessor::Inkling}};
+  value.imagePixels.resize(value.images[0].pixelBytes());
+  engine.submit(std::move(value));
+  runUntilIdle(engine);
+  require(executor.lastBeginId == 1 && events.emitted == 1 &&
+              events.failedCount == 0,
+          "Inkling image did not reach model execution");
 }
 
 void testImageSpansKeyPrefixIdentity() {
@@ -12486,6 +12504,7 @@ int main() {
     testFollowUpResumesBeforeTheGenerationPrompt();
     testRetryPublishesNoStateInsideTheGenerationPrompt();
     testSharedJunctionEndsBeforeTheGenerationPrompt();
+    testInklingImageReachesModelExecution();
     testImageSpansKeyPrefixIdentity();
     testSharedPrefillBoundaryStopsAtTheFirstDifferentImage();
     testOneRequestPublishesJunctionAndLatestReplayState();

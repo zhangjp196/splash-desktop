@@ -491,7 +491,7 @@ inline std::vector<Tensor> withFusedGateUp(std::vector<Tensor> tensors, uint32_t
     for (const Tensor *tensor : {&gate, &up})
       rows.insert(rows.end(), tensor->data.begin() + expert * expertBytes,
                   tensor->data.begin() + (expert + 1) * expertBytes);
-  gate = {prefix + "ffn_gate_up_exps.weight", {gate.dims[0], 2 * gate.dims[1], gate.dims[2]}, gate.type,
+  gate = {prefix + "ffn_gate_up_exps.weight", {gate.dims[0], gate.dims[1], 2 * gate.dims[2]}, gate.type,
           std::move(rows)};
   std::erase_if(tensors, [&](const Tensor &tensor) { return tensor.name == up.name; });
   return tensors;

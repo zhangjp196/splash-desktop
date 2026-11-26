@@ -5,6 +5,7 @@
 #include "model/ModelFactory.hpp"
 #include "model/QwenTargetLoader.hpp"
 #include "model/RuntimeArenas.hpp"
+#include "ops/inkling2_LaneRows.hpp"
 
 #include "metal/abi/QuantFormat.h"
 
@@ -359,8 +360,14 @@ void checkGdnWidths() {
   withoutGates.packedGdnWidth = shipped.convolutionDimension + shipped.attentionWidth;
   rejects([&] { sizeArenas(withoutGates); }, "invalid model runtime geometry",
           "packed GDN rows without the gates reached arena sizing");
-  // Every family's layout, the 122B's among them, passes the layout check.
-  model::forEachFamily([](const auto &family) { model::requireQwenLayout(family); });
+  // Every family's layout, the 122B's among them, passes its family check.
+  model::forEachFamily([](const auto &family) {
+    using Layout = std::remove_cvref_t<decltype(family)>;
+    if constexpr (std::is_same_v<Layout, model::Inkling2LoopLayout>)
+      model::requireInkling2Layout(family);
+    else
+      model::requireQwenLayout(family);
+  });
   // A layout without GDN layers sets none of the GDN dimensions.
   auto strayGdn = model::FlintLayout{};
   strayGdn.gdnKeyHeads = 16;
@@ -378,8 +385,30 @@ void checkGdnWidths() {
 
 } // namespace
 
+void checkInklingLinearVerifyLayout() {
+  constexpr uint32_t lanes = 2;
+  constexpr uint32_t rows = lanes * SPLASH_TARGET_VERIFY_ROWS;
+  std::array<ops::TreeRow, rows> tree{};
+  std::array<ops::LaneRows, lanes> layout{};
+  ops::makeLinearVerifyLayout(tree, layout, rows);
+  require(layout[0].first == 0 && layout[0].rows == SPLASH_TARGET_VERIFY_ROWS &&
+              layout[1].first == SPLASH_TARGET_VERIFY_ROWS && layout[1].rows == SPLASH_TARGET_VERIFY_ROWS,
+          "Inkling verify lane layout is not fixed-width");
+  for (uint32_t lane = 0; lane < lanes; ++lane) {
+    for (uint32_t row = 0; row < SPLASH_TARGET_VERIFY_ROWS; ++row) {
+      const auto &entry = tree[lane * SPLASH_TARGET_VERIFY_ROWS + row];
+      require(entry.ancestors == (uint32_t{1} << (row + 1)) - 1 &&
+                  entry.parent == (row ? row - 1 : SPLASH_TREE_ROOT) && entry.depth == row,
+              "Inkling verify chain topology is invalid");
+    }
+  }
+  rejects([&] { ops::makeLinearVerifyLayout(tree, layout, rows - 1); },
+          "invalid linear verify layout buffers", "short verify layout was accepted");
+}
+
 int main() {
   try {
+    checkInklingLinearVerifyLayout();
     checkUnsizedProjection();
     checkCaptureLayers();
     checkGdnWidths();

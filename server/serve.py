@@ -139,6 +139,8 @@ def _native_command(args, model_root, relaunch_context=None):
         command.extend(("--expert-memory-grow", args.expert_memory_grow))
     if args.disable_ane:
         command.extend(("--ane", "off"))
+    if args.recalibrate_ane:
+        command.extend(("--ane-calibration", "again"))
     if args.disable_ane_mixer:
         command.extend(("--ane-mixer", "off"))
     if share := os.environ.get("SPLASH_ANE_SHARE"):
@@ -152,6 +154,10 @@ def _native_command(args, model_root, relaunch_context=None):
             raise ValueError("SPLASH_ANE_SHARE cannot be combined with --disable-ane")
         command.extend(("--ane-share", share))
     policy = serve_options.thermal_policy(args)
+    if args.max_concurrent_requests != serve_options.DEFAULT_CONCURRENT_REQUESTS:
+        command.extend(
+            ("--max-concurrent-requests", str(args.max_concurrent_requests))
+        )
     if args.verify_rows != "auto":
         command.extend(("--verify-rows", args.verify_rows))
     if args.decode_share is not None:
@@ -306,7 +312,7 @@ def main():
         if readiness is None or not (
             readiness.max_context_tokens == args.max_context
             if args.max_context is not None
-            else 1 <= readiness.max_context_tokens <= serve_options.MAX_CONTEXT_TOKENS
+            else readiness.max_context_tokens > 0
         ):
             raise engine_runtime.EngineUnhealthy(
                 "native runtime reported an invalid context window"
@@ -326,11 +332,13 @@ def main():
             chat_templates=chat_templates,
             chat_format=family.chat_format,
             max_image_pixels=args.max_image_pixels,
+            image_processor=family.image_processor,
             thinking_codec=thinking_codec,
             served_model_names=args.served_model_name,
             announce_served_name=args.announce_served_name,
             default_reasoning_effort=args.default_reasoning_effort,
             default_thinking_token_budget=args.thinking_token_budget,
+            sampling_defaults=dict(args.sampling_default),
             compact_at=args.compact_at,
             compact_keep=args.compact_keep,
             compact_memory=args.compact_memory,

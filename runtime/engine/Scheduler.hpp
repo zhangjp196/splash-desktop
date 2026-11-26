@@ -86,9 +86,11 @@ public:
   // contends with, so a long prompt does not pin the GPU for seconds.
   explicit Scheduler(double decodeShare,
                      uint64_t maximumAttentionPairs = std::numeric_limits<uint64_t>::max(),
-                     double prefillSliceMilliseconds = 0.0) noexcept
+                     double prefillSliceMilliseconds = 0.0,
+                     uint32_t maximumConcurrentRequests = model::ExecutionLimits::maximumBatchWidth) noexcept
       : decodeShare_(decodeShare), maximumAttentionPairs_(maximumAttentionPairs),
-        prefillSliceMilliseconds_(prefillSliceMilliseconds) {}
+        prefillSliceMilliseconds_(prefillSliceMilliseconds),
+        maximumConcurrentRequests_(maximumConcurrentRequests) {}
 
   // The query-key pairs the attention of `rows` prompt rows from `position`
   // computes: each row attends to its history and itself, so the pairs, and
@@ -253,6 +255,7 @@ private:
   // Zero keeps unopposed prefill commands at their chunk size; positive
   // bounds each to about this wall time.
   double prefillSliceMilliseconds_;
+  uint32_t maximumConcurrentRequests_;
   // Decode time that prefill still owes the lanes that decoded beside it
   // (not those waiting for a mask): equal-priority decode runs until its
   // commands' wall time has worked it off.

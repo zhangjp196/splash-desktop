@@ -576,3 +576,184 @@ kernel void vision_attention_gather(
             dim];
     }
 }
+
+// Inkling2v uses four 20x20 patches from one normalized 40x40 HWC RGB tile.
+// Input is tile-major HWC; output patch rows are image-wide raster order.
+#include "metal/abi/Inkling2Vision.h"
+
+kernel void inkling2_vision_patchify(
+    device const float *pixels [[buffer(0)]],
+    device bfloat *patches [[buffer(1)]],
+    constant Inkling2VisionStemParams &params [[buffer(2)]],
+    uint patch [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    uint py = patch / (2 * params.tile_width);
+    uint px = patch % (2 * params.tile_width);
+    for (uint feature = tid; feature < 1200; feature += 256) {
+        uint channel = feature % 3;
+        uint within = feature / 3;
+        uint y = within / 20;
+        uint x = within % 20;
+        ulong tile = ulong(py / 2) * params.tile_width + px / 2;
+        ulong src = ((tile * 40 + (py % 2) * 20 + y) * 40 + (px % 2) * 20 + x) * 3 + channel;
+        patches[ulong(patch) * 1200 + feature] = bfloat(pixels[src]);
+    }
+}
+
+// Initialize CLS and the full raster patch grid using half-pixel bilinear
+// interpolation of the learned 32x32 table (align_corners=false).
+kernel void inkling2_vision_prepare_stem(
+    device const bfloat *class_embedding [[buffer(0)]],
+    device const bfloat *class_position [[buffer(1)]],
+    device const bfloat *positions [[buffer(2)]],
+    device float *hidden [[buffer(3)]],
+    constant Inkling2VisionStemParams &params [[buffer(4)]],
+    uint token [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    uint gh = 2 * params.tile_height, gw = 2 * params.tile_width;
+    if (token >= 1 + gh * gw) return;
+    for (uint d = tid; d < params.hidden_size; d += 256) {
+        float value;
+        if (token == 0) {
+            value = float(class_embedding[d]) + float(class_position[d]);
+        } else {
+            uint patch = token - 1;
+            uint row = patch / gw, col = patch % gw;
+            float fy = clamp((float(row) + 0.5f) * 32.0f / float(gh) - 0.5f, 0.0f, 31.0f);
+            float fx = clamp((float(col) + 0.5f) * 32.0f / float(gw) - 0.5f, 0.0f, 31.0f);
+            uint r0 = uint(floor(fy)), c0 = uint(floor(fx));
+            uint r1 = min(r0 + 1, 31u), c1 = min(c0 + 1, 31u);
+            float wy = fy - float(r0), wx = fx - float(c0);
+            float a = mix(float(positions[(ulong(r0) * 32 + c0) * params.hidden_size + d]),
+                          float(positions[(ulong(r0) * 32 + c1) * params.hidden_size + d]), wx);
+            float b = mix(float(positions[(ulong(r1) * 32 + c0) * params.hidden_size + d]),
+                          float(positions[(ulong(r1) * 32 + c1) * params.hidden_size + d]), wx);
+            value = mix(a, b, wy);
+        }
+        hidden[ulong(token) * params.hidden_size + d] = float(bfloat(value));
+    }
+}
+
+kernel void inkling2_vision_patch_embed(
+    device const bfloat *patches [[buffer(0)]],
+    device const bfloat *weights [[buffer(1)]],
+    device const bfloat *bias [[buffer(2)]],
+    device float *hidden [[buffer(3)]],
+    constant Inkling2VisionStemParams &params [[buffer(4)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    uint patch = group.x;
+    uint d = group.y * 32 + tid;
+    if (patch >= 4 * params.tile_height * params.tile_width || d >= params.hidden_size) return;
+    float sum = float(bias[d]);
+    device const bfloat *x = patches + ulong(patch) * 1200;
+    device const bfloat *w = weights + ulong(d) * 1200;
+    // The reference flattens HWC pixels; GGUF stores convolution weights CHW.
+    for (uint k = 0; k < 1200; ++k) {
+        uint weight_index = (k % 3) * 400 + k / 3;
+        sum = fma(float(x[k]), float(w[weight_index]), sum);
+    }
+    ulong dst = ulong(patch + 1) * params.hidden_size + d;
+    hidden[dst] = float(bfloat(hidden[dst] + float(bfloat(sum))));
+}
+
+// Inkling2 separate Q/K/V projections use interleaved pairwise axial RoPE.
+kernel void inkling2_vision_axial_qkv(
+    device const bfloat *query [[buffer(0)]], device const bfloat *key [[buffer(1)]],
+    device const bfloat *value [[buffer(2)]], device bfloat *queries [[buffer(3)]],
+    device bfloat *keys [[buffer(4)]], device bfloat *values [[buffer(5)]],
+    constant Inkling2VisionRopeParams &p [[buffer(6)]],
+    uint token [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+  const uint tiles=p.padded_tokens/128; const bool valid=token<p.tokens;
+  const bool cls=p.skip_cls_rope && token==0;
+  const uint spatial=token-(p.skip_cls_rope ? 1u:0u);
+  const uint x=valid&&!cls ? spatial%p.grid_width:0, y=valid&&!cls ? spatial/p.grid_width:0;
+  for(uint i=tid;i<p.heads*p.head_dim;i+=256) {
+    const uint h=i/p.head_dim,d=i%p.head_dim,pair=d/2;
+    const uint f=pair%16; const bool vertical=pair>=16;
+    float c=1.0f,s=0.0f;
+    if(valid&&!cls) { float inv=precise::pow(p.theta,-float(2*f)/32.0f);
+      float a=float((vertical?y:x) + 1u)*inv; c=cos(a); s=sin(a); }
+    const ulong src=ulong(token)*p.hidden_size+i;
+    const ulong mate=ulong(token)*p.hidden_size+h*p.head_dim+(d^1u);
+    const float sign=(d&1u)?1.0f:-1.0f;
+    const ulong dst=(ulong(h)*p.padded_tokens+token)*p.head_dim+d;
+    if(!valid) {
+      queries[dst]=bfloat(0); keys[dst]=bfloat(0);
+      const ulong vd=((ulong(h)*tiles+token/128)*128+token%128)*p.head_dim+d;
+      values[vd]=bfloat(0);
+      continue;
+    }
+    queries[dst]=bfloat(float(query[src])*c+sign*float(query[mate])*s);
+    keys[dst]=bfloat(float(key[src])*c+sign*float(key[mate])*s);
+    const ulong vd=((ulong(h)*tiles+token/128)*128+token%128)*p.head_dim+d;
+    values[vd]=value[src];
+  }
+}
+
+// Inkling2 block LayerNorm: epsilon comes from the block parameter, isolated
+// from the Qwen vision norm constant.
+kernel void inkling2_vision_layer_norm(
+    device const float *input [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
+    device const bfloat *bias [[buffer(2)]], device bfloat *output [[buffer(3)]],
+    constant Inkling2VisionBlockParams &p [[buffer(4)]],
+    uint row_index [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float sums[8]; device const float *row=input+ulong(row_index)*p.hidden_size;
+  device bfloat *out=output+ulong(row_index)*p.hidden_size; float sum=0.0f;
+  for(uint j=tid;j<p.hidden_size;j+=256) sum+=row[j]; sum=simd_sum(sum);
+  if(lane==0)sums[sg]=sum; threadgroup_barrier(mem_flags::mem_threadgroup);
+  float mean=0.0f; for(uint i=0;i<8;++i)mean+=sums[i]; mean/=float(p.hidden_size);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float sq=0.0f; for(uint j=tid;j<p.hidden_size;j+=256){float d=row[j]-mean;sq+=d*d;}
+  sq=simd_sum(sq); if(lane==0)sums[sg]=sq; threadgroup_barrier(mem_flags::mem_threadgroup);
+  float var=0.0f; for(uint i=0;i<8;++i)var+=sums[i];
+  float inv=rsqrt(var/float(p.hidden_size)+p.epsilon);
+  for(uint j=tid;j<p.hidden_size;j+=256)out[j]=bfloat((row[j]-mean)*inv*float(weight[j])+float(bias[j]));
+}
+
+kernel void inkling2_vision_scaled_residual(
+    device const float *residual [[buffer(0)]], device const bfloat *branch [[buffer(1)]],
+    device const bfloat *scale [[buffer(2)]], device float *output [[buffer(3)]],
+    constant Inkling2VisionBlockParams &p [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+  for(uint j=tid;j<p.hidden_size;j+=256){ulong i=ulong(row)*p.hidden_size+j;
+    output[i]=residual[i]+float(branch[i])*float(scale[j]);}
+}
+
+// The tower-wide pre-LN keeps its output in FP32 for the residual stream.
+kernel void inkling2_vision_pre_layer_norm(
+    device const float *input [[buffer(0)]], device const bfloat *weight [[buffer(1)]],
+    device const bfloat *bias [[buffer(2)]], device float *output [[buffer(3)]],
+    constant Inkling2VisionBlockParams &p [[buffer(4)]],
+    uint row_index [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float sums[8]; device const float *row=input+ulong(row_index)*p.hidden_size;
+  float sum=0.0f; for(uint j=tid;j<p.hidden_size;j+=256)sum+=row[j]; sum=simd_sum(sum);
+  if(lane==0)sums[sg]=sum; threadgroup_barrier(mem_flags::mem_threadgroup);
+  float mean=0.0f; for(uint i=0;i<8;++i)mean+=sums[i]; mean/=float(p.hidden_size);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float sq=0.0f; for(uint j=tid;j<p.hidden_size;j+=256){float d=row[j]-mean;sq+=d*d;}
+  sq=simd_sum(sq); if(lane==0)sums[sg]=sq; threadgroup_barrier(mem_flags::mem_threadgroup);
+  float var=0.0f; for(uint i=0;i<8;++i)var+=sums[i];
+  float inv=rsqrt(var/float(p.hidden_size)+p.epsilon);
+  for(uint j=tid;j<p.hidden_size;j+=256)
+    output[ulong(row_index)*p.hidden_size+j]=float(bfloat((row[j]-mean)*inv*float(weight[j])+float(bias[j])));
+}
+
+kernel void inkling2_vision_pack_merger(
+    device const float *hidden [[buffer(0)]], device bfloat *packed [[buffer(1)]],
+    constant Inkling2VisionMergerParams &p [[buffer(2)]],
+    uint feature [[thread_position_in_grid]]) {
+  if (feature >= p.padded_rows * 4096) return;
+  uint row = feature / 4096, column = feature % 4096;
+  if (row < p.tile_height * p.tile_width) {
+    uint tile_y = row / p.tile_width, tile_x = row % p.tile_width;
+    uint patch = column / 1024, dim = column % 1024;
+    uint spatial = (tile_y * 2 + patch / 2) * (p.tile_width * 2) + tile_x * 2 + patch % 2;
+    packed[feature] = bfloat(hidden[ulong(spatial + 1) * 1024 + dim]);
+  } else packed[feature] = bfloat(0.0f);
+}

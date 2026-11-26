@@ -194,6 +194,10 @@ laneOutcomeWire(LaneOutcome outcome) noexcept {
 inline constexpr std::string_view kDeadlineExceededMessage =
     "request deadline exceeded";
 
+// Where the state a request resumes from was: none for a cold start, a RAM
+// copy, or the SSD cache's copy alone (engine::CacheLookup).
+enum class StateSource : uint8_t { None = 0, Memory = 1, Disk = 2 };
+
 class EngineEventSink {
 public:
   virtual ~EngineEventSink() = default;
@@ -203,8 +207,13 @@ public:
   // own retirement.
   virtual void batchCompleted(WorkKind, uint32_t, uint32_t, uint32_t,
                               uint32_t, uint32_t, double, double) = 0;
+  // What the request found in the cache: the prompt's tokens whose KV the
+  // cache matched, the tokens of the state it resumes from, where that state
+  // was, and whether a matched block past it once held a state that is gone
+  // from both tiers (engine::CacheLookup).
   virtual void started(uint64_t requestId, uint32_t matchedTokens,
-                       uint32_t lane) = 0;
+                       uint32_t lane, uint32_t prefixTokens,
+                       StateSource source, bool lostState) = 0;
   // What held the request before its first token, as the engine counted it
   // (Engine::firstTokens). A sink that does not serve the breakdown keeps
   // the no-op.

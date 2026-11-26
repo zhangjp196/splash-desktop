@@ -90,7 +90,7 @@ void requireStartupHeadroom(
 // change to either, such as a fix to a kernel that writes KV or state or a
 // change to the block identities its labels record (blockIdentity), bumps
 // it, so that no start takes back copies of the old one.
-constexpr uint32_t kPersistentCacheFormat = 2;
+constexpr uint32_t kPersistentCacheFormat = 3;
 // How long a start waits for the cache directory another process holds: one
 // that is closing has finished its flush, or been stopped by the server, by
 // then (server/runtime.py `_shutdown_grace_seconds`).
@@ -225,6 +225,7 @@ struct DiskTier final {
   std::shared_ptr<model::SlotFile> kv;
   PersistentCacheFiles persistent;
   std::unique_ptr<DiskSpace> space;
+  std::string offReason;
 };
 
 // Opens the tier's files where the disk takes them, with `quotaBytes` (none
@@ -308,6 +309,7 @@ DiskTier openDiskTier(const RuntimeResourcesConfig &config, const std::string &c
       }
     }
     if (off) {
+      tier.offReason = *off;
       logLine("SSD cache off: ", *off, "; the state staging the plan set aside stays unused.");
       tier.budget.reset();
     }
@@ -492,12 +494,20 @@ std::array<uint8_t, 32> parseSha256(std::string_view value) {
 void requireLoadedModel(const model::LoadedModel &loaded) {
   if (!loaded.targetActualAllocatedBytes() ||
       (loaded.descriptor.hasDraft() && !loaded.draft.actualAllocatedBytes) ||
-      (loaded.descriptor.hasVision() && !loaded.vision.actualAllocatedBytes) ||
+      (loaded.descriptor.hasVision() && !loaded.visionWeightBytes()) ||
       loaded.manifestFingerprintSha256.empty() ||
       loaded.targetManifestFingerprint().empty()) {
     throw std::invalid_argument(
         "loaded model has incomplete allocation accounting");
   }
+}
+
+kv::KvStorage runtimeKvStorage(const model::TargetLayout &target,
+                                kv::KvStorage requested) noexcept {
+  if (std::holds_alternative<model::Inkling2LoopLayout>(target) &&
+      (requested.k.bits == 4 || requested.v.bits == 4))
+    return kv::storageOf(kv::Format::Int8);
+  return requested;
 }
 
 std::string_view runtimeResourceStageName(RuntimeResourceStage stage) {
@@ -639,7 +649,9 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   if (config.metallibPath.empty() || config.modelRoot.empty() ||
       !kv::validKvStorage(config.kvStorage) || !ops::validFormat(config.stateFormat) ||
       !config.model.valid() || !config.hostMemory || !config.diskVolume ||
-      config.buildId.empty() || !config.maximumImagePatches ||
+      config.buildId.empty() || !config.lanes ||
+      config.lanes > model::ExecutionLimits::maximumBatchWidth ||
+      !config.maximumImagePatches ||
       config.maximumImagePatches % 4 ||
       config.maximumImagePatches > ops::kMaximumImagePatches) {
     throw RuntimeResourcesError(
@@ -733,9 +745,13 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   // rest on its weights' formats, but which one load gives for whatever
   // streams of it (model::StreamedParts); and on the SSD cache's room for
   // active KV and whether its KV file opened.
+  const kv::KvStorage runtimeStorage =
+      runtimeKvStorage(config.model.target, config.kvStorage);
+  if (runtimeStorage != config.kvStorage)
+    logLine("Inkling-2 relative attention has no packed int4 KV kernels; using int8 KV.");
   kv::Layout kvLayout = config.model.targetKvLayout;
-  kvLayout.storage = config.kvStorage;
-  kvLayout.format = kv::singleFormat(config.kvStorage);
+  kvLayout.storage = runtimeStorage;
+  kvLayout.format = kv::singleFormat(runtimeStorage);
   // How the KV tier lays a page out in its slot, and so the slots' size.
   const kv::SlotFormat kvFormat(kvLayout);
   const uint64_t kvSlotBytes = model::SlotFile::slotBytesFor(kvFormat.payloadBytes());
@@ -795,7 +811,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
          .kvSlotBytes = kvSlotBytes,
          .stateSlotBytes = model::SlotFile::slotBytesFor(stateBytes),
          .activeLimitBytes = activeLimitBytes,
-         .groupPages = groupPages});
+         .groupPages = groupPages,
+         .lanes = config.lanes});
   };
   // The plan of the parts as configured, which sizes their stores.
   const auto sizingPlan = [&](uint64_t stagingBytes) {
@@ -914,14 +931,14 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
                                   error.what());
     }
     try {
-      modelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, config.kvStorage, config.stateFormat,
+      modelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, runtimeStorage, config.stateFormat,
                                                     model::StreamedParts::loaded(loaded));
       if (kvMaySpill)
-        spillModelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, config.kvStorage, config.stateFormat,
+        spillModelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, runtimeStorage, config.stateFormat,
                                                            model::StreamedParts::loaded(loaded, true));
       const auto arenas = [&](model::StreamedParts parts) {
         const model::ModelMemoryPlan streamed =
-            model::plannedRuntimeMemory(loaded, operators, config.kvStorage, config.stateFormat, parts);
+            model::plannedRuntimeMemory(loaded, operators, runtimeStorage, config.stateFormat, parts);
         return streamed.sharedPrefillPlannedAllocatedBytes + streamed.sharedDecodePlannedAllocatedBytes;
       };
       for (const bool table : {false, true}) {
@@ -991,7 +1008,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     ModelMemoryFootprint footprint{
         loaded.targetActualAllocatedBytes(),
         loaded.draft.actualAllocatedBytes,
-        loaded.vision.actualAllocatedBytes,
+        loaded.visionWeightBytes(),
         streamed.plan && streamed.plan->spill.enabled ? spillModelMemoryPlan : modelMemoryPlan,
         stagingBytes,
         aneFfnBytes + mixerBytes,
@@ -1003,8 +1020,9 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     // experts stream (model::RuntimeGeometry::prefillChunks).
     const uint32_t commandPages = loadOptions.streamedMemoryBytes ? groupPages : 0;
     ModelMemoryProfile modelProfile{
-        loaded.name(), loaded.maximumContextTokens(), loaded.targetKvLayout(config.kvStorage), footprint,
-        config.stateFormat, streamed.plan ? streamed.plan->spill : KvSpillPlan{}, commandPages};
+        loaded.name(), loaded.maximumContextTokens(), loaded.targetKvLayout(runtimeStorage), footprint,
+        config.stateFormat, streamed.plan ? streamed.plan->spill : KvSpillPlan{}, commandPages,
+        config.lanes};
     EngineMemoryPlanResult result = evaluateEngineMemoryPlan(device, modelProfile, config.maximumMemoryBytes);
     if (streamed.plan || !result.plan)
       return result;
@@ -1045,7 +1063,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   if (config.aneMixer.enabled) mixerLayers = model::aneMixerLayers(loaded);
   // The model's side of the split (startAneFfn).
   const AneFfnModel splitModel =
-      aneFfnModel(*backend, loaded, operators, config.kvStorage, config.buildId, config.cancelled);
+      aneFfnModel(*backend, loaded, operators, runtimeStorage, config.buildId, config.cancelled);
 
   // The automatic tier keeps its staging only where the plan holds the model
   // and the requested context beside it, the parts as they load. The split
@@ -1092,7 +1110,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     cacheIdentity = makeRuntimeCacheIdentity(
         loaded.manifestFingerprintSha256,
         loaded.targetManifestFingerprint(), config.buildId,
-        loaded.targetKvLayout(config.kvStorage), loaded.descriptor.ropeScaling);
+        loaded.targetKvLayout(runtimeStorage), loaded.descriptor.ropeScaling);
   } catch (const std::exception &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::ModelLoading,
                                 error.what(),
@@ -1313,6 +1331,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     auto cache = std::make_unique<engine::Cache>(*kvPool, kvTier.get(), disk.budget,
                                                  spillPolicy, windowPolicy,
                                                  config.cacheEviction);
+    if (!disk.budget && cacheDiskBytes)
+      cache->setDiskOff(disk.offReason.empty() ? "the SSD cache could not be opened" : disk.offReason);
     if (disk.space)
       cache->setDiskMeasure([space = disk.space.get()] { space->measure(); });
     // A target whose KV spills reads it back through one hot block cache and
@@ -1534,7 +1554,7 @@ ActualMemoryReport RuntimeResources::actualMemoryReport(
   ActualMemoryReport report;
   report.targetWeightsBytes = model_.targetActualAllocatedBytes();
   report.draftWeightsBytes = model_.draft.actualAllocatedBytes;
-  report.visionWeightsBytes = model_.vision.actualAllocatedBytes;
+  report.visionWeightsBytes = model_.visionWeightBytes();
   report.stateAllocatedBytes = modelMemory.stateActualAllocatedBytes;
   report.sharedPrefillBytes = modelMemory.sharedPrefillActualAllocatedBytes;
   report.sharedDecodeBytes = modelMemory.sharedDecodeActualAllocatedBytes;

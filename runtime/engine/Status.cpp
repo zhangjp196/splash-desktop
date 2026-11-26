@@ -541,8 +541,14 @@ std::string runtimeStatusJson(
       << ",\"offloads\":" << state.offloads
       << ",\"offload_failures\":" << state.offloadFailures
       << ",\"invalidations\":" << state.invalidations
-      << "}"
-      << ",\"disk\":{\"capacity_bytes\":" << resources.kvTier.capacityBytes
+      << "}";
+  const uint64_t spilledKvReadBytes =
+      (kvSpill && kvSpill->blockCache ? kvSpill->blockCache->reads.readBytes : 0) +
+      (kvSpill && kvSpill->historyStream ? kvSpill->historyStream->bytes : 0);
+  const uint64_t weightsReadBytes =
+      (streamedTable ? streamedTable->readBytes : 0) +
+      (streamedExperts ? streamedExperts->uses[0].readBytes + streamedExperts->uses[1].readBytes : 0);
+  out << ",\"disk\":{\"capacity_bytes\":" << resources.kvTier.capacityBytes
       << ",\"limit_bytes\":" << resources.kvTier.limitBytes
       << ",\"used_bytes\":" << resources.kvTier.usedBytes
       << ",\"file_bytes\":" << resources.kvTier.fileBytes
@@ -551,6 +557,8 @@ std::string runtimeStatusJson(
       << ",\"write_budget_bytes\":" << resources.kvTier.writeBudgetBytes
       << ",\"writes_deferred_ms\":" << resources.kvTier.writesDeferredMicroseconds / 1000.0
       << ",\"read_bytes\":" << resources.kvTier.readBytes
+      << ",\"spilled_kv_read_bytes\":" << spilledKvReadBytes
+      << ",\"weights_read_bytes\":" << weightsReadBytes
       << ",\"written_bytes\":" << resources.kvTier.writtenBytes
       << ",\"kv_blocks\":" << resources.kvTier.diskBlocks
       << ",\"kv_bytes\":" << resources.kvTier.diskBytes
@@ -562,8 +570,10 @@ std::string runtimeStatusJson(
       << ",\"kv_pending_pages\":" << resources.kvTier.pendingPages
       << ",\"persistent\":" << boolean(resources.persistent)
       << ",\"kv_copies\":" << resources.kvTier.copies
-      << ",\"kv_copy_failures\":" << resources.kvTier.copyFailures
-      << ",\"taken_back\":{\"states\":" << resources.adoption.states
+      << ",\"kv_copy_failures\":" << resources.kvTier.copyFailures;
+  if (!resources.kvTier.offReason.empty())
+    out << ",\"off_reason\":" << json::quote(resources.kvTier.offReason);
+  out << ",\"taken_back\":{\"states\":" << resources.adoption.states
       << ",\"kv_blocks\":" << resources.adoption.blocks
       << ",\"bytes\":" << resources.adoption.bytes
       << ",\"left_behind\":" << resources.adoption.dropped << "}"

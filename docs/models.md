@@ -68,7 +68,7 @@ instances and a row of the compiled shapes in `ops/GDN.cpp` or
 list (`dev/tests/engine/TestFamilies.hpp`). A Qwen config holds its text model
 under `text_config`; Flint's is flat, its keys at the top level, which the check
 reads only for a model type whose configs are flat (a layout type's
-`flatConfig`). Flint loads from a GGUF only, and its configuration is held to
+`flatConfig`). Flint loads from GGUF or MLX, and its configuration is held to
 Flint's values key by key (its widths, router, window, `layer_types`,
 `no_rope_layer_indices`, `mlp_only_layers` and `eos_token_id`; `softmax_type`,
 `rope_theta` and the rest where it states them).
@@ -111,7 +111,11 @@ each quantized tensor in the format mlx-lm infers from its tensors, an affine
 NVFP4, at the checkpoint's bits per weight (NVFP4's at 4.625, its tensor scale
 stored once per 256 weights); projections and experts as block planes, a
 quantized token table as native rows and an unquantized one as its bf16 or
-fp16 rows.
+fp16 rows. Flint and Qwen3.8-Flash-Next checkpoints are also accepted when
+their configuration and tensor shapes match the family; the loader checks
+attention q/k norm values across full-attention layers to tell whether a
+checkpoint stores the multipliers directly or stores values one below them.
+F16 and BF16 norms are widened to F32 for families whose kernels require F32.
 The MoE router keeps its format too, a quantized one as native rows, an
 unquantized one as its bf16 or F32 rows, which the float projection runs
 ([Kernels](internals.md#kernels)). The MoE selection reads the shared-expert

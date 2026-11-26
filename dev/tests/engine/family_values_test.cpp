@@ -28,8 +28,9 @@ namespace {
 
 using splash::test::require;
 
-// The draft each family's values are taken with: the one
-// dev/tests/fixtures/model-configs describes for it (TestDrafts.hpp).
+// The DFlash2 draft each family's values are taken with: the one
+// dev/tests/fixtures/model-configs describes for it (TestDrafts.hpp), or an
+// empty layout for a family like Inkling-2-Mini that has no DFlash2 draft.
 model::DFlashDraftLayout draftOf(std::string_view family) {
   if (family == model::Qwen3_8Layout{}.family)
     return test::qwen3_8Draft();
@@ -41,6 +42,7 @@ model::DFlashDraftLayout draftOf(std::string_view family) {
     return test::flashNextDraft();
   if (family == model::FlintLayout{}.family)
     return test::flintDraft();
+  if (family == model::Inkling2LoopLayout{}.family) return {};
   throw std::logic_error(std::string(family) + " has no draft to take its values with");
 }
 

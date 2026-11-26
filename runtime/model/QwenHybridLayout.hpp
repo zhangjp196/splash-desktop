@@ -2,8 +2,11 @@
 
 #include "model/RopeScaling.hpp"
 #include "model/StateLayout.hpp"
+#include "ops/DraftVocabulary.hpp"
+#include "ops/LogitFinish.hpp"
 #include "ops/MoE.hpp"
 #include "ops/PagedKv.hpp"
+#include "ops/inkling2_RelativeAttention.hpp"
 #include "ops/StopTokens.hpp"
 
 #include <array>
@@ -48,6 +51,20 @@ struct QwenTargetDimensions {
   // after its queries, by whose sigmoid the attention's output rows multiply
   // (Qwen3.5's attn_output_gate); else it holds the queries alone.
   bool attentionGate = true;
+  // Whether each attention layer holds a learned sink per query head, which
+  // its reduce adds (Flint's).
+  bool attentionSinks = false;
+  // Whether the norm kernels of its geometry are compiled for F32 norms alone
+  // (ops::CompiledAttention, ops::CompiledGdn: Flint's and
+  // Qwen3.8-Flash-Next's), so that its images widen norms a checkpoint stores
+  // bf16; else they take bf16 norms as stored too.
+  bool float32NormsOnly = false;
+  // The mean of the multipliers its attention q and k norms hold, over every
+  // full-attention layer, as measured on its checkpoints, by which a
+  // safetensors checkpoint's storage of its norms is told
+  // (safetensors::normStorage, where each family's measurement is stated).
+  // Every family states it (model::kFamilies).
+  float attentionNormMean = 0.0F;
   // The rotated dimension pairs of each attention head and their RoPE base.
   uint32_t rotaryPairs = 0;
   float rotaryTheta = 0.0F;
@@ -72,6 +89,16 @@ struct QwenTargetDimensions {
   uint32_t firstDraftMaskToken = 0;
   uint32_t lastDraftMaskToken = 0;
   ops::StopTokens stopTokens{};
+  // Inkling 2's head/draft additions (Splash 1.7.2), all zero/false for the
+  // fork's families: the vocabulary block a DFlash2 draft proposes from, the
+  // finish of the head's logits (softcap and the count of real tokens past
+  // which a padded head's rows select nothing), and how a draft captures the
+  // target (layer inputs vs. mixed rows, and a folded embedding norm).
+  ops::DraftVocabulary draftVocabulary{};
+  float logitSoftcap = 0.0F;
+  uint32_t vocabularyTokens = 0;
+  bool draftReadsLayerInputs = false;
+  bool draftEmbeddingNorm = false;
   QwenFfnKind ffnKind = QwenFfnKind::Dense;
   // The dense FFN's width.
   uint32_t intermediateSize = 0;
@@ -85,6 +112,13 @@ struct QwenTargetDimensions {
   ops::MoeRouter moeRouter = ops::MoeRouter::Softmax;
   uint32_t sharedExpertSlices = 1;
   bool sharedExpertGate = true;
+  // Inkling 2's biased routing (Splash 1.7.2), zero/false/1 for the fork's
+  // families: experts ranked by score plus a bias, routed weights scaled by
+  // routedScale, and SwiGLU softcaps on the gate and up projections.
+  bool expertSelectionBias = false;
+  float expertRoutedScale = 1.0F;
+  uint32_t expertGateSoftcap = 0;
+  uint32_t expertUpSoftcap = 0;
   // The first layers of a sparse MoE target, which run a dense FFN of
   // intermediateSize instead (a config's mlp_only_layers); its MoE blocks
   // are those of the layers after them, in layer order.
@@ -125,6 +159,19 @@ struct QwenTargetDimensions {
   [[nodiscard]] constexpr uint32_t gdnLayerCount() const noexcept { return layers - attentionLayerCount(); }
   // Whether its drafts choose their mask token (firstDraftMaskToken).
   [[nodiscard]] constexpr bool draftChoosesMaskToken() const noexcept { return lastDraftMaskToken != 0; }
+  // Inkling 2's head and draft helpers (Splash 1.7.2). tokens() is the real
+  // token count when a padded head leaves vocabularyTokens of its rows
+  // selectable; logitFinish() is what the head applies to its logits.
+  [[nodiscard]] constexpr uint32_t tokens() const noexcept {
+    return vocabularyTokens ? vocabularyTokens : vocabularySize;
+  }
+  [[nodiscard]] constexpr ops::LogitFinishValues logitFinish() const noexcept { return {logitSoftcap, tokens()}; }
+  [[nodiscard]] constexpr bool finishesLogits() const noexcept {
+    return logitSoftcap != 0.0F || tokens() != vocabularySize;
+  }
+  [[nodiscard]] constexpr uint32_t draftReadableLayers() const noexcept {
+    return layers + (draftReadsLayerInputs ? 1u : 0u);
+  }
   // Whether layer `layer`'s FFN is a MoE block, and the block's index among
   // the target's (its ExpertStore block).
   [[nodiscard]] constexpr bool isMoeLayer(uint32_t layer) const noexcept {
@@ -140,7 +187,11 @@ struct QwenTargetDimensions {
             .expertIntermediateSize = expertIntermediateSize,
             .router = moeRouter,
             .sharedSlices = sharedExpertSlices,
-            .sharedGate = sharedExpertGate};
+            .sharedGate = sharedExpertGate,
+            .selectionBias = expertSelectionBias,
+            .routedScale = expertRoutedScale,
+            .gateSoftcap = expertGateSoftcap,
+            .upSoftcap = expertUpSoftcap};
   }
   [[nodiscard]] constexpr uint32_t actualGdnWidth() const noexcept {
     return convolutionDimension + attentionWidth + 2 * gdnValueHeads;
@@ -203,6 +254,13 @@ struct QwenHybridLayout : QwenTargetDimensions {
 
   // The family's name, as the installer pairs its draft (install/families.py).
   std::string_view family;
+
+  // The relative-attention layer variants Inkling-2's family uses, empty for
+  // every fork family: they attend through the shared paged attention. The
+  // family overrides this with its full and sliding variants in L5.
+  [[nodiscard]] constexpr std::array<ops::RelativeAttentionVariant, 0> relativeAttention() const noexcept {
+    return {};
+  }
 
   // The KV pages, which also hold a QSA indexer's pooled keys; a QSA target's
   // sparse attention gathers blocks of tokens, so its values are token-major.

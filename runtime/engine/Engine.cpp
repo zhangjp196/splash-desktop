@@ -74,10 +74,13 @@ Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
     : config_(config), cache_(cache), writeBehind_(cache), model_(model),
       events_(events),
       scheduler_(config_.decodeShare, config_.maximumPrefillAttentionPairs,
-                 config_.prefillSliceMilliseconds) {
+                 config_.prefillSliceMilliseconds, config_.maxConcurrentRequests) {
   if (!config_.maxContext || !config_.vocabularySize) {
     throw std::invalid_argument("context and vocabulary sizes must be positive");
   }
+  if (!config_.maxConcurrentRequests ||
+      config_.maxConcurrentRequests > model::ExecutionLimits::maximumBatchWidth)
+    throw std::invalid_argument("maximum concurrent requests is outside model capacity");
   if (!config_.growthPaused || !config_.serving)
     throw std::invalid_argument("the engine needs the governor's growth pause and serving mark");
   if (!std::isfinite(config_.decodeShare) || config_.decodeShare < 0.0)
@@ -578,7 +581,7 @@ bool Engine::admitQueued(double now) {
   const bool lanesFull =
       std::count_if(requests_.begin(), requests_.end(), [](const auto &entry) {
         return entry.second.lane.has_value();
-      }) >= model::ExecutionLimits::maximumBatchWidth;
+      }) >= config_.maxConcurrentRequests;
   bool laneSought = false;
   const auto waitForLane = [&](uint64_t id, Request &active) {
     if (!laneSought && !pendingSharedPrefill(active, cachedTokens(active))) {
@@ -1181,7 +1184,14 @@ void Engine::completeAdmission(Request &active, CacheLookup &lookup,
   }
   scheduler_.resourcesReady(active.request.id, resumeBoundary);
   cache_.recordLookup(lookup);
-  events_.started(active.request.id, resumeBoundary, *active.lane);
+  // Where the state it resumes from was, and whether a matched block past it
+  // once held a state that is gone from both tiers.
+  events_.started(active.request.id, resumeBoundary, *active.lane,
+                  lookup.state ? lookup.state->boundary() : 0,
+                  lookup.state ? (lookup.state->state()->residentBytes() ? StateSource::Memory
+                                                                        : StateSource::Disk)
+                              : StateSource::None,
+                  lookup.lostState);
   if (active.request.returnProgress) {
     active.reportedPromptTokens = resumeBoundary;
     events_.promptProgress(active.request.id, resumeBoundary);

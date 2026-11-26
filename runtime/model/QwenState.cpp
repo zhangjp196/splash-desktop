@@ -1035,7 +1035,16 @@ void QwenStateStorage::validateLengths(const QwenLogicalLengths &lengths,
        (hasDraft && !lengths.hasCompleteDraftWindow(ExecutionLimits::draftContextTokens)) ||
        lengths.targetTokens % kv::kPageTokens)) {
     throw std::invalid_argument(
-        "composite snapshot requires equal page-aligned committed lengths");
+        "composite snapshot requires equal page-aligned committed lengths "
+        "(targetTokens=" + std::to_string(lengths.targetTokens) +
+        ", draftBase=" + std::to_string(lengths.draftBase) +
+        ", draftLength=" + std::to_string(lengths.draftLength) +
+        ", draftEnd=" + std::to_string(lengths.draftEnd()) +
+        ", windowEnd=" + std::to_string(lengths.windowEnd) +
+        ", draftCapacity=" +
+        std::to_string(ExecutionLimits::draftContextTokens) +
+        ", pageTokens=" + std::to_string(kv::kPageTokens) +
+        ", hasDraft=" + (hasDraft ? "true" : "false") + ")");
   }
   // States are published in prefill, which keeps the window with the rings.
   // Without a draft there is no window to keep.

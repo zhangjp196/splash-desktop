@@ -198,7 +198,8 @@ private:
   void ended(uint64_t requestId, double now);
 
   void started(uint64_t requestId, uint32_t matchedTokens,
-               uint32_t lane) override;
+               uint32_t lane, uint32_t prefixTokens,
+               StateSource source, bool lostState) override;
   void batchCompleted(WorkKind kind, uint32_t width, uint32_t inputTokens,
                       uint32_t outputTokens, uint32_t draftedTokens,
                       uint32_t acceptedDraftTokens, double wallMilliseconds,

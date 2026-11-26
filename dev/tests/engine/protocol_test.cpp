@@ -194,6 +194,13 @@ RequestFrame exampleImageRequest() {
   return request;
 }
 
+RequestFrame exampleMixedImageRequest() {
+  RequestFrame request = exampleImageRequest();
+  request.imageSpans.push_back({2, 1, 1, 1, 3, 4, ImageProcessor::Inkling});
+  request.imagePixels.resize(request.imagePixels.size() + request.imageSpans.back().pixelBytes());
+  return request;
+}
+
 RequestFrame exampleScoreRequest() {
   RequestFrame request = exampleRequest();
   request.logicalMaxOutputTokens = 0;
@@ -222,6 +229,7 @@ const std::vector<std::pair<std::string, ClientMessage>> &clientMessages() {
   static const std::vector<std::pair<std::string, ClientMessage>> messages{
       {"request", exampleRequest()},
       {"request_image", exampleImageRequest()},
+      {"request_mixed_images", exampleMixedImageRequest()},
       {"request_score", exampleScoreRequest()},
       {"request_ignore_eos", exampleIgnoreEosRequest()},
       {"request_progress", exampleProgressRequest()},
@@ -239,7 +247,7 @@ const std::vector<std::pair<std::string, EngineEvent>> &engineEvents() {
   static const std::vector<std::pair<std::string, EngineEvent>> events{
       {"ready", ReadyEvent{4, 524'288, false}},
       {"ready_vision", ReadyEvent{4, 524'288, true}},
-      {"start", StartEvent{91, 2, 4096}},
+      {"start", StartEvent{91, 2, 4096, 4096, splash::engine::StateSource::Disk, true}},
       {"prompt_progress", PromptProgressEvent{91, 2048, 123456}},
       {"tokens", TokensEvent{91, 17, {10, 11, 12}}},
       {"logprobs",
@@ -317,6 +325,23 @@ void testGoldenVectors(const char *path) {
               *serialized.value == found->second,
           name, test, __LINE__);
   }
+}
+
+void testVersionedImageGeometryContract() {
+  constexpr std::string_view test = "versioned image geometry contract";
+  CHECK(test, kImageContractVersion == 1);
+  const ImageGeometry qwen{ImageProcessor::Qwen, 64, 32};
+  const ImageGeometry inkling{ImageProcessor::Inkling, 2, 3};
+  CHECK(test, !imageGeometryValidationError(qwen));
+  CHECK(test, !imageGeometryValidationError(inkling));
+  CHECK(test, qwen.tokenCount() == 512);
+  CHECK(test, qwen.pixelBytes() == uint64_t{64 * 16 * 32 * 16 * 3});
+  CHECK(test, inkling.tokenCount() == 6);
+  CHECK(test, inkling.pixelBytes() == uint64_t{2 * 3 * 40 * 40 * 3 * 4});
+  CHECK(test, imageGeometryValidationError({ImageProcessor::Qwen, 3, 2}));
+  CHECK(test, imageGeometryValidationError({ImageProcessor::Inkling, 0, 2}));
+  CHECK(test, imageGeometryValidationError(
+                  {static_cast<ImageProcessor>(99), 2, 2}));
 }
 
 void testRequestRoundTrip() {
@@ -734,6 +759,16 @@ void testMalformedPayloadClassification() {
 
 // Every rejection of a request's prompt or image spans is that request's own
 // error.
+void testMixedImageValidation() {
+  auto request = exampleMixedImageRequest();
+  CHECK("mixed images", !splash::imageSpansValidationError(request.imageSpans, request.promptTokens.size(), request.imagePixels.size()));
+  request.imageSpans[1].processor = static_cast<ImageProcessor>(9);
+  CHECK("unknown processor", splash::imageSpansValidationError(request.imageSpans, request.promptTokens.size(), request.imagePixels.size()));
+  request.imageSpans[1].processor = ImageProcessor::Inkling;
+  request.imageSpans[1].tokens = 2;
+  CHECK("inkling token count", splash::imageSpansValidationError(request.imageSpans, request.promptTokens.size(), request.imagePixels.size()));
+}
+
 void testPromptAndImageSpanRejections() {
   constexpr std::string_view test = "prompt and image span rejections";
   RequestFrame empty = exampleRequest();
@@ -1042,6 +1077,9 @@ void testFailureTaxonomy() {
   expectEventIssue(test, ReadyEvent{0, 4096, false}, IssueCode::InvalidCount);
   expectEventIssue(test, StartEvent{8, ExecutionLimits::maximumBatchWidth, 0},
                    IssueCode::InvalidCount);
+  expectEventIssue(test, StartEvent{8, 0, 0, 0,
+                                   static_cast<splash::engine::StateSource>(255), false},
+                   IssueCode::InvalidEnumValue);
   expectEventIssue(test,
                    TokensEvent{8, std::numeric_limits<uint32_t>::max(), {1}},
                    IssueCode::IntegerOverflow);
@@ -1176,6 +1214,7 @@ int main(int argc, char **argv) {
   }
   try {
     testGoldenVectors(argv[1]);
+    testVersionedImageGeometryContract();
     testRequestRoundTrip();
     testScoreRequestAndDoneLogits();
     testClientAndEventStreams();
@@ -1185,6 +1224,7 @@ int main(int argc, char **argv) {
     testHeaderFailures();
     testTruncationAtEveryBoundary();
     testMalformedPayloadClassification();
+    testMixedImageValidation();
     testPromptAndImageSpanRejections();
     testSamplingBlock();
     testRequestFlags();

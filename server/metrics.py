@@ -108,6 +108,8 @@ PROMETHEUS_SERIES = {
     "splash_disk_volume_available_bytes": ("disk", "volume_available_bytes"),
     "splash_disk_write_budget_bytes": ("disk", "write_budget_bytes"),
     "splash_disk_read_bytes_total": ("disk", "read_bytes"),
+    "splash_disk_spilled_kv_read_bytes_total": ("disk", "spilled_kv_read_bytes"),
+    "splash_disk_weights_read_bytes_total": ("disk", "weights_read_bytes"),
     "splash_disk_written_bytes_total": ("disk", "written_bytes"),
     "splash_cache_hits_total": ("cache", "hits"),
     "splash_cache_cold_misses_total": ("cache", "cold_misses"),

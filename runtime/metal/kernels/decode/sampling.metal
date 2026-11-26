@@ -1027,6 +1027,15 @@ kernel void decode_sample_vocabulary_draw(
   }
 }
 
+kernel void decode_retained_path(device const uint *retained [[buffer(0)]],
+                                 device uint *paths [[buffer(1)]],
+                                 constant RetainedPathParams &params [[buffer(2)]],
+                                 uint lane [[thread_position_in_grid]]) {
+  if (lane >= params.lanes) return;
+  const uint rows = clamp(retained[lane], 1u, params.maximum_rows);
+  paths[lane] = (1u << rows) - 1u;
+}
+
 // Whether no token can be selected for a logit: NaN has no order and -inf
 // no probability. A bit test, which Metal's fast math keeps.
 inline bool unselectable_logit(float value) {

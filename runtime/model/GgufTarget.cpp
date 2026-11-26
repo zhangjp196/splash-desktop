@@ -41,6 +41,30 @@ GgufTargetLoader::GgufTargetLoader(metal::MetalBackend &backend, WeightImages &i
   planned_->firstMoeLayer = geometry.leadingDenseLayers;
   planned_->table = table;
   planned_->experts = experts;
+  std::shared_ptr<Planned> planned = planned_;
+  adopt(backend, images, {planned, &planned->images},
+        [&backend, planned](const metal::MetalBuffer &buffer, size_t index) {
+          writeGgufImage(backend, buffer, planned->images[index]);
+        },
+        [planned] { planned->source.checkUnchanged(); }, geometry.layers, geometry.leadingDenseLayers, experts);
+}
+
+GgufTargetLoader::GgufTargetLoader(metal::MetalBackend &backend, WeightImages &images,
+                                   const std::vector<std::filesystem::path> &paths, const GgufTargetPlan &plan,
+                                   SparseRowStoreOptions table, ExpertStoreOptions experts)
+    : backend_(backend), images_(images), planned_(std::make_shared<Planned>(paths)) {
+  planned_->images = plan.images(planned_->source.file(),
+                                 {.streamExperts = experts.memoryBytes != 0, .streamTable = table.cacheBytes != 0});
+  planned_->layers = plan.layerImages;
+  planned_->firstMoeLayer = plan.firstMoeLayer;
+  planned_->table = table;
+  planned_->experts = experts;
+  std::shared_ptr<Planned> planned = planned_;
+  adopt(backend, images, {planned, &planned->images},
+        [&backend, planned](const metal::MetalBuffer &buffer, size_t index) {
+          writeGgufImage(backend, buffer, planned->images[index]);
+        },
+        [planned] { planned->source.checkUnchanged(); }, plan.layerImages, plan.firstMoeLayer, experts);
 }
 
 StreamedBlocks GgufTargetLoader::streamedExperts() const {

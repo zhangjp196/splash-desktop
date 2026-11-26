@@ -33,6 +33,8 @@ void requireCompatibleModel(const LoadedModel &model) {
 }
 
 std::unique_ptr<VisionLoader> planVisionLoader(const std::filesystem::path &root, const ModelDescriptor &descriptor) {
+  if (std::holds_alternative<Inkling2LoopLayout>(descriptor.target))
+    return nullptr;
   if (descriptor.visionSource != VisionSource::Safetensors && descriptor.visionSource != VisionSource::Gguf)
     return nullptr;
   return std::make_unique<VisionLoader>(root / "vision", descriptor.visionSource, descriptor.vision);
@@ -81,6 +83,11 @@ TargetWeights readTarget(metal::MetalBackend &backend, const FlintLayout &layout
   return loadFlintWeights(backend, layout, files);
 }
 
+TargetWeights readTarget(metal::MetalBackend &backend, const Inkling2LoopLayout &layout,
+                         const QwenTargetFiles &files) {
+  return loadInkling2LoopWeights(backend, layout, files);
+}
+
 } // namespace
 
 SparseRowStoreOptions streamedTableRows(const Qwen3_8Layout &) { return {}; }
@@ -108,6 +115,17 @@ LoadedModel loadModel(metal::MetalBackend &backend,
   // the vision tower's and the draft's here, the target's by its loader. A
   // plan without a draft reads no draft directory and loads no draft image.
   const auto vision = planVisionLoader(root, result.descriptor);
+  std::unique_ptr<Inkling2VisionLoader> inklingVision;
+  if (result.descriptor.hasVision() && std::holds_alternative<Inkling2LoopLayout>(result.descriptor.target)) {
+    if (std::get<Inkling2LoopLayout>(result.descriptor.target).hiddenSize != Inkling2VisionLayout{}.output)
+      throw std::invalid_argument("Inkling2 vision output width does not match target");
+    if (result.descriptor.visionSource == VisionSource::Gguf)
+      inklingVision = std::make_unique<Inkling2VisionLoader>(root / "vision" / "mmproj.gguf");
+    else if (result.descriptor.visionSource == VisionSource::Safetensors)
+      inklingVision = std::make_unique<Inkling2VisionLoader>(root / "target", Inkling2VisionSourceFormat::Safetensors);
+    else
+      throw std::invalid_argument("Inkling2 vision source is disabled");
+  }
   std::unique_ptr<DraftCheckpointLoader> draft;
   if (result.descriptor.hasDraft())
     draft = std::make_unique<DraftCheckpointLoader>(backend, images, root / "draft", result.descriptor.draft);
@@ -142,7 +160,12 @@ LoadedModel loadModel(metal::MetalBackend &backend,
         const std::filesystem::path directory = root / "target";
         switch (result.descriptor.targetSource) {
         case TargetSource::Safetensors: {
-          SafetensorsTargetLoader loader(backend, images, directory, layout, experts);
+          // A streamed table's store: its memory and readers here, the rows
+          // a step stages and prefetches from the family.
+          SparseRowStoreOptions table = streamedTableRows(layout);
+          table.cacheBytes = options.streamedTableBytes;
+          table.readers = options.readers;
+          SafetensorsTargetLoader loader(backend, images, directory, safetensorsTargetPlan(layout), table, experts);
           return readTarget(backend, layout, std::ref(loader));
         }
         case TargetSource::Gguf: {
@@ -151,8 +174,7 @@ LoadedModel loadModel(metal::MetalBackend &backend,
           SparseRowStoreOptions table = streamedTableRows(layout);
           table.cacheBytes = options.streamedTableBytes;
           table.readers = options.readers;
-          GgufTargetLoader loader(backend, images, findTargetGgufs(directory), layout.ggufArchitecture, layout, table,
-                                  experts);
+          GgufTargetLoader loader(backend, images, findTargetGgufs(directory), ggufTargetPlan(layout), table, experts);
           return readTarget(backend, layout, std::ref(loader));
         }
         }
@@ -162,6 +184,12 @@ LoadedModel loadModel(metal::MetalBackend &backend,
   if (draft)
     result.draft = loadDFlashDraftWeights(backend, *draft, result.descriptor.draft);
   result.vision = loadVisionWeights(backend, images, vision.get());
+  if (inklingVision) {
+    const uint64_t baseline = backend.memoryStats().allocatedBytes;
+    result.inklingVision = inklingVision->load(images);
+    result.inklingVision.actualAllocatedBytes =
+        metal::allocationDelta(baseline, backend.memoryStats().allocatedBytes);
+  }
 
   std::vector<WeightFileRecord> records(result.targetFiles().begin(),
                                         result.targetFiles().end());
@@ -169,6 +197,8 @@ LoadedModel loadModel(metal::MetalBackend &backend,
                  result.draft.files.end());
   records.insert(records.end(), result.vision.files.begin(),
                  result.vision.files.end());
+  records.insert(records.end(), result.inklingVision.files.begin(),
+                 result.inklingVision.files.end());
   result.manifestFingerprintSha256 = weightManifestFingerprint(records);
   requireCompatibleModel(result);
   return result;

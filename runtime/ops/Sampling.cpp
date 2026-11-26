@@ -482,4 +482,14 @@ void Sampling::addAcceptance(
             params, {lanes, 1, 1}, {1, 1, 1});
 }
 
+void Sampling::addRetainedPaths(metal::CommandGraph &graph, metal::MetalBuffer retainedCounts,
+                                metal::MetalBuffer paths, uint32_t lanes, uint32_t maximumRows) {
+  if (!lanes || lanes > kMaximumLanes || !maximumRows || maximumRows > 31)
+    throw std::invalid_argument("invalid retained path geometry");
+  requireBytes(retainedCounts, uint64_t{lanes} * sizeof(uint32_t), "retained count");
+  requireBytes(paths, uint64_t{lanes} * sizeof(uint32_t), "retained path");
+  graph.add("decode_retained_path", {retainedCounts, paths}, RetainedPathParams{lanes, maximumRows},
+            {lanes, 1, 1}, {1, 1, 1});
+}
+
 } // namespace splash::ops

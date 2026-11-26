@@ -24,8 +24,8 @@ installing it nor its first run needs anything but the model you choose.
    drag Splash Desktop to Applications. The app used to be called Splash: if
    `/Applications/Splash.app` is there from an older disk image, delete it, so
    the two do not sit side by side.
-2. Open it. The build is ad-hoc signed but not notarized, so the first time
-   you may need to right-click and choose Open.
+2. Open it. The app is ad-hoc signed but not notarized; macOS may require
+   **Open Anyway** in System Settings › Privacy & Security.
 3. In the **Models** pane, pick a configuration and press **Start**. The
    first run downloads the model and its DFlash2 draft and serves on
    `127.0.0.1:8000`; later starts reuse the downloads.
@@ -156,8 +156,8 @@ automatically from the configuration; a model with none is served alone, and
 | Qwen3.8-4B | — | tied-head MLX checkpoints |
 | Qwen3.6-35B-A3B | `unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M` | `mlx-community/Qwen3.6-35B-A3B-4bit` |
 | Ornith-1.5-122B | `unsloth/Ornith-1.5-122B-GGUF:UD-Q4_K_XL` | `ornith-ai/Ornith-1.5-122B-MLX-4bit` |
-| Qwen3.8-Flash-Next | `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:Q2_0` | — |
-| Flint | `unsloth/flint-GGUF:UD-Q4_K_XL` | — |
+| Qwen3.8-Flash-Next | `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:Q2_0` | `mlx-community/Qwen3.8-Flash-Next-4bit` |
+| Flint | `unsloth/flint-GGUF:UD-Q4_K_XL` | `mlx-community/flint-mixed-3-4bit` |
 
 Unsloth GGUF variants span **1–8 bits**, including mixed-precision UD formats
 up to `UD-Q8_K_XL`, whose BF16 tensors load too. Whole-BF16 and F16 models are

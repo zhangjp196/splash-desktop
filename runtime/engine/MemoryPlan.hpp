@@ -124,8 +124,8 @@ struct KvSpillPlan final {
   uint64_t laneSlots = 0;
   uint64_t hotFloorBytes = 0;
   uint64_t hotTargetBytes = 0;
-  // The most the hot cache holds: its target, or the floor of every lane
-  // decoding over Index pages (requiredSlots(maximumBatchWidth)).
+  // The most the hot cache holds: its target, or the floor of every configured
+  // lane decoding over Index pages (requiredSlots(lanes)).
   uint64_t hotLimitBytes = 0;
   uint32_t stagingBuffers = 0;
   uint64_t stagingBytes = 0;
@@ -153,6 +153,7 @@ struct ModelMemoryProfile final {
   // its routed routed stream (model::kPrefillGroupChunks chunks), zero for
   // a chunk's. A windowed layout's lane keeps them Full (kvWindowFloorPages).
   uint32_t commandPages = 0;
+  uint32_t lanes = model::ExecutionLimits::maximumBatchWidth;
 
   [[nodiscard]] std::optional<std::string> validationError() const;
   [[nodiscard]] uint64_t fixedRuntimeBytes() const;
@@ -200,6 +201,7 @@ struct StreamedMemoryInputs final {
   uint64_t activeLimitBytes = 0;
   // The pages of a prefill group's rows (model::kPrefillGroupChunks chunks).
   uint32_t groupPages = 0;
+  uint32_t lanes = model::ExecutionLimits::maximumBatchWidth;
 };
 
 // The stores the plan streams the parts through, zero for a part that loads

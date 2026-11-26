@@ -76,12 +76,21 @@ final class LibraryStore {
                 &configs[index].settings, storedVersion: version) {
                 changed = true
             }
+            let before = configs[index]
+            ServerSettings.sanitized(&configs[index].settings)
+            changed = changed || configs[index] != before
         }
         if changed { saveConfigs(configs) }
         return configs
     }
 
-    func saveConfigs(_ configs: [ModelConfig]) { encode(configs, Self.configsKey) }
+    func saveConfigs(_ configs: [ModelConfig]) {
+        encode(configs.map { config in
+            var sanitized = config
+            ServerSettings.sanitized(&sanitized.settings)
+            return sanitized
+        }, Self.configsKey)
+    }
 
     func loadActive() -> UUID? {
         defaults.string(forKey: Self.activeKey).flatMap(UUID.init(uuidString:))

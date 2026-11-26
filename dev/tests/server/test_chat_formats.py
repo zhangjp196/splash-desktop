@@ -23,21 +23,62 @@ from tokenizers import (
 from transformers import PreTrainedTokenizerFast
 
 from dev.tests import server_fixtures as fixtures
-from dev.tests.tool_output import argument_grammar, project, put, tool_policy
+from dev.tests.tool_output import (
+    argument_grammar,
+    project,
+    put,
+    streamed_arguments,
+    tool_policy,
+)
 from install import families
 from server import backend as backend_api
-from server import constraints, tool_schema
+from server import constraints, judgments, tool_schema
 from server import output as model_output
 from server import protocol as wire
 from server import serve as serve_api
 from server import server as api
-from server.chat_format import FLINT, GLM_ARGS, QWEN, QWEN_XML, ToolCallSyntax
-from server.chat_templates import NATIVE, ChatTemplates
+from server.chat_format import (
+    FLINT,
+    GLM_ARGS,
+    INKLING2,
+    INKLING2_JSON,
+    QWEN,
+    QWEN_XML,
+    ToolCallSyntax,
+)
+from server.chat_templates import NATIVE, ChatTemplateError, ChatTemplates
 from server.tokenization import PromptTokenizer
 
 TEMPLATE = (
     Path(__file__).resolve().parents[1] / "fixtures/chat_templates/flint.jinja"
 ).read_text()
+INKLING_TEMPLATE = (
+    Path(__file__).resolve().parents[1] / "fixtures/chat_templates/inkling2.jinja"
+).read_text()
+INKLING2_SPECIAL = (
+    "<|endoftext|>",
+    "<|message_user|>",
+    "<|message_model|>",
+    "<|message_system|>",
+    "<|message_tool|>",
+    "<|content_text|>",
+    "<|content_image|>",
+    "<|content_model_end_sampling|>",
+    "<|content_thinking|>",
+    "<|end_message|>",
+    "<|content_tool_error|>",
+    "<|content_xml|>",
+    "<|begin_of_text|>",
+    "<|content_invoke_tool_json|>",
+    "<|content_invoke_tool_text|>",
+    "<|unused_200054|>",
+)
+MODEL, THINKING, TEXT, END = (
+    "<|message_model|>",
+    "<|content_thinking|>",
+    "<|content_text|>",
+    "<|end_message|>",
+)
 # Flint's control tokens, the special ones, and the tags its template writes
 # in text, added tokens that are not special.
 FLINT_SPECIAL = (
@@ -113,6 +154,60 @@ def flint_format(tokenizer):
         think_end_id=ids("</think>"),
         think_start_id=ids("<think>"),
         call_open_id=ids("<tool_call>"),
+    )
+
+
+def block(kind, text):
+    """A block of Inkling 2's output: the model's message of `kind`."""
+    return MODEL + kind + text + END
+
+
+def inkling2_call(name, arguments):
+    """A call as Inkling 2's template writes it: the model's message named for
+    the function, then the call's JSON object, compact, its keys sorted."""
+    body = json.dumps(
+        {"name": name, "args": dict(sorted(arguments.items()))},
+        separators=(",", ":"),
+    )
+    return MODEL + name + "<|content_invoke_tool_json|>" + body + END
+
+
+def inkling2_tokenizer():
+    """A byte-level BPE tokenizer with Inkling 2's special tokens and chat
+    template."""
+    backend = Tokenizer(models.BPE())
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    backend.decoder = decoders.ByteLevel()
+    backend.train_from_iterator(
+        ["Paris weather in metric units\nThinking effort level: 0.9\n"],
+        trainers.BpeTrainer(
+            vocab_size=300,
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+            show_progress=False,
+        ),
+    )
+    backend.add_special_tokens(
+        [AddedToken(text, normalized=False) for text in INKLING2_SPECIAL]
+    )
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend, eos_token="<|content_model_end_sampling|>"
+    )
+    tokenizer.chat_template = INKLING_TEMPLATE
+    return tokenizer
+
+
+def inkling2_format(tokenizer):
+    """Inkling 2's chat format over `tokenizer`'s token IDs."""
+    ids = tokenizer.convert_tokens_to_ids
+    return replace(
+        INKLING2,
+        vocabulary=len(tokenizer),
+        stop_tokens=tuple(
+            (text, ids(text)) for text in INKLING2.stop_tokens
+        ),
+        think_end_id=ids(END),
+        think_start_ids=(ids(MODEL), ids(THINKING)),
+        call_open_id=ids(MODEL),
     )
 
 
@@ -480,10 +575,18 @@ class QwenGrammarTests(unittest.TestCase):
         self.assertEqual(
             main,
             "%llguidance {}\n"
-            "start: think WS (call_0) WS\n"
+            "start: think WS_LEAD (call_0) WS\n"
             "think: TEXT <[248069]>\n"
-            'call_0: <tool_call> "\\n<function=f>\\n" @free_arguments "</function>\\n" '
-            "</tool_call>\n" + tool_schema.WHITESPACE_RULE + "\n"
+            'call_0: <tool_call> "\\n<function=f>\\n" @free_arguments '
+            '"</function>\\n" </tool_call> WS_TAIL?\n'
+            + tool_schema.WHITESPACE_RULE
+            + "\n"
+            + tool_schema.LEADING_WHITESPACE_RULE
+            + "\n"
+            + tool_schema.WHITESPACE_CONTINUATION_RULE
+            + "\n"
+            + tool_schema.TRAILING_WHITESPACE_RULE
+            + "\n"
             r"TEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\/think>)(?s:.*)/" + "\n",
         )
         self.assertTrue(
@@ -494,13 +597,18 @@ class QwenGrammarTests(unittest.TestCase):
         )
         self.assertEqual(
             tool_schema.json_grammar({"type": "integer"}, False, chat_format=QWEN),
-            "%llguidance {}\nstart: WS %json "
+            "%llguidance {}\nstart: WS_LEAD %json "
             + json.dumps(
                 tool_schema._grammar_compatible_schema({"type": "integer"}),
                 separators=(",", ":"),
             )
+            + " WS_TAIL?"
             + "\n"
             + tool_schema.WHITESPACE_RULE
+            + "\n"
+            + tool_schema.LEADING_WHITESPACE_RULE
+            + "\n"
+            + tool_schema.TRAILING_WHITESPACE_RULE
             + "\n",
         )
 
@@ -813,10 +921,11 @@ class FlintServingTests(fixtures.HarnessTestCase):
         self.assertEqual(status, 200, payload)
         (grammar,) = factory.grammars
         main = json.loads(grammar)["grammars"][0]["lark_grammar"]
-        self.assertIn("start: think? WS (call_0) (TEXT (call_0))* TEXT\n", main)
+        self.assertIn("start: think? WS_LEAD (call_0) (TEXT (call_0))* TEXT\n", main)
         self.assertIn("think: <[40]> TEXT <[42]>\n", main)
         self.assertIn(
-            'call_0: <tool_call> "weather" @free_arguments </tool_call>\n', main
+            'call_0: <tool_call> "weather" @free_arguments </tool_call> WS_TAIL?\n',
+            main,
         )
 
 
@@ -887,6 +996,495 @@ class ServedFamilyTests(unittest.TestCase):
             started.status.call_args_list[-1].args[0],
         )
 
+
+class InklingReadingTests(unittest.TestCase):
+    """Inkling 2's output is blocks its model opens itself: the reasoning in
+    <|content_thinking|> blocks, which may come again after text, the answer
+    in <|content_text|> blocks, each closed by <|end_message|>."""
+
+    def test_reasoning_and_text_are_read_from_their_blocks(self):
+        for text, expected in (
+            (block(THINKING, "Plan.") + block(TEXT, "Answer"), ("Plan.", "Answer")),
+            (block(TEXT, "Just <b>this</b>."), ("", "Just <b>this</b>.")),
+            (
+                block(THINKING, "a")
+                + block(TEXT, "b")
+                + block(THINKING, "c")
+                + block(TEXT, "d"),
+                ("ac", "bd"),
+            ),
+            (
+                block("<|content_tool_error|>", "No such file."),
+                ("", "No such file."),
+            ),
+            ("", ("", "")),
+        ):
+            for size in range(1, len(text) + 2):
+                with self.subTest(text=text, size=size):
+                    self.assertEqual(
+                        split(text, size, INKLING2, tool_calls=False)[:2], expected
+                    )
+
+    def test_reasoning_after_text_is_its_own_part_in_order(self):
+        splitter = model_output.ReasoningSplitter(False, False, INKLING2)
+        text = block(TEXT, "b") + block(THINKING, "c") + block(TEXT, "d")
+        parts = splitter.put(text) + splitter.finish()
+        self.assertEqual(
+            parts,
+            [("content", "b"), ("reasoning_content", "c"), ("content", "d")],
+        )
+
+    def test_output_cut_inside_the_reasoning_ends_in_it(self):
+        self.assertEqual(
+            split(MODEL + THINKING + "Still", 3, INKLING2, tool_calls=False),
+            ("Still", "", True),
+        )
+
+    def test_reasoning_tokens_are_those_inside_its_blocks(self):
+        model, thinking, text, end = 200001, 200008, 200004, 200010
+        for token_ids, expected in (
+            ([model, thinking, 1, 2, end, model, text, 3, end], 2),
+            ([model, text, 3, end, model, thinking, 1, end, model, thinking, 2], 2),
+            ([model, text, 1, 2, end], 0),
+            ([], 0),
+        ):
+            with self.subTest(token_ids=token_ids):
+                streamer = backend_api.CallbackStreamer(
+                    SimpleNamespace(backend_tokenizer=None), lambda *_: None
+                )
+                streamer.token_ids = token_ids
+                self.assertEqual(
+                    streamer.count_reasoning_tokens(INKLING2, False, False), expected
+                )
+
+    def test_its_tags_decode_as_text_and_its_stop_token_does_not(self):
+        tokenizer = inkling2_tokenizer()
+        written = block(TEXT, "Paris weather")
+        token_ids = tokenizer.encode(written, add_special_tokens=False) + [
+            tokenizer.convert_tokens_to_ids("<|content_model_end_sampling|>")
+        ]
+        for visible, expected in (
+            (INKLING2.visible_tags, written),
+            ((), "Paris weather"),
+        ):
+            with self.subTest(visible=visible):
+                chunks = []
+                streamer = backend_api.CallbackStreamer(
+                    tokenizer, chunks.append, visible_tags=visible
+                )
+                for token_id in token_ids:
+                    streamer.put_tokens([token_id])
+                streamer.end()
+                self.assertEqual("".join(chunks), expected)
+
+
+class InklingDecodingTests(unittest.TestCase):
+    def test_a_tag_after_an_unfinished_character_streams_as_the_output_decodes(
+        self,
+    ):
+        # A token that ends inside a multibyte character (the first byte of
+        # "é"), then a visible tag, then text: the stream finishes the run
+        # before the tag as the whole output's decode does, its unfinished
+        # character as the replacement character, and the two agree.
+        tokenizer = inkling2_tokenizer()
+        ids = tokenizer.convert_tokens_to_ids
+        token_ids = [ids("Ã"), ids(END)] + tokenizer.encode(
+            "Paris", add_special_tokens=False
+        )
+        chunks = []
+        streamer = backend_api.CallbackStreamer(
+            tokenizer, chunks.append, visible_tags=INKLING2.visible_tags
+        )
+        for token_id in token_ids:
+            streamer.put_tokens([token_id])
+        streamer.end()
+        self.assertEqual("".join(chunks), "\ufffd" + END + "Paris")
+        self.assertEqual("".join(chunks), streamer._decode(token_ids))
+
+
+class InklingCallReadingTests(unittest.TestCase):
+    """Inkling 2's calls, a JSON object in the model's message named for the
+    function, read in pieces as they arrive, through the splitter and the
+    projector as a request reads them."""
+
+    POLICY = tool_policy(SCHEMAS)
+
+    def read(self, text, size, incomplete=False, syntax=INKLING2_JSON):
+        splitter = model_output.ReasoningSplitter(False, True, INKLING2)
+        projector = model_output.StreamingToolCallProjector(
+            self.POLICY, "r", syntax=syntax, think_close=END
+        )
+        reasoning, events = [], []
+        pieces = [text[offset : offset + size] for offset in range(0, len(text), size)]
+        for kind, value in [p for piece in pieces for p in splitter.put(piece)] + (
+            splitter.finish()
+        ):
+            if kind == "reasoning_content":
+                reasoning.append(value)
+            else:
+                events += projector.put(value)
+        content, calls, owed = projector.finish(incomplete)
+        return "".join(reasoning), content, calls, events + owed
+
+    def test_calls_text_and_reasoning_read_in_any_pieces(self):
+        weather = inkling2_call("weather", {"city": "Paris", "days": 3})
+        time = inkling2_call("time", {})
+        text = (
+            block(THINKING, "Look it up.")
+            + block(TEXT, "Let me look.")
+            + weather
+            + time
+        )
+        for size in range(1, len(text) + 2):
+            with self.subTest(size=size):
+                reasoning, content, calls, events = self.read(text, size)
+                self.assertEqual((reasoning, content), ("Look it up.", "Let me look."))
+                self.assertEqual(
+                    [
+                        (call["function"]["name"], call["function"]["arguments"])
+                        for call in calls
+                    ],
+                    [("weather", '{"city":"Paris","days":3}'), ("time", "{}")],
+                )
+                # The arguments streamed are the arguments read.
+                self.assertEqual(
+                    streamed_arguments(events),
+                    '{"city":"Paris","days":3}{}',
+                )
+
+    def test_a_cut_call_keeps_the_arguments_it_has(self):
+        text = inkling2_call("weather", {"city": "Paris", "days": 3})
+        cut = text[: text.index("days")]
+        _, _, calls, _ = self.read(cut, 4, incomplete=True)
+        self.assertEqual(
+            [
+                (call["function"]["name"], call["function"]["arguments"])
+                for call in calls
+            ],
+            [("weather", '{"city":"Paris","')],
+        )
+
+    def test_an_object_laid_out_otherwise_is_read_whole(self):
+        text = (
+            MODEL
+            + "weather<|content_invoke_tool_json|>"
+            + '{ "args": {"city": "Paris"}, "name": "weather" }'
+            + END
+        )
+        for size in (1, 5, len(text)):
+            with self.subTest(size=size):
+                _, _, calls, _ = self.read(text, size)
+                self.assertEqual(
+                    json.loads(calls[0]["function"]["arguments"]), {"city": "Paris"}
+                )
+
+    def test_a_json_call_s_object_takes_the_keys_its_syntax_states(self):
+        self.assertEqual(
+            INKLING2_JSON.json_prefix("weather"), '{"name":"weather","args":'
+        )
+        syntax = replace(
+            INKLING2_JSON, json_name_key="function", json_arguments_key="arguments"
+        )
+        self.assertEqual(
+            syntax.json_prefix("wéather"), '{"function":"wéather","arguments":'
+        )
+        header = MODEL + "weather<|content_invoke_tool_json|>"
+        for body in (
+            # Streamed after the object's name, and laid out otherwise, read
+            # whole.
+            '{"function":"weather","arguments":{"city":"Paris"}}',
+            '{ "arguments": {"city": "Paris"}, "function": "weather" }',
+        ):
+            text = header + body + END
+            for size in (1, 5, len(text)):
+                with self.subTest(body=body, size=size):
+                    _, _, calls, _ = self.read(text, size, syntax=syntax)
+                    self.assertEqual(
+                        json.loads(calls[0]["function"]["arguments"]),
+                        {"city": "Paris"},
+                    )
+
+
+class InklingGrammarTests(unittest.TestCase):
+    """Inkling 2's constrained output: an optional reasoning block, then calls
+    in its blocks with their arguments as JSON, or a JSON answer in a text
+    block, compiled over a tokenizer of its special tokens."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tokenizer = inkling2_tokenizer()
+        cls.chat_format = inkling2_format(cls.tokenizer)
+        ids = cls.tokenizer.convert_tokens_to_ids
+        cls.factory = constraints.ConstraintFactory(
+            cls.tokenizer,
+            cls.chat_format,
+        )
+
+    def policy(self, choice="auto", parallel=True, strict=False):
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": name, "parameters": schema, "strict": strict},
+            }
+            for name, schema in SCHEMAS.items()
+        ]
+        return tool_schema.normalize_tools(tools, choice, parallel)[1]
+
+    def accepts(self, grammar, text):
+        constraint = self.factory.create(grammar)
+        tokens = self.tokenizer.encode(text, add_special_tokens=False)
+        matcher = constraint.matcher
+        return matcher.consume_tokens(tokens) and matcher.is_accepting()
+
+    def test_calls_follow_an_optional_reasoning_block(self):
+        grammar = tool_schema.tool_grammar(
+            self.policy("required", strict=True), False, chat_format=self.chat_format
+        )
+        call = inkling2_call("weather", {"city": "Paris", "days": 3})
+        for text, accepted in (
+            (call, True),
+            (block(THINKING, "Paris, then.") + call, True),
+            (call + inkling2_call("time", {}), True),
+            # A required call comes first; text may follow it.
+            (call + block(TEXT, "Done."), True),
+            (block(TEXT, "Sure.") + call, False),
+            (block(TEXT, "Sure."), False),
+            (inkling2_call("weather", {"days": 3}), False),
+            (inkling2_call("weather", {"city": 3}), False),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.accepts(grammar, text), accepted)
+
+    def test_a_response_schema_is_answered_in_a_text_block(self):
+        grammar = tool_schema.json_grammar(
+            {"type": "object", "properties": {"a": {"type": "integer"}}},
+            False,
+            chat_format=self.chat_format,
+        )
+        for text, accepted in (
+            (block(TEXT, '{"a":1}'), True),
+            (block(THINKING, "Think.") + block(TEXT, '{"a":1}'), True),
+            ('{"a":1}', False),
+            (block(TEXT, '{"a":"x"}'), False),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.accepts(grammar, text), accepted)
+
+    def test_what_the_grammar_writes_reads_back_as_written(self):
+        # A required free call, as the grammar lets the model write it, reads
+        # back as the call (InklingCallReadingTests' path).
+        grammar = tool_schema.tool_grammar(
+            self.policy("required"), False, chat_format=self.chat_format
+        )
+        call = inkling2_call("weather", {"city": "Paris", "detail": {"a": [1]}})
+        self.assertTrue(self.accepts(grammar, call))
+        self.assertIn(
+            'call_0: <|message_model|> "weather" <|content_invoke_tool_json|> '
+            '"{\\"name\\":\\"weather\\",\\"args\\":" @free_arguments "}" '
+            "<|end_message|> WS_TAIL?\n",
+            json.loads(grammar)["grammars"][0]["lark_grammar"],
+        )
+
+    def test_json_arguments_compile_with_bounded_continuation_and_trailing_space(self):
+        for strict in (False, True):
+            output_grammar = tool_schema.tool_grammar(
+                self.policy("required", strict=strict),
+                False,
+                chat_format=self.chat_format,
+            )
+            grammar = json.loads(output_grammar)
+            arguments = next(
+                item["lark_grammar"]
+                for item in grammar["grammars"]
+                if item["name"] in ("free_arguments", "arguments_0")
+            )
+            self.assertIn(tool_schema.WHITESPACE_CONTINUATION_RULE, arguments)
+            self.assertNotIn("WS_NEXT? /", arguments)
+            bound = 2 * tool_schema.MAX_WHITESPACE
+            for spaces, complete in ((bound, True), (bound + 1, False)):
+                with self.subTest(strict=strict, spaces=spaces):
+                    self.assertFalse(
+                        LLMatcher.validate_grammar(arguments, self.factory.tokenizer)
+                    )
+                    matcher = LLMatcher(self.factory.tokenizer, arguments)
+                    text = '{"city":"Paris"}' + " " * spaces
+                    tokens = self.tokenizer.encode(text, add_special_tokens=False)
+                    self.assertEqual(
+                        matcher.validate_tokens(tokens) == len(tokens)
+                        and matcher.consume_tokens(tokens)
+                        and matcher.is_accepting(),
+                        complete,
+                    )
+            call = inkling2_call("weather", {"city": "Paris"})
+            for spaces, complete in (
+                (tool_schema.MAX_WHITESPACE, True),
+                (tool_schema.MAX_WHITESPACE + 1, False),
+            ):
+                with self.subTest(strict=strict, trailing=spaces):
+                    self.assertEqual(
+                        self.accepts(output_grammar, call + "\n" * spaces), complete
+                    )
+
+
+class InklingTokenizerContractTests(unittest.TestCase):
+    def test_inkling_2_s_tokens_are_checked_against_its_format(self):
+        tokenizer = inkling2_tokenizer()
+        chat_format = inkling2_format(tokenizer)
+        constraints.validate_tokenizer(tokenizer, chat_format)
+        model, thinking = chat_format.think_start_ids
+        for changed, refusal in (
+            (
+                {"think_start_ids": (model, thinking + 1)},
+                "tokenizer must encode '<\\|message_model\\|><\\|content_thinking\\|>' "
+                "as native tokens",
+            ),
+            ({"think_end_id": chat_format.think_end_id + 1}, "as native token"),
+            (
+                {"visible_tags": chat_format.visible_tags + ("<|message_nobody|>",)},
+                "the tag",
+            ),
+            ({"stop_tokens": ("<|content_model_end_sampling|>x",)}, "stop text"),
+        ):
+            with self.subTest(changed=changed):
+                with self.assertRaisesRegex(
+                    constraints.TokenizerContractError, refusal
+                ):
+                    constraints.validate_tokenizer(
+                        tokenizer, replace(chat_format, **changed)
+                    )
+        ids = tokenizer.convert_tokens_to_ids
+        constraints.check_capabilities(
+            tokenizer,
+            chat_format,
+            SimpleNamespace(
+                vocabulary_size=len(tokenizer),
+                stop_token_ids=(ids("<|content_model_end_sampling|>"),),
+                vision=False,
+            ),
+        )
+
+
+class InklingPromptTests(unittest.TestCase):
+    """Inkling 2's template renders as shipped: it appends no generation
+    prompt, as its model opens its own message, and tells the model the
+    request's effort in a system message."""
+
+    def frontend(self, **options):
+        tokenizer = inkling2_tokenizer()
+        return fixtures.make_frontend(
+            tokenizer,
+            None,
+            "test-model",
+            4096,
+            10,
+            2,
+            vision=False,
+            chat_format=inkling2_format(tokenizer),
+            **options,
+        )
+
+    def test_the_probe_takes_the_empty_generation_prompt_of_its_format(self):
+        tokenizer = inkling2_tokenizer()
+        template = ChatTemplates(tokenizer, opens_own_message=True).select(None)
+        self.assertEqual(template.later_system, NATIVE)
+        self.assertEqual(set(template.generation_prompts.values()), {("", ())})
+        # A custom template must serve every request: the same one serves
+        # where the model opens its own message, and only there.
+        # A custom template that appends no generation prompt serves no
+        # request where the model does not open its own message.
+        no_prompt = "{{ [{'role': 'user', 'content': 'x'}] }}"
+        ChatTemplates(tokenizer, override=no_prompt, opens_own_message=True)
+        with self.assertRaisesRegex(ChatTemplateError, "serves no request"):
+            ChatTemplates(tokenizer, override=no_prompt)
+
+    def test_the_request_s_effort_is_told_to_the_model(self):
+        frontend = self.frontend()
+        question = "<|message_user|>" + TEXT + "hello" + END
+        effort = "<|message_system|>" + TEXT + "Thinking effort level: "
+        for options, level in (
+            ({}, "0.9"),
+            ({"reasoning_effort": "none"}, "0"),
+            ({"chat_template_kwargs": {"enable_thinking": False}}, "0"),
+            ({"reasoning_effort": "low"}, "0.2"),
+            ({"reasoning_effort": "max"}, "0.99"),
+        ):
+            with self.subTest(**options):
+                body = fixtures.chat_body(**options)
+                job = frontend.prepare(body, deadline=fixtures.FOREVER)
+                self.assertFalse(job.thinking)
+                self.assertIsNone(job.thinking_token_budget)
+                self.assertEqual(
+                    frontend.apply_template(body, deadline=fixtures.FOREVER),
+                    effort + level + END + question,
+                )
+
+    def test_models_report_the_efforts_its_template_renders(self):
+        self.assertEqual(
+            self.frontend().reasoning,
+            {
+                "thinks": True,
+                "efforts": ["minimal", "low", "medium", "high", "xhigh"],
+                "default": "high",
+            },
+        )
+
+    def test_its_effort_reaches_the_model_but_switches_nothing(self):
+        # Its model opens its reasoning itself, and still reasons at effort
+        # none: /status reports no switch, and the thinking budget's options,
+        # which cap a reasoning the generation prompt opens, act on nothing.
+        self.assertTrue(INKLING2.reasoning_switch)
+        self.assertFalse(INKLING2.prompt_switches_reasoning)
+        self.assertFalse(self.frontend().reasoning_switch)
+        self.assertEqual(
+            (QWEN.prompt_switches_reasoning, FLINT.prompt_switches_reasoning),
+            (True, False),
+        )
+
+    def test_tools_render_in_its_tool_declaration(self):
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "weather", "parameters": SCHEMAS["weather"]},
+            }
+        ]
+        prompt = self.frontend().apply_template(
+            fixtures.chat_body(tools=tools), deadline=fixtures.FOREVER
+        )
+        self.assertTrue(
+            prompt.startswith('<|message_system|>tool_declare<|content_xml|>[{"desc'),
+            prompt,
+        )
+
+    def test_scores_are_read_where_the_model_answers(self):
+        # After an empty reasoning block and the opening of its answer.
+        frontend = self.frontend()
+        judgment, _ = judgments.prepare_judgment(
+            frontend,
+            fixtures.judgment_body(),
+            deadline=fixtures.FOREVER,
+            disconnected=fixtures.stays_connected,
+        )
+        ids = frontend.tokenizer.convert_tokens_to_ids
+        self.assertEqual(
+            list(judgment.prompt_tokens[-5:]),
+            [ids(MODEL), ids(THINKING), ids(END), ids(MODEL), ids(TEXT)],
+        )
+
+    def test_prompt_tokens_are_reused_after_the_last_message(self):
+        tokenizer = inkling2_tokenizer()
+        tokenizer.backend_tokenizer.post_processor = processors.ByteLevel(
+            trim_offsets=False
+        )
+        cache = PromptTokenizer(tokenizer, INKLING2.message_boundary)
+        self.assertTrue(cache.enabled)
+        first = "<|message_user|>" + TEXT + "Paris 12345 " * 400 + END
+        later = first + block(TEXT, "Sunny.")
+        for text in (first, later):
+            self.assertEqual(
+                cache.encode(text),
+                tokenizer(text, add_special_tokens=False)["input_ids"],
+            )
+        self.assertEqual(cache.stats()["hits"], 1)
 
 if __name__ == "__main__":
     unittest.main()

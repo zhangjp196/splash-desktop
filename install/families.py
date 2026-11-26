@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from server.chat_format import FLINT, QWEN, ChatFormat
+from server.chat_format import FLINT, INKLING2, QWEN, ChatFormat
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,8 @@ class ModelFamily:
     # it cannot be resolved (a z-lab mirror, for example). Their names are
     # data: compatibility is the checkpoint's own config, never its owner.
     draft_mirrors: tuple[str, ...] = ()
+    # Image preprocessing must match the family's native vision executor.
+    image_processor: str = "qwen"
 
 
 FAMILIES = (
@@ -57,6 +59,9 @@ FAMILIES = (
     ModelFamily("Qwen3.5-122B-A10B", "incoai/Ornith-1.5-122B-DFlash2", QWEN),
     ModelFamily("Qwen3.8-Flash-Next", "incoai/Qwen3.8-Flash-Next-DFlash2", QWEN),
     ModelFamily("Flint", "incoai/Flint-DFlash2", FLINT),
+    # Its vision tower is not served yet.
+    ModelFamily("Inkling-2-Mini", "incoai/Inkling-2-Mini-DFlash2", INKLING2,
+                image_processor="inkling2"),
 )
 
 

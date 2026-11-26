@@ -63,7 +63,10 @@
 // 16i..16i+15), g at QUANT_NVFP4_G, then from QUANT_NVFP4_CODES the codes as a
 // row packs them (element e in bits 4 (e % 2) of byte e / 2); FP8's g, then
 // from QUANT_FP8_VALUES the 256 E4M3 bytes. Their planes hold the codes as
-// MXFP4's indices and the values as Q8_0's.
+// MXFP4's indices and the values as Q8_0's. An NVFP4 tensor whose rows are not
+// whole 256-element blocks (an expert's down projection of 1152 inputs) takes
+// NVFP4_64's 64-element blocks: four E4M3 scales, g at QUANT_NVFP464_G, then
+// codes from QUANT_NVFP464_CODES.
 //
 // BF16 and F16 hold 16-bit float values x with an FP32 scale g per 256
 // elements, as FP8 holds g: value = g * x. A GGUF tensor of either type has
@@ -130,18 +133,28 @@
 #define GGUF_FMT_TQK6 45u
 #define GGUF_FMT_TQK7 46u
 #define GGUF_FMT_Q10 47u
-#define GGUF_FMT_COUNT 48u
+// MXFP8: FP8 values with a per-32 E8M0 exponent. The ID follows the Gyro
+// trellis formats rather than clashing with them.
+#define GGUF_FMT_MXFP8 48u
+// NVFP4's form of 64-element blocks: the next id after the Gyro trellis
+// formats and MXFP8 rather than upstream 1.7.2's 44 (TQ2_T's here).
+#define GGUF_FMT_NVFP464 49u
+#define GGUF_FMT_COUNT 50u
 
 // The tensor type an image descriptor names for an MLX affine format: no GGUF
 // type is of this form.
 #define QUANT_AFFINE_TYPE(bits, group) (0x4D4C0000u | ((bits) << 8) | (group))
 // The tensor types of NVFP4's and FP8's native blocks, which the loader
-// writes ("NVF4", "FP8E"): no GGUF type is either.
+// writes ("NVF4", "FP8E"): no GGUF type is either. NVFP4_64's ("NV64") differs.
 #define QUANT_NVFP4_TYPE 0x4E564634u
+#define QUANT_NVFP464_TYPE 0x4E563634u
 #define QUANT_FP8_TYPE 0x46503845u
+#define QUANT_MXFP8_TYPE 0x4D584638u
 // Byte offsets in NVFP4's native block (its scales at 0) and FP8's (its g at 0).
 #define QUANT_NVFP4_G 16u
 #define QUANT_NVFP4_CODES 20u
+#define QUANT_NVFP464_G 4u
+#define QUANT_NVFP464_CODES 8u
 #define QUANT_FP8_VALUES 4u
 
 struct QuantFormat {
@@ -213,6 +226,12 @@ QUANT_CONSTANT QuantFormat kQuantFormats[GGUF_FMT_COUNT] = {
     // Q1_0 (GGUF tensor type 41): block_q1_0, one half d per 128 weights and one sign bit each, worth d or -d
     // (llama.cpp's dequantize_row_q1_0). plane0: the group's bits as a little-endian string of 32 slots; meta: d.
     {41, 128, 18, 4, 0, 2, 4, "q10"},
+    // MXFP8: FP8's planes with a one-byte E8M0 exponent per 32 values, as
+    // MXFP4's meta holds its exponent.
+    {QUANT_MXFP8_TYPE, 32, 33, 32, 0, 1, 1, "mxfp8"},
+    // NVFP4's blocks of 64 elements, for rows that are not whole 256-element
+    // ones; meta: the 4 E4M3 scales, g.
+    {QUANT_NVFP464_TYPE, 64, 40, 16, 0, 8, 2, "nvfp464"},
 };
 
 // The format that stores a GGUF tensor type (or a loader's);
@@ -229,9 +248,10 @@ inline constexpr bool quant_affine_format(uint32_t format) {
 }
 inline constexpr uint32_t quant_affine_bits(uint32_t format) { return (kQuantFormats[format].ggml_type >> 8) & 0xFF; }
 // Whether a format's native block is the loader's rather than a GGUF type's:
-// the MLX affine formats, NVFP4 and FP8.
+// the MLX affine formats, NVFP4 (both block sizes), FP8 and MXFP8.
 inline constexpr bool quant_loader_format(uint32_t format) {
-  return quant_affine_format(format) || format == GGUF_FMT_NVFP4 || format == GGUF_FMT_FP8;
+  return quant_affine_format(format) || format == GGUF_FMT_NVFP4 || format == GGUF_FMT_NVFP464 ||
+         format == GGUF_FMT_FP8 || format == GGUF_FMT_MXFP8;
 }
 // Whether a GGUF tensor type is one of Gyro's trellis formats (TQ2_T, TQK6, TQK7).
 inline constexpr bool quant_trellis_type(uint32_t ggml_type) { return ggml_type >= 144 && ggml_type <= 146; }

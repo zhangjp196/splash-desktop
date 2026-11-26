@@ -197,6 +197,7 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.resources.model = arguments.model;
   config.resources.buildId = SPLASH_BUILD_ID;
   config.resources.maximumMemoryBytes = arguments.maxMemoryBytes;
+  config.resources.lanes = arguments.lanes;
   config.resources.cacheDisk = arguments.maxCacheDisk;
   config.resources.cacheDiskWritesPerDay = arguments.maxCacheDiskWritesBytes;
   config.resources.cacheEviction = arguments.cacheEviction;
@@ -212,6 +213,7 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.resources.residencyKeepAliveSeconds = arguments.residencyKeepAliveSeconds;
   config.resources.expertMemoryGrow = arguments.expertMemoryGrow;
   config.resources.aneFfn.enabled = arguments.neuralEngine;
+  config.resources.aneFfn.recalibrate = arguments.recalibrateAne;
   config.resources.aneMixer.enabled = arguments.neuralEngine && arguments.neuralEngineMixer;
   if (arguments.aneShare)
     config.resources.aneFfn = engine::AneFfnSetting::fromGiven(

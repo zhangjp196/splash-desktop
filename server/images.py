@@ -22,6 +22,7 @@ FACTOR = PATCH * MERGE
 MIN_PIXELS = 65_536
 # Serving default and largest cap: 16,384 patches, the protocol's per-image ceiling.
 MAX_PIXELS = 4_194_304
+MAX_ASPECT = 200
 # Bound codec work before full-resolution decode, independently of the model's
 # resized input budget. Ordinary screenshots and up to 32 MP photos fit here.
 MAX_SOURCE_PIXELS = 32 * 1024 * 1024
@@ -81,7 +82,7 @@ def smart_resize(height: int, width: int, max_pixels: int) -> tuple[int, int]:
         raise ImageError("image dimensions must be positive")
     if not MIN_PIXELS <= max_pixels <= MAX_PIXELS:
         raise ImageError("invalid image pixel budget")
-    if max(height, width) / min(height, width) > 200:
+    if max(height, width) / min(height, width) > MAX_ASPECT:
         raise ImageError("absolute aspect ratio must be smaller than 200")
     h_bar = round(height / FACTOR) * FACTOR
     w_bar = round(width / FACTOR) * FACTOR
@@ -101,6 +102,107 @@ def smart_resize(height: int, width: int, max_pixels: int) -> tuple[int, int]:
         else:
             w_bar -= FACTOR
     return h_bar, w_bar
+
+
+def prepare_inkling(payload: bytes, max_pixels: int = MAX_PIXELS) -> "PreparedInklingImage":
+    """Prepare Inkling-2's 40px tiles without adapting them to Qwen's grid.
+
+    Each tile contains four 20px patches and becomes one language token. The
+    raw RGB image is padded with -1 before rescaling and normalization;
+    transparent pixels are composited over Inkling's 8px 204/153 checkerboard.
+    Images exceeding the padded pixel budget are rejected, never resized.
+    """
+    from PIL import Image, ImageOps
+
+    if not isinstance(max_pixels, int) or isinstance(max_pixels, bool) or not 0 < max_pixels <= MAX_PIXELS:
+        raise ImageError("invalid image pixel budget")
+    if len(payload) > MAX_IMAGE_BYTES:
+        raise ImageError("image exceeds the size limit")
+    try:
+        with Image.open(io.BytesIO(payload), formats=IMAGE_FORMATS) as decoded:
+            if decoded.height * decoded.width > MAX_SOURCE_PIXELS:
+                raise ImageError("source image exceeds the pixel limit")
+            try:
+                ImageOps.exif_transpose(decoded, in_place=True)
+            except Exception:
+                pass
+            width, height = decoded.size
+            if (
+                width <= 0
+                or height <= 0
+                or max(width, height) / min(width, height) > MAX_ASPECT
+            ):
+                raise ImageError("absolute aspect ratio must be smaller than 200")
+            padded_width = (width + 39) // 40 * 40
+            padded_height = (height + 39) // 40 * 40
+            if padded_width * padded_height > max_pixels:
+                raise ImageError("padded image exceeds the pixel limit")
+            rgba = decoded.convert("RGBA")
+            background = Image.new("RGB", (padded_width, padded_height))
+            px = background.load()
+            for y in range(padded_height):
+                for x in range(padded_width):
+                    value = 204 if ((x // 8 + y // 8) % 2 == 0) else 153
+                    px[x, y] = (value, value, value)
+            background.paste(rgba, (0, 0), rgba.getchannel("A"))
+            # Padding is raw -1 before the 1/255 rescale and normalization.
+            raw = bytearray(padded_width * padded_height * 3)
+            source = background.tobytes()
+            raw[:] = source
+            import array
+            values = array.array("f", ((channel / 255.0 - 0.5) / 0.5 for channel in raw))
+            for y in range(height):
+                for x in range(width, padded_width):
+                    start = (y * padded_width + x) * 3
+                    values[start : start + 3] = array.array("f", [(-1 / 255.0 - 0.5) / 0.5]) * 3
+            for y in range(height, padded_height):
+                start = y * padded_width * 3
+                values[start : start + padded_width * 3] = array.array("f", [(-1 / 255.0 - 0.5) / 0.5]) * (padded_width * 3)
+            # Upstream emits [grid rows, grid columns, 40, 40, RGB].
+            if struct.pack("=I", 1) != struct.pack("<I", 1):
+                values.byteswap()
+            ordered = bytearray(len(values) * values.itemsize)
+            source = memoryview(values).cast("B")
+            destination = memoryview(ordered)
+            row_bytes = 40 * 3 * values.itemsize
+            offset = 0
+            for tile_y in range(padded_height // 40):
+                for tile_x in range(padded_width // 40):
+                    for row in range(40):
+                        start = ((tile_y * 40 + row) * padded_width + tile_x * 40) * 3 * values.itemsize
+                        destination[offset:offset + row_bytes] = source[start:start + row_bytes]
+                        offset += row_bytes
+            pixels = bytes(ordered)
+    except ImageError:
+        raise
+    except Exception as error:
+        raise ImageError("image could not be decoded") from error
+    grid_height, grid_width = padded_height // 40, padded_width // 40
+    digest = hashlib.sha256(b"inkling2" + struct.pack("<II", grid_height, grid_width) + pixels).digest()
+    digest_lo, digest_hi = struct.unpack_from("<QQ", digest)
+    return PreparedInklingImage(grid_height, grid_width, pixels, digest_lo, digest_hi)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedInklingImage:
+    grid_height: int
+    grid_width: int
+    pixels: bytes
+    digest_lo: int
+    digest_hi: int
+    processor: str = "inkling2"
+
+    @property
+    def tile_height(self):
+        return self.grid_height
+
+    @property
+    def tile_width(self):
+        return self.grid_width
+
+    @property
+    def tokens(self):
+        return self.tile_height * self.tile_width
 
 
 def prepare(payload: bytes, max_pixels: int = MAX_PIXELS) -> PreparedImage:
@@ -186,13 +288,20 @@ class ImageCache:
     def request_batch(self):
         return PreparedImages(self)
 
-    def prepare(self, payload: bytes, max_pixels: int) -> PreparedImage:
-        key = hashlib.sha256(struct.pack("<I", max_pixels) + payload).digest()
+    def prepare(
+        self, payload: bytes, max_pixels: int, processor="qwen"
+    ) -> PreparedImage | PreparedInklingImage:
+        key = hashlib.sha256(processor.encode() + struct.pack("<I", max_pixels) + payload).digest()
         with self._lock:
             cached = self._entries.get(key)
         if cached is not None:
             return cached
-        prepared = prepare(payload, max_pixels)
+        if processor == "qwen":
+            prepared = prepare(payload, max_pixels)
+        elif processor == "inkling2":
+            prepared = prepare_inkling(payload, max_pixels)
+        else:
+            raise ImageError("unsupported image processor")
         with self._lock:
             self._entries.put(key, prepared, len(prepared.pixels))
         return prepared

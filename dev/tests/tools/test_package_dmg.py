@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -128,6 +129,38 @@ class PackageDmgTest(unittest.TestCase):
         self.assertIn("--model-dir", launcher)
         self.assertTrue((runtime / "server/server.py").is_file())
         self.assertFalse(any(path.name == "__pycache__" for path in runtime.rglob("*")))
+
+    def test_sign_app_runs_ad_hoc_signing_then_strict_verification(self):
+        app = self.root / "Splash Desktop.app"
+        commands = []
+
+        def record(command, **kwargs):
+            commands.append(command)
+
+        with mock.patch.object(package_dmg, "run", side_effect=record):
+            package_dmg.sign_app(app)
+
+        self.assertEqual(
+            commands,
+            [
+                ["codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", app],
+                ["codesign", "--verify", "--deep", "--strict", app],
+            ],
+        )
+
+    def test_sign_app_stops_when_strict_verification_fails(self):
+        app = self.root / "Splash Desktop.app"
+        commands = []
+
+        def fail_verification(command, **kwargs):
+            commands.append(command)
+            if "--verify" in command:
+                raise subprocess.CalledProcessError(1, command)
+
+        with mock.patch.object(package_dmg, "run", side_effect=fail_verification):
+            with self.assertRaises(subprocess.CalledProcessError):
+                package_dmg.sign_app(app)
+        self.assertEqual(len(commands), 2)
 
     def test_create_dmg_holds_the_app_and_an_applications_link(self):
         if shutil.which("hdiutil") is None:

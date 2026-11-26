@@ -7,11 +7,6 @@
 namespace splash::engine {
 namespace {
 
-// A lane yields to later arrivals at most this many prefill commands in a
-// row: the other lanes of a full batch, each finishing one short prompt.
-constexpr uint32_t kMaximumOvertakes =
-    model::ExecutionLimits::maximumBatchWidth - 1;
-
 // The slice a contended prefill command aims for: while peers of its
 // priority decode, the budget halves until its estimated cost fits, so they
 // wait about this long between steps. A latency target, not a deadline: the
@@ -349,10 +344,10 @@ std::optional<BatchPlan>
 Scheduler::planPrefill(std::vector<PrefillRequestView> ready) const {
   if (ready.empty())
     return std::nullopt;
-  // Order by the remaining prompt. After kMaximumOvertakes consecutive skips,
-  // an older lane leads the next command to prevent starvation.
-  const auto overdue = [](const PrefillRequestView &view) {
-    return view.request->overtaken >= kMaximumOvertakes;
+  // A lane yields to later arrivals at most one less than the resident lane
+  // limit consecutive commands, then leads the next command to prevent starvation.
+  const auto overdue = [this](const PrefillRequestView &view) {
+    return view.request->overtaken >= maximumConcurrentRequests_ - 1;
   };
   std::sort(ready.begin(), ready.end(),
             [&](const PrefillRequestView &a, const PrefillRequestView &b) {
@@ -384,7 +379,7 @@ Scheduler::planPrefill(std::vector<PrefillRequestView> ready) const {
       break;
     budget = std::min(budget, view.request->spec.prefillGroupRows - planned);
     if (!budget || view.request->spec.priority != selectedPriority ||
-        plan.width() == model::ExecutionLimits::maximumBatchWidth)
+        plan.width() == maximumConcurrentRequests_)
       break;
     // A lane that streams its history runs alone: nothing joins a command
     // it leads, and it joins none it does not lead; overtaken often enough,
@@ -520,7 +515,7 @@ std::optional<BatchPlan> Scheduler::nextDecode(std::span<const uint64_t> exclude
         request->decodeStage != decodeStage)
       continue;
     plan.items.push_back({request->spec.id, 0, 0});
-    if (plan.width() == model::ExecutionLimits::maximumBatchWidth)
+    if (plan.width() == maximumConcurrentRequests_)
       break;
   }
   return plan;
@@ -528,7 +523,7 @@ std::optional<BatchPlan> Scheduler::nextDecode(std::span<const uint64_t> exclude
 
 void Scheduler::commit(const BatchPlan &plan, std::span<const uint64_t> excluded) {
   if (active_ || plan.empty() ||
-      plan.width() > model::ExecutionLimits::maximumBatchWidth) {
+      plan.width() > maximumConcurrentRequests_) {
     throw std::logic_error("invalid scheduler commit");
   }
   for (const BatchItem &item : plan.items) {

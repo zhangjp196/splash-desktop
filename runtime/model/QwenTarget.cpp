@@ -1,5 +1,7 @@
 #include "model/QwenTarget.hpp"
 
+#include "ops/LogitFinish.hpp"
+
 #include "model/Qwen3_6Moe.hpp"
 #include "model/Qwen3_8.hpp"
 #include "model/WeightStore.hpp"
@@ -105,6 +107,9 @@ QwenTarget::QwenTarget(const QwenTargetWeightsBase &weights, const QwenTargetGeo
                        metal::MetalBackend &backend, const ops::ExecutionPlans &operators)
     : weightsBase_(weights), geometry_(geometry), backend_(backend), operators_(operators) {
   if (!geometry_.valid()) throw std::invalid_argument("Qwen target weights do not match execution geometry");
+}
+
+void QwenTarget::requireSharedAttention() const {
   if (!ops::PagedAttention::compiles(geometry_.attentionQueryHeads, geometry_.kvLayout, geometry_.attentionGate,
                                      geometry_.rotaryPairs))
     throw std::invalid_argument("no attention kernel for the target's output gate and RoPE");
@@ -123,7 +128,13 @@ uint32_t QwenTarget::decodeStorageLanes(uint32_t lanes) const {
   uint32_t storageRows = rows;
   for (const auto &shape : geometry_.decodeProjections)
     storageRows = std::max(storageRows, operators_.linear().decodeStorageRows(rows, shape));
-  return storageRows / kVerifyRows;
+  // Weight plans can select the staged 16/32-row decode tile based on the
+  // loaded segment formats, which ProjectionShape alone cannot identify.
+  // Reserve that tile's rows for every lane count; otherwise a three-lane
+  // batch stores 24 rows while an MXFP8/staged projection reads its 32-row
+  // tile. The padding rows are never selected or committed.
+  storageRows = std::max(storageRows, (rows + 15u) / 16u * 16u);
+  return (storageRows + kVerifyRows - 1) / kVerifyRows;
 }
 
 void QwenTarget::prepareVerifyLane(uint32_t, uint64_t, const QwenTargetRequest &) {}
@@ -186,14 +197,12 @@ QwenTarget::PrefillStep QwenTarget::prefillStep(metal::CommandGraph &graph, cons
       chunk.rows > ExecutionLimits::prefillTokenBudget)
     throw std::invalid_argument("invalid Qwen prefill chunk");
   PrefillStep step{graph, chunk.buffers, chunk.sequences, chunk.rows, kv.layers(), spilled};
-  const uint32_t window = geometry_.kvLayout.windowTokens;
-  for (const QwenTargetPrefillSequence &sequence : chunk.sequences) {
+  step.decode = chunk.decode;
+  for (uint32_t index = 0; index < chunk.sequences.size(); ++index) {
+    const QwenTargetPrefillSequence &sequence = chunk.sequences[index];
+    step.chunks[index] = sequence.chunk;
+    step.pageTables[index] = sequence.pageTable;
     requirePrefillStates(geometry_, sequence);
-    step.attention.push_back(
-        operators_.prefillAttention(sequence.rows, geometry_.attentionQueryHeads, geometry_.kvLayout));
-    if (window)
-      step.windowedAttention.push_back(operators_.prefillAttention(
-          sequence.rows, geometry_.attentionQueryHeads, geometry_.kvLayout, {.windowTokens = window}));
   }
   if (geometry_.ffnKind == QwenFfnKind::SparseMoe) step.moe = operators_.moePrefill(geometry_.moeShape(), chunk.rows);
   if (aneFfn && aneFfn->splits(chunk.rows)) step.aneFfn = aneFfn;
@@ -201,6 +210,17 @@ QwenTarget::PrefillStep QwenTarget::prefillStep(metal::CommandGraph &graph, cons
   if (aneMixerGdn && aneMixerGdn->splits(chunk.rows)) step.aneMixerGdn = aneMixerGdn;
   if (aneMixerOut && aneMixerOut->splits(chunk.rows)) step.aneMixerOut = aneMixerOut;
   return step;
+}
+
+void QwenTarget::planAttention(PrefillStep &step) const {
+  const uint32_t window = geometry_.kvLayout.windowTokens;
+  for (const QwenTargetPrefillSequence &sequence : step.sequences) {
+    step.attention.push_back(
+        operators_.prefillAttention(sequence.rows, geometry_.attentionQueryHeads, geometry_.kvLayout));
+    if (window)
+      step.windowedAttention.push_back(operators_.prefillAttention(
+          sequence.rows, geometry_.attentionQueryHeads, geometry_.kvLayout, {.windowTokens = window}));
+  }
 }
 
 QwenTarget::VerifyStep QwenTarget::verifyStep(metal::CommandGraph &graph, const QwenTargetVerifyBuffers &buffers,
@@ -480,7 +500,7 @@ void QwenTarget::addPrefillMoeRouting(PrefillStep &step, const ops::NormWeights 
                                       metal::MetalBuffer output) const {
   const QwenTargetPrefillBuffers &b = step.buffers;
   ops::Normalization::addRms(step.graph, residual, norm, b.normalized, geometry_.hiddenSize, step.rows);
-  step.ffn = {b.normalized, std::move(residual), std::move(output), b.moe, {}};
+  step.ffn = {b.normalized, std::move(residual), std::move(output), b.moe, {}, {}, {}};
   ops::MoE::addRouting(step.graph, step.ffn, ffn, *step.moe);
 }
 
@@ -507,7 +527,7 @@ void QwenTarget::addVerifyMoe(VerifyStep &step, const ops::NormWeights &norm, co
                               metal::MetalBuffer residual, metal::MetalBuffer output) const {
   const QwenTargetVerifyBuffers &b = step.buffers;
   ops::Normalization::addRms(step.graph, residual, norm, b.normalized, geometry_.hiddenSize, step.rows);
-  ops::MoE::add(step.graph, {b.normalized, std::move(residual), std::move(output), b.moe, b.verifyRows}, ffn,
+  ops::MoE::add(step.graph, {b.normalized, std::move(residual), std::move(output), b.moe, b.verifyRows, {}, {}}, ffn,
                 *step.moe);
 }
 
@@ -531,6 +551,17 @@ void QwenTarget::addCapture(metal::CommandGraph &graph, uint32_t slot, metal::Me
                     {destinationRow, capturedWidth, slot * width}, rows, width);
 }
 
+void QwenTarget::addDraftCapture(const PrefillStep &step, uint32_t id, metal::MetalBuffer rows) const {
+  if (step.decode) {
+    if (const auto slot = geometry_.captureSlot(id))
+      addCapture(step.graph, *slot, rows, 0, step.decode->capturedTargetHidden, 0, step.rows);
+    return;
+  }
+  forEachPrefillCapture(step, id, [&](uint32_t slot, uint32_t source, uint32_t destination, uint32_t count) {
+    addCapture(step.graph, slot, rows, source, step.buffers.captured, destination, count);
+  });
+}
+
 namespace {
 
 // The rows a mixer's output projection adds to the layer's input rows into.
@@ -552,7 +583,9 @@ public:
   Qwen3_5Target(const QwenTargetWeights<Layout, Layer> &weights, const QwenTargetGeometry &geometry,
                 metal::MetalBackend &backend, const ops::ExecutionPlans &operators)
       : QwenTarget(weights, geometry, backend, operators), weights_(weights) {
+    static_assert(Layout{}.relativeAttention().empty(), "the layout states the attention its target's layers run");
     requireLayers(std::span<const Layer>(weights.layers));
+    requireSharedAttention();
   }
 
   std::vector<metal::MetalBuffer> addPrefill(metal::CommandGraph &graph, std::span<const QwenTargetPrefillChunk> chunks,
@@ -670,5 +703,85 @@ template std::unique_ptr<QwenTarget> makeQwenTarget(const Qwen3_8Weights &, cons
                                                     metal::MetalBackend &, const ops::ExecutionPlans &, uint32_t);
 template std::unique_ptr<QwenTarget> makeQwenTarget(const Qwen3_6MoeWeights &, const QwenTargetGeometry &,
                                                     metal::MetalBackend &, const ops::ExecutionPlans &, uint32_t);
+
+// A target without a verify implementation must not consume stale logits or
+// commit state as if its decode step had run.
+void QwenTarget::addVerify(metal::CommandGraph &, QwenTargetVerifyBuffers, const kv::PageStorage &,
+                           SpilledKvReads &, std::span<const kv::ChunkedPrefillParams>, uint32_t) const {
+  throw std::logic_error("target verify is not implemented for this model family");
+}
+
+// The vocabulary head of a step, as upstream 1.7.2's QwenTarget::addHead,
+// used by the ported Inkling-2 family. The fork's plans come from operators_,
+// so `linear` is recognized but not used to plan here.
+void QwenTarget::addHead(metal::CommandGraph &graph, const ops::Linear &linear, metal::MetalBuffer input,
+                         metal::MetalBuffer logits, uint32_t rows, ops::LinearScratch scratch,
+                         ops::PreparedInput prepared) const {
+  // The fork's decode plans take lanes, while this interface takes rows.
+  // Only its fixed-width layout is available until packed decode is wired in.
+  if (!rows || rows % kVerifyRows)
+    throw std::invalid_argument("target head requires fixed-width decode rows");
+  const ops::Projection &head = vocabularyProjection();
+  linear.add(graph, {.input = std::move(input), .output = logits, .scratch = scratch,
+                     .prepared = std::move(prepared)}, head, linear.decodePlan(head, rows / kVerifyRows));
+  if (geometry_.finishesLogits())
+    ops::LogitFinish::add(graph, std::move(logits), geometry_.vocabularySize, rows, geometry_.logitFinish());
+}
+
+// The two addPrefill forms forward to each other so a family overrides either
+// the fork's nine-argument form or upstream 1.7.2's six-argument form. Every
+// target overrides at least one, so the six-argument fallback is never reached
+// in a working build.
+std::vector<metal::MetalBuffer> QwenTarget::addPrefill(metal::CommandGraph &graph,
+                                                       std::span<const QwenTargetPrefillChunk> chunks,
+                                                       const kv::PageStorage &kv, SpilledKvReads &spilled,
+                                                       QwenPrefillLayers layers, ops::AneFfn *aneFfn,
+                                                       ops::AneProjection *aneMixerQkv, ops::AneProjection *aneMixerGdn,
+                                                       ops::AneProjection *aneMixerOut) {
+  (void)aneMixerQkv;
+  (void)aneMixerGdn;
+  (void)aneMixerOut;
+  return addPrefill(graph, chunks, kv, spilled, layers, aneFfn);
+}
+
+std::vector<metal::MetalBuffer> QwenTarget::addPrefill(metal::CommandGraph &graph,
+                                                       std::span<const QwenTargetPrefillChunk> chunks,
+                                                       const kv::PageStorage &kv, SpilledKvReads &spilled,
+                                                       QwenPrefillLayers layers, ops::AneFfn *aneFfn) {
+  (void)graph;
+  (void)chunks;
+  (void)kv;
+  (void)spilled;
+  (void)layers;
+  (void)aneFfn;
+  throw std::logic_error("a target must override addPrefill");
+}
+
+// The shared target hooks used by Inkling-2's decode and cache lifecycle.
+// State commit validates auxiliary buffers; unsupported family-specific
+// operations fail explicitly instead of leaving partially committed state.
+
+void QwenTarget::requireDraftRows(bool inputs, bool normedTokens) const {
+  if (geometry_.draftReadsLayerInputs != inputs || geometry_.draftEmbeddingNorm != normedTokens)
+    throw std::invalid_argument("the target captures and embeds other rows than its family's drafts read");
+}
+
+void QwenTarget::addDraftEmbedding(metal::CommandGraph &graph, metal::MetalBuffer tokens, metal::MetalBuffer hidden,
+                                   uint32_t rows) const {
+  addEmbedding(graph, std::move(tokens), std::move(hidden), rows);
+}
+
+void QwenTarget::addStateFold(metal::CommandGraph &, QwenTargetFoldBuffers, uint32_t, const ops::StepRows &) const {
+  // A family may fold only auxiliary state after calling this base method.
+  // Silently skipping recurrent state would cache an incomplete snapshot.
+  if (geometry_.stateLayout.layers)
+    throw std::logic_error("target recurrent state fold is not implemented for this model family");
+}
+
+void QwenTarget::addKvPathCommit(metal::CommandGraph &, kv::Layout, uint32_t,
+                                 std::span<const metal::MetalBuffer>, std::span<const uint32_t>, uint32_t,
+                                 const metal::MetalBuffer &) const {
+  throw std::logic_error("target KV path commit is not implemented for this model family");
+}
 
 } // namespace splash::model

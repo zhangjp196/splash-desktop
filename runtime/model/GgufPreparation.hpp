@@ -45,4 +45,10 @@ struct StoredRows final {
 };
 [[nodiscard]] std::optional<StoredRows> storedRepackRows(const gguf::Repack &repack, uint64_t first, uint64_t count);
 
+// Whether every value of a 16-bit float tensor at `offset` (`values` of
+// `type`, ggml::kBF16 or ggml::kF16) is exactly representable as MXFP8, so
+// the rows can be built at half the bytes. Results are cached by file and
+// offset: a start plans its target several times from the same source.
+[[nodiscard]] bool exactlyMxfp8(const WeightSource &file, uint64_t offset, uint64_t values, uint32_t type);
+
 } // namespace splash::model

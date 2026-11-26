@@ -150,16 +150,23 @@ static inline void gguf_repack_group(device const uchar *row, uint fmt, uint G, 
       for (uint i = 0; i < f.meta_bytes; ++i) meta[i] = blk[i];
       break;
     }
-    case GGUF_FMT_NVFP4: {   // {E4M3 scales[16], g, codes[128]}: element e of group j in bits 4 (e % 2) of codes[16 j + e / 2]
-      for (uint e = 0; e < 32; ++e) lo[quant_slot(e)] = (blk[QUANT_NVFP4_CODES + 16 * j + e / 2] >> (4 * (e % 2))) & 15;
+    case GGUF_FMT_NVFP4: case GGUF_FMT_NVFP464: {   // {E4M3 scales[16] or [4], g, codes}: element e of group j in bits 4 (e % 2) of codes[16 j + e / 2]
+      const uint codes = f.meta_bytes;
+      for (uint e = 0; e < 32; ++e) lo[quant_slot(e)] = (blk[codes + 16 * j + e / 2] >> (4 * (e % 2))) & 15;
       gguf_store_bits(lo, 4, out0);
-      if (j == 0) for (uint i = 0; i < QUANT_NVFP4_CODES; ++i) meta[i] = blk[i];   // the scales and g
+      if (j == 0) for (uint i = 0; i < codes; ++i) meta[i] = blk[i];   // the scales and g
       break;
     }
     case GGUF_FMT_FP8: {   // {g, E4M3 values[256]}
       for (uint e = 0; e < 32; ++e) lo[quant_slot(e)] = blk[QUANT_FP8_VALUES + 32 * j + e];
       gguf_store_bits(lo, 8, out0);
       if (j == 0) for (uint i = 0; i < QUANT_FP8_VALUES; ++i) meta[i] = blk[i];   // g
+      break;
+    }
+    case GGUF_FMT_MXFP8: {   // {e, E4M3 values[32]}: one group per block
+      for (uint e = 0; e < 32; ++e) lo[quant_slot(e)] = blk[1 + e];
+      gguf_store_bits(lo, 8, out0);
+      if (j == 0) meta[0] = blk[0];   // e
       break;
     }
     case GGUF_FMT_BF16: case GGUF_FMT_F16: {   // 256 values, element e of group j value 32 j + e; no scale: g = 1

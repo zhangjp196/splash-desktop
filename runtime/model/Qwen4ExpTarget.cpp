@@ -71,7 +71,10 @@ Qwen4ExpTarget::Qwen4ExpTarget(const Qwen4ExpWeights &weights, const QwenTargetG
                                uint32_t prefillChunks)
     : QwenTarget(weights, geometry, backend, operators), weights_(weights),
       steps_(weights, geometry_, backend, prefillChunks) {
-  requireLayers(std::span<const Qwen4ExpLayerWeights>(weights.layers));
+    static_assert(Qwen4ExpLayout{}.relativeAttention().empty(),
+                  "the layout states the attention its target's layers run");
+    requireLayers(std::span<const Qwen4ExpLayerWeights>(weights.layers));
+    requireSharedAttention();
 }
 
 QwenTargetScratchBytes Qwen4ExpTarget::allocatedScratchBytes() const noexcept { return steps_.allocatedBytes(); }
@@ -93,7 +96,7 @@ std::vector<metal::MetalBuffer> Qwen4ExpTarget::addPrefill(metal::CommandGraph &
     step.scratch = steps_.prefillScratch(index);
     step.blocks = begins ? steps_.preparePrefill(index, chunks[index]) : steps_.prefillBlocks(index, chunks[index]);
     step.indexOffsets = offsets;
-    step.ffn = {step.buffers.normalized, step.scratch.zeros, step.scratch.branch, step.buffers.moe, {}};
+    step.ffn = {step.buffers.normalized, step.scratch.zeros, step.scratch.branch, step.buffers.moe, {}, {}, {}};
   }
   if (begins) steps_.readAhead(chunks);
   return addPrefillLayers(std::span(steps), *this, layers);
@@ -371,7 +374,7 @@ void Qwen4ExpTarget::addVerify(metal::CommandGraph &graph, QwenTargetVerifyBuffe
         layer.mixer);
     ops::HyperConnection::addCombine(step.graph, h.streams, h.branch, h.weights, hs, rows);
     addVerifyMix(step, layer.ffnHyper, b.normalized);
-    ops::MoE::add(step.graph, {b.normalized, h.zeros, h.branch, b.moe, b.verifyRows}, layer.ffn, *step.moe);
+    ops::MoE::add(step.graph, {b.normalized, h.zeros, h.branch, b.moe, b.verifyRows, {}, {}}, layer.ffn, *step.moe);
     ops::HyperConnection::addCombine(step.graph, h.streams, h.branch, h.weights, hs, rows);
     if (const auto slot = geometry_.captureSlot(index))
       addStreamCapture(step.graph, geometry_, *slot, h.streams, b.capturedTargetHidden, 0, rows);

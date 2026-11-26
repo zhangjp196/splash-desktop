@@ -18,7 +18,19 @@
 // pins the bytes both sides agree on.
 namespace splash::protocol {
 
-inline constexpr uint16_t kProtocolVersion = 13;
+inline constexpr uint16_t kProtocolVersion = 15;
+using ::splash::ImageProcessor;
+inline constexpr uint32_t kImageContractVersion = 1;
+inline constexpr uint32_t kInklingTileSize = 40;
+struct ImageGeometry {
+  ImageProcessor processor = ImageProcessor::Qwen;
+  uint32_t gridHeight = 0;
+  uint32_t gridWidth = 0;
+  [[nodiscard]] std::optional<uint64_t> pixelBytes() const noexcept;
+  [[nodiscard]] std::optional<uint64_t> tokenCount() const noexcept;
+};
+[[nodiscard]] std::optional<std::string_view>
+imageGeometryValidationError(const ImageGeometry &geometry) noexcept;
 // A frame is its header, the magic "SPLH", the u16 protocol version, the
 // u16 FrameType and the u64 payload length, then the payload.
 inline constexpr size_t kFrameHeaderBytes = 16;
@@ -207,7 +219,8 @@ struct RequestFrame {
 //   ReleaseRequest u64 correlationId
 //   PrefillDutyRequest f32 dutyPercent
 //   Ready          u32 maxConcurrentRequests, u32 maxContextTokens, u8 vision
-//   Start          u64 requestId, u32 lane, u32 matchedPromptTokens
+//   Start          u64 requestId, u32 lane, u32 matchedPromptTokens,
+//                  u32 prefixTokens, u8 stateSource, u8 lostState
 //   PromptProgress u64 requestId, u32 processedTokens, u64 elapsedMicros
 //   Tokens         u64 requestId, u32 sequenceOffset, u32 count, u32 tokens
 //   Logprobs       u64 requestId, u32 sequenceOffset, u32 count, then per
@@ -277,8 +290,14 @@ struct ReadyEvent {
 struct StartEvent {
   uint64_t requestId = 0;
   uint32_t lane = 0;
-  // The cached prefix the request starts from; zero for a cold start.
+  // The resumed token boundary, the restored state's token boundary, where
+  // that state was stored, and whether a deeper matched block once held a
+  // state that is gone from both tiers. Both boundaries are currently equal
+  // and zero when no state is restored.
   uint32_t matchedPromptTokens = 0;
+  uint32_t prefixTokens = 0;
+  engine::StateSource stateSource = engine::StateSource::None;
+  bool lostState = false;
 
   bool operator==(const StartEvent &) const = default;
 };

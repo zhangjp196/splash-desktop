@@ -330,9 +330,9 @@ SourceModel withQuantizationConfig(const SourceModel &model, std::string_view qu
 
 // An MLX target's quantization is MLX's own object: the object and each
 // module's own entry name affine 2, 3, 4, 5, 6 or 8 bits in groups of 32, 64
-// or 128, mxfp4 or nvfp4; an entry is affine unless it names its mode, and
+// or 128, mxfp4, mxfp8 or nvfp4; an entry is affine unless it names its mode, and
 // takes its mode's default bits and group size (affine 4 and 64, mxfp4 4 and
-// 32, nvfp4 4 and 16) when it omits them, as MLX loads it. The entry false,
+// 32, mxfp8 8 and 32, nvfp4 4 and 16) when it omits them, as MLX loads it. The entry false,
 // which MLX writes for a module it leaves unquantized, is refused for a
 // projection and the head, and accepted for the router, the shared-expert
 // gate, GDN alpha and beta and the token table. A Model Optimizer target's is
@@ -406,11 +406,11 @@ void testQuantization(const std::filesystem::path &fixtures) {
            // MLX's own object, not the quantization_config a transformers
            // checkpoint (GPTQ, AWQ, ...) states.
            {dense, R"("quantization": {)", R"("unused": {)",
-            "this model requires an MLX checkpoint (affine 2, 3, 4, 5, 6 or 8 bits in groups of 32, 64 or 128, mxfp4 "
-            "or nvfp4), an NVFP4 or FP8 checkpoint of Model Optimizer or compressed-tensors, or a supported GGUF"},
+            "this model requires an MLX checkpoint (affine 2, 3, 4, 5, 6 or 8 bits in groups of 32, 64 or 128, mxfp4, "
+            "mxfp8 or nvfp4), an NVFP4 or FP8 checkpoint of Model Optimizer or compressed-tensors, or a supported GGUF"},
            {dense, R"("bits": 4)", R"("bits": 7)",
             "quantization is affine 7-bit in groups of 64; MLX weights load as affine 2, 3, 4, 5, 6 or 8 bits in "
-            "groups of 32, 64 or 128, or as mxfp4 or nvfp4"},
+            "groups of 32, 64 or 128, or as mxfp4, mxfp8 or nvfp4"},
            {dense, R"("group_size": 64)", R"("group_size": 16)", "quantization is affine 4-bit in groups of 16"},
            // A group past a byte is no format (4 bits in groups of 320 are not af5g64).
            {dense, R"("group_size": 64)", R"("group_size": 320)", "quantization is affine 4-bit in groups of 320"},
@@ -571,6 +571,18 @@ void testQuantization(const std::filesystem::path &fixtures) {
 // tower's own sizes say which one it is: the 27-block tower and the 24-block
 // one a 4B or 9B checkpoint holds both run.
 void testVisionConfig(const std::filesystem::path &fixtures) {
+  // Inkling-2's tower uses its separate executor and weight layout, not the
+  // Qwen VisionLayout. A Safetensors vision record must keep that source on
+  // the descriptor without binding Qwen kernels.
+  const SourceModel inkling =
+      mlxModel(fixtures, "inkling-2-mini").with(&SourceModel::record, R"("none")", R"("safetensors")");
+  const model::ModelDescriptor inklingDescriptor = inspect(inkling);
+  require(inklingDescriptor.hasVision(), "Inkling-2 Safetensors vision was dropped from its descriptor");
+  require(inklingDescriptor.visionSource == model::VisionSource::Safetensors,
+          "Inkling-2 vision source was not Safetensors");
+  require(std::holds_alternative<model::Inkling2LoopLayout>(inklingDescriptor.target),
+          "Inkling-2 target was not kept on its own executor");
+
   const SourceModel text = mlxModel(fixtures, "qwen3.8-27b");
   require(!inspect(text.with(&SourceModel::config, R"("vision_config")", R"("unused")")).hasVision(),
           "a text-only installation read the vision config");
@@ -719,8 +731,9 @@ void testConfigurationCheck(const std::filesystem::path &fixtures) {
     require(at != std::string::npos, "the config or metadata has no " + std::string(from));
     return json.replace(at, from.size(), to);
   };
-  // Qwen3.8-Flash-Next loads from a GGUF only; its metadata also states the
-  // hyper-connections, the QSA indexer and the PLE n-gram embedding.
+  // Qwen3.8-Flash-Next loads from a GGUF or an MLX checkpoint; its metadata
+  // also states the hyper-connections, the QSA indexer and the PLE n-gram
+  // embedding.
   const std::string flashConfig = text(fixtures / "qwen3.8-flash-next" / "config.json");
   const std::string flashMetadata = text(fixtures / "qwen3.8-flash-next" / "gguf-metadata.json");
   const std::string flashDraft = text(fixtures / "qwen3.8-flash-next" / "draft" / "config.json");
@@ -742,8 +755,12 @@ void testConfigurationCheck(const std::filesystem::path &fixtures) {
   rejects([&] { static_cast<void>(check("gguf", "none", flashConfig, flashMetadata, otherReduction)); },
           "draft config dflash_config target_hidden_reduction mismatch: checkpoint none, runtime stream_mean",
           "a draft of another reduction was accepted");
-  rejects([&] { static_cast<void>(check("mlx-affine", "none", flashConfig, std::nullopt, std::nullopt)); },
-          "Qwen3.8-Flash-Next loads from a GGUF only", "Qwen3.8-Flash-Next was accepted from MLX");
+  // Its MLX checkpoint's configuration names the hyper-connections, the QSA
+  // indexer and the PLE n-gram embedding, which the check holds to its
+  // layout's.
+  const std::string flashMlxConfig = text(fixtures / "qwen3.8-flash-next" / "mlx-config.json");
+  require(check("mlx-affine", "none", flashMlxConfig, std::nullopt, std::nullopt) == "Qwen3.8-Flash-Next",
+          "Qwen3.8-Flash-Next's MLX config was not found to be its family");
   for (const auto &[from, to, error] : std::initializer_list<std::array<std::string_view, 3>>{
            {R"("qwen4exp.hyper_connection.count": 4)", R"("qwen4exp.hyper_connection.count": 2)",
             "GGUF metadata does not match the target: hyper_connection.count 2 (expected 4)"},
@@ -923,8 +940,16 @@ void testFlint(const std::filesystem::path &fixtures) {
   for (const uint32_t token : {150018u, 150144u, 248077u})
     refuses(masked(token), "is not one of the target's reserved tokens 150019 to 150143",
             "a Flint draft's mask token outside the reserved tokens was accepted");
-  refuses(flint.with(&SourceModel::record, R"("gguf")", R"("mlx-affine")"), "Flint loads from a GGUF only",
-          "an MLX Flint was accepted");
+  // Flint loads from a GGUF or an MLX checkpoint: its MLX checkpoint's
+  // configuration makes the same descriptor its GGUF's does.
+  const std::string flintMlxConfig = text(fixtures / "flint" / "mlx-config.json");
+  const model::ModelDescriptor mlxDescriptor = inspect(
+      flint.with(&SourceModel::record, R"("gguf")", R"("mlx-affine")")
+          .with(&SourceModel::config, flint.config, flintMlxConfig));
+  const auto *mlxLayout = std::get_if<model::FlintLayout>(&mlxDescriptor.target);
+  require(mlxLayout && mlxDescriptor.targetSource == model::TargetSource::Safetensors &&
+              mlxDescriptor.family() == "Flint" && mlxDescriptor.valid(),
+          "an MLX Flint made another descriptor");
   // Each key Flint's values make is held to them by name.
   struct Refused final {
     std::string_view from, to, error;

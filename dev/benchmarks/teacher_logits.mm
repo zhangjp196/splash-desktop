@@ -3,25 +3,32 @@
 //
 //   teacher-logits METALLIB MODEL_ROOT TOKENS OUTPUT --window END:ROWS [--window END:ROWS...]
 //                  [--kv-format int8|int4|bf16] [--state-format fp32|bf16]
-//                  [--expert-memory SIZE] [--ple-memory SIZE] [--captures yes]
+//                  [--expert-memory SIZE] [--ple-memory SIZE] [--captures yes] [--target-only yes]
 //
 // TOKENS holds little-endian uint32 token ids, read as they are: no BOS, no
 // chat template. For each window a cold request prefills ids [0, END - ROWS)
-// and then decodes ROWS positions teacher-forced through the production
-// verify: a thinking budget of no tokens whose end is the true continuation
-// makes each verify row select the next true id and replaces the draft's
-// proposals with them, so every cycle retains all its rows (the runtime's
-// thinking cutoff); a sentinel id that is not in the window closes the end.
-// OUTPUT-END.f32 receives ROWS + 1 rows of the target's vocabulary of fp32
-// logits for positions END - ROWS - 1 .. END - 1, position p's predicting
-// id p + 1: the row of the prefill's final position, then the verify rows,
+// and decodes ROWS positions teacher-forced through production decode. With
+// DFlash, a thinking budget of no tokens whose end is the true continuation
+// replaces the draft proposals so every cycle retains its block. With
+// --target-only yes, the descriptor drops draft execution and decodes one
+// target token at a time; --captures retains only the draft's target-layer
+// ids so both paths expose the same hidden rows. A sentinel id that is not in
+// the window closes the end. OUTPUT-END.f32 receives ROWS + 1 rows of the
+// target's vocabulary of fp32 logits for positions END - ROWS - 1 .. END - 1,
+// where position p predicts id p + 1: the prefill's final-position row, then
+// the verify rows,
 // which RuntimeInstrumentation::lastLogits reads after each command. With
-// --captures yes, OUTPUT-END.captures.f32 receives, of a window whose prefill
-// is one command, the output rows of the target layers the model's draft
-// reads (its target_layer_ids) at positions 0 .. END - ROWS - 1, as the draft
-// captures them (RuntimeInstrumentation::lastCapturedRows), in fp32: a row
-// per position of each layer's hidden values in the draft's layer order,
-// which a reference's residuals after those layers compare with.
+// --captures yes, OUTPUT-END.captures.f32 receives prefill rows (when the
+// prefill is one command), while OUTPUT-END.verify-captures.f32 receives the
+// verify rows: the output rows of the target layers the draft reads (its
+// target_layer_ids), in fp32 and draft layer order. It also writes the final
+// target auxiliary state as OUTPUT-END.aux-state.bf16. The verify capture file
+// lets DFlash block rows and target-only single-token rows be compared at the
+// same history points. With --conv-capture yes, each decode writes app 1's
+// initial FFN state, MoE input, selected experts/weights, staged grouped inputs,
+// grouped gate/up intermediates/down outputs, and MoE/conv outputs; activations are
+// raw BF16 and routes use uint32/float32 representation.
+// Verify captures all rows; target-only captures row 0 of each autoregressive step.
 
 #include "engine/MemoryGovernor.hpp"
 #include "engine/Types.hpp"
@@ -138,9 +145,16 @@ void require(bool condition, const std::string &message) {
     throw std::runtime_error(message);
 }
 
+template <typename T> void writeBinary(const std::string &path, std::span<const T> values) {
+  std::ofstream file(path, std::ios::binary);
+  file.write(reinterpret_cast<const char *>(values.data()), static_cast<std::streamsize>(values.size_bytes()));
+  require(static_cast<bool>(file), "cannot write " + path);
+}
+
 // One window on state lane 0, which the request leaves free.
 void runWindow(model::Runtime &executor, std::span<const uint32_t> tokens, Window window, uint64_t id,
-               std::span<const uint32_t> pages, uint32_t vocabulary, const std::string &output, uint32_t captureWidth) {
+               std::span<const uint32_t> pages, uint32_t vocabulary, const std::string &output, uint32_t captureWidth,
+               bool targetOnly, bool convolutionCapture) {
   const uint32_t start = window.end - window.rows;
   const std::span<const uint32_t> prompt = tokens.first(start);
   const std::span<const uint32_t> forced = tokens.subspan(start, window.rows + 1);
@@ -172,7 +186,7 @@ void runWindow(model::Runtime &executor, std::span<const uint32_t> tokens, Windo
     if (offset == start)
       require(results[0].firstToken == forced[0], "the prefill did not select the first forced id");
   }
-  if (captureWidth) {
+  if (captureWidth && !targetOnly) {
     require(start <= chunk, "--captures takes a window whose prefill is one command");
     const std::span<const uint16_t> captured = model::RuntimeInstrumentation::lastCapturedRows(executor, 0);
     require(captured.size() >= uint64_t{start} * captureWidth, "the prefill captured fewer rows than its prompt");
@@ -187,29 +201,88 @@ void runWindow(model::Runtime &executor, std::span<const uint32_t> tokens, Windo
   const double prefillSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
   uint32_t position = start;
-  for (uint32_t cycle = 0; cycle < window.rows / kRows; ++cycle) {
+  std::vector<uint16_t> verifyCaptures;
+  const uint32_t iterations = targetOnly ? window.rows : window.rows / kRows;
+  for (uint32_t cycle = 0; cycle < iterations; ++cycle) {
     BatchPlan plan{.kind = WorkKind::Decode, .items = {{id, 0}}, .decodeStage = DecodeStage::Regular};
     const ModelBatchItem item{id, position, 0, pages, 1};
+    if (convolutionCapture)
+      model::RuntimeInstrumentation::armInklingFfnConvolutionCapture(executor, 0, 0, targetOnly ? 1 : kRows);
     const std::vector<ModelStepResult> results = executor.decode(plan, std::span(&item, 1));
     require(results.size() == 1 && results[0].failure.empty(),
             "decode failed: " + (results.empty() ? std::string("no result") : results[0].failure));
-    // A cycle emits its anchor and the ids its rows retained before the next
-    // anchor: every row's, when the forcing held.
+    if (convolutionCapture) {
+      const auto captured = model::RuntimeInstrumentation::takeInklingFfnConvolutionCapture(executor);
+      require(captured.has_value(), "target decode did not capture the application-1 FFN convolution");
+      const std::string stem = output + "-" + std::to_string(window.end) + "-" +
+                               (targetOnly ? "ar" : "verify") + "-cycle-" + std::to_string(cycle);
+      writeBinary(stem + ".state-in.bf16", std::span(captured->stateIn));
+      writeBinary(stem + ".route-experts.u32", std::span(captured->selectedExperts));
+      writeBinary(stem + ".route-weights.f32", std::span(captured->routingWeights));
+      if (captured->groupedInputBfloat16)
+        writeBinary(stem + ".grouped-input.bf16", std::span(captured->groupedInput));
+      writeBinary(stem + ".expert-intermediate.bf16", std::span(captured->expertIntermediate));
+      writeBinary(stem + ".expert-output.bf16", std::span(captured->expertOutputs));
+      writeBinary(stem + ".moe-in.bf16", std::span(captured->moeInput));
+      writeBinary(stem + ".conv-in.bf16", std::span(captured->input));
+      writeBinary(stem + ".conv-out.bf16", std::span(captured->output));
+      std::ofstream metadata(stem + ".txt");
+      metadata << "application=1\nlane=" << captured->lane << "\nrow=" << captured->row
+               << "\nrow_count=" << captured->rowCount
+               << "\nroutes_per_row=" << captured->selectedExperts.size() / captured->rowCount
+               << "\nmode=" << (targetOnly ? "autoregressive" : "DFlash verify")
+               << "\nstate/input/output=raw bf16 bits\n";
+      require(static_cast<bool>(metadata), "cannot write " + stem + ".txt");
+    }
     const std::vector<uint32_t> &emitted = results[0].outputTokens;
-    require(emitted.size() == kRows && results[0].outputTokensWithoutKv == 0 &&
-                std::ranges::equal(emitted, tokens.subspan(position, kRows)),
-            "decode cycle " + std::to_string(cycle) + " did not retain the forced ids");
+    if (captureWidth) {
+      const std::span<const uint16_t> captured = model::RuntimeInstrumentation::lastCapturedVerifyRows(executor, 0);
+      const uint32_t capturedRows = targetOnly ? 1 : kRows;
+      require(captured.size() == uint64_t{capturedRows} * captureWidth,
+              "target verify captured an unexpected number of hidden values");
+      verifyCaptures.insert(verifyCaptures.end(), captured.begin(), captured.end());
+    }
     const std::span<const float> rows = model::RuntimeInstrumentation::lastLogits(executor, 0);
-    for (uint32_t row = 0; row < kRows; ++row)
-      logits.put(1 + cycle * kRows + row, rows.subspan(uint64_t{row} * vocabulary, vocabulary),
-                 tokens[position + row + 1]);
-    position += kRows;
+    if (targetOnly) {
+      require(emitted.size() == 1 && results[0].outputTokensWithoutKv == 0 && emitted[0] == tokens[position],
+              "autoregressive decode did not retain the forced id");
+      logits.put(1 + cycle, rows.first(vocabulary), tokens[position + 1]);
+      ++position;
+    } else {
+      // A cycle emits its anchor and the ids its rows retained before the next
+      // anchor: every row's, when the forcing held.
+      require(emitted.size() == kRows && results[0].outputTokensWithoutKv == 0 &&
+                  std::ranges::equal(emitted, tokens.subspan(position, kRows)),
+              "decode cycle " + std::to_string(cycle) + " did not retain the forced ids");
+      for (uint32_t row = 0; row < kRows; ++row)
+        logits.put(1 + cycle * kRows + row, rows.subspan(uint64_t{row} * vocabulary, vocabulary),
+                  tokens[position + row + 1]);
+      position += kRows;
+    }
+  }
+  if (captureWidth) {
+    const std::vector<uint16_t> state = model::RuntimeInstrumentation::targetAuxiliaryState(executor, id);
+    require(!state.empty(), "the target auxiliary state capture is empty");
+    const std::string statePath = output + "-" + std::to_string(window.end) + ".aux-state.bf16";
+    std::ofstream file(statePath, std::ios::binary);
+    file.write(reinterpret_cast<const char *>(state.data()),
+               static_cast<std::streamsize>(state.size() * sizeof(uint16_t)));
+    require(static_cast<bool>(file), "cannot write " + statePath);
   }
   executor.end(id);
   const double totalSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
   const std::string path = output + "-" + std::to_string(window.end) + ".f32";
   logits.write(path);
+  if (captureWidth) {
+    std::vector<float> widened(verifyCaptures.size());
+    std::ranges::transform(verifyCaptures, widened.begin(), model::widenBfloat16);
+    const std::string capturePath = output + "-" + std::to_string(window.end) + ".verify-captures.f32";
+    std::ofstream file(capturePath, std::ios::binary);
+    file.write(reinterpret_cast<const char *>(widened.data()),
+               static_cast<std::streamsize>(widened.size() * sizeof(float)));
+    require(static_cast<bool>(file), "cannot write " + capturePath);
+  }
   std::printf("window end=%u rows=%u prefill_s=%.1f decode_s=%.1f nll=%.4f top1_true=%.4f -> %s\n", window.end,
               window.rows + 1, prefillSeconds, totalSeconds - prefillSeconds, logits.meanNegativeLogLikelihood(),
               logits.accuracy(), path.c_str());
@@ -224,11 +297,14 @@ int main(int argc, char **argv) {
       if (argc < 5) {
         std::cerr << "usage: teacher-logits METALLIB MODEL_ROOT TOKENS OUTPUT --window END:ROWS "
                      "[--window END:ROWS...] [--kv-format int8|int4|bf16] [--state-format fp32|bf16] "
-                     "[--expert-memory SIZE] [--ple-memory SIZE] [--captures yes]\n";
+                     "[--expert-memory SIZE] [--ple-memory SIZE] [--captures yes] [--target-only yes] "
+                     "[--conv-capture yes]\n";
         return 2;
       }
       std::vector<Window> windows;
       bool captures = false;
+      bool targetOnly = false;
+      bool convolutionCapture = false;
       kv::Format format = kv::Format::Int8;
       ops::GdnStateFormat stateFormat = ops::GdnStateFormat::Float32;
       model::ModelLoadOptions loadOptions;
@@ -243,8 +319,15 @@ int main(int argc, char **argv) {
           if (value != "yes")
             throw std::invalid_argument("--captures takes yes");
           captures = true;
-        }
-        else if (option == "--kv-format") {
+        } else if (option == "--target-only") {
+          if (value != "yes")
+            throw std::invalid_argument("--target-only takes yes");
+          targetOnly = true;
+        } else if (option == "--conv-capture") {
+          if (value != "yes")
+            throw std::invalid_argument("--conv-capture takes yes");
+          convolutionCapture = true;
+        } else if (option == "--kv-format") {
           if (value != "int8" && value != "int4" && value != "bf16")
             throw std::invalid_argument("--kv-format takes int8, int4 or bf16");
           format = value == "int8"  ? kv::Format::Int8
@@ -270,7 +353,22 @@ int main(int argc, char **argv) {
       const std::filesystem::path root(argv[2]);
       // Streamed weights read on a pool of SSD readers, as the engine's do.
       loadOptions.readers = std::make_shared<model::SsdReaders>(model::kSsdReaders);
-      model::LoadedModel model = model::loadModel(backend, root, model::inspectModelRoot(root), loadOptions);
+      model::ModelDescriptor descriptor = model::inspectModelRoot(root);
+      // Keep capture layer ids for a target-only trace without loading or
+      // executing the draft.
+      const model::DFlashDraftLayout captureLayout = descriptor.draft;
+      if (targetOnly) {
+        const auto capabilities = descriptor.capabilities;
+        const auto scaling = descriptor.ropeScaling;
+        const std::string sourceIdentity = descriptor.sourceIdentity;
+        descriptor = model::makeModelDescriptor(descriptor.name, descriptor.target, {}, descriptor.vision,
+                                                descriptor.targetSource, descriptor.visionSource);
+        descriptor.capabilities = capabilities;
+        descriptor.ropeScaling = scaling;
+        descriptor.sourceIdentity = sourceIdentity;
+      }
+      model::LoadedModel model = model::loadModel(backend, root, descriptor, loadOptions);
+      if (targetOnly && captures) model.draft.layout = captureLayout;
       ops::ExecutionPlans operators(backend.capabilities());
       const uint32_t vocabulary =
           std::visit([](const auto &layout) { return layout.vocabularySize; }, model.descriptor.target);
@@ -303,7 +401,7 @@ int main(int argc, char **argv) {
                   tokens.size());
       for (size_t index = 0; index < windows.size(); ++index)
         runWindow(executor, tokens, windows[index], index + 1, pageTable, vocabulary, argv[4],
-                  captures ? model.draft.layout.targetHiddenSize() : 0);
+                  captures ? model.draft.layout.targetHiddenSize() : 0, targetOnly, convolutionCapture);
       return 0;
     } catch (const std::exception &error) {
       std::cerr << "teacher-logits: " << error.what() << '\n';

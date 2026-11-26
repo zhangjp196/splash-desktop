@@ -27,6 +27,21 @@ class CacheInfo:
     # Tokens whose KV the request read from cached blocks another request
     # computed, past its cached prefix; known once it is done.
     deduplicated_tokens: int = 0
+    # The tokens of the state the request resumed from, zero for a cold
+    # start; where that state was ("memory", "disk" or None); and whether a
+    # matched block past it once held a state that is gone from both tiers.
+    prefix_tokens: int = 0
+    state_source: str | None = None
+    lost_state: bool = False
+
+    def reuse(self):
+        """The usage fields that say what the request reused, beside each
+        API's cached tokens."""
+        return {
+            "prefix_tokens": self.prefix_tokens,
+            "state_source": self.state_source,
+            "lost_state": self.lost_state,
+        }
 
 
 @dataclass(frozen=True)

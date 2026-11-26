@@ -723,8 +723,13 @@ class StructuredToolGrammarTest(unittest.TestCase):
         cases = (
             ({}, False, True, None),
             ({"tool_choice": "none"}, False, True, "TEXT"),
-            ({"tool_choice": "required"}, True, True, f"WS {both} (TEXT {both})* TEXT"),
-            ({"tool_choice": named}, True, False, "WS (call_0) WS"),
+            (
+                {"tool_choice": "required"},
+                True,
+                True,
+                f"WS_LEAD {both} (TEXT {both})* TEXT",
+            ),
+            ({"tool_choice": named}, True, False, "WS_LEAD (call_0) WS"),
             ({"parallel_tool_calls": False}, False, False, f"TEXT ({both} WS)?"),
         )
         for extra, required, parallel, start in cases:

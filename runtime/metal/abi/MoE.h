@@ -26,6 +26,16 @@ struct MoeRouteParams {
 static_assert(sizeof(MoeRouteParams) == 16,
               "MoE routing parameters are 16 bytes on both sides");
 
+// A biased selection's routing (ops::MoeShape::selectionBias): the scale of
+// its routing weights beside the routing's parameters.
+struct MoeBiasedRouteParams {
+  MoeRouteParams route;
+  float scale;
+};
+
+static_assert(sizeof(MoeBiasedRouteParams) == 20,
+              "biased MoE routing parameters are 20 bytes on both sides");
+
 // Every row carries top_k routed experts followed by the slices of the shared
 // expert, ids `experts` on, whose routing weight is the sigmoid of the
 // block's scalar gate or 1 (ops::MoeShape). Routes are sorted by expert: tile
@@ -121,10 +131,15 @@ struct MoeGgufExpertParams {
   uint32_t experts;
   uint32_t routed_format;
   uint32_t shared_format;
+  uint32_t projection; // 0 gate, 1 up, 2 down: the expert scale row (ops::BlockMoeWeights)
 };
 
-static_assert(sizeof(MoeGgufExpertParams) == 20,
-              "MoE GGUF expert parameters are 20 bytes on both sides");
+// Both expert families bind the routed experts' F32 [3][experts] scales
+// (ops::BlockMoeWeights::expertScales): the staged passes after their slot
+// table at 12 (17 for fused gate/up), the register passes after their slot
+// table at 13, with MoeGgufExpertParams following.
+static_assert(sizeof(MoeGgufExpertParams) == 24,
+              "MoE GGUF expert parameters are 24 bytes on both sides");
 
 // The gate and up passes in one (moe_expert_gguf_m<rows>_gate_up[_mixed]): their
 // sizes and expert count, as MoeGgufExpertParams holds them, and each pass's

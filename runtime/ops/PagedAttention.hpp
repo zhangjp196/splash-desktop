@@ -321,6 +321,11 @@ public:
   [[nodiscard]] static kv::ChunkedPrefillParams
   prefillParams(uint64_t logicalPosition, uint32_t chunkTokens,
                 uint32_t chunkStride, uint32_t pageTableEntries);
+  // Upstream 1.7.2's name for prefillParams, used by the Inkling-2 family.
+  [[nodiscard]] static kv::ChunkedPrefillParams
+  chunkParams(uint64_t logicalPosition, uint32_t chunkTokens, uint32_t chunkStride, uint32_t pageTableEntries) {
+    return prefillParams(logicalPosition, chunkTokens, chunkStride, pageTableEntries);
+  }
   // A verify lane's chunk: its verify rows in kVerifyChunkStride rows of
   // staging, the only parameters addVerify attends.
   [[nodiscard]] static kv::ChunkedPrefillParams

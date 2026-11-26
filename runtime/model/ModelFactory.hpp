@@ -6,6 +6,7 @@
 #include "Qwen3_6Moe.hpp"
 #include "Qwen3_8.hpp"
 #include "QwenVision.hpp"
+#include "Inkling2VisionLoader.hpp"
 #include "ops/PageStorage.hpp"
 #include "ops/ExecutionPlans.hpp"
 
@@ -30,7 +31,8 @@ class QwenStateStorage;
 class SsdReaders;
 class VisionLoader;
 
-using TargetWeights = std::variant<Qwen3_8Weights, Qwen3_6MoeWeights, Qwen4ExpWeights, FlintWeights>;
+using TargetWeights =
+    std::variant<Qwen3_8Weights, Qwen3_6MoeWeights, Qwen4ExpWeights, FlintWeights, Inkling2LoopWeights>;
 
 // How a model loads beside its descriptor: with streamedTableBytes, the rows
 // of a table the target's GGUF holds (model/ModelSizing.hpp) stream from its
@@ -59,7 +61,12 @@ struct LoadedModel final {
   TargetWeights target;
   DFlashDraftWeights draft;
   QwenVisionWeights vision;
+  Inkling2VisionBufferWeights inklingVision;
   std::string manifestFingerprintSha256;
+
+  [[nodiscard]] uint64_t visionWeightBytes() const noexcept {
+    return vision.actualAllocatedBytes + inklingVision.actualAllocatedBytes;
+  }
 
   [[nodiscard]] const std::string &name() const noexcept {
     return descriptor.name;

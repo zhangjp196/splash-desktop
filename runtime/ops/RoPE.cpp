@@ -29,8 +29,11 @@ void RoPE::addTables(
     metal::MetalBuffer targetCosine, metal::MetalBuffer targetSine,
     metal::MetalBuffer draftCosine, metal::MetalBuffer draftSine,
     RopeTableParams rows, uint32_t maximumRows, uint32_t targetPairs) {
-  const std::string kernel = tableKernel(targetPairs);
-  if (!rows.target_rows || rows.target_rows > maximumRows ||
+  // A target's pairs choose the kernel of its rows; draft rows alone, of a
+  // target without RoPE among them, take the default kernel's.
+  const std::string kernel =
+      tableKernel(rows.target_rows ? targetPairs : SPLASH_TARGET_ROPE_PAIRS);
+  if ((!rows.target_rows && !rows.draft_rows) || rows.target_rows > maximumRows ||
       rows.draft_rows > maximumRows) {
     throw std::invalid_argument("invalid RoPE table row count");
   }
@@ -41,13 +44,23 @@ void RoPE::addTables(
   // Target rows carry three positions (t, h, w): Qwen3.5's M-RoPE.
   requireBytes(targetPositions, uint64_t{rows.target_rows} * 3 * sizeof(uint32_t), "target RoPE position");
   requireBytes(draftPositions, uint64_t{rows.draft_rows} * sizeof(uint32_t), "draft RoPE position");
-  requireBytes(targetInverseFrequencies, targetPairs * sizeof(float), "target inverse frequency");
+  requireBytes(targetInverseFrequencies,
+               rows.target_rows ? targetPairs * sizeof(float) : 0,
+               "target inverse frequency");
   requireBytes(draftInverseFrequencies, rows.draft_rows ? SPLASH_DRAFT_ROPE_PAIRS * sizeof(float) : 0,
                "draft inverse frequency");
   requireBytes(targetCosine, targetTable, "target RoPE cosine");
   requireBytes(targetSine, targetTable, "target RoPE sine");
   requireBytes(draftCosine, draftTable, "draft RoPE cosine");
   requireBytes(draftSine, draftTable, "draft RoPE sine");
+  // Without target rows the kernel reads no target buffer: the draft's
+  // stand in their places.
+  if (!rows.target_rows) {
+    targetPositions = draftPositions;
+    targetInverseFrequencies = draftInverseFrequencies;
+    targetCosine = draftCosine;
+    targetSine = draftSine;
+  }
   const uint64_t elements =
       std::max<uint64_t>(uint64_t{rows.target_rows} * targetPairs,
                          uint64_t{rows.draft_rows} * SPLASH_DRAFT_ROPE_PAIRS);

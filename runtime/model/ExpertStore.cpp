@@ -234,8 +234,10 @@ struct ExpertStore::Impl {
     uint32_t size = 0;
     gguf::StreamedExperts experts;
     std::vector<uint32_t> slot; // each expert's, kNoSlot when not resident
-    // Its router and shared-expert gate (bind), which predict its routes.
+    // Its router, shared-expert gate and selection bias (bind), which
+    // predict its routes.
     ops::QuantizedSegment router, scalarGate;
+    metal::MetalBuffer selectionBias;
     // The weights bind() filled, which an elastic resize fills again after
     // its arena moves (ExpertStore::setMemoryBytes).
     ops::BlockMoeWeights *weights = nullptr;
@@ -1136,6 +1138,7 @@ void ExpertStore::bind(uint32_t block, ops::BlockMoeWeights &weights) {
   Impl::Block &streamed = impl.blocks.at(block);
   streamed.router = weights.router;
   streamed.scalarGate = weights.sharedScalarGate;
+  streamed.selectionBias = weights.selectionBias;
   const Impl::Size &size = impl.sizes[streamed.size];
   ops::BlockExpertProjection *const projections[] = {&weights.gate, &weights.up, &weights.down};
   for (size_t z = 0; z < 3; ++z) {
@@ -1208,8 +1211,8 @@ void ExpertStore::addLoad(metal::CommandGraph &graph, std::span<const ops::MoeLo
   if (predicted) {
     if (parts.size() != 1) throw std::invalid_argument("a decode load serves one step");
     const Impl::Block &next = impl.blocks[block + 1];
-    ops::MoE::addRoutes(graph, parts.front().buffers->input, next.router, next.scalarGate, impl.predictionScores,
-                        impl.predictionRoutes, impl.predictionWeights, rows, shape,
+    ops::MoE::addRoutes(graph, parts.front().buffers->input, next.router, next.scalarGate, next.selectionBias,
+                        impl.predictionScores, impl.predictionRoutes, impl.predictionWeights, rows, shape,
                         parts.front().plan->configuration().ggufRouterTile);
   }
   // A decode step's loads keep the GPU awake: they come about every

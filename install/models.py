@@ -70,7 +70,7 @@ ENTRY_STAGING = ".loading-"
 # The speculation modes a selection names. auto takes the draft the
 # configuration provides (the family's release or --draft-model) and serves
 # without one when there is none; a provider names the draft's implementation.
-SPECULATION_MODES = ("auto", "dflash2")
+SPECULATION_MODES = ("auto", "none", "dflash2")
 
 
 class ModelError(RuntimeError):
@@ -78,13 +78,12 @@ class ModelError(RuntimeError):
 
 
 def speculation_mode(value):
-    """The mode a selection names; `none` was one before this release, and is
-    auto now: the draft is whatever the configuration provides."""
-    mode = "auto" if value is None or value == "none" else value
+    """The mode a selection names; none disables draft resolution."""
+    mode = "auto" if value is None else value
     if mode not in SPECULATION_MODES:
         raise ModelError(
             f"speculation {value} is not one this release implements; "
-            "use auto or dflash2"
+            "use auto, none or dflash2"
         )
     return mode
 
@@ -175,6 +174,10 @@ def split_model_id(value: str) -> tuple[str, str | None]:
 def parse_draft_model(value: str) -> str:
     # A local draft directory is recorded as an absolute path, so the
     # installation it selects does not depend on the working directory.
+    if value and (local := Path(value).expanduser()).is_file():
+        raise argparse.ArgumentTypeError(
+            "a DFlash2 draft must be a directory, not a model or projector file"
+        )
     if value and (local := Path(value).expanduser()).is_dir():
         return str(local.resolve())
     try:
@@ -392,6 +395,8 @@ class Selection:
     ):
         models_root = Path(models_root).resolve()
         speculation = speculation_mode(speculation)
+        if speculation == "none" and require_draft:
+            raise ModelError("speculation none conflicts with require-draft")
         if mmproj is not None:
             mmproj = Path(mmproj).expanduser().resolve()
             if directory is None:

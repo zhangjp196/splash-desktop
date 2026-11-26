@@ -298,6 +298,18 @@ struct GgufEmbedNVFP4 {
     return float(kFP4Values[q]) * (float(quant_e4m3_pair(block[Scales + l / 16]).x) * (128.0f * g));
   }
 };
+// Its 64-element form (nvfp464): uchar scales[4] | float g | uchar codes[32], decoded alike.
+struct GgufEmbedNVFP464 {
+  enum : uint { Weights = 64, Bytes = 40, Scales = 0, G = QUANT_NVFP464_G, Codes = QUANT_NVFP464_CODES };
+  __attribute__((always_inline)) static float decode(device const uchar *block, uint dim) {
+#pragma clang fp reassociate(off)
+    const uint l = dim % Weights;
+    const uchar q = (block[Codes + l / 2] >> (4 * (l % 2))) & 15;
+    const float g = as_type<float>(uint(block[G]) | uint(block[G + 1]) << 8 | uint(block[G + 2]) << 16 |
+                                   uint(block[G + 3]) << 24);
+    return float(kFP4Values[q]) * (float(quant_e4m3_pair(block[Scales + l / 16]).x) * (128.0f * g));
+  }
+};
 // The loader's fp8 block: float g | uchar values[256], E4M3 values; value = (e4m3 / 2^8) (256 g), as the projections'
 // coefficient scales it.
 struct GgufEmbedFP8 {
@@ -305,6 +317,14 @@ struct GgufEmbedFP8 {
   __attribute__((always_inline)) static float decode(device const uchar *block, uint dim) {
 #pragma clang fp reassociate(off)
     return float(quant_e4m3_pair(block[Values + dim % Weights]).x) * (256.0f * as_type<float>(gguf_u32(block, G)));
+  }
+};
+// The loader's mxfp8 block: uchar e | uchar values[32], E4M3 values under the group's E8M0 exponent e.
+struct GgufEmbedMXFP8 {
+  enum : uint { Weights = 32, Bytes = 33, E = 0, Values = 1 };
+  __attribute__((always_inline)) static float decode(device const uchar *block, uint dim) {
+#pragma clang fp reassociate(off)
+    return float(quant_e4m3_pair(block[Values + dim % Weights]).x) * quant_mxfp8_scale(block[E]);
   }
 };
 // MLX affine {bf16 s, bf16 z, codes}: element l of the group is code l of the codes' little-endian bit string of
@@ -415,7 +435,7 @@ GGUF_EMBED_AFFINE(8)
   X(pq20, GgufEmbedPQ20) X(q20, GgufEmbedQ20) X(q10, GgufEmbedQ10) X(iq4nl, GgufEmbedIQ4NL) X(iq4xs, GgufEmbedIQ4XS)  \
   X(iq3s, GgufEmbedIQ3S) X(iq3xxs, GgufEmbedIQ3XXS) X(iq2xxs, GgufEmbedIQ2XXS) X(iq2xs, GgufEmbedIQ2XS)            \
   X(iq2s, GgufEmbedIQ2S) X(iq1s, GgufEmbedIQ1S) X(iq1m, GgufEmbedIQ1M) X(mxfp4, GgufEmbedMXFP4)                    \
-  X(nvfp4, GgufEmbedNVFP4) X(fp8, GgufEmbedFP8)                                                                   \
+  X(nvfp4, GgufEmbedNVFP4) X(nvfp464, GgufEmbedNVFP464) X(fp8, GgufEmbedFP8) X(mxfp8, GgufEmbedMXFP8)         \
   X(tq2t, GgufEmbedTQ2T) X(tqk6, GgufEmbedTQK6) X(tqk7, GgufEmbedTQK7)                                            \
   X(af2g32, GgufEmbedAF2G32) X(af2g64, GgufEmbedAF2G64) X(af2g128, GgufEmbedAF2G128)                               \
   X(af3g32, GgufEmbedAF3G32) X(af3g64, GgufEmbedAF3G64) X(af3g128, GgufEmbedAF3G128)                               \

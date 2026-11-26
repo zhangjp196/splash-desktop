@@ -29,6 +29,7 @@ from .errors import (
     field_error,
 )
 from .http_security import OriginRefused, authenticate, validate_headers
+from .images import MAX_ASPECT
 from .latency import RequestLatency
 from .metrics import prometheus_metrics
 from .origins import ANY_ORIGIN
@@ -452,6 +453,7 @@ class FrontendHandler(BaseHTTPRequestHandler):
                     "max_model_len": self.app.max_context,
                     "context_length": self.app.max_context,
                     "vision": self.app.vision,
+                    "limits": {"image_aspect": MAX_ASPECT},
                     "input_modalities": self.app.input_modalities,
                     "reasoning": self.app.reasoning,
                     "speculation": speculation,

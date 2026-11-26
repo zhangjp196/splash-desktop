@@ -25,7 +25,8 @@ void include(Workspace &bound, const Workspace &required,
 } // namespace
 
 ExecutionPlans::ExecutionPlans(const DeviceCapabilities &device)
-    : linear_(device), family_(gpuFamilyClass(device.appleGpuFamily)),
+    : linear_(device), calibration_(Inkling2AttentionCalibration::of(device)),
+      family_(gpuFamilyClass(device.appleGpuFamily)),
       gpuCores_(plannedGpuCores(device)),
       cpuBf16Experts_([] {
         const char *value = std::getenv("SPLASH_CPU_BF16_EXPERTS");

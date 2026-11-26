@@ -234,6 +234,41 @@ def select_vision(repo):
     )
 
 
+def _validate_inkling2_projector(header):
+    """Validate Inkling2v's known GGUF tensor inventory and extents."""
+    width, intermediate, patch, depth = 1024, 4096, 20, 23
+    expected = {
+        "v.class_embd": (width,),
+        "v.class_position_embd.weight": (width,),
+        "v.patch_embd.weight": (width, 3, patch, patch),
+        "v.position_embd.weight": (width, 32 * 32),
+        "v.pre_ln.bias": (width,),
+        "v.pre_ln.weight": (width,),
+        "mm.1.weight": (intermediate, intermediate),
+        "mm.2.weight": (2304, intermediate),
+    }
+    for layer in range(depth):
+        prefix = f"v.blk.{layer}."
+        for name in ("ln1.bias", "ln1.weight", "ln2.bias", "ln2.weight", "ls1.weight", "ls2.weight",
+                     "ffn_up.bias", "ffn_up.weight", "ffn_down.bias", "ffn_down.weight",
+                     "attn_k.bias", "attn_k.weight", "attn_out.bias", "attn_out.weight",
+                     "attn_q.bias", "attn_q.weight", "attn_v.bias", "attn_v.weight"):
+            if name.startswith(("ln", "ls", "attn_")) and name.endswith(("bias", "weight")) and name.split(".")[0].startswith("attn_"):
+                shape = (width, width) if name.endswith("weight") else (width,)
+            elif name.startswith("ffn_up"):
+                shape = (intermediate, width) if name.endswith("weight") else (intermediate,)
+            elif name.startswith("ffn_down"):
+                shape = (width, intermediate) if name.endswith("weight") else (width,)
+            else:
+                shape = (width,)
+            expected[prefix + name] = shape
+    if set(header.tensors) != set(expected):
+        raise models.ModelError("invalid GGUF Inkling2 vision tensor inventory")
+    for name, shape in expected.items():
+        if tuple(reversed(header.extents[name])) != shape:
+            raise models.ModelError("invalid GGUF Inkling2 vision tensor shape: " + name)
+
+
 def read_projector(repo, name):
     """The header of the GGUF name in repo; the precision of a vision
     projector Splash loads, a clip model whose weights are BF16, F32, F16 or
@@ -252,7 +287,13 @@ def read_projector(repo, name):
         gguf.TENSOR_TYPES.get(kind, f"type {kind}") for kind in header.tensors.values()
     }
     precision = None
-    if architecture == "clip" and types and types <= {"BF16", "F32", "F16", "Q8_0"}:
+    projector_type = header.values.get("clip.projector_type")
+    if projector_type is None:
+        projector_type = header.values.get("clip.vision.projector_type")
+    if architecture == "clip" and projector_type == "inkling2v":
+        _validate_inkling2_projector(header)
+    supported_types = {"BF16", "F32"} if projector_type == "inkling2v" else {"BF16", "F32", "F16", "Q8_0"}
+    if architecture == "clip" and projector_type in ("qwen3vl_merger", "inkling2v") and types and types <= supported_types:
         # The least precise type the tower has: the one a projector is chosen
         # by, Q8_0's quantized weights below F16's.
         precision = next(p for p in ("Q8_0", "F16", "BF16", "F32") if p in types)
@@ -450,11 +491,16 @@ def _image_processor(repo):
     PROCESSOR_FILES the repository has."""
     if "preprocessor_config.json" in repo.files:
         return models.read_json(repo.file("preprocessor_config.json"))
-    config = models.read_json(repo.file("processor_config.json")).get("image_processor")
+    processor = models.read_json(repo.file("processor_config.json"))
+    config = processor.get("image_processor")
     if not isinstance(config, dict):
         raise models.VisionError(
             f"{repo.name}'s processor_config.json has no image_processor"
         )
+    # Transformers stores the processor class beside image_processor. Carry
+    # it into validation so model identity survives this metadata split.
+    if "processor_class" in processor:
+        config = config | {"processor_class": processor["processor_class"]}
     return config
 
 
@@ -514,18 +560,31 @@ def _safetensors_tensors(repo, name):
 
 
 def _validate_processor(config):
-    """Splash prepares images one way (server/images.py): 16-pixel patches in
-    two temporal slices, merged 2x2 and normalized to [-1, 1]. A processor
-    configuration asking for another is rejected before any download; it is
-    not installed, since nothing reads it."""
+    """Validate the processor against the vision encoder Splash can run.
+
+    Inkling-2 uses a separate encoder with 20-pixel patches.
+    """
+    inkling = (
+        config.get("image_processor_type") == "Inkling2ImageProcessor"
+        or config.get("processor_class") in ("Inkling2Processor", "Inkling2ImageProcessor")
+    )
     expected = {
-        "patch_size": 16,
+        "patch_size": 20 if inkling else 16,
         "temporal_patch_size": 2,
         "merge_size": 2,
         "image_mean": [0.5, 0.5, 0.5],
         "image_std": [0.5, 0.5, 0.5],
     }
-    if any(config.get(key) != value for key, value in expected.items()):
+    # Inkling2's processor config records its processor type and normalization,
+    # but omits patch/temporal/merge sizes that its native processor fixes.
+    # Validate those sizes when present; require them for other processors.
+    if inkling:
+        invalid = any(config.get(key) != expected[key] for key in ("image_mean", "image_std"))
+        invalid |= any(key in config and config[key] != value for key, value in expected.items()
+                       if key not in ("image_mean", "image_std"))
+    else:
+        invalid = any(config.get(key) != value for key, value in expected.items())
+    if invalid:
         raise models.ModelError("unsupported vision preprocessing configuration")
 
 
@@ -580,9 +639,23 @@ def prepare_local(selection):
     vision projector, a file wherever it lies, which the installation links in
     place of the one the directory's or the Hub's projectors would supply. The
     target has no repository or revision, so no Hub request is made for it."""
-    repo = hub.Repository.local_directory(selection.directory)
-    projector = select_vision
-    if selection.mmproj is not None:
+    directory = Path(selection.directory)
+    localFile = directory.is_file()
+    if localFile:
+        if directory.suffix.lower() != ".gguf":
+            raise models.ModelError(f"{directory} is not a GGUF file")
+        from .local import _inspect
+
+        # The local-file installer already discovers a split GGUF's parts and
+        # incorporates a named projector. Reuse that file-level inspection;
+        # the common path below handles directories, not individual files.
+        with tempfile.TemporaryDirectory(prefix="splash-local-target-") as scratch:
+            repo, _ = _inspect(directory, selection.mmproj, selection.language_only, Path(scratch))
+        projector = select_vision
+    else:
+        repo = hub.Repository.local_directory(directory)
+        projector = select_vision
+    if selection.mmproj is not None and not localFile:
         mmproj = Path(selection.mmproj)
         if not mmproj.is_file():
             raise models.ModelError(f"vision projector {mmproj} is not a file")
@@ -625,9 +698,9 @@ def prepare_local(selection):
             installed = assembly.verify(selection.link)
         except (models.ModelError, OSError) as error:
             print(f"Reinstalling {selection.model}: {error}", flush=True)
-    if selection.draft_model is None:
-        # No draft named: the family's DFlash2 release stands in, which
-        # _install resolves from the Hub and downloads when it is missing.
+    if selection.draft_model is None or selection.speculation == "none":
+        # With no explicit draft, _install resolves the family's release;
+        # speculation none makes that resolution return no draft.
         _install(selection, repo, installed, projector=projector)
         return
     draft = _local_draft(selection, installed)
@@ -976,6 +1049,8 @@ def _resolve_draft(family, selection, installed, target):
     cache holds for this selection; the installed draft also stands in, with
     the reason, when the draft cannot be resolved. A family no draft is
     released for takes --draft-model's."""
+    if selection.speculation == "none":
+        return None
     names = (
         (selection.draft_model,)
         if selection.draft_model

@@ -133,7 +133,7 @@ KvSpillPlan planSpill(const StreamedMemoryInputs &in, uint64_t floors) {
     else
       high = middle - 1;
   }
-  const uint64_t states = uint64_t{model::ExecutionLimits::maximumBatchWidth} * in.stateSlotBytes;
+  const uint64_t states = uint64_t{in.lanes} * in.stateSlotBytes;
   spill.enabled = true;
   spill.memoryTokens = low;
   // The room only bounds a first start's context: it follows the volume's
@@ -154,7 +154,7 @@ KvSpillPlan planSpill(const StreamedMemoryInputs &in, uint64_t floors) {
   spill.laneSlots = shape.laneSlots();
   spill.hotFloorBytes = spill.hotTargetBytes = spillFloors.hotFloorBytes;
   spill.hotLimitBytes = extentsBytes(
-      shape.requiredSlots(model::ExecutionLimits::maximumBatchWidth) >> SPLASH_ATTENTION_LOCATION_BLOCK_BITS,
+      shape.requiredSlots(in.lanes) >> SPLASH_ATTENTION_LOCATION_BLOCK_BITS,
       extentPages, layout.kvBytesPerModelPage());
   spill.indexRunwayBytes = spillFloors.indexRunwayBytes;
   spill.stagingBytes = spillFloors.stagingBytes(spill.floorTokens, spill.stagingBuffers);
@@ -168,15 +168,17 @@ StreamedMemoryResult planParts(const StreamedMemoryInputs &in, const Part &route
                                uint64_t arenaBytes, uint64_t spillArenaBytes) {
   const kv::Layout &layout = in.kvLayout;
   const auto overflow = [] { return StreamedMemoryResult{std::nullopt, "the memory plan overflows uint64"}; };
-  // The floors: what loads, the arenas and the stores at their floors, a
-  // lane's state and the KV runway, and a spill-capable target's spill
-  // floors.
+  // The floors: what loads, the arenas and the stores at their floors, every
+  // configured lane's state and the KV runway, and a spill-capable target's
+  // spill floors.
   uint64_t loaded = 0;
   for (const uint64_t bytes : {in.fixedBytes, arenaBytes, routed.floor, table.floor})
     if (!checkedAdd(loaded, bytes, loaded)) return overflow();
-  const std::optional<uint64_t> minimum = minimumRequiredBytes(loaded, in.laneStateBytes, layout);
+  uint64_t laneStates = 0;
+  if (!checkedMultiply(in.laneStateBytes, in.lanes, laneStates)) return overflow();
+  const std::optional<uint64_t> minimum = minimumRequiredBytes(loaded, laneStates, layout);
   if (!minimum) return overflow();
-  const uint64_t runwayBytes = *minimum - loaded - in.laneStateBytes;
+  const uint64_t runwayBytes = *minimum - loaded - laneStates;
   uint64_t floors = *minimum;
   // A plan that spills holds the arenas of a runtime whose K/V spills
   // instead, at least as large, beside which its spill floors must fit.
@@ -408,7 +410,9 @@ std::string_view ContextBounds::bound() const noexcept {
 }
 
 StreamedMemoryResult planStreamedMemory(const StreamedMemoryInputs &in) {
-  if (!in.kvLayout.valid() || !in.windowTokens || in.requestedContextTokens > in.windowTokens ||
+  if (!in.kvLayout.valid() || !in.windowTokens || !in.lanes ||
+      in.lanes > model::ExecutionLimits::maximumBatchWidth ||
+      in.requestedContextTokens > in.windowTokens ||
       (in.sparseKv && !in.sparseKv->laneSlots()))
     return {std::nullopt, "invalid memory planner inputs"};
   std::string error;
@@ -437,6 +441,8 @@ std::optional<std::string> ModelMemoryProfile::validationError() const {
     return "invalid_model_context_length";
   }
   if (!targetKvLayout.valid()) return "invalid_target_kv_layout";
+  if (!lanes || lanes > model::ExecutionLimits::maximumBatchWidth)
+    return "invalid_maximum_batch_width";
   if (spill.enabled && !targetKvLayout.spillable()) return "spill_plan_needs_a_spillable_layout";
   if (!ops::validFormat(stateFormat)) return "invalid_state_format";
   if (!footprint.targetWeightsBytes) return "target_weight_bytes_required";
@@ -622,6 +628,7 @@ evaluateEngineMemoryPlan(const DeviceCapabilities &device,
   breakdown.targetWeightsBytes = model.footprint.targetWeightsBytes;
   breakdown.draftWeightsBytes = model.footprint.draftWeightsBytes;
   breakdown.visionWeightsBytes = model.footprint.visionWeightsBytes;
+  breakdown.maximumBatchWidth = model.lanes;
   breakdown.laneStateBytes =
       model.footprint.runtime.laneStatePlannedAllocatedBytes;
   breakdown.sharedPrefillBytes =
@@ -663,9 +670,15 @@ evaluateEngineMemoryPlan(const DeviceCapabilities &device,
       breakdown.hardBudgetBytes > breakdown.fixedRuntimeBytes
           ? breakdown.hardBudgetBytes - breakdown.fixedRuntimeBytes
           : 0;
+  uint64_t allLaneStateBytes = 0;
+  if (!checkedMultiply(breakdown.laneStateBytes, breakdown.maximumBatchWidth,
+                       allLaneStateBytes))
+    return {std::nullopt, failure(BudgetErrorCode::ArithmeticOverflow,
+                                  "lane state footprint overflows uint64",
+                                  std::move(breakdown))};
   const std::optional<uint64_t> required =
       minimumRequiredBytes(breakdown.fixedRuntimeBytes,
-                           breakdown.laneStateBytes, model.targetKvLayout);
+                           allLaneStateBytes, model.targetKvLayout);
   if (!required) {
     return {std::nullopt,
             failure(BudgetErrorCode::ArithmeticOverflow,
@@ -687,8 +700,8 @@ evaluateEngineMemoryPlan(const DeviceCapabilities &device,
   // unused; a windowed layout's Full and Slim pages take extents of their
   // own (kvPagesWithin).
   const uint64_t availableForOneRequestKv =
-      breakdown.dynamicBudgetBytes > breakdown.laneStateBytes
-          ? breakdown.dynamicBudgetBytes - breakdown.laneStateBytes
+      breakdown.dynamicBudgetBytes > allLaneStateBytes
+          ? breakdown.dynamicBudgetBytes - allLaneStateBytes
           : 0;
   const auto pagesWithin = [&](uint32_t extentPages) {
     return std::min<uint64_t>(
@@ -722,7 +735,7 @@ evaluateEngineMemoryPlan(const DeviceCapabilities &device,
       .disk = spill.diskTokens};
   if (spill.enabled)
     breakdown.residentKvBytes =
-        remaining(breakdown.dynamicBudgetBytes, breakdown.laneStateBytes + spill.indexRunwayBytes +
+        remaining(breakdown.dynamicBudgetBytes, allLaneStateBytes + spill.indexRunwayBytes +
                                                     std::max(spill.stagingBytes, spill.hotTargetBytes));
   if (!breakdown.kvExtentPages ||
       breakdown.dynamicBudgetBytes < breakdown.minimumDynamicBytes) {

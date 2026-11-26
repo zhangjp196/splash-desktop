@@ -176,6 +176,8 @@ struct ModelRequest final {
 // the frontend's resized pixels, and a 128-bit digest of that content.
 // Placeholder token ids are identical for every image, so cache identity keys
 // on the digest as well as the tokens.
+enum class ImageProcessor : uint32_t { Qwen = 0, Inkling = 1 };
+
 struct ImageSpan final {
   uint32_t offset = 0;
   uint32_t tokens = 0;
@@ -183,13 +185,18 @@ struct ImageSpan final {
   uint32_t gridWidth = 0;
   uint64_t digestLo = 0;
   uint64_t digestHi = 0;
+  ImageProcessor processor = ImageProcessor::Qwen;
 
   [[nodiscard]] uint32_t end() const noexcept { return offset + tokens; }
   [[nodiscard]] ops::ImageGrid grid() const noexcept {
     return {gridHeight, gridWidth};
   }
   [[nodiscard]] uint64_t pixelBytes() const noexcept {
-    return grid().pixelBytes();
+    const uint64_t cells = uint64_t{gridHeight} * gridWidth;
+    if (cells > 16384) return 0;
+    if (processor == ImageProcessor::Qwen) return cells * 16 * 16 * 3;
+    if (processor == ImageProcessor::Inkling) return cells * 40 * 40 * 3 * 4;
+    return 0;
   }
   bool operator==(const ImageSpan &) const = default;
 };
@@ -204,10 +211,15 @@ imageSpansValidationError(std::span<const ImageSpan> spans, size_t promptTokens,
   uint64_t previousEnd = 0;
   uint64_t gridPixelBytes = 0;
   for (const ImageSpan &span : spans) {
-    const ops::ImageGrid grid = span.grid();
-    if (!grid.valid() || grid.patches() > ops::kMaximumImagePatches)
-      return "image grid must be even-sided and within the patch limit";
-    if (span.tokens != grid.mergedTokens())
+    const uint64_t cells = uint64_t{span.gridHeight} * span.gridWidth;
+    if (span.processor != ImageProcessor::Qwen && span.processor != ImageProcessor::Inkling)
+      return "unknown image processor";
+    if (!span.gridHeight || !span.gridWidth || cells > ops::kMaximumImagePatches ||
+        (span.processor == ImageProcessor::Qwen &&
+         (span.gridHeight % 2 || span.gridWidth % 2)))
+      return "image grid must be valid and within the patch limit";
+    const uint64_t expectedTokens = span.processor == ImageProcessor::Qwen ? cells / 4 : cells;
+    if (span.tokens != expectedTokens)
       return "image span tokens must equal the merged grid size";
     const uint64_t end = uint64_t{span.offset} + span.tokens;
     if (span.offset < previousEnd || end > promptTokens) {
@@ -215,7 +227,7 @@ imageSpansValidationError(std::span<const ImageSpan> spans, size_t promptTokens,
              "prompt";
     }
     previousEnd = end;
-    gridPixelBytes += grid.pixelBytes();
+    gridPixelBytes += span.pixelBytes();
   }
   if (pixelBytes != gridPixelBytes)
     return "image pixels do not match the image grids";
@@ -615,6 +627,11 @@ maskWordsPerToken(uint32_t vocabularySize) noexcept {
 // and attention-kernel geometry live with their operators.
 struct ExecutionLimits final {
   static constexpr uint32_t maximumBatchWidth = 4;
+  // Inkling 2's name for the default runtime lane count (Splash 1.7.2): the
+  // concurrency limit a target's arenas and scratch hold. Equal to this
+  // build's maximum batch width.
+  static constexpr uint32_t defaultLanes = maximumBatchWidth;
+  [[nodiscard]] static constexpr uint32_t stepRows(uint32_t lanes) noexcept { return lanes * targetVerifyRows; }
   // The rows of a prefill chunk. A prefill command's lanes fill its chunks
   // one after another, and the runtime lets at most one lane's rows run past
   // a chunk: a prefill group has one scratch GDN cell for the state between

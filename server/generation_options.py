@@ -5,13 +5,17 @@ Every generation API validates its request's numbers alike, through
 """
 
 import hashlib
+import math
 import secrets
 from dataclasses import dataclass
 
 from . import protocol as wire
 from .errors import APIError
-from .metrics import is_finite_number
-from .output import MAX_STOP_CHARACTERS
+
+# The longest stop sequence a request may carry (output.MAX_STOP_CHARACTERS).
+# Kept here so the launcher can import the sampling rules without importing
+# output validation and its third-party dependencies.
+MAX_STOP_CHARACTERS = 16 * 1024
 
 MIN_FLOAT32_SUBNORMAL = float.fromhex("0x1p-149")
 FLOAT32_MAX = float.fromhex("0x1.fffffep127")
@@ -71,6 +75,32 @@ class GenerationOptions:
     logit_bias: tuple[tuple[int, float], ...] = ()
 
 
+def is_finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, TypeError):
+        return False
+
+
+def sampling_refusal(name, value):
+    """Why a request may not set the sampling option name to value, as its
+    400 says it; None if it may. A top_k of 0 or -1 keeps every token. A
+    --sampling-default and the served family's sampling are held to the
+    same rule."""
+    if name == "top_k":
+        if isinstance(value, int) and not isinstance(value, bool) and value >= -1:
+            return None
+        return "top_k must be 0 or -1 (disabled) or a positive integer"
+    if name not in SAMPLING_NUMBERS:
+        return f"{name} is not a sampling option"
+    _, accepts, requirement = SAMPLING_NUMBERS[name]
+    if is_finite_number(value) and accepts(value):
+        return None
+    return f"{name} must be {requirement}"
+
+
 def priority(body):
     """The request's scheduling priority, by its lowercase wire name."""
     priority_name = body.get("priority", "normal")
@@ -96,9 +126,12 @@ def cache_salt(body):
 
 def from_request(frontend, body):
     """The request's GenerationOptions, every field validated."""
+    # The server's sampling defaults (--sampling-default) take the place of
+    # the table's own defaults, which a request's own value takes over.
+    defaults = frontend.sampling_defaults
     numbers = {}
     for name, (default, accepts, requirement) in SAMPLING_NUMBERS.items():
-        value = body.get(name, default)
+        value = body.get(name, defaults.get(name, default))
         if not is_finite_number(value) or not accepts(value):
             raise APIError(400, f"{name} must be {requirement}")
         numbers[name] = float(value)
@@ -107,7 +140,7 @@ def from_request(frontend, body):
     # A top_k of 0 or -1 keeps every token, which the frame says with 0. A
     # top_k past the vocabulary keeps every token too, so one past the
     # frame's u32 is sent as its largest value.
-    top_k = body.get("top_k", TOP_K_DEFAULT)
+    top_k = body.get("top_k", defaults.get("top_k", TOP_K_DEFAULT))
     if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < -1:
         raise APIError(400, "top_k must be 0 or -1 (disabled) or a positive integer")
     top_k = min(max(top_k, 0), 0xFFFFFFFF)

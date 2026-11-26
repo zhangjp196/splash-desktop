@@ -276,14 +276,17 @@ void requireReadyWithoutReducingConcurrency(
 void testBudgetLimitedWarmupKeepsRuntimeConcurrency() {
   const auto complete = memoryPlan().breakdown();
   for (uint32_t width : {1U, 2U, 3U}) {
-    // Enough for the requested lanes' state and the KV runway, with less
-    // than one more lane's state to spare. This is a valid single-lane plan.
-    const uint64_t ceiling = complete.minimumRequiredBytes +
-                            (width - 1) * complete.laneStateBytes +
+    // The plan's minimum already holds every configured lane's state and
+    // the KV runway. Lower the explicit ceiling by the lanes that should
+    // remain unmeasured, leaving less than one more lane's state to spare.
+    const uint64_t ceiling = complete.minimumRequiredBytes -
+                            (complete.maximumBatchWidth - width) *
+                                complete.laneStateBytes +
                             complete.laneStateBytes / 2;
+    auto profile = test::modelMemoryProfile(2 * kGiB, 1 * kGiB, 1 * kGiB);
+    profile.lanes = width;
     const EngineMemoryPlan plan = test::requireMemoryPlan(
-        device(), test::modelMemoryProfile(2 * kGiB, 1 * kGiB, 1 * kGiB),
-        ceiling);
+        device(), profile, ceiling);
     Harness harness;
     const auto report = warmup(harness, plan);
     requireReadyWithoutReducingConcurrency(harness, report);
@@ -294,10 +297,15 @@ void testBudgetLimitedWarmupKeepsRuntimeConcurrency() {
     require(harness.executor().calls == expected,
             "warmup attempted a decode width that cannot fit the plan");
     for (uint32_t lane = 0; lane < report.warmup.decodeBatches.size(); ++lane) {
-      require(report.warmup.decodeBatches[lane] ==
-                  (lane < width ? WarmupStepStatus::Complete
-                                : WarmupStepStatus::MemoryLimited),
-              "budget-skipped decode was reported as measured or pending");
+      const auto expectedStatus =
+          lane < width ? WarmupStepStatus::Complete
+                       : lane < plan.breakdown().maximumBatchWidth
+                             ? WarmupStepStatus::MemoryLimited
+                             : WarmupStepStatus::Pending;
+      require(report.warmup.decodeBatches[lane] == expectedStatus,
+              "budget-skipped decode was reported as measured or pending: lane=" +
+                  std::to_string(lane) + " configured=" +
+                  std::to_string(plan.breakdown().maximumBatchWidth));
     }
   }
 }

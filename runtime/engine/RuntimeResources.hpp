@@ -48,6 +48,10 @@ enum class RuntimeResourceStage {
 [[nodiscard]] std::string_view
 runtimeResourceStageName(RuntimeResourceStage stage);
 
+// The storage an architecture's attention kernels can safely address.
+[[nodiscard]] kv::KvStorage runtimeKvStorage(const model::TargetLayout &target,
+                                            kv::KvStorage requested) noexcept;
+
 // What /status reports of the loaded model, the build and the KV pages.
 // Both digests are SHA-256 in lowercase hex.
 struct RuntimeCacheIdentity {
@@ -107,6 +111,8 @@ struct RuntimeResourcesConfig {
   model::ModelDescriptor model;
   std::string buildId;
   uint64_t maximumMemoryBytes = 0;
+  // Maximum resident request lanes (--max-concurrent-requests).
+  uint32_t lanes = model::ExecutionLimits::maximumBatchWidth;
   // No tier unless set.
   CacheDiskQuota cacheDisk;
   // The tier's write budget, the most it writes a day on average

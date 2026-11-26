@@ -14,7 +14,6 @@ from urllib.parse import unquote
 from jsonschema.exceptions import SchemaError
 from llguidance import LLMatcher
 
-from .chat_format import TOOL_CALL_CLOSE, TOOL_CALL_OPEN
 from .errors import APIError
 from .lru import LRUCache, memoized
 from .schema_validation import (
@@ -216,8 +215,20 @@ _pattern_checks = LRUCache(PATTERN_CHECK_CACHE_BYTES, PATTERN_CHECK_CACHE_SIZE)
 # still take pretty printing 15 levels deep at four spaces. Whitespace inside
 # strings is content and unbounded.
 MAX_WHITESPACE = 64
+# llguidance 1.9.1 lexes whitespace_pattern itself, greedily and without
+# backtracking. A bounded run therefore has to be wrapped in grammar rules:
+# the compiler's lexer stops at its bound and an outer rule can finish with
+# another run. Inside JSON that bounds a run to twice MAX_WHITESPACE. Compose
+# runs in a rule instead of recursing: an Inkling subgrammar rejects a
+# self-reference in a token's definition. The leading and continuation rules
+# therefore compose two runs, so neither is captured by the compiler's greedy
+# bounded lexer.
 WHITESPACE = rf"[ \t\n\r]{{0,{MAX_WHITESPACE}}}"
 WHITESPACE_RULE = f"WS: /{WHITESPACE}/"
+LEADING_WHITESPACE_RULE = f"WS_LEAD: /{WHITESPACE}/ /{WHITESPACE}/"
+WHITESPACE_CONTINUATION_RULE = f"WS_NEXT: /{WHITESPACE}/ /{WHITESPACE}/"
+# One trailing run leaves room for the JSON compiler's own bounded run.
+TRAILING_WHITESPACE_RULE = f"WS_TAIL: /{WHITESPACE}/"
 
 
 def _grammar_takes_pattern(pattern):
@@ -810,6 +821,12 @@ def _lark_regex(pattern):
     return "/" + pattern.replace("/", r"\/") + "/"
 
 
+def _text_rule(*tags):
+    """The TEXT lexeme: any text that spells none of `tags`."""
+    spelled = "|".join(re.escape(tag) for tag in tags)
+    return "TEXT: /(?s:.*)/ & ~" + _lark_regex(f"(?s:.*)({spelled})(?s:.*)")
+
+
 # What the grammars write reads back as written: a name neither starts nor
 # ends with the space reading strips and is no longer than reading takes, and
 # raw text does not run past its value's close.
@@ -867,9 +884,25 @@ def _value_terminals(syntax):
     return [f"RAW_VALUE: {_RAW_VALUE} & ~{spelled}"]
 
 
+def _json_arguments(schema):
+    """The arguments of a call of the "json" kind (ToolCallSyntax.arguments):
+    one JSON value of `schema`."""
+    return (
+        "%llguidance {}\nstart: %json "
+        + json.dumps(_grammar_compatible_schema(schema), separators=(",", ":"))
+        + " WS_NEXT?"
+        + "\n"
+        + WHITESPACE_CONTINUATION_RULE
+        + "\n"
+    )
+
+
 def _free_arguments(syntax):
     """The arguments of a tool that is not strict: parameters in the chat
-    template's tags, each with any name and raw text."""
+    template's tags, each with any name and raw text, or for a call of the
+    "json" kind any object."""
+    if syntax.arguments == "json":
+        return _json_arguments({"type": "object"})
     key_open, key_close = _key_tags(syntax)
     rules = [
         "%llguidance {}",
@@ -987,28 +1020,77 @@ def _reasoning(thinking, chat_format):
     opened a think block (thinking), its text up to the block's close; where
     the model opens one itself, an optional block from its opening to its
     close; otherwise none. Each tag is its token, as the template writes it,
-    and the text between is TEXT, which cannot spell the close."""
+    and the text between is TEXT, which cannot spell the close. The
+    whitespace that sets a constrained answer apart from the reasoning, as
+    the template's blank line after the close does, is the rule's too: an
+    answer no reasoning comes before starts at its first token."""
     close = f"<[{chat_format.think_end_id}]>"
     if thinking:
+        # The fork keeps its original grammar text for the existing families;
+        # a format that frames its answer's text needs the close's whitespace
+        # in the reasoning rule so an answer starts at its first token.
+        if chat_format.text_frames:
+            return "think ", f"think: TEXT {close} WS"
         return "think ", f"think: TEXT {close}"
-    if chat_format.think_start_id is not None:
-        return "think? ", f"think: <[{chat_format.think_start_id}]> TEXT {close}"
+    if chat_format.think_start_ids:
+        opening = " ".join(f"<[{token}]>" for token in chat_format.think_start_ids)
+        if chat_format.text_frames:
+            return "think? ", f"think: {opening} TEXT {close} WS"
+        return "think? ", f"think: {opening} TEXT {close}"
     return "", None
 
 
+def _written_tags(chat_format, text):
+    """`text`, a text frame or close of the chat format, as a grammar writes
+    it: its visible tags (special tokens, ChatFormat.frame_tags), each as its
+    token."""
+    return " ".join(chat_format.frame_tags(text))
+def _answer(schema, chat_format):
+    """A JSON answer of `schema`, in the frame of the answer's text where the
+    chat format frames it (text_frames, text_close)."""
+    answer = "%json " + json.dumps(
+        _grammar_compatible_schema(schema), separators=(",", ":")
+    )
+    if chat_format.text_frames:
+        opening = _written_tags(chat_format, chat_format.text_frames[0])
+        close = _written_tags(chat_format, chat_format.text_close)
+        answer = f"{opening} {answer} {close}"
+    return answer
+def _answer_text(chat_format):
+    """The answer's text as a grammar item, and its rule: TEXT, where the
+    answer is the text outside other blocks; blocks of it in their frame
+    where the chat format frames it."""
+    if not chat_format.text_frames:
+        return "TEXT", None
+    opening = _written_tags(chat_format, chat_format.text_frames[0])
+    close = _written_tags(chat_format, chat_format.text_close)
+    return "texts", f"texts: ({opening} TEXT {close})*"
 def json_grammar(schema, thinking, *, chat_format):
     """The output grammar of a request with a response schema and no tools:
-    the reasoning chat_format lets come first (_reasoning), then the JSON."""
+    the reasoning chat_format lets come first (_reasoning), then the JSON,
+    in the answer's frame where the format has one."""
     think, think_rule = _reasoning(thinking, chat_format)
     grammar = [
         "%llguidance {}",
-        f"start: {think}WS %json "
-        + json.dumps(_grammar_compatible_schema(schema), separators=(",", ":")),
+        f"start: {think}"
+        + (
+            _answer(schema, chat_format)
+            if chat_format.text_frames
+            else "WS_LEAD %json "
+            + json.dumps(_grammar_compatible_schema(schema), separators=(",", ":"))
+            + " WS_TAIL?"
+        ),
     ]
     if think_rule is not None:
         grammar.append(think_rule)
-        grammar.append(r"TEXT: /(?s:.*)/ & ~/(?s:.*)<\/think>(?s:.*)/")
-    grammar.append(WHITESPACE_RULE)
+        grammar.append(_text_rule(chat_format.think_close))
+    grammar.extend(
+        (
+            WHITESPACE_RULE,
+            LEADING_WHITESPACE_RULE,
+            TRAILING_WHITESPACE_RULE,
+        )
+    )
     return "\n".join(grammar) + "\n"
 
 
@@ -1171,10 +1253,18 @@ def tool_grammar(policy, thinking, response_schema=None, *, chat_format):
     auto choice, a response schema admits its JSON answer instead of the
     calls."""
     syntax = chat_format.call_syntax
-    strict_arguments = {
-        name: _argument_grammar(policy.argument_schemas[name], syntax)
-        for name in policy.strict
-    }
+    if syntax.arguments == "json":
+        strict_arguments = {
+            name: _json_arguments(
+                _strict_schema(_json_type_names(policy.schemas[name]))
+            )
+            for name in policy.strict
+        }
+    else:
+        strict_arguments = {
+            name: _argument_grammar(policy.argument_schemas[name], syntax)
+            for name in policy.strict
+        }
     side_grammars = []
     if len(strict_arguments) < len(policy.schemas):
         side_grammars.append(
@@ -1183,6 +1273,9 @@ def tool_grammar(policy, thinking, response_schema=None, *, chat_format):
     closing = (
         f" {_tags(syntax, syntax.arguments_close)}" if syntax.arguments_close else ""
     )
+    if syntax.arguments == "json":
+        # The call's object closes after its arguments.
+        closing = ' "}"'
     calls = []
     for index, name in enumerate(policy.schemas):
         arguments = "free_arguments"
@@ -1191,38 +1284,46 @@ def tool_grammar(policy, thinking, response_schema=None, *, chat_format):
             side_grammars.append(
                 {"name": arguments, "lark_grammar": strict_arguments[name]}
             )
+        opening = _function_opening(syntax, name)
+        if syntax.arguments == "json":
+            opening += " " + json.dumps(syntax.json_prefix(name))
         calls.append(
-            f"call_{index}: {TOOL_CALL_OPEN} {_function_opening(syntax, name)} "
-            f"@{arguments}{closing} {TOOL_CALL_CLOSE}"
+            f"call_{index}: {syntax.call_tag} {opening} "
+            f"@{arguments}{closing} {syntax.call_close} WS_TAIL?"
         )
     call = "(" + " | ".join(f"call_{index}" for index in range(len(calls))) + ")"
+    text, text_rule = _answer_text(chat_format)
     if not calls:
         # tool_choice "none": neither the text nor a JSON answer starts a call.
-        body = "TEXT" if response_schema is None else "answer"
+        body = text if response_schema is None else "answer"
     elif policy.required or response_schema is not None:
-        # A call comes first, set apart from the reasoning by whitespace.
-        body = f"WS {call} " + (f"(TEXT {call})* TEXT" if policy.parallel else "WS")
+        # A call comes first. Non-framed formats keep the fork's leading WS.
+        lead = "" if chat_format.text_frames else "WS_LEAD "
+        body = f"{lead}{call} " + (f"({text} {call})* {text}" if policy.parallel else "WS")
         if not policy.required:
             body = f"(({body}) | answer)"
     else:
-        body = f"(TEXT {call})* TEXT" if policy.parallel else f"TEXT ({call} WS)?"
+        body = f"({text} {call})* {text}" if policy.parallel else f"{text} ({call} WS)?"
     think, think_rule = _reasoning(thinking, chat_format)
     main = ["%llguidance {}", f"start: {think}{body}"]
     if response_schema is not None and not policy.required:
+        answer = _answer(response_schema, chat_format)
         main.append(
-            "answer: WS %json "
-            + json.dumps(
-                _grammar_compatible_schema(response_schema), separators=(",", ":")
-            )
-            + " WS"
+            f"answer: {'WS ' if not chat_format.text_frames else ''}"
+            f"{answer} WS_TAIL?"
         )
     if think_rule is not None:
         main.append(think_rule)
+    if text_rule is not None:
+        main.append(text_rule)
     main.extend(
         [
             *calls,
             WHITESPACE_RULE,
-            r"TEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\/think>)(?s:.*)/",
+            LEADING_WHITESPACE_RULE,
+            WHITESPACE_CONTINUATION_RULE,
+            TRAILING_WHITESPACE_RULE,
+            _text_rule(syntax.call_tag, chat_format.think_close),
         ]
     )
     side_grammars.insert(

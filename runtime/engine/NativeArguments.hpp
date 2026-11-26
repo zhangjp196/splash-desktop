@@ -82,6 +82,8 @@ struct NativeArguments final {
   // Neural Engine when that is faster (splash serve --disable-ane turns it
   // off).
   bool neuralEngine = true;
+  // --ane-calibration again: recalibrate at this start rather than recalling.
+  bool recalibrateAne = false;
   // --ane-share SHARE: the prefill FFN's Neural Engine share in [0, 1), in
   // place of the calibration; zero runs the GPU alone. Unset calibrates.
   std::optional<double> aneShare;
@@ -111,6 +113,8 @@ struct NativeArguments final {
   // --verify-rows auto|all: the rows of the draft's block a decode
   // cycle verifies (RuntimeResourcesConfig::verifyRows).
   model::VerifyRows verifyRows = model::VerifyRows::Auto;
+  // --max-concurrent-requests: the maximum resident request lanes.
+  uint32_t lanes = model::ExecutionLimits::maximumBatchWidth;
 };
 
 // Reads `serve-native MODEL_DIRECTORY MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto

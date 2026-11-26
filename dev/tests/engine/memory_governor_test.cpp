@@ -173,9 +173,9 @@ void testAdvertisedContextIsGrantable() {
     uint32_t advertisedTokens;
   };
   for (const Machine &machine :
-       {Machine{"32 GB INT8", 32, 2, 3, kv::Format::Int8, 69'625},
-        Machine{"36 GB INT8", 36, 3, 4, kv::Format::Int8, 253'945},
-        Machine{"36 GB BF16", 36, 3, 4, kv::Format::BFloat16, 129'049}}) {
+       {Machine{"32 GB INT8", 32, 2, 3, kv::Format::Int8, 36'857},
+        Machine{"36 GB INT8", 36, 3, 4, kv::Format::Int8, 221'177},
+        Machine{"36 GB BF16", 36, 3, 4, kv::Format::BFloat16, 113'209}}) {
     // The 27B with its draft and vision tower: 16.2 GiB of weights.
     ModelMemoryProfile model =
         test::modelMemoryProfile(15 * kGiB, kGiB / 2, 7 * kGiB / 10);
@@ -185,7 +185,10 @@ void testAdvertisedContextIsGrantable() {
         model);
     const EngineMemoryBreakdown &budget = plan.breakdown();
     require(plan.maximumContextTokens() == machine.advertisedTokens,
-            std::string(machine.name) + ": unexpected advertised context");
+            std::string(machine.name) + ": unexpected advertised context=" +
+                std::to_string(plan.maximumContextTokens()) + " capacity=" +
+                std::to_string(budget.kvCapacityTokens) + " lanes=" +
+                std::to_string(budget.maximumBatchWidth));
     const uint64_t reserves =
         budget.pipelineReserveBytes + budget.runtimeOverheadReserveBytes;
     for (const uint64_t untracked :
@@ -197,7 +200,8 @@ void testAdvertisedContextIsGrantable() {
       test::metalStatistics().allocatedBytes =
           budget.targetWeightsBytes + budget.draftWeightsBytes +
           budget.visionWeightsBytes + budget.sharedPrefillBytes +
-          budget.sharedDecodeBytes + budget.laneStateBytes;
+          budget.sharedDecodeBytes +
+          uint64_t{budget.maximumBatchWidth} * budget.laneStateBytes;
       test::metalStatistics().deviceCurrentAllocatedBytes =
           test::metalStatistics().allocatedBytes + untracked;
       metal::MetalBackend backend("unused");

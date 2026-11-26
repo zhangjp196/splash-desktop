@@ -121,6 +121,18 @@ std::vector<SyntheticTensor> mlxTargetTensors(const Layout &layout, Quantization
   const auto bfloat16 = [&](const std::string &name, std::vector<uint64_t> shape) {
     result.push_back({name, "BF16", std::move(shape)});
   };
+  // The attention q and k norms hold the multipliers the norms multiply by,
+  // near a family's measured mean (layout.attentionNormMean), which is how
+  // the checkpoint's storage of its norms is told (safetensors::normStorage).
+  const auto normMultipliers = [&](const std::string &name, uint64_t elements) {
+    const uint32_t bits = std::bit_cast<uint32_t>(layout.attentionNormMean) >> 16;
+    std::vector<uint8_t> data(elements * 2);
+    for (uint64_t element = 0; element < elements; ++element) {
+      data[element * 2] = uint8_t(bits);
+      data[element * 2 + 1] = uint8_t(bits >> 8);
+    }
+    result.push_back({name, "BF16", {elements}, std::move(data)});
+  };
   const auto quantized = [&](const std::string &module, uint64_t rows, uint64_t columns, uint64_t experts = 1) {
     const auto [bits, group] = quantization(module);
     const auto shape = [&](uint64_t last) {
@@ -140,8 +152,8 @@ std::vector<SyntheticTensor> mlxTargetTensors(const Layout &layout, Quantization
       quantized(attention + "q_proj", 2ull * layout.attentionWidth, hidden);
       quantized(attention + "k_proj", kv, hidden);
       quantized(attention + "v_proj", kv, hidden);
-      bfloat16(attention + "q_norm.weight", {layout.attentionHeadDimension});
-      bfloat16(attention + "k_norm.weight", {layout.attentionHeadDimension});
+      normMultipliers(attention + "q_norm.weight", layout.attentionHeadDimension);
+      normMultipliers(attention + "k_norm.weight", layout.attentionHeadDimension);
       quantized(attention + "o_proj", hidden, layout.attentionWidth);
     } else {
       const std::string gdn = prefix + "linear_attn.";
@@ -330,9 +342,14 @@ SyntheticAccounting writeSyntheticModel(const std::filesystem::path &root, const
   writeSyntheticCheckpoints(root, target, draft);
   writeSyntheticShard(root / "vision" / "model.safetensors", visionTensors(vision));
   uint64_t targetBytes = 0;
-  for (const model::gguf::Image &image :
-       model::safetensors::planImages(model::SafetensorsCheckpoint(root / "target"), target))
-    targetBytes += image.bytes;
+  {
+    const model::SafetensorsCheckpoint checkpoint(root / "target");
+    // How the checkpoint stores its norms, told by its attention q and k
+    // norms (safetensors::normStorage).
+    const model::safetensors::NormStorage norms = model::safetensors::normStorage(checkpoint, target);
+    for (const model::gguf::Image &image : model::safetensors::planImages(checkpoint, target, norms))
+      targetBytes += image.bytes;
+  }
   return {targetBytes, model::draftImageBytes(root / "draft", draft), model::visionImageBytes(vision)};
 }
 

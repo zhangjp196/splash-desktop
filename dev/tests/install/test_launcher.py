@@ -89,13 +89,11 @@ class LauncherTests(unittest.TestCase):
                 launcher.parse_args(["serve", "--model", model]).model, model
             )
 
-    def test_the_legacy_no_draft_flag_is_accepted_as_auto(self):
-        # A release before this one served without a draft on request; the
-        # configuration decides now, so the old spellings name auto.
-        for options in (["--no-draft"], ["--speculation", "none"]):
+    def test_none_speculation_and_legacy_no_draft_flag(self):
+        for options, expected in ((["--no-draft"], "auto"), (["--speculation", "none"], "none")):
             with self.subTest(options=options):
                 args = launcher.parse_args(["serve", "--model", MODEL_ID, *options])
-                self.assertEqual(args.speculation, "auto")
+                self.assertEqual(args.speculation, expected)
         with (
             mock.patch("sys.stderr", io.StringIO()) as error,
             self.assertRaises(SystemExit) as refused,
@@ -1043,6 +1041,40 @@ class LauncherTests(unittest.TestCase):
             ):
                 with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
                     launcher.parse_args(arguments)
+
+    def test_split_gguf_target_and_local_draft_reach_installation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            target = runtime / "model-00001-of-00002.gguf"
+            target.write_bytes(b"GGUF")
+            draft = runtime / "local-draft"
+            draft.mkdir()
+            with (
+                mock.patch.object(launcher, "RUNTIME_DIR", runtime),
+                mock.patch.object(launcher.socket, "socket"),
+                mock.patch.object(launcher, "_ensure_installed") as install,
+                mock.patch.object(launcher.os, "execve"),
+            ):
+                launcher.main([
+                    "serve", "--model-dir", str(target),
+                    "--draft-model", str(draft), "--speculation", "dflash2",
+                ])
+            (chosen,) = install.call_args.args
+            self.assertEqual(chosen.directory, target.resolve())
+            self.assertEqual(chosen.draft_model, str(draft.resolve()))
+            with (
+                mock.patch.object(
+                    launcher.subprocess, "run",
+                    return_value=subprocess.CompletedProcess([], 0),
+                ),
+                mock.patch.object(launcher, "_run_held", return_value=0) as run,
+                mock.patch.object(launcher.paths, "PACKAGED", True),
+            ):
+                launcher._ensure_installed(chosen)
+            parsed = launcher.model_artifacts.parse_args(run.call_args.args[0][2:])
+            self.assertEqual(parsed.model_dir, str(target.resolve()))
+            self.assertEqual(parsed.draft_model, str(draft.resolve()))
+            self.assertEqual(parsed.speculation, "dflash2")
 
     def test_source_selection_reaches_installation_and_served_root(self):
         with tempfile.TemporaryDirectory() as temporary:

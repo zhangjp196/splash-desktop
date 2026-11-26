@@ -170,12 +170,19 @@ FLINT_PATTERNS = (
     r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
     r"| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
 )
-# Each GGUF tokenizer profile (tokenizer.ggml.pre) Splash derives a tokenizer
-# for: the patterns that split text, each isolating its matches, in order,
-# and whether text is NFC-normalized before them.
+# Inkling 2 uses the o200k split and takes whole vocabulary pieces before merges.
+INKLING2_PATTERN = (
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+"
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*"
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+    r"|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+)
+# Patterns, NFC normalization, and BPE ignore_merges for each profile.
 TOKENIZER_PROFILES = {
-    "qwen35": ((QWEN35_PATTERN,), True),
-    "flint": (FLINT_PATTERNS, False),
+    "qwen35": ((QWEN35_PATTERN,), True, False),
+    "flint": (FLINT_PATTERNS, False, False),
+    "inkling2": ((INKLING2_PATTERN,), False, True),
 }
 # The GGUF token types (llama_token_type) a byte-level BPE vocabulary uses:
 # control tokens are special added tokens, user-defined ones added tokens
@@ -219,7 +226,7 @@ def tokenizer_files(metadata):
             "unsupported GGUF tokenizer profile; expected gpt2/"
             + " or gpt2/".join(TOKENIZER_PROFILES)
         )
-    patterns, nfc = profile
+    patterns, nfc, ignore_merges = profile
     tokens = metadata.require("tokenizer.ggml.tokens", list)
     types = metadata.require("tokenizer.ggml.token_type", list)
     merges = metadata.require("tokenizer.ggml.merges", list)
@@ -247,7 +254,7 @@ def tokenizer_files(metadata):
             raise ModelError("GGUF automatic BOS/EOS insertion is unsupported: " + key)
     try:
         backend = Tokenizer(
-            token_models.BPE({t: i for i, t in enumerate(tokens)}, pairs)
+            token_models.BPE({t: i for i, t in enumerate(tokens)}, pairs, ignore_merges=ignore_merges)
         )
     except Exception as error:
         raise ModelError("invalid GGUF BPE vocabulary or merges") from error
@@ -334,6 +341,12 @@ def model_config(metadata, vision=None):
     text_config, with its vision tower's beside it, or Flint's flat."""
     arch = text_architecture(metadata)
     architecture = ARCHITECTURES[arch]
+    if arch == "inkling2_loop":
+        text = inkling_loop_config(metadata, arch)
+        config = {"model_type": "inkling2_loop", "text_config": text}
+        if vision is not None:
+            config["vision_config"] = vision_config(vision)
+        return config
     fields = {
         "hidden_size": "embedding_length",
         "max_position_embeddings": "context_length",
@@ -368,6 +381,47 @@ def model_config(metadata, vision=None):
     return config
 
 
+def inkling_loop_config(metadata, arch):
+    """Translate the converter's per-weight-layer header to its text config."""
+    layers = loaded_layers(metadata, arch)
+
+    def uniform_heads(name):
+        key = arch + ".attention." + name
+        values = metadata.values.get(key)
+        if (type(values) is not list or len(values) != layers or not values
+                or any(type(value) is not int or value <= 0 or value != values[0]
+                       for value in values)):
+            raise ModelError("missing or invalid GGUF metadata: " + key)
+        return values[0]
+
+    def positive(name):
+        return metadata.positive(arch + "." + name)
+
+    sliding = layer_pattern(metadata, arch, "attention.sliding_window_pattern")
+    return {
+        "model_type": "inkling2_loop_text",
+        "hidden_size": positive("embedding_length"),
+        "model_max_length": positive("context_length"),
+        "num_hidden_layers": layers,
+        "vocab_size": positive("vocab_size"),
+        "unpadded_vocab_size": positive("vocab_size_unpadded"),
+        "num_attention_heads": uniform_heads("head_count"),
+        "num_key_value_heads": uniform_heads("head_count_kv"),
+        "head_dim": positive("attention.key_length"),
+        "sliding_window_size": positive("attention.sliding_window"),
+        "local_layer_ids": [i for i, slides in enumerate(sliding) if slides],
+        "num_experts_per_tok": positive("expert_used_count"),
+        "intermediate_size": positive("expert_feed_forward_length"),
+        "loop_config": {
+            "core_start": positive("loop.start"),
+            "core_end": positive("loop.end"),
+            "num_passes": positive("loop.count"),
+            "gate_rank": positive("loop.gate_rank"),
+            "is_varloop": metadata.require(arch + ".loop.varying", bool),
+        },
+    }
+
+
 def scalar_metadata(metadata):
     """The header's scalar values as the native reader keeps them, for the
     engine's model check, which holds them to the rules its GGUF planner
@@ -384,6 +438,15 @@ def scalar_metadata(metadata):
             typed["float"][key] = value
         elif isinstance(value, str):
             typed["string"][key] = value
+    if metadata.values.get("general.architecture") == "inkling2_loop":
+        prefix = "inkling2_loop.attention."
+        typed["arrays"] = {}
+        for key in ("head_count", "head_count_kv", "sliding_window_pattern"):
+            values = metadata.values.get(prefix + key)
+            if type(values) is list:
+                if key == "sliding_window_pattern":
+                    values = [int(v) for v in values] if all(type(v) is bool for v in values) else []
+                typed["arrays"][prefix + key] = values
     return typed
 
 
@@ -501,11 +564,15 @@ def flint_text_config(metadata, arch):
 
 
 def vision_config(vision):
-    if (
-        vision.require("general.architecture", str) != "clip"
-        or vision.require("clip.projector_type", str) != "qwen3vl_merger"
-        or vision.require("clip.use_gelu", bool) is not True
-    ):
+    architecture = vision.require("general.architecture", str)
+    projector = vision.values.get("clip.projector_type")
+    if projector is None:
+        projector = vision.require("clip.vision.projector_type", str)
+    if architecture != "clip":
+        raise ModelError("unsupported GGUF vision architecture")
+    if projector == "inkling2v":
+        return inkling2_vision_config(vision)
+    if projector != "qwen3vl_merger" or vision.require("clip.use_gelu", bool) is not True:
         raise ModelError("unsupported GGUF vision architecture")
     fields = {
         "depth": "block_count",
@@ -536,8 +603,54 @@ def vision_config(vision):
     return result
 
 
+def inkling2_vision_config(vision):
+    """Inkling2v's distinct vision tower config, retained as a descriptor
+    that the current native runtime explicitly does not load."""
+    expected = {
+        "clip.vision.image_size": 640,
+        "clip.vision.patch_size": 20,
+        "clip.vision.embedding_length": 1024,
+        "clip.vision.block_count": 23,
+        "clip.vision.attention.head_count": 16,
+        "clip.vision.feed_forward_length": 4096,
+        "clip.vision.projection_dim": 2304,
+        "clip.vision.spatial_merge_size": 2,
+    }
+    for key, value in expected.items():
+        if vision.positive(key) != value:
+            raise ModelError("unsupported GGUF Inkling2 vision metadata: " + key)
+    if vision.require("clip.vision.image_mean", list) != [0.5, 0.5, 0.5] or vision.require(
+        "clip.vision.image_std", list
+    ) != [0.5, 0.5, 0.5]:
+        raise ModelError("invalid GGUF Inkling2 vision normalization")
+    return {
+        "model_type": "inkling2_vision",
+        "text_hidden_size": 2304,
+        "temporal_patch_size": 2,
+        "native_patch_size": 20,
+        "adapter_merge_size": 2,
+        "projection_hidden_dim": 4096,
+        "projector_bias": False,
+        "hidden_size": 1024,
+        "num_hidden_layers": 23,
+        "num_attention_heads": 16,
+        "mlp_ratio": 4.0,
+        "posemb_grid_size": 32,
+        "layer_norm_eps": 1e-5,
+    }
+
+
 def processor_config(vision):
     config = vision_config(vision)
+    if config.get("model_type") == "inkling2_vision":
+        return {
+            "processor_class": "Inkling2ImageProcessor",
+            "patch_size": 20,
+            "temporal_patch_size": 2,
+            "merge_size": 2,
+            "image_mean": [0.5, 0.5, 0.5],
+            "image_std": [0.5, 0.5, 0.5],
+        }
     return {
         "patch_size": config["patch_size"],
         "temporal_patch_size": config["temporal_patch_size"],
@@ -786,6 +899,9 @@ class Architecture:
 # QSA block and PLE layer of qwen4exp are Qwen4ExpLayout's
 # indexerBlockTokens and pleLayer (runtime/model/Qwen4Exp.hpp).
 ARCHITECTURES = {
+    "inkling2_loop": Architecture(
+        "inkling2_loop_text", MODEL_TENSORS, LAYER_TENSORS, moe=True, hybrid=False
+    ),
     "qwen35": Architecture("qwen3_5_text", MODEL_TENSORS, LAYER_TENSORS, moe=False),
     "qwen35moe": Architecture(
         "qwen3_5_moe_text", MODEL_TENSORS, LAYER_TENSORS, moe=True
@@ -814,6 +930,49 @@ ARCHITECTURES = {
 }
 
 
+def inkling_loop_tensors(metadata, arch):
+    """The converter layout's weight-layer sections (Inkling2LoopGguf.cpp)."""
+    layers = loaded_layers(metadata, arch)
+    pattern = layer_pattern(metadata, arch, "attention.sliding_window_pattern")
+    start = metadata.positive(arch + ".loop.start")
+    end = metadata.positive(arch + ".loop.end")
+    if not 0 < start < end <= layers:
+        raise ModelError("invalid GGUF loop layer range")
+    tensors = dict(MODEL_TENSORS)
+    tensors.update({"token_embd_norm.weight": NORM_TYPES, "output_res_query.weight": F32})
+    for layer in range(layers):
+        parts = {name: FORMAT_TYPES for name in (
+            "attn_q.weight", "attn_gate.weight", "attn_rel.weight", "attn_k.weight",
+            "attn_v.weight", "attn_output.weight", "ffn_down_exps.weight")}
+        parts.update({name: F32 for name in (
+            "attn_q_clip.weight", "attn_rel_clip.weight", "attn_rel_bias.weight",
+            "attn_k_conv.weight", "attn_v_conv.weight", "attn_post_conv.weight",
+            "ffn_res_query.weight", "exp_probs_b.bias", "ffn_post_conv.weight")})
+        parts.update({"attn_sink_proj.weight": FLOAT_PROJECTION_TYPES,
+                      "ffn_norm.weight": NORM_TYPES, "ffn_gate_inp.weight": ROUTER_TYPES})
+        if layer:
+            parts["attn_res_query.weight"] = F32
+        if pattern[layer]:
+            parts["attn_norm.weight"] = NORM_TYPES
+        else:
+            for name in ("q", "k", "v"):
+                parts[f"attn_{name}_inp_norm.weight"] = NORM_TYPES
+            for name in ("k", "v"):
+                parts[f"attn_{name}_conv_proj.weight"] = FLOAT_PROJECTION_TYPES | FORMAT_TYPES
+        if f"blk.{layer}.ffn_gate_up_exps.weight" in metadata.tensors:
+            parts["ffn_gate_up_exps.weight"] = FORMAT_TYPES
+        else:
+            parts["ffn_gate_exps.weight"] = FORMAT_TYPES
+            parts["ffn_up_exps.weight"] = FORMAT_TYPES
+        if start <= layer < end:
+            parts["loop_msg_query.weight"] = F32
+            for gate in ("q", "k", "v", "ffn"):
+                for projection in ("down", "forget", "gain"):
+                    parts[f"loop_{gate}_ctrl_{projection}.weight"] = FLOAT_PROJECTION_TYPES
+        tensors.update({f"blk.{layer}.{name}": types for name, types in parts.items()})
+    return tensors
+
+
 def loaded_tensors(metadata):
     """Each tensor the native loader reads from the target that metadata
     describes, with the types it accepts. Built-in NextN prediction layers
@@ -824,6 +983,8 @@ def loaded_tensors(metadata):
     whose header lists the fused gate/up experts tensor reads it in place of
     the two. A PLE layer reads the n-gram embedding's tensors too."""
     arch = text_architecture(metadata)
+    if arch == "inkling2_loop":
+        return inkling_loop_tensors(metadata, arch)
     architecture = ARCHITECTURES[arch]
     period = (
         metadata.positive(arch + ".full_attention_interval")
@@ -862,6 +1023,18 @@ def require_arrays(metadata):
     arch = text_architecture(metadata)
     architecture = ARCHITECTURES[arch]
     mismatched = []
+    if arch == "inkling2_loop":
+        expected = {
+            "attention.head_count": [24] * 24,
+            "attention.head_count_kv": [8] * 24,
+            "attention.sliding_window_pattern": [i % 6 != 5 for i in range(24)],
+        }
+        for key, values in expected.items():
+            found = metadata.values.get(arch + "." + key)
+            value_type = bool if key.endswith("pattern") else int
+            if (type(found) is not list or len(found) != len(values)
+                    or any(type(a) is not value_type or a != b for a, b in zip(found, values))):
+                mismatched.append(key)
     if architecture.qsa_block is not None:
         period = metadata.positive(arch + ".full_attention_interval")
         ratios = [
@@ -1007,9 +1180,13 @@ def require_loadable(metadata):
         # llama.cpp multiplies a weight's products by a .scale tensor beside
         # it; the loader folds one into NVFP4's rows only.
         stem = name.removesuffix(".weight")
-        if stem != name and stem + ".scale" in metadata.tensors and found != "NVFP4":
+        if stem != name and stem + ".scale" in metadata.tensors:
             scale = short.removesuffix(".weight") + ".scale"
-            unsupported[scale, f"beside {found}"] += 1
+            scale_kind = TENSOR_TYPES.get(metadata.tensors[stem + ".scale"])
+            if found != "NVFP4":
+                unsupported[scale, f"beside {found}"] += 1
+            elif scale_kind != "F32":
+                unsupported[scale, scale_kind or "unknown"] += 1
     if unsupported:
         listed = ", ".join(
             f"{tensor} {found} ({count} {'tensor' if count == 1 else 'tensors'})"

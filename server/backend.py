@@ -757,7 +757,13 @@ class NativeBackend:
             job.events.put(("text", text))
 
         streamer = CallbackStreamer(
-            self.tokenizer, emit, job.stop_sequences, stop_matched
+            self.tokenizer,
+            emit,
+            job.stop_sequences,
+            stop_matched,
+            visible_tags=(
+                job.chat_format.visible_tags if job.chat_format is not None else ()
+            ),
         )
         state = _JobState(job, streamer)
         state.fingerprint = request_fingerprint(job)
@@ -859,6 +865,13 @@ class NativeBackend:
                 "hit" if event.matched_prompt_tokens else "miss",
                 event.matched_prompt_tokens,
                 event.lane,
+                0,
+                event.prefix_tokens,
+                {
+                    wire.StateSource.MEMORY: "memory",
+                    wire.StateSource.DISK: "disk",
+                }.get(event.state_source),
+                event.lost_state,
             )
             with self.lock:
                 state.started = True

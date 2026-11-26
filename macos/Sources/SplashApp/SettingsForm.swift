@@ -119,6 +119,9 @@ struct SettingsEditor: View {
         case .serving:
             return s.kvFormat != b.kvFormat || s.stateFormat != b.stateFormat
                 || s.neuralEngine != b.neuralEngine
+                || s.recalibrateANE != b.recalibrateANE
+                || s.maxConcurrentRequests != b.maxConcurrentRequests
+                || s.samplingDefaults != b.samplingDefaults
                 || s.maxConcurrency != b.maxConcurrency
                 || s.decodeShare != b.decodeShare
                 || s.responsivePrefill != b.responsivePrefill
@@ -170,6 +173,7 @@ struct SettingsEditor: View {
             VStack(alignment: .leading, spacing: 14) {
                 runtimeCard
                 paceCard
+                samplingCard
                 if profile.thinking {
                     thinkingCard
                 }
@@ -381,11 +385,22 @@ struct SettingsEditor: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                 }
-                FieldColumn(title: L10n.string("field.neural_engine"), help: L10n.string("help.neural_engine")) {
+            }
+            rowDivider
+            SettingColumns {
+                FieldColumn(title: L10n.string("field.neural_engine")) {
                     Toggle("", isOn: $settings.neuralEngine)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .tint(SplashPalette.mint)
+                }
+                FieldColumn(title: L10n.string("field.recalibrate_ane")) {
+                    Toggle("", isOn: $settings.recalibrateANE)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(SplashPalette.mint)
+                        .disabled(!settings.neuralEngine)
+                        .opacity(settings.neuralEngine ? 1 : 0.45)
                 }
             }
         }
@@ -398,10 +413,17 @@ struct SettingsEditor: View {
             tint: SplashPalette.amber
         ) {
             SettingColumns {
-                FieldColumn(title: L10n.string("field.max_concurrency"), help: L10n.string("help.max_concurrency")) {
+                FieldColumn(title: L10n.string("field.queue_size")) {
                     HStack(spacing: 7) {
                         EditorNumberField(value: $settings.maxConcurrency, range: 1...4096, width: 72)
                         Stepper("", value: $settings.maxConcurrency, in: 1...4096)
+                            .labelsHidden()
+                    }
+                }
+                FieldColumn(title: L10n.string("field.max_concurrent_requests")) {
+                    HStack(spacing: 7) {
+                        EditorNumberField(value: $settings.maxConcurrentRequests, range: 1...4, width: 72)
+                        Stepper("", value: $settings.maxConcurrentRequests, in: 1...4)
                             .labelsHidden()
                     }
                 }
@@ -434,6 +456,19 @@ struct SettingsEditor: View {
                     .opacity(settings.responsivePrefill ? 1 : 0.45)
                 }
             }
+        }
+    }
+
+    private var samplingCard: some View {
+        EditorCard(
+            title: L10n.string("config.group.sampling"),
+            systemImage: "slider.horizontal.3",
+            tint: SplashPalette.blue
+        ) {
+            FieldColumn(title: L10n.string("field.sampling_defaults")) {
+                EditorField(text: $settings.samplingDefaults, monospaced: true)
+            }
+            .padding(.vertical, 9)
         }
     }
 

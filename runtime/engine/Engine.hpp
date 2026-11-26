@@ -54,6 +54,8 @@ struct EngineConfig final {
   // Patches per image the server's --max-image-pixels allows; zero rejects
   // images.
   uint32_t maxImagePatches = ops::kMaximumImagePatches;
+  // Maximum resident request lanes admitted by the scheduler.
+  uint32_t maxConcurrentRequests = model::ExecutionLimits::maximumBatchWidth;
   // Decode time owed for each unit of time a prefill runs while requests of
   // equal or higher priority decode. At 0.5 a stream keeps about a third of
   // its solo rate through a long prefill, which meanwhile takes 1.5x as long;

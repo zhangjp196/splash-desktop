@@ -32,6 +32,7 @@ inline float bf16(double value) { return float(__bf16(float(value))); }
 
 inline splash::metal::MetalBuffer upload(splash::metal::MetalBackend &backend, const void *data, uint64_t bytes,
                                          const char *label) {
+  if (!bytes) return {};
   splash::metal::MetalBuffer buffer = backend.allocateBuffer(bytes, splash::metal::BufferStorage::Shared, label);
   std::memcpy(buffer.contents(), data, bytes);
   return buffer;
@@ -147,9 +148,12 @@ inline gguf_reference::Fmt fitting(const std::vector<gguf_reference::Fmt> &forma
 // The model of `shape` and format f that `tile` runs: gate, up and down in f
 // and the next two formats the tile takes, cyclically, and the shared
 // expert's in the three after them, each the next that fits its rows; with
-// upInGateFormats, up in the gate's formats.
+// upInGateFormats, up in the gate's formats. Non-unit scales vary by expert
+// and, by their projection rows, by gate/up/down; the default is the unit
+// scales ordinary families hold.
 inline Model makeModel(splash::metal::MetalBackend &backend, const splash::ops::MoeShape &shape, int f,
-                       bool upInGateFormats, splash::ops::MoeGgufTile tile = splash::ops::MoeGgufTile::Staged) {
+                       bool upInGateFormats, splash::ops::MoeGgufTile tile = splash::ops::MoeGgufTile::Staged,
+                       bool scaled = false) {
   const std::vector<gguf_reference::Fmt> formats = tileFormats(tile);
   const size_t first = std::find(formats.begin(), formats.end(), gguf_reference::Fmt(f)) - formats.begin();
   const uint32_t hidden = shape.hiddenSize, intermediate = shape.expertIntermediateSize;
@@ -174,7 +178,17 @@ inline Model makeModel(splash::metal::MetalBackend &backend, const splash::ops::
   gguf.up = {m.routed[1].segment, m.shared[1].segment};
   gguf.down = {m.routed[2].segment, m.shared[2].segment};
   gguf.slotTable = splash::model::residentExpertSlots(backend, shape.experts);
+  std::vector<float> expertScales(uint64_t{3} * shape.experts, 1.0f);
+  if (scaled)
+    for (size_t i = 0; i < expertScales.size(); ++i) expertScales[i] = 0.5f + float((i * 17) % 7) * 0.25f;
+  gguf.expertScales = upload(backend, expertScales.data(), expertScales.size() * sizeof(float), "moe-expert-scales");
   gguf.slots = shape.experts;
+  if (shape.selectionBias) {
+    std::vector<float> bias(shape.experts);
+    for (uint32_t expert = 0; expert < shape.experts; ++expert)
+      bias[expert] = 0.125f * float((expert * 5) % 13);
+    gguf.selectionBias = upload(backend, bias.data(), bias.size() * sizeof(float), "moe-selection-bias");
+  }
   m.weights = gguf;
   return m;
 }

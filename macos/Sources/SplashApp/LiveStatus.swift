@@ -10,6 +10,7 @@ import Foundation
 struct LiveStatus: Equatable {
     var updated = false
     var ready = false
+    var thermalState: ThermalPressure?
     var modelID: String?
     var contextTokens: Int?
     var decodeTokensPerSecond: Double?
@@ -130,6 +131,39 @@ struct RequestEvent: Identifiable, Equatable {
     let kind: Kind
     let count: Int
     let tokensPerSecond: Double?
+}
+
+/// The thermal pressure macOS reports for the running engine.
+enum ThermalPressure: String, Equatable {
+    case nominal, fair, serious, critical
+
+    var title: String { L10n.string("thermal.pressure." + rawValue) }
+
+    var severity: Double {
+        switch self {
+        case .nominal: return 0
+        case .fair: return 0.25
+        case .serious: return 0.60
+        case .critical: return 1
+        }
+    }
+
+}
+
+/// The highest reported fan's share of its own usable RPM range.
+func fanUtilization(_ live: LiveStatus) -> Double? {
+    guard live.fansAvailable, !live.fanSpeeds.isEmpty else { return nil }
+    let shares = live.fanSpeeds.enumerated().compactMap { index, rpm -> Double? in
+        guard index < live.fanMaximums.count else { return nil }
+        let minimum = index < live.fanMinimums.count ? live.fanMinimums[index] : 0
+        let maximum = live.fanMaximums[index]
+        guard maximum > minimum else { return nil }
+        return min(1, max(0, Double(rpm - minimum) / Double(maximum - minimum)))
+    }
+    if let share = shares.max() { return share }
+    guard let maximum = live.fanMaximums.max(), maximum > 0,
+          let speed = live.fanSpeeds.max() else { return nil }
+    return min(1, max(0, Double(speed) / Double(maximum)))
 }
 
 /// One temperature sensor's reading: the engine reads them from the SMC, so

@@ -5,6 +5,7 @@
 // weights (BlockTargetFormat).
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -15,6 +16,7 @@
 #include "model/GgufImage.hpp"
 #include "model/QwenHybridLayout.hpp"
 #include "model/SparseRowStore.hpp"
+#include "model/TargetImages.hpp"
 #include "model/WeightImages.hpp"
 
 namespace splash::model {
@@ -23,7 +25,25 @@ namespace splash::model {
 // split one (NAME-0000K-of-0000N.gguf, K = 1..N) in split order.
 [[nodiscard]] std::vector<std::filesystem::path> findTargetGgufs(const std::filesystem::path &directory);
 
-class GgufTargetLoader final {
+// How a family's GGUFs plan: its images from a GGUF's metadata with what
+// streams, its layer images first, `layerImages` of them, the first MoE
+// layer's `firstMoeLayer`.
+struct GgufTargetPlan final {
+  uint32_t layerImages = 0;
+  uint32_t firstMoeLayer = 0;
+  std::function<std::vector<gguf::Image>(const GgufFile &, gguf::PlanOptions)> images;
+};
+
+// A family whose GGUF gguf::planImages plans (every fork family), an image a
+// layer. A family that plans its own declares a more specific overload beside
+// its layout (Inkling 2's ggufTargetPlan).
+template <class Layout> [[nodiscard]] GgufTargetPlan ggufTargetPlan(const Layout &layout) {
+  return {layout.layers, layout.leadingDenseLayers, [layout](const GgufFile &file, gguf::PlanOptions options) {
+            return gguf::planImages(file, Layout::ggufArchitecture, layout, options);
+          }};
+}
+
+class GgufTargetLoader final : public TargetImages {
 public:
   // A table whose rows stream from the GGUF (streamTable()): the store that
   // reads them, their format (GGUF_FMT_*), and the record of its image, which
@@ -46,6 +66,10 @@ public:
                    const std::vector<std::filesystem::path> &paths, std::string_view architecture,
                    const QwenTargetDimensions &geometry, SparseRowStoreOptions table = {},
                    ExpertStoreOptions experts = {});
+  // Plans the images as a family declares them (Inkling 2's ggufTargetPlan).
+  GgufTargetLoader(metal::MetalBackend &backend, WeightImages &images,
+                   const std::vector<std::filesystem::path> &paths, const GgufTargetPlan &plan,
+                   SparseRowStoreOptions table = {}, ExpertStoreOptions experts = {});
   GgufTargetLoader(const GgufTargetLoader &) = delete;
   GgufTargetLoader &operator=(const GgufTargetLoader &) = delete;
 

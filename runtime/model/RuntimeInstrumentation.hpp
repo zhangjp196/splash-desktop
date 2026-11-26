@@ -31,6 +31,12 @@ public:
   // values each, in their order), the captured rows in the order the draft's
   // context plan captured them (a cold prompt's first command: its rows).
   [[nodiscard]] static std::span<const uint16_t> lastCapturedRows(const Runtime &runtime, uint32_t chunk);
+  // The draft capture layers' bf16 hidden rows written by lane `lane` of the
+  // last target verify, through the rows that step actually verified.
+  [[nodiscard]] static std::span<const uint16_t> lastCapturedVerifyRows(const Runtime &runtime, uint32_t lane);
+  // The active target auxiliary state (bf16), used by Inkling's short
+  // convolutions, for a resident request after its last decode commit.
+  [[nodiscard]] static std::vector<uint16_t> targetAuxiliaryState(const Runtime &runtime, uint64_t requestId);
   // The rows of its block batch lane `lane` of the last decode step verified
   // (ops::DraftSelector::addVerifyRows), until the next decode step.
   [[nodiscard]] static uint32_t lastVerifyRows(const Runtime &runtime, uint32_t lane);
@@ -43,6 +49,27 @@ public:
   // last such command since the last take; none if none ran.
   static void captureTargetLogits(Runtime &runtime, bool enabled);
   [[nodiscard]] static std::vector<std::vector<float>> takeTargetLogits(Runtime &runtime);
+  struct FfnConvolutionCapture final {
+    uint32_t lane = 0;
+    uint32_t row = 0;
+    uint32_t rowCount = 1;
+    std::vector<uint16_t> stateIn;
+    std::vector<uint32_t> selectedExperts;
+    std::vector<float> routingWeights;
+    bool groupedInputBfloat16 = false;
+    std::vector<uint16_t> groupedInput;
+    std::vector<uint16_t> expertIntermediate;
+    std::vector<uint16_t> expertOutputs;
+    std::vector<uint16_t> moeInput;
+    std::vector<uint16_t> input;
+    std::vector<uint16_t> output;
+  };
+  // Capture consecutive application-1 FFN convolution rows during the next
+  // target decode graph. All vectors retain the raw BF16 bits from the kernels.
+  static void armInklingFfnConvolutionCapture(Runtime &runtime, uint32_t lane, uint32_t row,
+                                               uint32_t rowCount = 1);
+  [[nodiscard]] static std::optional<FfnConvolutionCapture>
+  takeInklingFfnConvolutionCapture(Runtime &runtime);
   // The anchor request `requestId`'s last selection left pending, which its
   // next decode step emits first; none until its first token is selected.
   [[nodiscard]] static std::optional<uint32_t> pendingToken(const Runtime &runtime, uint64_t requestId);

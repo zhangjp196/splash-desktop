@@ -89,6 +89,132 @@ class SmartResizeTest(unittest.TestCase):
                     self.assertLessEqual(height * width, cap)
 
 
+class InklingPrepareTest(unittest.TestCase):
+    def test_uses_40px_tiles_checkerboard_and_normalized_minus_one_padding(self):
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGBA", (1, 1), (255, 0, 0, 255)).save(buffer, format="PNG")
+        prepared = images.prepare_inkling(buffer.getvalue())
+        self.assertEqual(
+            (prepared.tile_height, prepared.tile_width, prepared.tokens), (1, 1, 1)
+        )
+        values = struct.unpack("<" + "f" * (40 * 40 * 3), prepared.pixels)
+        self.assertEqual(values[:3], (1.0, -1.0, -1.0))
+        for value in values[3:6]:
+            self.assertAlmostEqual(value, -1.0 - 2.0 / 255.0)
+
+    def test_transparency_composites_on_checkerboard(self):
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGBA", (16, 1), (0, 0, 0, 0)).save(buffer, format="PNG")
+        prepared = images.prepare_inkling(buffer.getvalue())
+        values = struct.unpack("<" + "f" * (40 * 40 * 3), prepared.pixels)
+        self.assertAlmostEqual(values[0], 204 / 255 * 2 - 1)
+        self.assertAlmostEqual(values[8 * 3], 153 / 255 * 2 - 1)
+
+
+    def test_non_square_image_preserves_image_wide_geometry_and_padding(self):
+        prepared = images.prepare_inkling(png_bytes(81, 41, (255, 0, 0)))
+        self.assertEqual((prepared.tile_height, prepared.tile_width), (2, 3))
+        values = struct.unpack("<" + "f" * (80 * 120 * 3), prepared.pixels)
+        def pixel(x, y):
+            offset = (((y // 40) * 3 + x // 40) * 1600 + (y % 40) * 40 + x % 40) * 3
+            return values[offset:offset + 3]
+        self.assertEqual(pixel(80, 40), (1.0, -1.0, -1.0))
+        for x, y in ((81, 40), (0, 41), (119, 79)):
+            for value in pixel(x, y):
+                self.assertAlmostEqual(value, -1.0 - 2.0 / 255.0)
+
+    def test_placeholder_and_cache_keep_processor_and_geometry(self):
+        from server import image_prompts, protocol
+        from server.chat_format import QWEN
+
+        payload = png_bytes(41, 1)
+        cache = images.ImageCache()
+        inkling = cache.prepare(payload, images.MAX_PIXELS, "inkling2")
+        qwen = cache.prepare(payload, images.MAX_PIXELS, "qwen")
+        self.assertIs(cache.prepare(payload, images.MAX_PIXELS, "inkling2"), inkling)
+        self.assertNotEqual((inkling.digest_lo, inkling.digest_hi), (qwen.digest_lo, qwen.digest_hi))
+        frontend = SimpleNamespace(
+            chat_format=QWEN,
+            tokenizer=SimpleNamespace(convert_tokens_to_ids=lambda _: 7),
+            _image_token_count=lambda tokens, prepared, positions: len(tokens) + sum(i.tokens - 1 for i in prepared),
+            _check_image_request_size=lambda *args: None,
+        )
+        tokens, spans, pixels = image_prompts.expand_image_pads(frontend, [3, 7, 9], [inkling], [1])
+        self.assertEqual(tokens, [3, 7, 7, 9])
+        self.assertEqual((spans[0].processor, spans[0].grid_height, spans[0].grid_width),
+                         (protocol.ImageProcessor.INKLING, 1, 2))
+        self.assertEqual(pixels, inkling.pixels)
+        self.assertEqual(spans[0].pixel_bytes, len(pixels))
+
+    def test_inkling_images_prepare_for_native_execution(self):
+        from server import image_prompts
+
+        frontend = SimpleNamespace(
+            image_processor=images.PreparedInklingImage(1, 1, b"", 0, 0).processor,
+            images=images.ImageCache(),
+            max_image_pixels=images.MAX_PIXELS,
+            _check_image_request_size=lambda *args, **kwargs: None,
+        )
+        url = "data:image/png;base64," + base64.b64encode(
+            png_bytes(41, 41, (255, 0, 0))
+        ).decode()
+        prepared = image_prompts.prepare_images(
+            frontend,
+            [{"content": [{"type": "image_url", "image_url": {"url": url}}]}],
+            FOREVER,
+        )
+        self.assertEqual(len(prepared), 1)
+        self.assertEqual((prepared[0].tile_height, prepared[0].tile_width), (2, 2))
+
+    def test_runtime_guard_allows_text_only(self):
+        from server import image_prompts
+
+        frontend = SimpleNamespace(
+            image_processor=images.PreparedInklingImage(1, 1, b"", 0, 0).processor,
+            images=images.ImageCache(),
+        )
+        prepared = image_prompts.prepare_images(
+            frontend, [{"content": "text only"}], FOREVER
+        )
+        self.assertEqual(len(prepared), 0)
+
+    def test_fast_tokenizer_returns_requested_offsets_for_image_pad(self):
+        from tokenizers.pre_tokenizers import Whitespace
+
+        from server.fast_tokenizer import FastTokenizer
+
+        tokenizer = Tokenizer(
+            models.WordLevel(
+                {"before": 0, "<|content_image|>": 1, "after": 2, "[UNK]": 3},
+                unk_token="[UNK]",
+            )
+        )
+        tokenizer.pre_tokenizer = Whitespace()
+        tokenizer.add_special_tokens(["<|content_image|>"])
+        encoded = FastTokenizer(tokenizer, None, None)(
+            "before <|content_image|> after",
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        image = encoded["input_ids"].index(1)
+        self.assertEqual(encoded["offset_mapping"][image], (7, 24))
+        self.assertEqual(len(encoded["input_ids"]), len(encoded["offset_mapping"]))
+
+    def test_rejects_oversized_padded_image_without_resizing(self):
+        from PIL import Image
+
+        with mock.patch.object(Image.Image, "resize", side_effect=AssertionError("resized")):
+            with self.assertRaisesRegex(images.ImageError, "padded image exceeds"):
+                images.prepare_inkling(png_bytes(41, 41), 6399)
+        for budget in (0, -1, images.MAX_PIXELS + 1, True):
+            with self.subTest(budget=budget), self.assertRaises(images.ImageError):
+                images.prepare_inkling(png_bytes(1, 1), budget)
+
+
 class PrepareTest(unittest.TestCase):
     def test_prepare_returns_grid_pixels_and_content_digest(self):
         prepared = images.prepare(png_bytes(64, 64), images.MAX_PIXELS)
@@ -350,6 +476,8 @@ class ImageRequestTest(HarnessTestCase):
             "{{ '\\n' }}{% endfor %}"
         )
         app = object.__new__(request_frontend.Frontend)
+        from server.chat_format import QWEN
+        app.chat_format = QWEN
         app.tokenizer = tokenizer
         from server.latency import LatencyMetrics
 

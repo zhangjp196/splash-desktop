@@ -25,6 +25,7 @@ struct AneFfnSetting final {
   };
   bool enabled = true;
   std::optional<Given> given;
+  bool recalibrate = false;
 
   // The setting of a dev tool's --ane-ffn-share and --ane-ffn-minimum-rows:
   // none calibrates the split, and a share of 0 runs the GPU alone. Throws

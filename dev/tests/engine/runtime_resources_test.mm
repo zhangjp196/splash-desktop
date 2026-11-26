@@ -94,6 +94,26 @@ RuntimeResourcesConfig budgetConfig(const char *metallibPath, const std::filesys
   return config;
 }
 
+void testInklingPackedKvUsesInt8() {
+  const model::TargetLayout inkling = model::Inkling2LoopLayout{};
+  const model::TargetLayout other = model::Qwen3_8Layout{};
+  const kv::KvStorage int8 = kv::storageOf(kv::Format::Int8);
+  const kv::KvStorage int4 = kv::storageOf(kv::Format::Int4);
+  const kv::KvStorage bf16 = kv::storageOf(kv::Format::BFloat16);
+  const kv::KvStorage k8v4{{8, false}, {4, false}};
+
+  require(runtimeKvStorage(inkling, int4) == int8,
+          "Inkling-2 packed int4 KV was not downgraded to int8");
+  require(runtimeKvStorage(inkling, k8v4) == int8,
+          "Inkling-2 k8v4 KV was not downgraded to int8");
+  require(runtimeKvStorage(inkling, int8) == int8,
+          "Inkling-2 int8 KV was changed");
+  require(runtimeKvStorage(inkling, bf16) == bf16,
+          "Inkling-2 BF16 KV was changed");
+  require(runtimeKvStorage(other, int4) == int4,
+          "another model's int4 KV was changed");
+}
+
 // A model under root whose weights load, which nothing but the host
 // refuses: `name` names its descriptor and build.
 RuntimeResourcesConfig loadableConfig(const char *metallibPath, const std::filesystem::path &root,
@@ -456,12 +476,12 @@ void requireReachesModelLoader(RuntimeResourcesConfig config,
   }
 }
 
-// Beside its weights a model needs at least the runtime reserves, one lane's
-// state and the KV runway.
+// Beside its weights a model needs at least the runtime reserves, the state
+// for each configured lane and the KV runway.
 uint64_t minimumBytes(const RuntimeResourcesConfig &config) {
   return minimumRequiredBytes(model::streamableWeights(config.modelRoot, config.model, {}).loadedBytes +
                                   model::kPipelineReserveBytes + model::kRuntimeOverheadReserveBytes,
-                              config.model.stateLayout.laneBytes(),
+                              config.lanes * config.model.stateLayout.laneBytes(),
                               config.model.targetKvLayout)
       .value();
 }
@@ -1223,6 +1243,7 @@ int main(int argc, char **argv) {
   @autoreleasepool {
     try {
       require(argc == 2, "expected metallib path");
+      testInklingPackedKvUsesInt8();
       testLoadedVisionIsRequiredOnlyWithVision();
       testPersistentCacheNamespace();
       testWeightBudgetBeforeLoading(argv[1]);

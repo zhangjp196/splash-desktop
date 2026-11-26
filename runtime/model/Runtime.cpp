@@ -1,6 +1,7 @@
 #include "model/Runtime.hpp"
 #ifdef SPLASH_RUNTIME_INSTRUMENTATION
 #include "metal/abi/GDN.h"
+#include "model/Inkling2LoopTarget.hpp"
 #include "model/RuntimeInstrumentation.hpp"
 #endif
 #include "AwakeClock.hpp"
@@ -16,6 +17,7 @@
 #include "model/VerifyBudget.hpp"
 
 #include "metal/CommandGraph.hpp"
+#include "metal/abi/VerifyTree.h"
 #include "ops/AneFfn.hpp"
 #include "ops/AneProjection.hpp"
 #include "ops/Linear.hpp"
@@ -255,6 +257,7 @@ QwenTargetPrefillBuffers prefillBuffers(const PrefillArena &arena, uint32_t chun
   buffers.ropeCos = arena.get(PrefillTensor::RopeCos, chunk);
   buffers.ropeSin = arena.get(PrefillTensor::RopeSin, chunk);
   buffers.ropeInverseFrequencies = arena.get(PrefillTensor::TargetInverseFrequencies);
+  buffers.laneRows = arena.get(PrefillTensor::LaneLayout, chunk);
   buffers.chunkKeys = arena.get(PrefillTensor::ChunkKeys);
   buffers.chunkValues = arena.get(PrefillTensor::ChunkValues);
   buffers.moe = arena.moeScratch(chunk);
@@ -270,6 +273,7 @@ struct Runtime::Impl {
     uint64_t digestHi = 0;
     uint32_t gridHeight = 0;
     uint32_t gridWidth = 0;
+    ImageProcessor processor = ImageProcessor::Qwen;
 
     bool operator==(const ImageKey &) const = default;
   };
@@ -289,6 +293,7 @@ struct Runtime::Impl {
     ImageKey key;
     MetalBuffer pixels;
     MetalBuffer embeddings;
+    std::shared_ptr<Inkling2VisionGraphResources> inklingEncoder;
     bool encoding = false;
     bool encoded = false;
     // Its entry in the embedding cache while the cache holds it.
@@ -579,6 +584,8 @@ struct Runtime::Impl {
       const ImageSpan &span = image.span;
       if (logical < span.offset)
         break;
+      if (span.processor == ImageProcessor::Inkling)
+        continue;
       const uint32_t mergedHeight = span.gridHeight / 2;
       const uint32_t mergedWidth = span.gridWidth / 2;
       const uint32_t start =
@@ -597,12 +604,14 @@ struct Runtime::Impl {
   }
 
   uint64_t embeddingBytes(const ImageSpan &span) const {
-    return uint64_t{ops::Vision::embeddingRows(span.grid())} *
-           geometry.target.hiddenSize * sizeof(uint16_t);
+    const uint64_t rows = span.processor == ImageProcessor::Inkling
+                              ? uint64_t{span.gridHeight} * span.gridWidth
+                              : ops::Vision::embeddingRows(span.grid());
+    return rows * geometry.target.hiddenSize * sizeof(uint16_t);
   }
 
   static ImageKey imageKey(const ImageSpan &span) noexcept {
-    return {span.digestLo, span.digestHi, span.gridHeight, span.gridWidth};
+    return {span.digestLo, span.digestHi, span.gridHeight, span.gridWidth, span.processor};
   }
 
   // The rows of an identical image that something still holds, moved to the
@@ -811,7 +820,12 @@ struct Runtime::Impl {
     uint64_t bytes = 0;
     // The patches of the largest staged image that still needs its encode.
     uint32_t encodePatches = 0;
+    const bool inkling = std::holds_alternative<Inkling2LoopLayout>(model.descriptor.target);
+    if (inkling && model.inklingVision.layout.output != geometry.target.hiddenSize)
+      throw std::invalid_argument("Inkling vision output width does not match target");
     for (const ImageSpan &span : request.images) {
+      if (span.processor != (inkling ? ImageProcessor::Inkling : ImageProcessor::Qwen))
+        throw std::invalid_argument("image processor does not match model");
       if (span.end() <= request.restoredTokens) {
         staged.push_back({span, nullptr});
         continue;
@@ -824,10 +838,12 @@ struct Runtime::Impl {
         rows->key = imageKey(span);
         imageRows.insert_or_assign(rows->key, rows);
         bytes += span.pixelBytes() + embeddingBytes(span);
+        if (inkling)
+          bytes += Inkling2VisionGraphResources::requiredScratchBytes(span.gridHeight, span.gridWidth);
       } else if (rows->embeddings && std::ranges::find(shared, rows) == shared.end()) {
         shared.push_back(rows);
       }
-      if (!rows->encoded)
+      if (!inkling && !rows->encoded)
         encodePatches = std::max(encodePatches, span.gridHeight * span.gridWidth);
       staged.push_back({span, std::move(rows)});
     }
@@ -852,6 +868,9 @@ struct Runtime::Impl {
                       static_cast<size_t>(span.pixelBytes()));
           rows.embeddings = backend.allocateBuffer(
               embeddingBytes(span), BufferStorage::Private, "image embeddings");
+          if (inkling)
+            rows.inklingEncoder = std::make_shared<Inkling2VisionGraphResources>(
+                backend, model.inklingVision, rows.pixels, span.gridHeight, span.gridWidth);
         }
         pixels += span.pixelBytes();
       }
@@ -895,13 +914,22 @@ struct Runtime::Impl {
         throw std::logic_error("prefill reached an image its activation left out");
       ImageRows &rows = *image.rows;
       if (!rows.encoded && !rows.encoding) {
-        if (!vision)
-          throw std::logic_error("image request has no vision encoder");
-        vision->encode(encodes, image.span.grid(), rows.pixels, rows.embeddings);
+        if (image.span.processor == ImageProcessor::Inkling) {
+          if (!rows.inklingEncoder)
+            throw std::logic_error("image request has no Inkling vision encoder");
+          rows.inklingEncoder->encode(encodes);
+          const uint32_t width = geometry.target.hiddenSize;
+          ops::RowCopy::add(encodes, rows.inklingEncoder->output(), {0, width, 0},
+                            rows.embeddings, {0, width, 0}, image.span.tokens, width);
+        } else {
+          if (!vision)
+            throw std::logic_error("image request has no vision encoder");
+          vision->encode(encodes, image.span.grid(), rows.pixels, rows.embeddings);
+        }
         rows.encoding = true;
         ++counters.imageEncodes;
       }
-      const uint32_t width = model.vision.tensors.layout.outputHiddenSize;
+      const uint32_t width = geometry.target.hiddenSize;
       ops::RowCopy::add(
           graph, rows.embeddings,
           {static_cast<uint32_t>(begin - image.span.offset), width, 0}, hidden,
@@ -1036,13 +1064,16 @@ struct Runtime::Impl {
                      uint32_t draftRows, MetalBuffer targetCos,
                      MetalBuffer targetSin, MetalBuffer draftCos,
                      MetalBuffer draftSin) const {
+    // A target without RoPE builds no target tables, its draft's alone.
+    const uint32_t rotatedRows = geometry.target.rotaryPairs ? targetRows : 0;
+    if (!rotatedRows && !draftRows) return;
     ops::RoPE::addTables(
         graph, std::move(targetPositions), std::move(draftPositions),
         prefillArena->get(PrefillTensor::TargetInverseFrequencies),
         prefillArena->get(PrefillTensor::DraftInverseFrequencies),
         std::move(targetCos), std::move(targetSin), std::move(draftCos),
         std::move(draftSin),
-        {.target_rows = targetRows,
+        {.target_rows = rotatedRows,
          .draft_rows = draftRows,
          .target_scale = geometry.target.ropeScaling.attentionFactor()},
         kPrefillRows, geometry.target.rotaryPairs);
@@ -1806,6 +1837,10 @@ struct Runtime::Impl {
     }
     for (uint32_t c = 0; c < chunks.size(); ++c) {
       PrefillChunk &chunk = chunks[c];
+      // Each sequence's rows of the chunk, which its attention layers read.
+      auto *layout = contents<SplashLaneRows>(prefillArena->get(PrefillTensor::LaneLayout, c), "prompt lane rows");
+      for (size_t s = 0; s < chunk.sequences.size(); ++s)
+        layout[s] = {chunk.sequences[s].rowBegin, chunk.sequences[s].part.tokenCount};
       uint64_t queryOffset = 0, kvOffset = 0;
       for (PrefillSequence &sequence : chunk.sequences) {
         sequence.queryOffset = queryOffset;
@@ -2276,6 +2311,15 @@ struct Runtime::Impl {
     buffers.chunkValues = chunkValues;
     buffers.moe = decodeArena->moeScratch(storage);
     buffers.verifyRows = decodeArena->batchSlice(DecodeTensor::VerifyRows, lanes);
+    buffers.treeRows = decodeArena->batchSlice(DecodeTensor::VerifyTreeRows, lanes);
+    buffers.laneRows = decodeArena->batchSlice(DecodeTensor::VerifyLaneRows, lanes);
+    buffers.step = {lanes, lanes * kDecodeRows, kDecodeRows};
+    auto *treeRows = contents<SplashTreeRow>(buffers.treeRows, "verify tree rows");
+    auto *laneRows = contents<SplashLaneRows>(buffers.laneRows, "verify lane rows");
+    ops::makeLinearVerifyLayout(
+        std::span(reinterpret_cast<ops::TreeRow *>(treeRows), lanes * kDecodeRows),
+        std::span(reinterpret_cast<ops::LaneRows *>(laneRows), lanes),
+        lanes * kDecodeRows);
     for (uint32_t lane = 0; lane < lanes; ++lane)
       chunks[lane] = ops::PagedAttention::verifyParams(
           items[lane].logicalPosition,
@@ -2417,19 +2461,36 @@ struct Runtime::Impl {
   // The target's commit after acceptance (QwenTarget::addStateCommit): each
   // lane's auxiliary state after its retained rows. The GDN state folds the
   // retained rows into the lane's next step instead.
-  void encodeTargetStateCommit(CommandGraph &graph,
-                               std::span<Request *const> lanes) {
-    if (lanes.empty() || lanes.size() > kLaneCount)
+  void encodeTargetStateCommit(CommandGraph &graph, std::span<Request *const> lanes,
+                               std::span<const ModelBatchItem> items) {
+    if (lanes.empty() || lanes.size() > kLaneCount || lanes.size() != items.size())
       throw std::invalid_argument("invalid target state commit batch");
     const uint32_t width = static_cast<uint32_t>(lanes.size());
     QwenTargetCommitBuffers buffers;
     buffers.retainedCounts = decodeArena->batchSlice(DecodeTensor::RetainedCount, width);
+    buffers.retainedRows = decodeArena->batchSlice(DecodeTensor::AcceptedPath, width);
+    buffers.laneRows = decodeArena->batchSlice(DecodeTensor::VerifyLaneRows, width);
+    const ops::StepRows step{width, width * kDecodeRows, kDecodeRows};
+    if (targetModel->commitsKvByPath())
+      ops::Sampling::addRetainedPaths(graph, buffers.retainedCounts, buffers.retainedRows, width, kDecodeRows);
+    std::array<MetalBuffer, kLaneCount> pageTables{};
+    std::array<uint32_t, kLaneCount> committed{};
     for (uint32_t lane = 0; lane < width; ++lane) {
       Request &entry = laneEntry(lanes, lane);
       buffers.auxiliaryIn[lane] = states.current(entry.stateLane).auxiliary;
       buffers.auxiliaryOut[lane] = states.next(entry.stateLane).auxiliary;
+      if (targetModel->commitsKvByPath()) {
+        if (items[lane].logicalPosition > std::numeric_limits<uint32_t>::max())
+          throw std::overflow_error("Inkling-2 committed position exceeds the KV path ABI");
+        pageTables[lane] = laneTables(entry.stateLane).pages;
+        committed[lane] = static_cast<uint32_t>(items[lane].logicalPosition);
+      }
     }
-    targetModel->addStateCommit(graph, std::move(buffers), width);
+    if (targetModel->commitsKvByPath())
+      targetModel->addKvPathCommit(graph, geometry.target.kvLayout, kvPages.extentPages(),
+                                   std::span(pageTables).first(width), std::span(committed).first(width),
+                                   kDecodeRows, buffers.retainedRows);
+    targetModel->addStateCommit(graph, std::move(buffers), step);
   }
 
   // A verify's selection, acceptance and commits, which end its cycle's last
@@ -2440,17 +2501,21 @@ struct Runtime::Impl {
                           std::span<const uint32_t> maximumRetained) {
     encodeTargetVerifyBatchPolicy(graph, entries);
     encodeBatchAcceptance(graph, entries, maximumRetained);
-    encodeTargetStateCommit(graph, entries);
+    encodeTargetStateCommit(graph, entries, items);
     encodeDraftStateCommitBatch(graph, entries, items);
   }
 
   void encodeBatchEmbedding(CommandGraph &graph, DecodeTensor tokens,
-                            DecodeTensor output, uint32_t lanes) {
+                            DecodeTensor output, uint32_t lanes, bool draftInput) {
     if (!lanes || lanes > kLaneCount)
       throw std::invalid_argument("invalid embedding batch width");
     const uint32_t rows = lanes * kDecodeRows;
-    targetModel->addEmbedding(graph, decodeArena->batchSlice(tokens, lanes),
-                             decodeArena->batchSlice(output, lanes), rows);
+    const MetalBuffer tokenRows = decodeArena->batchSlice(tokens, lanes);
+    const MetalBuffer hiddenRows = decodeArena->batchSlice(output, lanes);
+    if (draftInput)
+      targetModel->addDraftEmbedding(graph, tokenRows, hiddenRows, rows);
+    else
+      targetModel->addEmbedding(graph, tokenRows, hiddenRows, rows);
   }
 
   void encodeBatchVerifyInput(CommandGraph &graph, uint32_t lanes) {
@@ -2707,7 +2772,7 @@ struct Runtime::Impl {
         const uint32_t width = static_cast<uint32_t>(lanes_.size());
         impl_.encodeBatchVerifyInput(target, width);
         impl_.encodeBatchEmbedding(target, DecodeTensor::InputTokens,
-                                   DecodeTensor::Hidden0, width);
+                                   DecodeTensor::Hidden0, width, false);
         impl_.encodeTargetVerifyBatchForward(
             target, {entries.data(), lanes_.size()}, items_, *reads_);
         submit(target);
@@ -3317,6 +3382,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
           rows.encoding = false;
           rows.encoded = true;
           rows.pixels = MetalBuffer{};
+          rows.inklingEncoder.reset();
         }
         // Its last row is injected: the cache owns the rows from now on, so
         // reclaim can free them while the request decodes.
@@ -3449,7 +3515,7 @@ Runtime::decodeAsync(const BatchPlan &plan,
       impl_->decodeArena->batchSlice(DecodeTensor::DraftRopeSin, width));
   if (impl_->model.hasDraft()) {
     impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::DraftInputTokens,
-                                DecodeTensor::DraftHidden0, width);
+                                DecodeTensor::DraftHidden0, width, true);
     impl_->draftModel->addMaskRows(commandGraph,
                                    impl_->decodeArena->batchSlice(DecodeTensor::DraftHidden0, width), width);
     impl_->encodeDraftBatchGraph(commandGraph, entries,
@@ -3519,7 +3585,7 @@ Runtime::decodeAsync(const BatchPlan &plan,
   }
   impl_->encodeBatchVerifyInput(commandGraph, width);
   impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::InputTokens,
-                              DecodeTensor::Hidden0, width);
+                              DecodeTensor::Hidden0, width, false);
   impl_->encodeTargetVerifyBatchForward(commandGraph, entries, items, *reads);
   impl_->encodeVerifyCommit(commandGraph, entries, items, {maximumRetained.data(), width});
 
@@ -3881,7 +3947,26 @@ WarmupStepResult Runtime::warmupCompositeStateRestore() {
     ModelBatchItem item = warmupItem(id, 0, prefixTokens, pages);
     item.inputTokens =
         std::span<const uint32_t>(request.prompt).first(prefixTokens);
-    static_cast<void>(prefill(plan, std::span<const ModelBatchItem>(&item, 1)));
+    const auto prefixResults =
+        prefill(plan, std::span<const ModelBatchItem>(&item, 1));
+    if (prefixResults.size() != 1) {
+      throw std::runtime_error(
+          "composite warmup prefix prefill result count mismatch: " +
+          std::to_string(prefixResults.size()));
+    }
+    requireLanesSucceeded(prefixResults);
+    if (!prefixResults[0].unreadableKvBlocks.empty()) {
+      throw std::runtime_error(
+          "composite warmup prefix prefill could not read " +
+          std::to_string(prefixResults[0].unreadableKvBlocks.size()) +
+          " committed KV blocks");
+    }
+    if (prefixResults[0].consumedPromptTokens != prefixTokens) {
+      throw std::runtime_error(
+          "composite warmup prefix prefill consumed " +
+          std::to_string(prefixResults[0].consumedPromptTokens) +
+          " of " + std::to_string(prefixTokens) + " tokens");
+    }
     wallSeconds = impl_->counters.lastPrefillWallSeconds;
     cachedState = snapshot(id);
     if (!cachedState)
@@ -3962,7 +4047,8 @@ ModelTelemetry Runtime::telemetry() const noexcept {
   result.stateHeldImageBytes = impl_->heldRowsBytes(false);
   for (const auto &[_, held] : impl_->imageRows) {
     if (const std::shared_ptr<const Impl::ImageRows> rows = held.lock())
-      result.imageRowsBytes += rows->pixels.sizeBytes() + rows->embeddings.sizeBytes();
+      result.imageRowsBytes += rows->pixels.sizeBytes() + rows->embeddings.sizeBytes() +
+                               (rows->inklingEncoder ? rows->inklingEncoder->scratchBytes() : 0);
   }
   return result;
 }
@@ -4049,6 +4135,24 @@ std::span<const uint16_t> RuntimeInstrumentation::lastCapturedRows(const Runtime
   return {contents<uint16_t>(captured, "captured target rows"), captured.sizeBytes() / sizeof(uint16_t)};
 }
 
+std::span<const uint16_t> RuntimeInstrumentation::lastCapturedVerifyRows(const Runtime &runtime, uint32_t lane) {
+  const Runtime::Impl &impl = *runtime.impl_;
+  const uint32_t rows = lastVerifyRows(runtime, lane);
+  const uint32_t width = impl.geometry.target.capturedHiddenSize();
+  if (!width || !rows) return {};
+  const MetalBuffer captured = impl.decodeArena->get(lane, DecodeTensor::CapturedTargetHidden);
+  return {contents<uint16_t>(captured, "captured verify target rows"), uint64_t{rows} * width};
+}
+
+std::vector<uint16_t> RuntimeInstrumentation::targetAuxiliaryState(const Runtime &runtime, uint64_t requestId) {
+  const Runtime::Impl &impl = *runtime.impl_;
+  const auto &entry = impl.requests.at(requestId);
+  const MetalBuffer auxiliary = impl.states.current(entry.stateLane).auxiliary;
+  if (!auxiliary) return {};
+  const auto *values = contents<uint16_t>(auxiliary, "target auxiliary state");
+  return {values, values + auxiliary.sizeBytes() / sizeof(uint16_t)};
+}
+
 uint32_t RuntimeInstrumentation::lastVerifyRows(const Runtime &runtime, uint32_t lane) {
   return *contents<uint32_t>(runtime.impl_->decodeArena->get(lane, DecodeTensor::VerifyRows), "verify rows");
 }
@@ -4059,6 +4163,28 @@ void RuntimeInstrumentation::captureTargetLogits(Runtime &runtime, bool enabled)
 
 std::vector<std::vector<float>> RuntimeInstrumentation::takeTargetLogits(Runtime &runtime) {
   return std::exchange(runtime.impl_->capturedTargetLogits, {});
+}
+
+void RuntimeInstrumentation::armInklingFfnConvolutionCapture(Runtime &runtime, uint32_t lane, uint32_t row,
+                                                               uint32_t rowCount) {
+  auto *target = dynamic_cast<Inkling2LoopTarget *>(runtime.impl_->targetModel.get());
+  if (!target) throw std::invalid_argument("FFN convolution capture requires an Inkling-2 target");
+  target->armFfnConvolutionCapture(lane, row, rowCount);
+}
+
+std::optional<RuntimeInstrumentation::FfnConvolutionCapture>
+RuntimeInstrumentation::takeInklingFfnConvolutionCapture(Runtime &runtime) {
+  auto *target = dynamic_cast<Inkling2LoopTarget *>(runtime.impl_->targetModel.get());
+  if (!target) throw std::invalid_argument("FFN convolution capture requires an Inkling-2 target");
+  auto capture = target->takeFfnConvolutionCapture();
+  if (!capture) return std::nullopt;
+  return FfnConvolutionCapture{capture->lane, capture->row, capture->rowCount, std::move(capture->stateIn),
+                               std::move(capture->selectedExperts), std::move(capture->routingWeights),
+                               capture->groupedInputBfloat16, std::move(capture->groupedInput),
+                               std::move(capture->expertIntermediate), std::move(capture->expertOutputs),
+                               std::move(capture->moeInput),
+                               std::move(capture->input),
+                               std::move(capture->output)};
 }
 
 std::optional<uint32_t> RuntimeInstrumentation::pendingToken(const Runtime &runtime, uint64_t requestId) {

@@ -234,27 +234,45 @@ struct SizeDifference final {
   size_t matched;
   std::string difference;
 };
-std::optional<SizeDifference> sizeDifference(NSDictionary *text, const QwenHybridLayout &target,
-                                             TargetSource source) {
-  const std::initializer_list<ExpectedNumber> sizes{
-      {"hidden_size", target.hiddenSize},
-      {"num_hidden_layers", target.layers},
-      {"vocab_size", target.vocabularySize},
-      {"max_position_embeddings", target.nativeContextTokens},
-      {"num_attention_heads", target.attentionQueryHeads},
-      {"num_key_value_heads", target.attentionKvHeads},
-      {"head_dim", target.attentionHeadDimension}};
+std::optional<SizeDifference> sizeDifference(NSDictionary *text, std::string_view family, TargetSource source,
+                                             std::initializer_list<ExpectedNumber> sizes) {
   size_t matched = 0;
   for (const ExpectedNumber &size : sizes) {
     const std::string label = std::string("text config ") + size.key;
     NSNumber *value = requireNumber(text[@(size.key)], label);
     if (value.doubleValue != size.value)
       return SizeDifference{matched, label + ": " + std::string(sourceName(source)) + " " +
-                                         value.description.UTF8String + ", " + std::string(target.family) +
-                                         " " + @(size.value).description.UTF8String};
+                                         value.description.UTF8String + ", " + std::string(family) + " " +
+                                         @(size.value).description.UTF8String};
     ++matched;
   }
   return std::nullopt;
+}
+std::optional<SizeDifference> sizeDifference(NSDictionary *text, const QwenHybridLayout &target,
+                                             TargetSource source) {
+  return sizeDifference(text, target.family, source,
+                        {{"hidden_size", target.hiddenSize},
+                         {"num_hidden_layers", target.layers},
+                         {"vocab_size", target.vocabularySize},
+                         {"max_position_embeddings", target.nativeContextTokens},
+                         {"num_attention_heads", target.attentionQueryHeads},
+                         {"num_key_value_heads", target.attentionKvHeads},
+                         {"head_dim", target.attentionHeadDimension}});
+}
+// Inkling-2-Mini's sizes: its weight layers, which its steps run more
+// applications of, and its own window (modelContextTokens, above the context
+// it is served at) at model_max_length, its release config's key, which the
+// config the installer derives states too.
+std::optional<SizeDifference> sizeDifference(NSDictionary *text, const Inkling2LoopLayout &target,
+                                             TargetSource source) {
+  return sizeDifference(text, target.family, source,
+                        {{"hidden_size", target.hiddenSize},
+                         {"num_hidden_layers", target.weightLayers},
+                         {"vocab_size", target.vocabularySize},
+                         {"model_max_length", target.modelContextTokens},
+                         {"num_attention_heads", target.attentionQueryHeads},
+                         {"num_key_value_heads", target.attentionKvHeads},
+                         {"head_dim", target.attentionHeadDimension}});
 }
 
 // The target's text configuration, of its family (describeSourceModel), whose
@@ -262,7 +280,8 @@ std::optional<SizeDifference> sizeDifference(NSDictionary *text, const QwenHybri
 // holds the rest of what the kernels compute; a GGUF's is what the installer
 // derived from the GGUF's metadata, which the GGUF planner checks
 // (gguf::requireMetadata).
-void validateTextConfig(NSDictionary *text, const QwenHybridLayout &target, TargetSource source) {
+void validateTextConfig(NSDictionary *text, const QwenHybridLayout &target, TargetSource source,
+                        bool statesAttentionGate = true) {
   const std::string_view name = sourceName(source);
   if (const auto difference = sizeDifference(text, target, source)) throw unsupportedModel(difference->difference);
   if (source != TargetSource::Safetensors) return;
@@ -284,9 +303,12 @@ void validateTextConfig(NSDictionary *text, const QwenHybridLayout &target, Targ
   else
     requireNumbers(text, name, "text config",
                    {{"intermediate_size", target.intermediateSize}});
-  requireBooleans(text, "text config",
-                  {{"attention_bias", false},
-                   {"attn_output_gate", true}});
+  requireBooleans(text, "text config", {{"attention_bias", false}});
+  if (statesAttentionGate) requireBooleans(text, "text config", {{"attn_output_gate", true}});
+  // The gate of the GDN's gated norm, where a config names it.
+  if (text[@"output_gate_type"])
+    requireEqual(requireString(text, @"output_gate_type", "text config output_gate_type"),
+                 target.gdnSigmoidGate ? "sigmoid" : "swish", name, "text config output_gate_type");
   if (text[@"tie_word_embeddings"] && !target.tiedEmbeddings)
     requireBooleans(text, "text config", {{"tie_word_embeddings", false}});
   requireEqual(requireString(text, @"hidden_act", "text config hidden_act"),
@@ -320,6 +342,35 @@ void requireWholes(NSArray *values, std::span<const uint32_t> expected, std::str
   };
   throw std::invalid_argument(label + " mismatch: " + std::string(source) + " " + text(found) + ", runtime " +
                               text(expected));
+}
+
+// Qwen3.8-Flash-Next's text configuration: the hybrid's (validateTextConfig
+// above) but attn_output_gate, which it leaves unstated (its attention is
+// gated: Qwen4ExpLayout's packedFullWidth), then, where a safetensors config
+// states them (a GGUF's metadata does, which its planner checks), its
+// hyper-connections, its QSA indexer (its heads, head width, one key head,
+// the tokens of a block and the tokens its blocks select), its PLE n-gram
+// embedding (n-grams, heads, convolution, width, its layer by its 1-based
+// id), and the end-of-sequence token its hash reads (Qwen4ExpLayout::pleEosToken).
+void validateTextConfig(NSDictionary *text, const Qwen4ExpLayout &target, TargetSource source) {
+  validateTextConfig(text, static_cast<const QwenHybridLayout &>(target), source, false);
+  if (source != TargetSource::Safetensors) return;
+  requireNumbers(text, sourceName(source), "text config",
+                 {{"hc_count", target.hyperConnections},
+                  {"hc_lowrank", target.hyperRank},
+                  {"indexer_n_heads", target.indexerHeads},
+                  {"indexer_head_dim", target.indexerHeadDimension},
+                  {"indexer_kv_heads", 1},
+                  {"indexer_compress_ratio", target.indexerBlockTokens},
+                  {"indexer_budget", target.indexerTokens()},
+                  {"ngram_size", target.pleNgram},
+                  {"heads_per_ngram", target.pleHeadsPerNgram},
+                  {"ple_conv_kernel_size", target.pleConvolutionTaps},
+                  {"ple_embed_dim", target.pleWidth()},
+                  {"eos_token_id", target.pleEosToken}});
+  const std::array<uint32_t, 1> pleLayers{target.pleLayer + 1};
+  requireWholes(requireArray(text, @"ple_layer_ids", "text config ple_layer_ids"), pleLayers, sourceName(source),
+                "text config ple_layer_ids");
 }
 
 // The layers of `mask` among `layers`, a bit each, in order.
@@ -374,6 +425,72 @@ void validateTextConfig(NSDictionary *text, const FlintLayout &target, TargetSou
     if (text[@(key)]) requireBooleans(text, "text config", {{key, false}});
 }
 
+// Inkling-2-Mini's text configuration, in its config.json's text_config (its
+// release's or an MLX conversion's, or the one the installer derives from its
+// GGUF, whose metadata its plan checks, gguf::requireMetadata): the sizes
+// (sizeDifference), then the rest as the layout's values make them: its
+// tokens (unpadded_vocab_size), its window and sliding layers
+// (local_layer_ids), its loop (loop_config: its layers, passes and gate
+// rank, the same passes for every token), and the experts a token takes and
+// their width (intermediate_size). Where a config states them (the release's
+// states most, the derived one those its header holds), its sliding heads,
+// relative bias, clips, log scaling, value norm, convolutions, block
+// residual, softcaps, router bias and scale, shared experts (none), stop
+// token, RMS epsilon and bias-free attention; its clip and log-scaling alpha
+// are held as the layout's F32 values, the nearest F32 of the config's.
+void validateTextConfig(NSDictionary *text, const Inkling2LoopLayout &target, TargetSource source) {
+  const std::string_view name = sourceName(source);
+  if (const auto difference = sizeDifference(text, target, source)) throw unsupportedModel(difference->difference);
+  requireNumbers(text, name, "text config",
+                 {{"unpadded_vocab_size", target.vocabularyTokens},
+                  {"sliding_window_size", target.slidingWindow},
+                  {"num_experts_per_tok", target.expertsPerToken},
+                  {"intermediate_size", target.expertIntermediateSize}});
+  std::vector<uint32_t> sliding;
+  for (uint32_t layer = 0; layer < target.weightLayers; ++layer)
+    if (target.slides(layer)) sliding.push_back(layer);
+  requireWholes(requireArray(text, @"local_layer_ids", "text config local_layer_ids"), sliding, name,
+                "text config local_layer_ids");
+  NSDictionary *loop = requireObject(text, @"loop_config", "text config loop_config");
+  requireNumbers(loop, name, "text config loop_config",
+                 {{"core_start", target.loopFirstLayer},
+                  {"core_end", target.loopEndLayer},
+                  {"num_passes", target.loopPasses},
+                  {"gate_rank", target.loopGateRank}});
+  if (loop[@"is_varloop"]) requireBooleans(loop, "text config loop_config", {{"is_varloop", false}});
+  for (const ExpectedNumber &stated : {ExpectedNumber{"swa_head_dim", target.attentionHeadDimension},
+                                       ExpectedNumber{"swa_num_attention_heads", target.attentionQueryHeads},
+                                       ExpectedNumber{"swa_num_key_value_heads", target.attentionKvHeads},
+                                       ExpectedNumber{"d_rel", target.relativeRank},
+                                       ExpectedNumber{"rel_extent", target.relativeExtent},
+                                       ExpectedNumber{"rel_l2_clip_threshold", target.relativeClip},
+                                       ExpectedNumber{"log_scaling_n_floor", target.logScalingFloor},
+                                       ExpectedNumber{"sconv_kernel_size", target.convolutionTaps},
+                                       ExpectedNumber{"n_layers_per_attn_res_block", target.blockResidualPeriod},
+                                       ExpectedNumber{"mlp_gate_softcap", target.expertGateSoftcap},
+                                       ExpectedNumber{"mlp_up_softcap", target.expertUpSoftcap},
+                                       ExpectedNumber{"final_logit_softcapping", target.logitSoftcap},
+                                       ExpectedNumber{"route_scale", target.expertRoutedScale},
+                                       ExpectedNumber{"n_shared_experts", target.sharedExpertSlices},
+                                       ExpectedNumber{"eos_token_id", target.stopTokens.ids[0]},
+                                       ExpectedNumber{"rms_norm_eps", SPLASH_RMS_EPSILON}})
+    if (text[@(stated.key)]) requireNumbers(text, name, "text config", {stated});
+  for (const auto &[key, expected] : {std::pair{"qk_l2_clip_threshold", target.queryClip},
+                                      std::pair{"log_scaling_alpha", target.logScalingAlpha}}) {
+    if (!text[@(key)]) continue;
+    const std::string label = std::string("text config ") + key;
+    NSNumber *number = requireNumber(text[@(key)], label);
+    if (number.floatValue != expected)
+      throw std::invalid_argument(label + " mismatch: " + std::string(name) + " " + number.description.UTF8String +
+                                  ", runtime " + @(expected).description.UTF8String);
+  }
+  for (const auto &[key, expected] : {std::pair{"use_value_norm_no_gamma", true},
+                                      std::pair{"attn_res_normalize_values", true},
+                                      std::pair{"use_gate_bias", true}, std::pair{"q_bias", false},
+                                      std::pair{"o_bias", false}})
+    if (text[@(key)]) requireBooleans(text, "text config", {{key, expected}});
+}
+
 // The mask token a DFlash2 draft of a family whose drafts choose theirs
 // names (dflash_config.mask_token_id), which must be one of the target's
 // reserved tokens; readDraftLayout then holds the draft to it.
@@ -421,7 +538,7 @@ uint32_t ggufRoutedExperts(NSDictionary *text, const QwenHybridLayout &target) {
 // affine, unless it names another. The object states its bits and group size; a
 // module's entry that omits either takes its mode's default, as MLX's
 // to_quantized does: affine 4 bits in groups of 64, mxfp4 4 bits in groups of
-// 32, nvfp4 4 bits in groups of 16. The images read each module's format from
+// 32, mxfp8 8 bits in groups of 32, nvfp4 4 bits in groups of 16. The images read each module's format from
 // its tensors, as MLX does (model/SafetensorsImage.hpp). An entry that is not
 // an object, false as MLX writes for a module it leaves unquantized, is refused
 // for a module the images read only quantized (safetensors::quantizedModules:
@@ -437,25 +554,26 @@ void requireMlxQuantization(NSDictionary *quantization, const QwenTargetDimensio
     const auto number = [&](NSString *key, uint32_t modeDefault) {
       return module && !entry[key] ? modeDefault : requireWhole(entry[key], label + " " + key.UTF8String);
     };
-    const uint32_t bits = number(@"bits", 4), group = number(@"group_size", affine ? 64 : nvfp4 ? 16 : 32);
-    if (affine ? quant_affine_format_of(bits, group) == GGUF_FMT_COUNT
-               : nvfp4 ? bits != 4 || group != 16 : ![mode isEqual:@"mxfp4"] || bits != 4 || group != 32)
+    const bool mxfp8 = [mode isEqual:@"mxfp8"];
+    const uint32_t bits = number(@"bits", mxfp8 ? 8 : 4), group = number(@"group_size", affine ? 64 : nvfp4 ? 16 : 32);
+    if (safetensors::mlxFormat(mode.UTF8String ?: "", bits, group) == GGUF_FMT_COUNT)
       throw std::invalid_argument(label + " is " + mode.UTF8String + " " + std::to_string(bits) +
                                   "-bit in groups of " + std::to_string(group) +
-                                  "; MLX weights load as affine 2, 3, 4, 5, 6 or 8 bits in groups of 32, 64 or "
-                                  "128, or as mxfp4 or nvfp4");
+                                  "; MLX weights load as " + std::string(safetensors::kMlxAffineFormats) +
+                                  ", or as " + std::string(safetensors::kMlxFloatFormats));
   };
   require(quantization, "quantization", false);
   // A module's entry is an object; the object's other values are its own.
   for (NSString *module in quantization)
     if ([quantization[module] isKindOfClass:[NSDictionary class]])
       require(quantization[module], "quantization " + std::string(module.UTF8String ?: ""), true);
-  for (const std::string &module : safetensors::quantizedModules(geometry, safetensors::ModuleNames::Mlx)) {
-    id entry = quantization[@(module.c_str())];
-    if (entry && ![entry isKindOfClass:[NSDictionary class]])
-      throw std::invalid_argument("quantization " + module +
-                                  " is unquantized; Splash loads quantized MLX projections");
-  }
+  for (const safetensors::ModuleNames names : {safetensors::ModuleNames::Mlx, safetensors::ModuleNames::MlxLm})
+    for (const std::string &module : safetensors::quantizedModules(geometry, names)) {
+      id entry = quantization[@(module.c_str())];
+      if (entry && ![entry isKindOfClass:[NSDictionary class]])
+        throw std::invalid_argument("quantization " + module +
+                                    " is unquantized; Splash loads quantized MLX projections");
+    }
 }
 
 // The projections a configuration names for a layer's routed experts
@@ -651,8 +769,8 @@ void requireQuantization(NSDictionary *config, const QwenTargetDimensions &geome
       return requireCompressedTensorsQuantization(quantization, geometry);
   }
   throw std::invalid_argument(
-      "this model requires an MLX checkpoint (affine 2, 3, 4, 5, 6 or 8 bits in groups of 32, 64 or 128, mxfp4 or "
-      "nvfp4), an NVFP4 or FP8 checkpoint of Model Optimizer or compressed-tensors, or a supported GGUF");
+      "this model requires an MLX checkpoint (affine 2, 3, 4, 5, 6 or 8 bits in groups of 32, 64 or 128, mxfp4, "
+      "mxfp8 or nvfp4), an NVFP4 or FP8 checkpoint of Model Optimizer or compressed-tensors, or a supported GGUF");
 }
 
 // A DFlash2 checkpoint's config: the draft's layout. Its attention widths,
@@ -715,9 +833,14 @@ DFlashDraftLayout readDraftLayout(NSDictionary *draft, const QwenTargetDimension
   for (id value : ids) {
     targetLayers.push_back(
         requireWhole(value, "draft config target_layer_ids " + std::to_string(targetLayers.size())));
-    if (targetLayers.back() >= target.layers)
+    if (targetLayers.back() >= target.draftReadableLayers())
       throw std::invalid_argument("draft config target_layer_ids names a layer past the target's");
   }
+  // The last id may name the head's final norm (Inkling 2's draft), which is
+  // readable via draftReadableLayers() but not a weight layer.
+  const bool finalNorm = !targetLayers.empty() && targetLayers.back() == target.layers;
+  if (flash[@"capture_final_norm"])
+    requireBooleans(flash, "draft config dflash_config", {{"capture_final_norm", finalNorm}});
   const DFlashDraftLayout layout =
       draftLayout(target.hiddenSize, target.vocabularySize,
                   requireWhole(draft[@"num_hidden_layers"], "draft config num_hidden_layers"),
@@ -812,8 +935,6 @@ ModelDescriptor describeSourceModel(std::string name, std::string_view targetFor
   // holds its draft's.
   DFlashDraftLayout dflashLayout;
   std::visit([&](auto &layout) {
-    if (targetSource == TargetSource::Safetensors && !layout.loadsSafetensors)
-      throw std::invalid_argument(std::string(layout.family) + " loads from a GGUF only");
     validateTextConfig(text, layout, targetSource);
     if (targetSource == TargetSource::Safetensors) requireQuantization(config, layout);
     if (targetSource == TargetSource::Gguf && layout.ffnKind == QwenFfnKind::SparseMoe)
@@ -823,9 +944,24 @@ ModelDescriptor describeSourceModel(std::string name, std::string_view targetFor
   }, *target);
   ops::VisionLayout vision{.outputHiddenSize = std::visit(
       [](const auto &layout) { return layout.hiddenSize; }, *target)};
-  if (visionSource != VisionSource::None)
-    vision = readVisionLayout(requireObject(config, @"vision_config", "vision config"),
-                              vision.outputHiddenSize, targetSource);
+  const bool inkling = std::holds_alternative<Inkling2LoopLayout>(*target);
+  if (visionSource != VisionSource::None) {
+    NSDictionary *visionConfig = requireObject(config, @"vision_config", "vision config");
+    if (inkling) {
+      requireEqual(requireString(visionConfig, @"model_type", "vision config model_type"),
+                   "inkling2_vision", sourceName(targetSource), "vision config model_type");
+      requireNumbers(visionConfig, sourceName(targetSource), "vision config",
+                     {{"text_hidden_size", 2304}, {"temporal_patch_size", 2},
+                      {"native_patch_size", 20}, {"adapter_merge_size", 2},
+                      {"projection_hidden_dim", 4096}, {"hidden_size", 1024},
+                      {"num_hidden_layers", 23}, {"num_attention_heads", 16},
+                      {"mlp_ratio", 4}, {"posemb_grid_size", 32}});
+      if (vision.outputHiddenSize != 2304)
+        throw unsupportedModel("Inkling2 vision output width does not match target");
+    } else {
+      vision = readVisionLayout(visionConfig, vision.outputHiddenSize, targetSource);
+    }
+  }
   ModelDescriptor result = makeModelDescriptor(std::move(name), *target, dflashLayout, vision,
                                                targetSource, visionSource);
   // A model without a draft config is a complete model: the plan is None and
@@ -861,6 +997,15 @@ GgufMetadata readGgufMetadata(const std::filesystem::path &path) {
   for (id key in strings) {
     const std::string name = requireText(key, "GGUF metadata key");
     metadata.strings.emplace(name, requireText(strings[key], "GGUF metadata " + name));
+  }
+  if (NSDictionary *arrays = object[@"arrays"]) {
+    if (![arrays isKindOfClass:[NSDictionary class]]) throw std::invalid_argument("GGUF metadata arrays must be an object");
+    for (id key in arrays) {
+      const std::string name = requireText(key, "GGUF metadata key");
+      id values = arrays[key];
+      if (![values isKindOfClass:[NSArray class]]) throw std::invalid_argument("GGUF metadata array must be an array");
+      for (id value in values) metadata.arrays[name].push_back(requireNumber(value, "GGUF metadata array value").doubleValue);
+    }
   }
   return metadata;
 }
@@ -934,7 +1079,7 @@ bool ModelDescriptor::valid() const noexcept {
                (!hasDraft ||
                 (layout.hiddenSize == draft.hiddenSize &&
                  draft.targetLayerCount && draft.targetLayerCount <= ExecutionLimits::maximumDraftTargetLayers &&
-                 draft.targetLayers[draft.targetLayerCount - 1] < layout.layers &&
+                 draft.targetLayers[draft.targetLayerCount - 1] < layout.draftReadableLayers() &&
                  // A family whose drafts choose the mask token holds its draft's.
                  (!layout.draftChoosesMaskToken() ||
                   (layout.maskToken >= layout.firstDraftMaskToken &&
@@ -1024,7 +1169,12 @@ std::string_view inspectSourceConfiguration(std::string_view targetFormat, std::
     if (descriptor.targetSource == TargetSource::Gguf) {
       if (!ggufMetadata) throw std::invalid_argument("a GGUF target is checked with its metadata");
       const GgufMetadata metadata = readGgufMetadata(*ggufMetadata);
-      std::visit([&](const auto &layout) { gguf::requireMetadata(metadata, layout.ggufArchitecture, layout); },
+      std::visit([&](const auto &layout) {
+        if constexpr (std::is_same_v<std::decay_t<decltype(layout)>, Inkling2LoopLayout>)
+          requireInklingGgufMetadata(metadata, layout);
+        else
+          gguf::requireMetadata(metadata, layout.ggufArchitecture, layout);
+      },
                  descriptor.target);
     }
     return descriptor.family();

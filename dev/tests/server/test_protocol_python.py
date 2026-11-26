@@ -87,6 +87,13 @@ def example_image_request():
     )
 
 
+def example_mixed_image_request():
+    request = example_image_request()
+    span = p.ImageSpan(2, 1, 1, 1, 3, 4, p.ImageProcessor.INKLING)
+    return replace(request, image_spans=(*request.image_spans, span),
+                   image_pixels=request.image_pixels + bytes(span.pixel_bytes))
+
+
 def example_score_request():
     return replace(
         example_request(),
@@ -115,6 +122,7 @@ def client_messages():
     return {
         "request": example_request(),
         "request_image": example_image_request(),
+        "request_mixed_images": example_mixed_image_request(),
         "request_score": example_score_request(),
         "request_ignore_eos": example_ignore_eos_request(),
         "request_progress": example_progress_request(),
@@ -132,7 +140,7 @@ def engine_events():
     return {
         "ready": p.ReadyEvent(4, 524_288, False),
         "ready_vision": p.ReadyEvent(4, 524_288, True),
-        "start": p.StartEvent(91, 2, 4096),
+        "start": p.StartEvent(91, 2, 4096, 4096, p.StateSource.DISK, True),
         "prompt_progress": p.PromptProgressEvent(91, 2048, 123456),
         "tokens": p.TokensEvent(91, 17, (10, 11, 12)),
         "logprobs": p.LogprobsEvent(91, 17, ((10, -0.5, ((11, -1.0), (12, -2.0))),)),
@@ -262,6 +270,22 @@ def exact_json(size):
 
 
 class ProtocolPythonTests(unittest.TestCase):
+    def test_versioned_image_geometry_contract(self):
+        self.assertEqual(p.IMAGE_CONTRACT_VERSION, 1)
+        qwen = p.ImageGeometry(p.ImageProcessor.QWEN, 64, 32)
+        inkling = p.ImageGeometry(p.ImageProcessor.INKLING, 2, 3)
+        qwen.validate()
+        inkling.validate()
+        self.assertEqual((qwen.token_count, qwen.pixel_bytes), (512, 64 * 16 * 32 * 16 * 3))
+        self.assertEqual((inkling.token_count, inkling.pixel_bytes), (6, 2 * 3 * 40 * 40 * 3 * 4))
+        for invalid in (
+            p.ImageGeometry(p.ImageProcessor.QWEN, 3, 2),
+            p.ImageGeometry(p.ImageProcessor.INKLING, 0, 2),
+            p.ImageGeometry(99, 2, 2),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                invalid.validate()
+
     def assert_protocol_error(self, failure_class, code, callback):
         with self.assertRaises(p.ProtocolError) as caught:
             callback()
@@ -276,6 +300,31 @@ class ProtocolPythonTests(unittest.TestCase):
             code,
             lambda: decode_event(native_peer.serialize_event(event)),
         )
+
+    def test_start_state_fields_and_invalid_values(self):
+        for source in p.StateSource:
+            for lost in (False, True):
+                event = p.StartEvent(91, 2, 4096, 4096, source, lost)
+                self.assertEqual(decode_event(native_peer.serialize_event(event)), event)
+        valid = native_peer.serialize_event(engine_events()["start"])
+        for offset in (p.FRAME_HEADER_BYTES + 20, p.FRAME_HEADER_BYTES + 21):
+            malformed = bytearray(valid)
+            malformed[offset] = 255
+            self.assert_protocol_error(
+                p.FailureClass.PROTOCOL_FATAL, p.IssueCode.INVALID_ENUM_VALUE,
+                lambda: decode_event(bytes(malformed)),
+            )
+
+    def test_mixed_image_wire_validation(self):
+        request = example_mixed_image_request()
+        self.assertEqual(decode_client(p.serialize_message(request)), request)
+        inkling = request.image_spans[1]
+        for invalid in (replace(inkling, processor=9), replace(inkling, tokens=2),
+                        replace(inkling, grid_height=0)):
+            with self.subTest(span=invalid), self.assertRaises(p.ProtocolError):
+                p.serialize_message(replace(request, image_spans=(request.image_spans[0], invalid)))
+        with self.assertRaises(p.ProtocolError):
+            p.serialize_message(replace(request, image_pixels=request.image_pixels[:-1]))
 
     def test_client_frames_match_golden(self):
         golden = read_golden()
@@ -691,11 +740,11 @@ class ProtocolPythonTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            struct.unpack_from("<IIIIQQ", wire, span_offset),
-            (1, 1, 2, 2, 0x1111222233334444, 0x5555666677778888),
+            struct.unpack_from("<IIIIQQI", wire, span_offset),
+            (1, 1, 2, 2, 0x1111222233334444, 0x5555666677778888, 0),
         )
         # The thinking end tokens follow the pixels.
-        self.assertEqual(wire[span_offset + 32 : -8], image.image_pixels)
+        self.assertEqual(wire[span_offset + p.IMAGE_SPAN_BYTES : -8], image.image_pixels)
         self.assertEqual(decode_client(wire), image)
 
     def test_thinking_budget_follows_the_cache_salt(self):

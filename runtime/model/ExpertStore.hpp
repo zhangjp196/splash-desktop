@@ -75,6 +75,7 @@
 #include "ops/MoE.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <vector>

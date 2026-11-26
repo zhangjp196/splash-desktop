@@ -241,7 +241,7 @@ void NativeRuntime::announceReady() {
   }
   if (ready_)
     throw std::logic_error("ready was already announced");
-  if (!send(protocol::ReadyEvent{model::ExecutionLimits::maximumBatchWidth,
+  if (!send(protocol::ReadyEvent{config_.engine.maxConcurrentRequests,
                                  config_.engine.maxContext,
                                  config_.engine.maxImagePatches != 0})) {
     throw std::runtime_error("failed to serialize ready event");
@@ -516,10 +516,11 @@ void NativeRuntime::batchCompleted(WorkKind kind, uint32_t width,
 }
 
 void NativeRuntime::started(uint64_t requestId, uint32_t matchedTokens,
-                            uint32_t lane) {
+                            uint32_t lane, uint32_t prefixTokens,
+                            StateSource source, bool lostState) {
   RequestTelemetry &telemetry = telemetry_.at(requestId);
   telemetry.startedMilliseconds = config_.monotonicMilliseconds();
-  send(protocol::StartEvent{requestId, lane, matchedTokens});
+  send(protocol::StartEvent{requestId, lane, matchedTokens, prefixTokens, source, lostState});
 }
 
 void NativeRuntime::promptProgress(uint64_t requestId,

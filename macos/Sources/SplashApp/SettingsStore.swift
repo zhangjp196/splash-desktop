@@ -56,6 +56,8 @@ final class SettingsStore {
     /// save is either the whole previous run's configuration or none of it.
     @discardableResult
     func save(_ settings: ServerSettings) -> Bool {
+        var sanitized = settings
+        ServerSettings.sanitized(&sanitized)
         guard let db else { return false }
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, Self.upsert, -1, &statement, nil) == SQLITE_OK else {
@@ -63,7 +65,7 @@ final class SettingsStore {
         }
         defer { sqlite3_finalize(statement) }
         guard sqlite3_exec(db, Self.begin, nil, nil, nil) == SQLITE_OK else { return false }
-        for (key, value) in settings.rows {
+        for (key, value) in sanitized.rows {
             sqlite3_reset(statement)
             sqlite3_clear_bindings(statement)
             sqlite3_bind_text(statement, 1, key, -1, SQLITE_TRANSIENT)

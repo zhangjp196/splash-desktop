@@ -217,6 +217,10 @@ public:
       std::span<const uint32_t> maximumRetained,
       std::span<const SamplingPolicy> policies,
       const StopTokens &stopTokens) const;
+  // Converts the GPU-selected retained token count to a low-bit row mask for
+  // targets whose KV and auxiliary state commit along an accepted tree path.
+  static void addRetainedPaths(metal::CommandGraph &graph, metal::MetalBuffer retainedCounts,
+                               metal::MetalBuffer paths, uint32_t lanes, uint32_t maximumRows);
   // Each logprob row's maximum and softmax denominator over the whole
   // vocabulary, in the row's LogprobRowMass, for the host to read once the
   // command completes. Nothing is filtered: logprobs are of every token the

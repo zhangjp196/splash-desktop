@@ -77,8 +77,8 @@ public:
     ++batchSequence_;
   }
 
-  void started(uint64_t requestId, uint32_t matchedTokens,
-               uint32_t) override {
+  void started(uint64_t requestId, uint32_t matchedTokens, uint32_t,
+               uint32_t, StateSource, bool) override {
     Observation &value = observations_[requestId];
     value.cacheStatus = matchedTokens ? "prefix_hit" : "miss";
     value.matchedTokens = matchedTokens;

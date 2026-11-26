@@ -5,6 +5,7 @@
 #include "model/GgufTarget.hpp"
 #include "model/ModelFactory.hpp"
 #include "model/SafetensorsImage.hpp"
+#include "model/SafetensorsTarget.hpp"
 #include "model/SparseRowStore.hpp"
 #include "model/VisionLoader.hpp"
 
@@ -26,7 +27,8 @@ uint64_t loadedBytes(std::span<const gguf::Image> images) {
 // lets stream does, and what each such part adds where it loads instead,
 // the routed experts' slot table with them.
 template <class Layout, class Plan>
-StreamableWeights targetWeights(const Layout &layout, const Plan &plan, gguf::PlanOptions streams) {
+StreamableWeights targetWeights(const Layout &layout, const Plan &plan, gguf::PlanOptions streams,
+                                uint32_t layerImages, uint32_t firstMoeLayer) {
   streams.streamExperts = streams.streamExperts && layout.ffnKind == QwenFfnKind::SparseMoe;
   StreamableWeights result;
   std::vector<gguf::Image> streamed;
@@ -56,7 +58,7 @@ StreamableWeights targetWeights(const Layout &layout, const Plan &plan, gguf::Pl
                          residentExpertSlotsBytes(layout.experts);
     StreamedBlocks blocks;
     blocks.blocks = gguf::streamedExperts(
-        std::span(streamed).subspan(layout.leadingDenseLayers, layout.layers - layout.leadingDenseLayers));
+        std::span(streamed).subspan(firstMoeLayer, layerImages - firstMoeLayer));
     result.expertFloorBytes = ExpertStore::minimumBytes(blocks, layout.moeBlockShape());
   }
   return result;
@@ -71,22 +73,36 @@ StreamableWeights streamableWeights(const std::filesystem::path &root, const Mod
         const std::filesystem::path directory = root / "target";
         if (descriptor.targetSource == TargetSource::Gguf) {
           const OpenGguf target(findTargetGgufs(directory));
+          const GgufTargetPlan plan = ggufTargetPlan(layout);
           return targetWeights(
               layout,
-              [&](gguf::PlanOptions options) {
-                return gguf::planImages(target.file(), layout.ggufArchitecture, layout, options);
-              },
-              streams);
+              [&](gguf::PlanOptions options) { return plan.images(target.file(), options); },
+              streams, plan.layerImages, plan.firstMoeLayer);
         }
         const SafetensorsCheckpoint checkpoint(directory);
+        // A family that plans its own images (Inkling 2) declares a specific
+        // safetensorsTargetPlan overload; every other family uses the template
+        // that plans via safetensors::planImages and its norm storage.
+        const SafetensorsTargetPlan plan = safetensorsTargetPlan(layout);
         return targetWeights(
-            layout, [&](gguf::PlanOptions options) { return safetensors::planImages(checkpoint, layout, options); },
-            streams);
+            layout,
+            [&](gguf::PlanOptions options) { return plan.images(checkpoint, options).images; }, streams,
+            plan.layerImages, plan.firstMoeLayer);
       },
       descriptor.target);
   if (descriptor.hasDraft())
     result.loadedBytes += draftImageBytes(root / "draft", descriptor.draft);
-  if (descriptor.hasVision()) result.loadedBytes += visionImageBytes(descriptor.vision);
+  if (descriptor.hasVision()) {
+    if (std::holds_alternative<Inkling2LoopLayout>(descriptor.target)) {
+      const Inkling2VisionLoader loader(
+          descriptor.visionSource == VisionSource::Gguf ? root / "vision" / "mmproj.gguf" : root / "target",
+          descriptor.visionSource == VisionSource::Gguf ? Inkling2VisionSourceFormat::Gguf
+                                                        : Inkling2VisionSourceFormat::Safetensors);
+      result.loadedBytes += loader.image().bytes;
+    } else {
+      result.loadedBytes += visionImageBytes(descriptor.vision);
+    }
+  }
   return result;
 }
 

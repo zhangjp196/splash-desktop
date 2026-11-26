@@ -156,6 +156,9 @@ enum SelfCheck {
         edited.kvFormat = "bf16"
         edited.stateFormat = "bf16"
         edited.neuralEngine = false
+        edited.recalibrateANE = true
+        edited.maxConcurrentRequests = 3
+        edited.samplingDefaults = "temperature=0.7,top_p=0.9"
         edited.maxMemory = "28G"
         edited.maxContext = "100K"
         edited.expertMemory = "16G"
@@ -211,6 +214,7 @@ enum SelfCheck {
         broken.reasoningEffort = "extreme"
         broken.port = 70_000
         broken.maxConcurrency = 0
+        broken.maxConcurrentRequests = 5
         broken.expertMemory = "banana"
         broken.pleMemory = "-2G"
         broken.sparseKvMemory = "0"
@@ -225,6 +229,7 @@ enum SelfCheck {
             && repaired.reasoningEffort == ""
             && repaired.port == ServerSettings.First.port
             && repaired.maxConcurrency == ServerSettings.First.maxConcurrency
+            && repaired.maxConcurrentRequests == ServerSettings.First.maxConcurrentRequests
             && repaired.expertMemory == ServerSettings.default.expertMemory
             && repaired.pleMemory == ServerSettings.default.pleMemory
             && repaired.sparseKvMemory == ServerSettings.default.sparseKvMemory
@@ -243,6 +248,9 @@ enum SelfCheck {
             && decoded?.modelMode == .upstream
             && decoded?.maxContext == "64K"
             && decoded?.maxConcurrency == ServerSettings.First.maxConcurrency
+            && decoded?.maxConcurrentRequests == ServerSettings.First.maxConcurrentRequests
+            && decoded?.recalibrateANE == ServerSettings.First.recalibrateANE
+            && decoded?.samplingDefaults == ServerSettings.First.samplingDefaults
             && decoded?.diskCache == ServerSettings.First.diskCache
             && decoded?.maxCacheDiskWrites == ServerSettings.First.maxCacheDiskWrites
             && decoded?.cacheEvictionPreset == ServerSettings.First.cacheEvictionPreset
@@ -266,6 +274,29 @@ enum SelfCheck {
         passed = passed
             && migrated.diskCache == false
             && migrated.settingsVersion == ServerSettings.currentVersion
+
+        // A target file saved into the draft field is never a draft. Both
+        // persisted row sets and decoded configurations clear it, while a real
+        // local draft folder remains untouched.
+        var selfTarget = ServerSettings.default
+        selfTarget.modelMode = .local
+        selfTarget.modelDirectory = "/tmp/model-00001-of-00002.gguf"
+        selfTarget.draftDirectory = selfTarget.modelDirectory
+        selfTarget.draftMode = "folder"
+        let selfTargetRows = Dictionary(uniqueKeysWithValues: selfTarget.rows)
+        let repairedTarget = ServerSettings(rows: selfTargetRows)
+        let encodedTarget = try? JSONEncoder().encode(selfTarget)
+        let decodedTarget = encodedTarget.flatMap { try? JSONDecoder().decode(ServerSettings.self, from: $0) }
+        passed = passed
+            && repairedTarget.draftDirectory.isEmpty
+            && repairedTarget.draftMode == "none"
+            && decodedTarget?.draftDirectory.isEmpty == true
+            && decodedTarget?.draftMode == "none"
+            && store.save(selfTarget)
+            && store.load().draftDirectory.isEmpty
+        selfTarget.draftDirectory = "/tmp/real-draft"
+        ServerSettings.sanitized(&selfTarget)
+        passed = passed && selfTarget.draftDirectory == "/tmp/real-draft"
 
         // The old ten-second residency was the app's default, not a choice: it
         // moves to this build's ten minutes, with the idle unload on. A value this
@@ -369,7 +400,7 @@ enum SelfCheck {
                 carries(launch, flag, value)
             }
             passed = passed
-                && carries("--gguf-target", "/tmp/selfcheck")
+                && carries("--model-dir", "/tmp/selfcheck")
                 && carries("--draft-model", "/tmp/selfcheck-draft")
                 && carries("--speculation", "dflash2")
                 && launch.contains("--require-draft")
@@ -419,7 +450,7 @@ enum SelfCheck {
             reloaded.draftDirectory = "/tmp/selfcheck-draft"
             let mlx = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
             passed = passed
-                && carries(mlx, "--mlx-target", "/tmp/selfcheck")
+                && carries(mlx, "--model-dir", "/tmp/selfcheck")
                 && carries(mlx, "--draft-model", "/tmp/selfcheck-draft")
                 && !mlx.contains("--mmproj")
             reloaded.localKind = "gguf"
@@ -432,6 +463,11 @@ enum SelfCheck {
             let hubDraft = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
             passed = passed && carries(hubDraft, "--draft-model", "org/dfash2-draft")
             reloaded.draftMode = "folder"
+            reloaded.draftDirectory = "/tmp/selfcheck-draft"
+            // A corrupt self-target draft never reaches the launcher.
+            reloaded.draftDirectory = reloaded.modelDirectory
+            let selfTargetLaunch = reloaded.launchArguments(launcherPath: "/tmp/launcher.py")
+            passed = passed && !selfTargetLaunch.contains("--draft-model")
             reloaded.draftDirectory = "/tmp/selfcheck-draft"
             // An upstream target is the model ID the panel holds, and its draft is
             // the installer's choice.

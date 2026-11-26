@@ -3,6 +3,7 @@
 #include "metal/abi/ExecutionGeometry.h"
 #include "metal/abi/Gguf.h"
 #include "ops/BufferExtent.hpp"
+#include "ops/inkling2_AttentionFramework.hpp"
 
 #include <algorithm>
 #include <array>
@@ -59,6 +60,35 @@ void requirePlaneViews(const Projection &p) {
 }
 
 } // namespace
+
+std::optional<Projection> Projection::sideBySide(std::span<const Projection *const> projections) {
+  // The fused decode dispatches read up to cols[3] segments side by side.
+  constexpr size_t kMostTensors = std::extent_v<decltype(GgufDecodeFusedParams::cols)>;
+  if (projections.size() < 2 || projections.size() > kMostTensors)
+    throw std::invalid_argument("projections side by side are two or three");
+  if (std::any_of(projections.begin(), projections.end(),
+                  [](const Projection *p) { return p->blocks().segments.size() != 1; }))
+    return std::nullopt;
+  const Projection &first = *projections.front();
+  const QuantizedSegment &lead = first.blocks().segments.front();
+  BlockWeights weights;
+  uint32_t columns = 0;
+  for (const Projection *p : projections) {
+    const QuantizedSegment &tensor = p->blocks().segments.front();
+    if (p->outputSize != first.outputSize || p->inputSize != first.inputSize ||
+        tensor.outputSize != p->outputSize || tensor.formatId != lead.formatId || tensor.layout != lead.layout ||
+        p->destination != first.destination || p->rotation || p->planeInputs_ || p->planOutputs_)
+      return std::nullopt;
+    QuantizedSegment segment = tensor;
+    segment.columnOffset = columns;
+    columns += segment.outputSize;
+    weights.segments.push_back(std::move(segment));
+  }
+  Projection result(columns, first.inputSize, std::move(weights));
+  result.destination = first.destination;
+  result.planOutputs_ = first.outputSize;
+  return result;
+}
 
 bool Projection::takesPlaneViews() const noexcept {
   const std::vector<QuantizedSegment> &segments = weights_.segments;
@@ -229,6 +259,18 @@ PreparedInput Linear::add(metal::CommandGraph &graph, LinearBuffers b,
   const bool tiled =
       std::any_of(segments.begin(), segments.end(), [](const QuantizedSegment &s) { return !s.isFloat(); });
   return tiled && selected.input() != LinearInput::Plain ? PreparedInput{b.input, selected.input()} : b.prepared;
+}
+
+Inkling2Int8Activations Linear::int8Activations() const noexcept { return Inkling2Int8Activations::Off; }
+
+LinearPlan Linear::plan(const Projection &p, uint32_t rows, LinearPhase phase) const {
+  return plan({{p.outputSize, p.inputSize}, rows, phase, LinearEpilogue::None}, p);
+}
+
+void Linear::addProjection(metal::CommandGraph &graph, metal::MetalBuffer input, const Projection &p,
+                           metal::MetalBuffer output, uint32_t rows, LinearScratch scratch) const {
+  add(graph, {.input = input, .output = output, .scratch = scratch}, p,
+      plan({{p.outputSize, p.inputSize}, rows, LinearPhase::Prefill, LinearEpilogue::None}, p));
 }
 
 void Linear::addPrefill(metal::CommandGraph &graph, metal::MetalBuffer input, const Projection &p,

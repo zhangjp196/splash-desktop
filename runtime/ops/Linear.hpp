@@ -15,6 +15,8 @@
 
 namespace splash::ops {
 
+enum class Inkling2Int8Activations : uint8_t;
+
 // The instance of kernel `name` that writes `destination`: a plain decode
 // kernel's fp32 instance is "<name>_f32".
 [[nodiscard]] inline std::string kernelInstance(std::string_view name, FloatOutput destination) {
@@ -248,6 +250,18 @@ class Linear final {
 public:
   explicit Linear(const DeviceCapabilities &device) noexcept;
 
+  // Upstream 1.7.2's activation-precision query, used by the ported Inkling-2
+  // family's relative-attention plans. The fork keeps its bf16 activations,
+  // so this is always Off and its kernel selection is unchanged.
+  [[nodiscard]] Inkling2Int8Activations int8Activations() const noexcept;
+  // Upstream 1.7.2's projection dispatch: plan the projection's rows and add
+  // it in one call. Built on the fork's own plan/add so no selection changes.
+  void addProjection(metal::CommandGraph &graph, metal::MetalBuffer input, const Projection &projection,
+                     metal::MetalBuffer output, uint32_t rows, LinearScratch scratch = {}) const;
+  // Upstream 1.7.2's plan of a projection over `rows` rows; the fork's
+  // projection plan takes the phase from its workload.
+  [[nodiscard]] LinearPlan plan(const Projection &projection, uint32_t rows,
+                                LinearPhase phase = LinearPhase::Prefill) const;
   [[nodiscard]] LinearPlan plan(LinearWorkload workload) const;
   // The plan of `workload` for the projection, into its destination type; a gate/up plan also runs `gate`.
   [[nodiscard]] LinearPlan plan(LinearWorkload workload, const Projection &projection,

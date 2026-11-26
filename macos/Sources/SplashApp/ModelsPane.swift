@@ -526,6 +526,7 @@ private struct ConfigEditor: View {
         guard canSave else { return }
         var saved = draft
         saved.name = saved.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        ServerSettings.sanitized(&saved.settings)
         // The panel's model is a local one: an edit of a configuration the
         // older online mode saved moves it here, where the downloader puts
         // what it fetches. A draft is a folder now, not a repository ID.

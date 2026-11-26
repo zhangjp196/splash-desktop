@@ -12,8 +12,11 @@ namespace splash::model {
 FlintTarget::FlintTarget(const FlintWeights &weights, const QwenTargetGeometry &geometry,
                          metal::MetalBackend &backend, const ops::ExecutionPlans &operators)
     : QwenTarget(weights, geometry, backend, operators), weights_(weights) {
+  static_assert(FlintLayout{}.relativeAttention().empty(),
+                "the layout states the attention its target's layers run");
   // Every layer attends.
   requireLayers(weights.layers.size(), weights.layers.size());
+  requireSharedAttention();
 }
 
 std::vector<metal::MetalBuffer> FlintTarget::addPrefill(metal::CommandGraph &graph,

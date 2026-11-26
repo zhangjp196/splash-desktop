@@ -14,7 +14,9 @@
   loader's of Qwen3.8-Flash-Next's BF16 and F16 hyper-connection projections,
   to its commit 7ab4ee7 alike.
 - `gguf_images`: every image `gguf-preparation` writes from its dense and MoE
-  GGUF fixtures.
+  GGUF fixtures. A MoE layer includes three F32 scale arrays for gate, up and
+  down. Sources without non-unit expert scales write unit rows explicitly,
+  which the test checks before comparing the layer image hash.
 - `draft_images`: every image `draft-preparation` writes from the DFlash2
   draft checkpoint `run_draft_preparation.py` writes.
 - `vision_image`: the image written from every `run_vision_preparation.py`

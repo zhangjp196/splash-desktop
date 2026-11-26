@@ -121,11 +121,8 @@ def _prepare(
 ):
     """prepare_local_model, of its paths made absolute."""
     speculation = models.speculation_mode(speculation)
-    if speculation not in ("auto", "dflash2"):
-        raise ModelError(
-            f"speculation {speculation} is not implemented by this release; "
-            "use auto or dflash2"
-        )
+    if speculation == "none" and require_draft:
+        raise ModelError("speculation none conflicts with require-draft")
     if mmproj and language_only:
         raise ModelError(
             f"{mmproj} is a vision projector, which a model that serves text "
@@ -146,13 +143,14 @@ def _prepare(
     with tempfile.TemporaryDirectory(prefix="splash-target-") as scratch:
         source, inspected = _inspect(target, mmproj, language_only, Path(scratch))
         repo = None
-        try:
-            repo = _draft(inspected.family, draft)
-        except ModelError as error:
-            if require_draft or speculation != "auto":
-                raise
-            if draft or families.draft_candidates(inspected.family):
-                models.warn(f"serving without speculation: {error}")
+        if speculation != "none":
+            try:
+                repo = _draft(inspected.family, draft)
+            except ModelError as error:
+                if require_draft or speculation != "auto":
+                    raise
+                if draft or families.draft_candidates(inspected.family):
+                    models.warn(f"serving without speculation: {error}")
         files = (
             upstream.draft_files(repo, inspected, models_root)
             if repo is not None
@@ -295,7 +293,7 @@ def _main(argv=None):
     parser.add_argument("target")
     parser.add_argument("--models", type=Path, default=paths.MODELS)
     parser.add_argument("--draft-model")
-    parser.add_argument("--speculation", choices=("auto", "dflash2"), default="auto")
+    parser.add_argument("--speculation", choices=("auto", "none", "dflash2"), default="auto")
     parser.add_argument("--require-draft", action="store_true")
     parser.add_argument("--mmproj")
     parser.add_argument("--language-only", action="store_true")

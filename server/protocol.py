@@ -15,7 +15,7 @@ from dataclasses import dataclass, fields
 from enum import IntEnum, IntFlag
 from typing import TypeAlias
 
-PROTOCOL_VERSION = 13
+PROTOCOL_VERSION = 15
 # A frame is its header, the magic, the protocol version, the frame type and
 # the payload length, then the payload.
 FRAME_HEADER_BYTES = 16
@@ -48,14 +48,15 @@ _HEADER = struct.Struct("<4sHHQ")
 # Replay can update the integer deadlines without decoding sampling floats.
 _REQUEST_HEAD = struct.Struct("<QBBQQ")
 _REQUEST = struct.Struct(_REQUEST_HEAD.format + "IIIffIffffQIIIIIQQIII")
-_IMAGE_SPAN = struct.Struct("<IIIIQQ")
+_IMAGE_SPAN = struct.Struct("<IIIIQQI")
 _CANCEL = struct.Struct("<Q")
 _MASK_RESPONSE = struct.Struct("<QQI")
 _STATUS_REQUEST = struct.Struct("<Q")
 _RELEASE_REQUEST = struct.Struct("<Q")
 _PREFILL_DUTY_REQUEST = struct.Struct("<f")
 _READY = struct.Struct("<IIB")
-_START = struct.Struct("<QII")
+# Request, lane, matched prompt tokens, prefix tokens, state source, lost state.
+_START = struct.Struct("<QIIIBB")
 _PROMPT_PROGRESS = struct.Struct("<QIQ")
 _TOKENS = struct.Struct("<QII")
 _LOGPROBS = struct.Struct("<QII")
@@ -71,9 +72,9 @@ assert (
 )
 assert _HEADER.size == FRAME_HEADER_BYTES
 assert _REQUEST.size == 122
-assert _IMAGE_SPAN.size == 32
+assert _IMAGE_SPAN.size == 36
 assert _READY.size == 9
-assert _START.size == 16
+assert _START.size == 22
 assert _DONE.size == 62
 assert _ERROR.size == 22
 assert _STATUS_JSON.size == 8
@@ -181,6 +182,52 @@ class ProtocolError(Exception):
         super().__init__(issue.describe())
 
 
+class ImageProcessor(IntEnum):
+    """Version 1 image processor contract, independent of request framing."""
+
+    QWEN = 0
+    INKLING = 1
+
+
+IMAGE_CONTRACT_VERSION = 1
+INKLING_TILE_SIZE = 40
+
+
+@dataclass(slots=True, frozen=True)
+class ImageGeometry:
+    processor: ImageProcessor
+    grid_height: int
+    grid_width: int
+
+    @property
+    def pixel_bytes(self) -> int:
+        processor = ImageProcessor(self.processor)
+        if processor is ImageProcessor.QWEN:
+            return self.grid_height * 16 * self.grid_width * 16 * 3
+        return self.grid_height * INKLING_TILE_SIZE * self.grid_width * INKLING_TILE_SIZE * 3 * 4
+
+    @property
+    def token_count(self) -> int:
+        if ImageProcessor(self.processor) is ImageProcessor.QWEN:
+            return (self.grid_height // 2) * (self.grid_width // 2)
+        return self.grid_height * self.grid_width
+
+    def validate(self) -> None:
+        if type(self.processor) not in (int, ImageProcessor):
+            raise ValueError("image processor is not defined by contract v1")
+        try:
+            processor = ImageProcessor(self.processor)
+        except (ValueError, TypeError) as error:
+            raise ValueError("image processor is not defined by contract v1") from error
+        limit = MAX_IMAGE_PATCHES if processor is ImageProcessor.QWEN else MAX_IMAGE_PATCHES
+        if self.grid_height <= 0 or self.grid_width <= 0 or self.grid_height * self.grid_width > limit:
+            raise ValueError("image grid must be positive and within the processor limit")
+        if processor is ImageProcessor.QWEN and (
+            self.grid_height < 2 or self.grid_width < 2 or self.grid_height % 2 or self.grid_width % 2
+        ):
+            raise ValueError("Qwen image grid must be even-sided")
+
+
 class RequestPriority(IntEnum):
     FOREGROUND = 0
     NORMAL = 1
@@ -246,10 +293,11 @@ class ImageSpan:
     grid_width: int
     digest_lo: int
     digest_hi: int
+    processor: ImageProcessor = ImageProcessor.QWEN
 
     @property
     def pixel_bytes(self) -> int:
-        return self.grid_height * 16 * self.grid_width * 16 * 3
+        return ImageGeometry(self.processor, self.grid_height, self.grid_width).pixel_bytes
 
 
 @dataclass(slots=True, frozen=True)
@@ -354,12 +402,27 @@ class ReadyEvent:
     vision: bool
 
 
+# Where the state a request resumes from was: none for a cold start, a RAM
+# copy, or the SSD cache's copy alone; the values are runtime/engine/
+# Types.hpp's.
+class StateSource(IntEnum):
+    NONE = 0
+    MEMORY = 1
+    DISK = 2
+
+
 @dataclass(slots=True, frozen=True)
 class StartEvent:
     request_id: int
     lane: int
-    # The cached prefix the request starts from; zero for a cold start.
+    # The resumed token boundary, the restored state's token boundary, where
+    # that state was stored, and whether a deeper matched block once held a
+    # state that is gone from both tiers. Both boundaries are currently equal
+    # and zero when no state is restored.
     matched_prompt_tokens: int
+    prefix_tokens: int = 0
+    state_source: StateSource = StateSource.NONE
+    lost_state: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -669,15 +732,9 @@ def _image_spans_check(request: RequestFrame, prompt_tokens: int) -> None:
         grid_width = _u32(span.grid_width, "image grid width")
         _u64(span.digest_lo, "image digest")
         _u64(span.digest_hi, "image digest")
-        if (
-            grid_height < 2
-            or grid_width < 2
-            or grid_height % 2
-            or grid_width % 2
-            or grid_height * grid_width > MAX_IMAGE_PATCHES
-        ):
-            raise ValueError("image grid must be even-sided and within the patch limit")
-        if tokens != (grid_height // 2) * (grid_width // 2):
+        geometry = ImageGeometry(span.processor, grid_height, grid_width)
+        geometry.validate()
+        if tokens != geometry.token_count:
             raise ValueError("image span tokens must equal the merged grid size")
         if offset < previous_end or offset + tokens > prompt_tokens:
             raise ValueError(
@@ -924,6 +981,7 @@ def _request_frame(request: RequestFrame) -> bytearray:
             span.grid_width,
             span.digest_lo,
             span.digest_hi,
+            int(span.processor),
         )
     # A bytearray copies a slice assignment's source first; its view does not.
     with memoryview(frame) as view:
@@ -1123,12 +1181,18 @@ def _decode_event(frame: Frame) -> EngineEvent:
             _fatal(IssueCode.INVALID_COUNT, "ready event capacities must be non-zero")
         return ReadyEvent(concurrent, context, bool(vision))
     if frame_type is FrameType.START:
-        request_id, lane, matched = _START.unpack(payload)
+        request_id, lane, matched, prefix, source, lost = _START.unpack(payload)
         if not request_id:
             _fatal(
                 IssueCode.INVALID_REQUEST_ID, "start event request id must be non-zero"
             )
-        return StartEvent(request_id, lane, matched)
+        if source not in StateSource._value2member_map_ or lost > 1:
+            _fatal(
+                IssueCode.INVALID_ENUM_VALUE,
+                "start event state source or lost state is invalid",
+                request_id,
+            )
+        return StartEvent(request_id, lane, matched, prefix, StateSource(source), bool(lost))
     if frame_type is FrameType.PROMPT_PROGRESS:
         request_id, processed, elapsed = _PROMPT_PROGRESS.unpack(payload)
         if not request_id or processed > MAX_PROMPT_TOKENS:

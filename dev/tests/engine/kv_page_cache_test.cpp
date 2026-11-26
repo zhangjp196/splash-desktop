@@ -88,13 +88,13 @@ void testBlockIdentitiesArePinned() {
   require(blockIdentity(0, 32, {}, salt) ==
                   BlockIdentity{0x7ebd72de8d5302c4ULL, 0xfc6aad21c68d9802ULL} &&
               blockIdentity(0, 32, images, {}) ==
-                  BlockIdentity{0x9979f264297f2e0dULL, 0x2a53365bb9c20351ULL} &&
+                  BlockIdentity{0x623962b5c040ad4dULL, 0xfcc170e596fceb0bULL} &&
               blockIdentity(32, 32, images, {}) ==
-                  BlockIdentity{0xbb5b6de52eeab8baULL, 0xfa8765be1d4ad307ULL} &&
+                  BlockIdentity{0x820faaecbb70bc52ULL, 0x79a0ee90f43274a8ULL} &&
               blockIdentity(64, 32, images, {}) ==
-                  BlockIdentity{0xbb5b6de52eeab89aULL, 0xfa8765be1d4ad327ULL} &&
+                  BlockIdentity{0x820faaecbb70bc72ULL, 0x79a0ee90f4327488ULL} &&
               blockIdentity(0, 32, images, salt) ==
-                  BlockIdentity{0xa23cc0b0f9bab89dULL, 0x386a63737598e476ULL} &&
+                  BlockIdentity{0xe024e68c6d251bc1ULL, 0x0380cb9dc97bc583ULL} &&
               blockIdentity(32, 32, images, salt) == blockIdentity(32, 32, images, {}),
           "block identities changed: persisted salted and image chains would match "
           "nothing; bump kPersistentCacheFormat and pin the new values");

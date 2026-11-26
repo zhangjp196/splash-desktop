@@ -60,8 +60,12 @@ class FastTokenizer:
 
     # Encoding and decoding, as transformers spelled them.
 
-    def __call__(self, text, add_special_tokens=False, **_):
-        return {"input_ids": self.encode(text, add_special_tokens)}
+    def __call__(self, text, add_special_tokens=False, **options):
+        encoded = self._tokenizer.encode(text, add_special_tokens=add_special_tokens)
+        result = {"input_ids": encoded.ids}
+        if options.get("return_offsets_mapping"):
+            result["offset_mapping"] = encoded.offsets
+        return result
 
     def encode(self, text, add_special_tokens=False, **_):
         return self._tokenizer.encode(text, add_special_tokens=add_special_tokens).ids

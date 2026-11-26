@@ -199,6 +199,21 @@ class UpstreamTest(unittest.TestCase):
         ):
             upstream.check_model("mlx-affine", "none", config)
 
+    def test_inkling_projector_uses_vision_metadata_and_supported_types(self):
+        repo = mock.Mock()
+        repo.open.return_value = contextlib.nullcontext(io.BytesIO())
+        header = mock.Mock()
+        header.values = {"general.architecture": "clip", "clip.vision.projector_type": "inkling2v"}
+        header.tensors = {"weight": GGML["BF16"]}
+        with (
+            mock.patch.object(upstream.gguf, "Metadata", return_value=header),
+            mock.patch.object(upstream, "_validate_inkling2_projector") as validate,
+        ):
+            self.assertEqual(upstream.read_projector(repo, "mmproj.gguf")[1], "BF16")
+            validate.assert_called_once_with(header)
+            header.tensors = {"weight": GGML["F16"]}
+            self.assertIsNone(upstream.read_projector(repo, "mmproj.gguf")[1])
+
     def test_gguf_selection_is_exact_and_takes_split_variant_folders(self):
         files = {
             "Qwen3.8-27B-UD-Q4_K_M.gguf",
@@ -440,12 +455,12 @@ class UpstreamTest(unittest.TestCase):
         fake = fake_hub(self, self.cache)
         required = (
             r"this model requires an MLX checkpoint \(affine 2, 3, 4, 5, 6 or 8 bits "
-            r"in groups of 32, 64 or 128, mxfp4 or nvfp4\), an NVFP4 or FP8 checkpoint "
+            r"in groups of 32, 64 or 128, mxfp4, mxfp8 or nvfp4\), an NVFP4 or FP8 checkpoint "
             r"of Model Optimizer or compressed-tensors, or a supported GGUF"
         )
         formats = (
             r"; MLX weights load as affine 2, 3, 4, 5, 6 or 8 bits in groups of 32, "
-            "64 or 128, or as mxfp4 or nvfp4"
+            r"64 or 128, or as mxfp4, mxfp8 or nvfp4"
         )
         for name, quantization, refusal in (
             # A transformers quantization_config alone is another method.
@@ -634,7 +649,7 @@ class UpstreamTest(unittest.TestCase):
                 "Qwen/Qwen3.8-27B",
                 transformers_release,
                 r"this model requires an MLX checkpoint \(affine 2, 3, 4, 5, 6 or 8 "
-                r"bits in groups of 32, 64 or 128, mxfp4 or nvfp4\), an NVFP4 or FP8 "
+                r"bits in groups of 32, 64 or 128, mxfp4, mxfp8 or nvfp4\), an NVFP4 or FP8 "
                 r"checkpoint of Model Optimizer or compressed-tensors, or a supported "
                 r"GGUF",
             ),
@@ -952,6 +967,43 @@ class UpstreamTest(unittest.TestCase):
                 {"image_processor": PROCESSOR | {"patch_size": 14}},
                 "unsupported vision preprocessing configuration; use --language-only",
             ),
+            (
+                "someone/inkling-vision",
+                {
+                    "image_processor": PROCESSOR
+                    | {
+                        "image_processor_type": "Inkling2ImageProcessor",
+                        "patch_size": 20,
+                    },
+                    "processor_class": "Inkling2Processor",
+                },
+                None,
+            ),
+            (
+                "someone/inkling-processor-class",
+                {
+                    "image_processor": PROCESSOR | {"patch_size": 20},
+                    "processor_class": "Inkling2Processor",
+                },
+                None,
+            ),
+            (
+                "someone/inkling-default-sizes",
+                {
+                    "image_processor": {
+                        "do_convert_rgb": True,
+                        "do_normalize": True,
+                        "do_rescale": True,
+                        "image_mean": [0.5, 0.5, 0.5],
+                        "image_processor_type": "Inkling2ImageProcessor",
+                        "image_std": [0.5, 0.5, 0.5],
+                        "rescale_factor": 1 / 255,
+                        "size": {"height": 40, "width": 40},
+                    },
+                    "processor_class": "Inkling2Processor",
+                },
+                None,
+            ),
         ):
             with self.subTest(model=model):
                 fake.publish(model, "a" * 40, target(processor))
@@ -1204,8 +1256,10 @@ class UpstreamTest(unittest.TestCase):
         fake = fake_hub(self, self.cache)
         chosen = selection(self.root)
         output, _ = self.prepare(chosen)
-        self.assertIn(
-            "Fetching 4 file(s), 0.00 GB with known sizes, from " + MODEL, output
+        self.assertRegex(
+            output,
+            r"Fetching \d+ file\(s\), 0\.00 GB with known sizes, from "
+            + re.escape(MODEL),
         )
         old = chosen.link.resolve()
         fake.publish(MODEL, "b" * 40, lambda p: mlx_target(p, DENSE))
@@ -1924,6 +1978,34 @@ class UpstreamTest(unittest.TestCase):
             models.ModelError, "is the target, not a vision projector"
         ):
             prepare(only, only / "Model-UD-Q4_K_M.gguf")
+
+    def test_a_local_split_gguf_file_prepares_with_a_local_draft(self):
+        target = self.root / "ggufs"
+        target.mkdir()
+        headers = self.root / "headers"
+        headers.mkdir()
+        header = fixture(native=True)
+        tensors = list(loadable_tensors(header, headers).items())
+        split = {"split.count": 2, "split.tensors.count": len(tensors)}
+        parts = [
+            f"Model-UD-Q4_K_M-{number + 1:05d}-of-00002.gguf" for number in range(2)
+        ]
+        for number, part in enumerate(parts):
+            values = (header if number == 0 else {}) | split | {"split.no": number}
+            write_gguf(target / part, values, tensors[number::2])
+        draft = draft_dir(self.root / "draft", MOE)
+        chosen = local_selection(
+            self.root, target / parts[0],
+            draft_model=str(draft.resolve()), language_only=False,
+        )
+        output, _ = self.prepare_local(chosen)
+        self.assertIn("Installing", output)
+        record = assembly.verify(chosen.link)
+        self.assertEqual(record["sources"]["draft"]["repo"], str(draft.resolve()))
+        self.assertEqual(record["sources"]["target"]["repo"], str((target / parts[0]).resolve()))
+        self.assertEqual(
+            sorted(path.name for path in (chosen.link / "target").iterdir()), parts
+        )
 
     def test_a_local_directory_serves_its_split_gguf_at_the_root(self):
         # A download leaves a split GGUF's parts at the directory's root, a

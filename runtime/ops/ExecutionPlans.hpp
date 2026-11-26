@@ -5,6 +5,7 @@
 #include "ops/Linear.hpp"
 #include "ops/MoE.hpp"
 #include "ops/PagedAttention.hpp"
+#include "ops/inkling2_AttentionCalibration.hpp"
 
 #include <span>
 
@@ -16,6 +17,13 @@ class ExecutionPlans final {
 public:
   explicit ExecutionPlans(const DeviceCapabilities &device);
   [[nodiscard]] const Linear &linear() const noexcept { return linear_; }
+  // Upstream 1.7.2's decode-step linear, used by the ported Inkling-2 family.
+  // The fork's Linear runs both phases from one object, so this is the same
+  // one; no existing family's plan selection changes.
+  [[nodiscard]] const Linear &decodeLinear() const noexcept { return linear_; }
+  // The device's attention calibration, for Inkling-2's relative attention
+  // plans. The fork's existing plans keep their device policy.
+  [[nodiscard]] const Inkling2AttentionCalibration &calibration() const noexcept { return calibration_; }
 
   [[nodiscard]] PrefillAttentionPlan prefillAttention(
       uint32_t rows, uint32_t queryHeads, kv::Layout layout,
@@ -48,6 +56,7 @@ private:
   [[nodiscard]] MoeConfig moeConfig(MoeShape shape, uint32_t rows, MoePhase phase) const;
 
   Linear linear_;
+  Inkling2AttentionCalibration calibration_;
   GpuFamilyClass family_;
   uint32_t gpuCores_;
   bool cpuBf16Experts_;

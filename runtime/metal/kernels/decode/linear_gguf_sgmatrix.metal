@@ -159,7 +159,7 @@ inline void decode(device const bfloat *table, device const float *sums, device 
                    device coherent(device) float *partials, device atomic_uint *counters,
                    device const bfloat *aux, const GgufDecodeParams p, uint2 tg, uint tid, uint sg,
                    uint lane, threadgroup const bfloat2 *lut, threadgroup Coef<F> *coefs,
-                   threadgroup uint *arrival) {
+                   threadgroup uint *arrival, float scale = 1.0f) {
   typedef Shape<F> S;
   typedef Coef<F> C;
   constexpr uint FG = 4 / S::CG;  // fragments per chain
@@ -322,7 +322,10 @@ inline void decode(device const bfloat *table, device const float *sums, device 
 #pragma unroll
       for (uint i = 0; i < 2; ++i) {
         const ulong at = ulong(r * 8 + fn + i) * p.out_stride + column;
-        out[at] = gguf_epilogue<Ep, Out>(acc[r][nf][i], aux, at);
+        // A routed MoE expert's scale belongs to its projection's product,
+        // before the bf16 rounding and the up/gate epilogue, as on the staged
+        // tile. Ordinary projections keep the default 1.
+        out[at] = gguf_epilogue<Ep, Out>(acc[r][nf][i] * scale, aux, at);
       }
     }
 }
@@ -430,11 +433,13 @@ template <GgufEpilogue Ep, uint Shared>
 inline void gguf_sg_expert(device const bfloat *table, device const float *sums, device const MoeTileDescriptor *tiles,
                            device const uint *tile_count, device uchar *w0, device uchar *w1, device uchar *meta,
                            device uchar *sw0, device uchar *sw1, device uchar *smeta, device bfloat *out,
-                           device const bfloat *aux, device const uint *slots, constant MoeGgufExpertParams &p,
+                           device const bfloat *aux, device const uint *slots, device const float *expert_scales,
+                           constant MoeGgufExpertParams &p,
                            uint2 tg, uint tid, uint sg, uint lane, threadgroup bfloat2 *lut, threadgroup float2 *coefs,
                            threadgroup uint *arrival) {
   if (tg.y >= *tile_count) return;
   const MoeGgufSegment s = moe_gguf_segment<Shared>(tiles[tg.y].expert, p, slots, w0, w1, meta, sw0, sw1, smeta);
+  const float scale = moe_expert_scale(expert_scales, tiles[tg.y].expert, p.experts, p.projection);
   const uint K = p.input_size, N = p.output_size;
   const ulong rows = ulong(tg.y) * 8;
   const GgufDecodeParams q{K, 1, N, 0, 0};
@@ -444,7 +449,7 @@ inline void gguf_sg_expert(device const bfloat *table, device const float *sums,
     gguf_sg::decode<F, 1, Ep>(
         table + rows * K, sums + tg.y * table16_sums_per_tile(K), s.w0, s.w1, s.meta, out + rows * N, nullptr, nullptr,
         aux + rows * N, q, uint2(tg.x, 0), tid, sg, lane, lut, reinterpret_cast<threadgroup gguf_sg::Coef<F> *>(coefs),
-        arrival);
+        arrival, scale);
   });
 }
 #define GGUF_SG_EXPERT(Name, EP, Shared)                                                                            \
@@ -453,15 +458,16 @@ inline void gguf_sg_expert(device const bfloat *table, device const float *sums,
                    device uchar *w0 [[buffer(4)]], device uchar *w1 [[buffer(5)]], device uchar *meta [[buffer(6)]], \
                    device uchar *sw0 [[buffer(7)]], device uchar *sw1 [[buffer(8)]], device uchar *smeta [[buffer(9)]], \
                    device bfloat *out [[buffer(10)]], device const bfloat *aux [[buffer(11)]],                      \
-                   device const uint *slots [[buffer(12)]], constant MoeGgufExpertParams &p [[buffer(13)]],         \
+                   device const uint *slots [[buffer(12)]], device const float *expert_scales [[buffer(13)]],      \
+                   constant MoeGgufExpertParams &p [[buffer(14)]],                                                 \
                    uint2 tg [[threadgroup_position_in_grid]],                                                       \
                    uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],            \
                    uint lane [[thread_index_in_simdgroup]]) {                                                       \
     threadgroup bfloat2 lut[kQuantPairTableEntries];                                                                \
     threadgroup float2 coefs[gguf_sg::kCoefFloat2s];                                                                \
     threadgroup uint arrival;                                                                                       \
-    gguf_sg_expert<EP, Shared>(table, sums, tiles, tile_count, w0, w1, meta, sw0, sw1, smeta, out, aux, slots, p, tg, \
-                               tid, sg, lane, lut, coefs, &arrival);                                                \
+    gguf_sg_expert<EP, Shared>(table, sums, tiles, tile_count, w0, w1, meta, sw0, sw1, smeta, out, aux, slots,        \
+                               expert_scales, p, tg, tid, sg, lane, lut, coefs, &arrival);                         \
   }
 GGUF_SG_EXPERT(moe_expert_gguf_sg_a, EpNone, 1)
 GGUF_SG_EXPERT(moe_expert_gguf_sg_g, EpUpWithGate, 1)

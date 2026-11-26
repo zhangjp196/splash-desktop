@@ -586,10 +586,11 @@ class NoDraftLocalModelTest(LocalModelTest):
         # weights are the engine's safetensors.
         self.assertEqual(record["sources"]["draft"]["repo"], str(draft))
 
-    def test_the_legacy_none_mode_is_auto(self):
+    def test_none_mode_does_not_load_a_configured_draft(self):
         target = self.gguf(self.root / "downloads" / "model-Q4_K_M.gguf")
         draft = draft_dir(self.root / "draft", MOE)
-        # `none` named no draft before this release; the configuration now
-        # decides, so the draft it names is used.
-        legacy = self.prepare(target, draft, speculation="none")
-        self.assertEqual(legacy, self.prepare(target, draft))
+        with mock.patch("install.local._draft", side_effect=AssertionError("draft resolved")):
+            prepared = self.prepare(target, draft, speculation="none")
+        record = assembly.verify(prepared)
+        self.assertEqual(record["speculation"]["provider"], "none")
+        self.assertNotIn("draft", record["sources"])

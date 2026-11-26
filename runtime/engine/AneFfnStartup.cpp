@@ -202,7 +202,8 @@ AneFfnStart decide(const AneFfnModel &model, const AneFfnSetting &setting, Reque
       return gpuAloneServing(Kind::NoGain, std::move(reason));
     };
 
-    std::optional<ane_ffn::Calibration> calibration = model.recall(maxAneUnits);
+    std::optional<ane_ffn::Calibration> calibration =
+        setting.recalibrate ? std::nullopt : model.recall(maxAneUnits);
     if (calibration && calibration->aneUnits &&
         (calibration->aneUnits > maxAneUnits || calibration->minimumRows < ops::AneFfn::kMinimumRows ||
          calibration->minimumRows > ops::AneFfn::kMaximumRows))

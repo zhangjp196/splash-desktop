@@ -135,6 +135,9 @@ final class AppModel: ObservableObject {
     @Published var kvFormat = ServerSettings.First.kvFormat
     @Published var stateFormat = ServerSettings.First.stateFormat
     @Published var neuralEngine = true
+    @Published var recalibrateANE = ServerSettings.First.recalibrateANE
+    @Published var maxConcurrentRequests = ServerSettings.First.maxConcurrentRequests
+    @Published var samplingDefaults = ServerSettings.First.samplingDefaults
     @Published var maxConcurrency = ServerSettings.First.maxConcurrency
     @Published var decodeShare = ""
     @Published var responsivePrefill = ServerSettings.First.responsivePrefill
@@ -184,20 +187,13 @@ final class AppModel: ObservableObject {
     /// given the rung, and a running engine's duty is changed through
     /// /v1/thermal, so a change applies without a restart.
     @Published var thermalRung: ThermalRung = .auto
-    /// How hard the smart mode works: the most prefill may keep the GPU busy
-    /// when the Mac is cool, before the fans and temperatures pull it down.
-    @Published var smartLevel: SmartLevel = .medium
-    /// The level the fixed mode runs at: one of the ladder's rungs, the share
-    /// of wall time prefill may keep the GPU busy, held steady while the fixed
-    /// mode is chosen.
-    @Published var fixedLevel: FixedLevel = .balanced
     /// What the engine answered a change with that it would not take, shown on
     /// the thermal page until the next change goes through.
     @Published var thermalError: String?
 
     private static let thermalKey = "splash.thermal-rung"
-    private static let smartLevelKey = "splash.smart-level"
-    private static let fixedLevelKey = "splash.fixed-level"
+    private static let legacySmartLevelKey = "splash.smart-level"
+    private static let legacyFixedLevelKey = "splash.fixed-level"
 
     // The process, the stopping flag and the last pushed duty are internal:
     // the engine reads the process's pid for the client scan, clears the flag
@@ -240,46 +236,37 @@ final class AppModel: ObservableObject {
            let stored = InterfaceLanguage(rawValue: raw) {
             language = stored
         }
+        let defaults = UserDefaults.standard
         let hasStoredSettings = store.hasStoredSettings
-        // The fixed level first: a thermal preference stored before the modes
-        // replaced the ladder named one of its rungs, and that rung becomes
-        // the same level of the fixed mode rather than losing the choice to
-        // the default. The migrated pair is written back, so it runs once.
-        if let raw = UserDefaults.standard.string(forKey: Self.fixedLevelKey),
-           let stored = FixedLevel(rawValue: raw) {
-            fixedLevel = stored
-        }
-        let storedThermal = UserDefaults.standard.string(forKey: Self.thermalKey)
-        if let raw = storedThermal {
-            if let stored = ThermalRung(rawValue: raw) {
-                thermalRung = stored
-            } else if let rung = FixedLevel(rawValue: raw) {
-                thermalRung = .fixed
-                fixedLevel = rung
-                UserDefaults.standard.set(rung.rawValue, forKey: Self.fixedLevelKey)
-                UserDefaults.standard.set(ThermalRung.fixed.rawValue, forKey: Self.thermalKey)
+        let storedThermal = defaults.string(forKey: Self.thermalKey)
+        let oldSmartLevel = defaults.string(forKey: Self.legacySmartLevelKey)
+        let oldFixedLevel = defaults.string(forKey: Self.legacyFixedLevelKey)
+        if let storedThermal {
+            switch storedThermal {
+            case ThermalRung.smartOne.rawValue:
+                thermalRung = .smartOne
+            case ThermalRung.smartTwo.rawValue:
+                thermalRung = .smartTwo
+            case ThermalRung.auto.rawValue:
+                thermalRung = .auto
+            case "smart":
+                thermalRung = oldSmartLevel == "high" ? .smartTwo : .smartOne
+            case "fixed", "balanced", "moderate", "quiet":
+                thermalRung = .smartOne
+            default:
+                thermalRung = .auto
             }
-        } else if hasStoredSettings {
-            // An existing install that never chose a mode keeps the system
-            // default it has been running; only a fresh install opens on the
-            // smart mode, so an update does not change a running Mac's heat
-            // and speed behind the user's back.
-            thermalRung = .auto
-            UserDefaults.standard.set(ThermalRung.auto.rawValue, forKey: Self.thermalKey)
         } else {
-            // A fresh install opens on Smart/High: full speed while the Mac is
-            // cool, backing off as the fans and sensors climb.
-            thermalRung = .smart
-            if UserDefaults.standard.string(forKey: Self.smartLevelKey) == nil {
-                smartLevel = .high
-                UserDefaults.standard.set(SmartLevel.high.rawValue, forKey: Self.smartLevelKey)
-            }
-            UserDefaults.standard.set(ThermalRung.smart.rawValue, forKey: Self.thermalKey)
+            // Keep existing installs on system management; new installs open
+            // on the performance smart mode. An orphaned old fixed-level
+            // preference migrates to the quieter smart mode instead.
+            thermalRung = oldFixedLevel != nil ? .smartOne : (hasStoredSettings ? .auto : .smartTwo)
         }
-        if let raw = UserDefaults.standard.string(forKey: Self.smartLevelKey),
-           let stored = SmartLevel(rawValue: raw) {
-            smartLevel = stored
-        }
+        // Remove old mode preferences after converting them to one of the
+        // three current choices, so no fixed strategy can be restored later.
+        defaults.set(thermalRung.rawValue, forKey: Self.thermalKey)
+        defaults.removeObject(forKey: Self.legacySmartLevelKey)
+        defaults.removeObject(forKey: Self.legacyFixedLevelKey)
         applyLanguage()
         // The store keeps the whole command's settings, so it is the first
         // source for both shares. The active configuration then names the
@@ -300,6 +287,7 @@ final class AppModel: ObservableObject {
             libraryStore.saveActive(seed.id)
         } else if let active = configs.first(where: { $0.id == activeConfigID }) {
             applyModelSettings(active.settings)
+            saveSettings()
         }
         // A server left over from a previous session is detected and taken
         // over asynchronously.
@@ -345,6 +333,9 @@ final class AppModel: ObservableObject {
         settings.kvFormat = kvFormat
         settings.stateFormat = stateFormat
         settings.neuralEngine = neuralEngine
+        settings.recalibrateANE = recalibrateANE
+        settings.maxConcurrentRequests = maxConcurrentRequests
+        settings.samplingDefaults = samplingDefaults
         settings.maxConcurrency = maxConcurrency
         settings.decodeShare = decodeShare
         settings.responsivePrefill = responsivePrefill
@@ -353,6 +344,7 @@ final class AppModel: ObservableObject {
         settings.thinkingTokenBudget = thinkingTokenBudget
         settings.thinkingEndText = thinkingEndText
         global.applying(to: &settings)
+        ServerSettings.sanitized(&settings)
         return settings
     }
 
@@ -407,6 +399,8 @@ final class AppModel: ObservableObject {
     /// Take the model-owned share of a complete configuration, leaving the
     /// app-wide share as the Settings page last left it.
     private func applyModelSettings(_ settings: ServerSettings) {
+        var settings = settings
+        ServerSettings.sanitized(&settings)
         restoring = true
         defer { restoring = false }
         modelMode = settings.modelMode
@@ -429,6 +423,9 @@ final class AppModel: ObservableObject {
         kvFormat = settings.kvFormat
         stateFormat = settings.stateFormat
         neuralEngine = settings.neuralEngine
+        recalibrateANE = settings.recalibrateANE
+        maxConcurrentRequests = settings.maxConcurrentRequests
+        samplingDefaults = settings.samplingDefaults
         maxConcurrency = settings.maxConcurrency
         decodeShare = settings.decodeShare
         responsivePrefill = settings.responsivePrefill
@@ -450,101 +447,62 @@ final class AppModel: ObservableObject {
     /// The duty the running engine holds, once /status has reported one.
     var engineDutyPercent: Double? { live.updated ? live.dutyPercent : nil }
 
-    /// The mode the engine holds, when it holds one of the ladder's: nil while
-    /// no server runs, and for a duty between the fixed levels, as a server
-    /// started outside the app with --prefill-duty leaves. A duty one of the
-    /// fixed levels holds marks the fixed mode; a top duty marks the system
-    /// default.
+    /// The system-default choice is identifiable from its full engine duty;
+    /// adaptive duties are computed continuously and are represented by the
+    /// app's selected smart mode.
     var engineRung: ThermalRung? {
-        guard let duty = engineDutyPercent else { return nil }
-        if FixedLevel(duty: duty) != nil { return .fixed }
-        if abs(duty - 100) < 0.5 { return .auto }
-        return nil
+        guard let duty = engineDutyPercent, abs(duty - 100) < 0.5 else { return nil }
+        return .auto
     }
 
-    /// Choose a mode: remember it for the next start, and take a running
-    /// engine's duty to it now. `smart` has no fixed duty: it is pushed each
-    /// second from the fans and temperatures, so a change to its level is
-    /// remembered and applied on the next poll. `fixed` takes its level's
-    /// duty.
+    /// Choose one of the three modes and apply it to a running engine.
     func setThermalRung(_ rung: ThermalRung) {
         thermalRung = rung
         UserDefaults.standard.set(rung.rawValue, forKey: Self.thermalKey)
         thermalError = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
-            switch rung {
-            case .auto: await pushThermalDuty(rung.duty ?? 100)
-            case .smart: await pushSmartDuty()
-            case .fixed: await pushThermalDuty(fixedLevel.duty)
+            if rung.isSmart {
+                lastSmartDuty = nil
+                await pushSmartDuty()
+            } else {
+                lastSmartDuty = nil
+                await pushThermalDuty(rung.duty ?? 100)
             }
         }
     }
 
-    /// Remember the smart level and, while the smart mode is chosen and a
-    /// server runs, take the engine's duty to it now.
-    func setSmartLevel(_ level: SmartLevel) {
-        smartLevel = level
-        UserDefaults.standard.set(level.rawValue, forKey: Self.smartLevelKey)
-        thermalError = nil
-        Task { @MainActor [weak self] in
-            guard let self, thermalRung == .smart else { return }
-            await pushSmartDuty()
-        }
-    }
-
-    /// Remember the fixed level and, while the fixed mode is chosen and a
-    /// server runs, take the engine's duty to it now.
-    func setFixedLevel(_ level: FixedLevel) {
-        fixedLevel = level
-        UserDefaults.standard.set(level.rawValue, forKey: Self.fixedLevelKey)
-        thermalError = nil
-        Task { @MainActor [weak self] in
-            guard let self, thermalRung == .fixed else { return }
-            await pushThermalDuty(level.duty)
-        }
-    }
-
-    /// The duty the smart mode asks for now: its level's ceiling while the fans
-    /// are still inside the band that level allows and the sensors are cool,
-    /// falling toward its floor as the fans leave that band or the hottest
-    /// sensor climbs. The fans are the Mac's own answer to the heat, so a Mac
-    /// already spinning them is asked to feed less work; a Mac without fans
-    /// (a fanless Air) is judged by its sensors alone. The result is clamped to
-    /// the engine's range, so it is always one the engine will take.
+    /// The smart target combines each fan's own usable RPM range, the hottest
+    /// sensor and macOS thermal pressure. Missing telemetry is treated as
+    /// unknown heat rather than proof that the Mac is cool.
     func smartDuty() -> Double {
         let live = self.live
-        let level = smartLevel
-        // How far the fans are past what this level allows, 0 inside the band
-        // and 1 at their top speed.
-        let fanShare: Double
-        if live.fansAvailable, let maxRpm = live.fanMaximums.max(), maxRpm > 0 {
-            let fastest = live.fanSpeeds.max() ?? 0
-            fanShare = min(1.0, Double(fastest) / Double(maxRpm))
-        } else {
-            fanShare = 0.0
+        let mode = thermalRung
+        let fanShare = fanUtilization(live)
+        let fanHead = fanShare.map {
+            min(1, max(0, ($0 - mode.fanShare) / max(0.01, 1 - mode.fanShare)))
         }
-        let band = level.fanShare
-        let fanHead = min(1.0, max(0.0, (fanShare - band) / max(0.01, 1.0 - band)))
-        // The sensors: cool below 65 °C, at their hottest the runtime reads to
-        // at 90 °C.
-        let heatHead: Double
-        if let hottest = TemperatureGroup.hottest(live.temperatures)?.celsius {
-            heatHead = min(1.0, max(0.0, (hottest - 65.0) / 25.0))
-        } else {
-            heatHead = 0.0
+        let heatHead = TemperatureGroup.hottest(live.temperatures).map {
+            min(1, max(0, ($0.celsius - 65) / 25))
         }
-        // Whichever of the two is further along holds the duty down, so a hot
-        // Mac with lazy fans is paced as hard as a cool one with loud fans.
-        let backoff = max(fanHead, heatHead)
-        let duty = level.ceiling - (level.ceiling - level.floor) * backoff
-        return min(100.0, max(10.0, duty))
+        let sensorSignals = [fanHead, heatHead].compactMap { $0 }
+        if sensorSignals.isEmpty {
+            if live.thermalState == .critical { return mode.floor }
+            if live.thermalState == .serious {
+                let duty = mode.ceiling - (mode.ceiling - mode.floor) * 0.60
+                return max(mode.floor, duty)
+            }
+            return min(mode.ceiling, 55)
+        }
+        let backoff = max(sensorSignals.max() ?? 0, live.thermalState?.severity ?? 0)
+        let duty = mode.ceiling - (mode.ceiling - mode.floor) * backoff
+        return min(100, max(10, duty))
     }
 
     /// Changes the running engine's duty to what the smart mode asks for now.
     /// Nothing to do while no server runs: the level is the next start's too.
     private func pushSmartDuty() async {
-        guard thermalRung == .smart else { return }
+        guard thermalRung.isSmart else { return }
         await pushThermalDuty(smartDuty())
     }
 
@@ -743,7 +701,7 @@ final class AppModel: ObservableObject {
         // serves. A repository ID an older configuration saved still names
         // its own download until an edit moves it to a folder.
         let draft = draftDirectory.trimmingCharacters(in: .whitespaces)
-        if !draft.isEmpty {
+        if !draft.isEmpty && draft != modelDirectory.trimmingCharacters(in: .whitespaces) {
             arguments += ["--draft-model", draft]
         } else if draftMode == "hub" {
             let stored = draftID.trimmingCharacters(in: .whitespaces)
@@ -765,6 +723,14 @@ final class AppModel: ObservableObject {
         // The panel owns the admission limit: it equals the server's own
         // default until edited, so passing it keeps the two in step.
         arguments += ["--queue-size", String(maxConcurrency)]
+        if maxConcurrentRequests != ServerSettings.First.maxConcurrentRequests {
+            arguments += ["--max-concurrent-requests", String(maxConcurrentRequests)]
+        }
+        for entry in samplingDefaults.split(separator: ",") {
+            let value = entry.trimmingCharacters(in: .whitespaces)
+            if !value.isEmpty { arguments += ["--sampling-default", value] }
+        }
+        if recalibrateANE && neuralEngine { arguments.append("--recalibrate-ane") }
         if languageOnly && profile.vision { arguments.append("--language-only") }
         if !maxMemory.isEmpty { arguments += ["--max-memory", maxMemory] }
         if !maxContext.isEmpty { arguments += ["--max-context", maxContext] }
@@ -882,17 +848,10 @@ final class AppModel: ObservableObject {
             !global.servedNames.trimmingCharacters(in: .whitespaces).isEmpty {
             arguments.append("--announce-served-name")
         }
-        // How loud the Mac may get: the system default passes nothing, leaving
-        // the Mac's own thermal management in charge, which is the server's
-        // default too. `smart` starts at its level's ceiling, and the poll
-        // takes it to what the fans and temperatures ask for each second.
-        // `fixed` starts at its level, one of the ladder's rungs, which the
-        // server names as a policy. A change made while the server runs goes
-        // to the engine through /v1/thermal instead.
-        if thermalRung == .smart {
-            arguments += ["--prefill-duty", String(Int(smartLevel.ceiling))]
-        } else if thermalRung == .fixed {
-            arguments += ["--thermal-policy", fixedLevel.rawValue]
+        // System default leaves pacing to macOS. Smart modes start at their
+        // own ceiling; live readings then adapt the duty through /v1/thermal.
+        if thermalRung.isSmart {
+            arguments += ["--prefill-duty", String(Int(thermalRung.ceiling))]
         }
         return arguments
     }

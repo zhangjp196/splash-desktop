@@ -181,13 +181,13 @@ RuntimeBootstrapReport RuntimeBootstrap::requireWarmupAndAnnounce(
   // Startup exercises only widths that fit this budget. This is not a
   // serving concurrency limit: the engine still admits lanes dynamically.
   const uint32_t affordableWidth = static_cast<uint32_t>(std::min<uint64_t>(
-      model::ExecutionLimits::maximumBatchWidth,
+      budget.maximumBatchWidth,
       (budget.dynamicBudgetBytes -
        kvRunwayPages(budget.kvExtentPages) * budget.kvPageBytes) /
           budget.laneStateBytes));
   // The maximum prefill, every decode width (a width the budget cannot hold
   // is announced as skipped), the composite restore and the memory audit.
-  const uint32_t totalSteps = 1 + model::ExecutionLimits::maximumBatchWidth + 2;
+  const uint32_t totalSteps = 1 + budget.maximumBatchWidth + 2;
   uint32_t step = 0;
   auto announce = [&](std::string_view name, std::string_view note = {}) {
     logLine("Warming up · ", ++step, " of ", totalSteps, " steps · ", name,
@@ -239,7 +239,7 @@ RuntimeBootstrapReport RuntimeBootstrap::requireWarmupAndAnnounce(
                            maximumPrefill.wallSeconds * 1000.0, maximumPrefill.hostSeconds * 1000.0);
   report.warmup.maximumPrefillDetail = maximumPrefill.detail;
   for (uint32_t width = 1;
-       width <= model::ExecutionLimits::maximumBatchWidth; ++width) {
+       width <= budget.maximumBatchWidth; ++width) {
     if (width > affordableWidth ||
         (width > 1 && report.warmup.decodeBatches[width - 2] ==
                           WarmupStepStatus::MemoryLimited)) {
@@ -366,6 +366,8 @@ std::unique_ptr<RuntimeBootstrap> RuntimeBootstrap::start(
   config.nativeLoop.engine.maxImagePatches =
       config.resources.model.hasVision() ? config.resources.maximumImagePatches
                                          : 0;
+  config.nativeLoop.engine.maxConcurrentRequests =
+      resources->memoryPlan().breakdown().maximumBatchWidth;
 
   std::unique_ptr<model::RuntimeModel> modelRuntime;
   try {

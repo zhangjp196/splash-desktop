@@ -70,6 +70,15 @@ class InstallerTest(unittest.TestCase):
         (snapshot / "config.json").symlink_to(os.path.relpath(blob, snapshot))
         return snapshot
 
+    def test_a_draft_must_be_a_directory_not_a_gguf_file(self):
+        target = self.root / "model-00001-of-00002.gguf"
+        target.write_bytes(b"GGUF")
+        with self.assertRaisesRegex(
+            argparse.ArgumentTypeError,
+            "a DFlash2 draft must be a directory, not a model or projector file",
+        ):
+            installer.parse_draft_model(str(target))
+
     def test_accepts_full_hub_ids_without_name_or_owner_allowlist(self):
         for model_id in (
             self.MODEL_ID,
@@ -136,13 +145,11 @@ class InstallerTest(unittest.TestCase):
         args = installer.parse_args(["--model", self.MODEL_ID, "prepare"])
         self.assertEqual((args.command, args.model), ("prepare", self.MODEL_ID))
 
-    def test_the_legacy_none_speculation_is_auto(self):
-        # A release before this one served without a draft on request; the
-        # configuration decides now, so none names auto.
+    def test_none_speculation_is_preserved(self):
         args = installer.parse_args(
             ["--model", self.MODEL_ID, "--speculation", "none", "link"]
         )
-        self.assertEqual(args.speculation, "auto")
+        self.assertEqual(args.speculation, "none")
         with self.assertRaises(installer.ModelError):
             installer.Selection.of(self.root, self.MODEL_ID, speculation="bogus")
 

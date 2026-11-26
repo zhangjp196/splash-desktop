@@ -84,12 +84,23 @@ ops::BlockMoeWeights readMoeBlock(WeightFile &file, const QwenTargetDimensions &
     ffn.slotTable = experts.resident;
     ffn.slots = experts.experts;
   }
-  ffn.gate.shared = readQuantizedSegment(file, "shared-expert-gate");
-  ffn.up.shared = readQuantizedSegment(file, "shared-expert-up");
-  ffn.down.shared = readQuantizedSegment(file, "shared-expert-down");
+  const uint64_t scaleBytes = checkedMultiply<WeightStoreError>(
+      3 * target.experts, kFloat32Bytes, "expert scale bytes");
+  ffn.expertScales = file.section(scaleBytes, "expert-scales");
+  // A family with no shared expert (Inkling 2, sharedExpertSlices=0) lays out
+  // no shared-expert sections; reading them would consume the next section's
+  // bytes as a tensor descriptor. Families with one read them as before.
+  if (target.sharedExpertSlices) {
+    ffn.gate.shared = readQuantizedSegment(file, "shared-expert-gate");
+    ffn.up.shared = readQuantizedSegment(file, "shared-expert-up");
+    ffn.down.shared = readQuantizedSegment(file, "shared-expert-down");
+  }
   if (target.sharedExpertGate) ffn.sharedScalarGate = readQuantizedSegment(file, "shared-expert-scalar-gate");
-  // The store keeps the block's router and scalar gate, which predict its
-  // routes.
+  if (target.expertSelectionBias)
+    ffn.selectionBias = file.section(
+        checkedMultiply<WeightStoreError>(target.experts, kFloat32Bytes, "selection bias bytes"), "selection-bias");
+  // The store keeps the block's router, scalar gate and selection bias,
+  // which predict its routes.
   if (experts.store) experts.store->bind(block, ffn);
   return ffn;
 }

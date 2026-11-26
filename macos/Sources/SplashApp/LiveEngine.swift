@@ -433,6 +433,9 @@ final class LiveEngine: ObservableObject {
             status.pacedWaits = throttle["paced_waits"] as? Int
             status.pacedWaitMilliseconds = throttle["paced_wait_ms"] as? Double
         }
+        if let rawThermalState = object["thermal_state"] as? String {
+            status.thermalState = ThermalPressure(rawValue: rawThermalState)
+        }
         status.updated = true
         let previous = live
         statusUpdatedAt = Date()
@@ -463,8 +466,14 @@ final class LiveEngine: ObservableObject {
         // duty to them, so the Mac stays as loud as it needs to be and no
         // louder. A push only when the reading has moved the duty, so the
         // engine is not asked to change a duty it already holds.
-        if app.thermalRung == .smart, app.phase == .ready {
-            let duty = app.smartDuty()
+        if app.thermalRung.isSmart, app.phase == .ready {
+            let target = app.smartDuty()
+            let duty: Double
+            if let last = app.lastSmartDuty, target > last {
+                duty = min(target, last + 6)
+            } else {
+                duty = target
+            }
             if let last = app.lastSmartDuty, abs(last - duty) < 1.0 {
                 return
             }

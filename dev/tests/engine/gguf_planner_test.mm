@@ -344,8 +344,11 @@ void checkMoe(const std::filesystem::path &directory) {
     ++quantized;
     const uint64_t rows = tensor.dims[1] * (tensor.dims.size() > 2 ? tensor.dims[2] : 1);
     const auto *repack = repackOf(layer, tensor.name);
-    check(repack && repack->sources.size() == 1 && repack->rows == rows && repack->columns == tensor.dims[0] &&
-              repack->sources[0].rows == rows,
+    const bool routedExpert = tensor.name.find("_exps.weight") != std::string::npos;
+    const uint64_t sourceCount = routedExpert ? g.experts : 1;
+    const uint64_t sourceRows = routedExpert ? rows / g.experts : rows;
+    check(repack && repack->sources.size() == sourceCount && repack->rows == rows && repack->columns == tensor.dims[0] &&
+              repack->sources[0].rows == sourceRows,
           "planner repacks " + tensor.name + " as " + std::to_string(rows) + " rows of " +
               std::to_string(tensor.dims[0]));
   }
@@ -376,11 +379,16 @@ void checkMoe(const std::filesystem::path &directory) {
       if (repack.sources.front().name == "blk.0.ffn_gate_up_exps.weight") halves.push_back(&repack);
   bool split = halves.size() == 2;
   for (size_t half = 0; split && half < 2; ++half) {
-    split = halves[half]->rows == g.experts * width && halves[half]->sources.size() == g.experts;
+    const auto &repack = *halves[half];
+    split = repack.rows == g.experts * width && repack.columns == g.hiddenSize &&
+            repack.sources.size() == g.experts;
     for (uint64_t expert = 0; split && expert < g.experts; ++expert) {
-      const model::gguf::TensorRows &rows = halves[half]->sources[expert];
+      const model::gguf::TensorRows &rows = repack.sources[expert];
       split = rows.first == (2 * expert + half) * width && rows.rows == width &&
-              rows.rowBytes == gguf_reference::rowBytes(Fmt(gguf_format_of(rows.type)), g.hiddenSize);
+              rows.rowBytes == gguf_reference::rowBytes(Fmt(gguf_format_of(rows.type)), g.hiddenSize) &&
+              std::all_of(repack.sources.begin(), repack.sources.end(), [](const model::gguf::TensorRows &source) {
+                return source.ggufNvfp4RowBytes == 0;
+              });
     }
   }
   check(split, "planner splits llama.cpp's fused gate/up experts into each expert's gate and up rows" +
@@ -389,9 +397,12 @@ void checkMoe(const std::filesystem::path &directory) {
         "planner streams fused gate/up experts as each expert's gate and up rows");
   tensorNamed(fused, "blk.0.ffn_gate_up_exps.weight").type = kQ8_1;
   tensorNamed(fused, "blk.0.ffn_gate_up_exps.weight").data.resize(2 * g.experts * width * g.hiddenSize / 32 * 36);
+  std::erase_if(fused, [](const Tensor &tensor) { return tensor.name == "blk.0.ffn_gate_up_exps.scale"; });
   writeGguf(path, fused, g);
-  check(names(plan(path, g), {"blk.0.ffn_gate_up_exps.weight (Q8_1)"}),
-        "planner refuses a fused gate/up experts tensor of a type it does not read by name");
+  const Plan refused = plan(path, g);
+  check(names(refused, {"blk.0.ffn_gate_up_exps.weight (Q8_1)"}),
+        "planner refuses a fused gate/up experts tensor of a type it does not read by name" +
+            (refused.error ? ": " + *refused.error : ""));
 }
 
 // The rotary embedding and norms the kernels compute: a GGUF declares their
@@ -752,6 +763,18 @@ void checkPleTable(const std::filesystem::path &directory) {
             model::gguf::streamedTableBytes(streamedTable) == kPleTableRows * rows->rowBytes &&
             model::gguf::loadedBytes(streamedTable) == 0 && streamedTable.bytes == table.bytes,
         "planner streams the PLE table's rows instead of loading its image, which its record keeps");
+  // A gathered IQ4_NL table needs whole 32-value blocks, not the 64-column
+  // coefficient unit a projection of the same format uses.
+  TensorTypes narrow = types;
+  narrow["per_layer_token_embd.weight"] = kIQ4_NL;
+  writeGguf(path, targetTensors(g, narrow), g);
+  const Plan narrowLoaded = plan(path, g), narrowStreamed = plan(path, g, {.streamTable = true});
+  check(!narrowLoaded.error && !narrowStreamed.error && narrowStreamed.images.back().streamedRows &&
+            narrowStreamed.images.back().streamedRows->rowBytes ==
+                gguf_reference::rowBytes(Fmt(GGUF_FMT_IQ4NL), g.pleHeadDimension),
+        "planner loads and streams a 160-column IQ4_NL PLE table" +
+            (narrowLoaded.error ? ": " + *narrowLoaded.error
+                                : narrowStreamed.error ? ": " + *narrowStreamed.error : std::string()));
   // NVFP4 rows are whole blocks of 256 values.
   model::QwenTargetDimensions wide = g;
   wide.pleHeadDimension = 256;
@@ -938,9 +961,11 @@ void checkFlint(const std::filesystem::path &directory) {
     if (!moe) continue;
     const auto *gate = repackOf(image, p + "ffn_gate_shexp.weight");
     const auto *down = repackOf(image, p + "ffn_down_shexp.weight");
-    check(gate && gate->rows == 2 * g.expertIntermediateSize && down && down->rows == 2 * g.hiddenSize &&
-              down->columns == g.expertIntermediateSize && down->sources.size() == 2 &&
-              down->sources[0].windows == 2 && down->sources[0].window == 0 && down->sources[1].window == 1,
+    check(gate && gate->rows == g.sharedExpertSlices * g.expertIntermediateSize &&
+              down && down->rows == g.sharedExpertSlices * g.hiddenSize &&
+              down->columns == g.expertIntermediateSize && down->sources.size() == g.sharedExpertSlices &&
+              down->sources[0].windows == g.sharedExpertSlices && down->sources[0].window == 0 &&
+              down->sources[1].window == 1,
           "planner plans layer " + std::to_string(layer) + "'s shared expert as two slices of the routed width");
   }
   const auto expertsOf = [](const Plan &result) {

@@ -15,9 +15,8 @@ from . import compaction, generation_options, image_prompts, judgments
 from . import images as image_input
 from . import protocol as wire
 from .backend import Job, remaining_request_time
-from .chat_format import THINK_END, THINK_START, TOOL_CALL_OPEN
+from .chat_format import TOOL_CALL_OPEN
 from .chat_messages import (
-    IMAGE_PAD_TOKEN,
     normalize_messages,
     template_messages,
 )
@@ -57,20 +56,24 @@ PREPARATION_WAIT_SECONDS = 30.0
 COMPLETION_DEFAULT_MAX_TOKENS = 16
 
 
-def _generation_prompt(probed, rendered, tokens):
+def _generation_prompt(probed, rendered, tokens, chat_format):
     """Whether the generation prompt opens a think block, and how many of the
     prompt's last tokens it is (zero where they differ from its tokens).
     `probed` is its text and tokens, as the startup probe found them for the
     request's template options, and the rendered prompt must end with that
-    text."""
+    text, which is empty only where the model opens its own message
+    (chat_format.opens_own_message). A trailing empty prompt of a format
+    whose model opens its own message is checked against all of the rendered
+    tokens: a custom template that appends a hidden prefix must not be served
+    as if the model wrote the first message."""
     text, ids = probed
-    if not text or not rendered.endswith(text):
+    if not (text or chat_format.opens_own_message) or not rendered.endswith(text):
         raise APIError(
             400, "chat template must end with an assistant generation prefix"
         )
     count = len(ids)
     return (
-        text.rfind(THINK_START) > text.rfind(THINK_END),
+        text.rfind(chat_format.think_open) > text.rfind(chat_format.think_close),
         count if count < len(tokens) and tuple(tokens[-count:]) == ids else 0,
     )
 
@@ -93,6 +96,30 @@ class Prompt:
     sent_effort: str | None = None
 
 
+def _head_tokens(messages, tools, tokens, openings):
+    """Where the prompt's head ends: its system message and the tools the
+    template renders before any other message, which other conversations of
+    the same agent or app share, end where the first other message opens
+    (ChatFormat.turn_openings, as `openings`' tokens). Zero without a system
+    message first or tools, and where no turn opens the format's way, as a
+    custom template (--chat-template-file) may write them."""
+    system = bool(messages) and messages[0].get("role") == "system"
+    if not (system or tools):
+        return 0
+    end = len(tokens)
+    for ids in openings:
+        index = -1
+        while True:
+            try:
+                index = tokens.index(ids[0], index + 1, end)
+            except ValueError:
+                break
+            if tuple(tokens[index : index + len(ids)]) == ids:
+                end = index
+                break
+    return 0 if end >= len(tokens) else end
+
+
 @dataclass
 class RenderedPrompt:
     text: str
@@ -102,6 +129,8 @@ class RenderedPrompt:
     thinking: bool
     # Images precede the generation prompt; expanding them keeps this count.
     generation_prompt_tokens: int
+    # Where the head ends (_head_tokens); zero without one.
+    head_tokens: int = 0
 
 
 class Frontend:
@@ -120,10 +149,12 @@ class Frontend:
         thinking_codec,
         vision,
         max_image_pixels=image_input.MAX_PIXELS,
+        image_processor="qwen",
         served_model_names=(),
         announce_served_name=False,
         default_reasoning_effort=None,
         default_thinking_token_budget=None,
+        sampling_defaults=None,
         compact_at=None,
         compact_keep=None,
         compact_memory=None,
@@ -141,6 +172,11 @@ class Frontend:
         # The served family's: how its output reasons and calls tools.
         self.chat_format = chat_format
         self.prompt_tokenizer = PromptTokenizer(tokenizer, chat_format.message_boundary)
+        # The tokens of each of its turn openings, where a prompt's head ends.
+        self.turn_openings = tuple(
+            tuple(self.tokenizer(tokenizable(text), add_special_tokens=False)["input_ids"])
+            for text in chat_format.turn_openings
+        )
         self.backend = backend
         # The model id the engine loaded. /status reports it, so an alias
         # can never hide what served a request (#81).
@@ -167,6 +203,9 @@ class Frontend:
         ):
             raise ValueError("invalid default_thinking_token_budget")
         self.default_thinking_token_budget = default_thinking_token_budget
+        # --sampling-default: the sampling values a request that sets none
+        # takes, by field name.
+        self.sampling_defaults = dict(sampling_defaults or ())
         self.max_context = max_context
         # --compact-at: "auto", or the share of the window a prompt may reach
         # before a request compacts; None turns compaction off.
@@ -200,6 +239,9 @@ class Frontend:
         self.request_timeout = request_timeout
         self.constraint_factory = constraint_factory
         self.max_image_pixels = max_image_pixels
+        if image_processor not in ("qwen", "inkling2"):
+            raise ValueError("unsupported image processor")
+        self.image_processor = image_processor
         self.images = image_input.ImageCache()
         self.ids = count(1)
         self.preparation_capacity = preparation_capacity
@@ -223,6 +265,13 @@ class Frontend:
         return ["text", "image", "pdf"] if self.vision else ["text"]
 
     @property
+    def reasoning_switch(self):
+        """Whether a request's reasoning effort or enable_thinking turns the
+        model's reasoning on and off, as /status reports: where the family's
+        prompt switches it, which the format states."""
+        return self.chat_format.prompt_switches_reasoning
+
+    @property
     def reasoning(self):
         """What /v1/models reports of reasoning: the default template's
         (ChatTemplate.reasoning), with the server's default effort in place of
@@ -243,7 +292,7 @@ class Frontend:
         status = self.backend.status(cached=True) if cached else self.backend.status()
         status["vision"] = self.vision
         status["input_modalities"] = self.input_modalities
-        status["reasoning_switch"] = self.chat_format.reasoning_switch
+        status["reasoning_switch"] = self.reasoning_switch
         status["chat_template"] = self.chat_templates.status()
         with self.preparation_lock:
             status["frontend"] = {
@@ -652,7 +701,8 @@ class Frontend:
                 prompt.messages, deadline, check_context=check_context
             )
         remaining_request_time(deadline)
-        if images and self.tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN) is None:
+        pad = image_prompts._image_pad(self)
+        if images and self.tokenizer.convert_tokens_to_ids(pad) is None:
             raise APIError(400, "the tokenizer does not define the image pad token")
         positions = []
         try:
@@ -690,10 +740,22 @@ class Frontend:
         thinking, generation_prompt_tokens = False, 0
         if add_generation_prompt:
             thinking, generation_prompt_tokens = _generation_prompt(
-                chat_template.generation_prompt(template), rendered, tokens
+                chat_template.generation_prompt(template),
+                rendered,
+                tokens,
+                self.chat_format,
             )
+        head_tokens = _head_tokens(
+            prompt.messages, prompt.tools, tokens, self.turn_openings
+        )
         return RenderedPrompt(
-            rendered, tokens, images, positions, thinking, generation_prompt_tokens
+            rendered,
+            tokens,
+            images,
+            positions,
+            thinking,
+            generation_prompt_tokens,
+            head_tokens,
         )
 
     def _prepare(

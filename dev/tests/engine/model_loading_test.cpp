@@ -3,6 +3,7 @@
 #include "TestChecks.hpp"
 #include "TestCheckpoint.hpp"
 #include "model/GgufImageLayout.hpp"
+#include "model/QwenTargetLoader.hpp"
 #include "model/ModelFactory.hpp"
 #include "model/ModelSizing.hpp"
 #include "model/SafetensorsImage.hpp"
@@ -375,6 +376,97 @@ void testGgufImageLayout(MetalBackend &backend, const std::filesystem::path &roo
         return images.load(
             fileImage(path, "test/" + path.filename().string(), kGgufImageMagic, 0, 0));
     };
+    // readMoeBlock consumes expert scales after the routed projections and
+    // before shared weights, in [gate][up][down][expert] order.
+    {
+        constexpr uint32_t experts = 2, expertRows = 256, hidden = 256;
+        splash::model::QwenTargetDimensions target{};
+        target.experts = experts;
+        target.expertsPerToken = 1;
+        target.hiddenSize = hidden;
+        target.expertIntermediateSize = expertRows;
+        target.sharedExpertSlices = 0;
+        target.sharedExpertGate = false;
+        const auto append = [](std::vector<uint64_t> &sections, const QuantFormat &format,
+                               uint32_t output, uint32_t input) {
+            const auto planes = splash::model::ggufPlaneBytes(format, output, input);
+            sections.push_back(splash::model::kWeightFileAlignment);
+            for (uint64_t bytes : {planes.plane0, planes.plane1, planes.meta})
+                if (bytes) sections.push_back(bytes);
+        };
+        std::vector<uint64_t> sections;
+        const auto descriptor = [&](const QuantFormat &format, uint32_t output, uint32_t input) {
+            const auto planes = splash::model::ggufPlaneBytes(format, output, input);
+            return splash::model::GgufTensorDescriptor{
+                .type = format.ggml_type,
+                .outputSize = output,
+                .inputSize = input,
+                .p0 = format.plane0_bytes,
+                .p1 = format.plane1_bytes,
+                .metaBytes = format.meta_bytes,
+                .metaGroups = format.meta_groups,
+                .plane0Bytes = planes.plane0,
+                .plane1Bytes = planes.plane1,
+                .metaTotalBytes = planes.meta};
+        };
+        const std::array<QuantFormat, 3> formats{q80, q80, q80};
+        sections.push_back(splash::model::kWeightFileAlignment);
+        sections.push_back(uint64_t{experts} * hidden * sizeof(float));
+        for (uint32_t projection = 0; projection < 3; ++projection)
+            append(sections, formats[projection], experts * (projection == 2 ? hidden : expertRows),
+                   projection == 2 ? expertRows : hidden);
+        std::array<float, 3 * experts> expected{1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F};
+        constexpr uint64_t alignment = splash::model::kWeightFileAlignment;
+        const uint64_t scaleBytes = expected.size() * sizeof(float);
+        std::vector<uint64_t> allSections = sections;
+        allSections.push_back(scaleBytes);
+        const auto path = root / "moe-expert-scales.bin";
+        const uint64_t fileBytes = writeWeightFile(path, kGgufImageMagic, 0, 0, allSections);
+        uint64_t offset = alignment;
+        auto advance = [&]() { offset = splash::model::alignWeightOffset(offset); };
+        int file = open(path.c_str(), O_RDWR | O_CLOEXEC);
+        require(file >= 0, "unable to open synthetic MoE expert scales");
+        const splash::model::GgufTensorDescriptor router{
+            .type = splash::model::ggml::kF32,
+            .outputSize = experts,
+            .inputSize = hidden,
+            .plane0Bytes = uint64_t{experts} * hidden * sizeof(float)};
+        const auto encodedRouter = router.encode();
+        require(pwrite(file, encodedRouter.data(), encodedRouter.size(), offset) ==
+                    static_cast<ssize_t>(encodedRouter.size()),
+                "unable to write synthetic MoE router descriptor");
+        offset += encodedRouter.size();
+        advance();
+        offset += router.plane0Bytes;
+        advance();
+        for (uint32_t projection = 0; projection < 3; ++projection) {
+            const auto encoded = descriptor(formats[projection],
+                                            experts * (projection == 2 ? hidden : expertRows),
+                                            projection == 2 ? expertRows : hidden)
+                                     .encode();
+            require(pwrite(file, encoded.data(), encoded.size(), offset) ==
+                        static_cast<ssize_t>(encoded.size()),
+                    "unable to write synthetic MoE projection descriptor");
+            offset += encoded.size();
+            advance();
+            for (size_t section = projection * 3 + 3; section < (projection + 1) * 3 + 2; ++section) {
+                offset += sections[section];
+                advance();
+            }
+        }
+        require(pwrite(file, expected.data(), scaleBytes, offset) == static_cast<ssize_t>(scaleBytes) &&
+                    offset + scaleBytes <= fileBytes,
+                "unable to write synthetic MoE expert scales");
+        close(file);
+        WeightFile weights = loaded(path);
+        const splash::model::MoeExperts routed{.resident = sharedBuffer(backend, experts * sizeof(uint32_t)),
+                                               .experts = experts};
+        const auto moe = splash::model::readMoeBlock(weights, target, routed, 0);
+        weights.finish();
+        require(moe.expertScales.sizeBytes() == scaleBytes &&
+                    std::memcmp(moe.expertScales.contents(), expected.data(), scaleBytes) == 0,
+                "MoE loader did not preserve [gate][up][down][expert] expert scales");
+    }
     {
         // finish() proves the reader took exactly the descriptor, plane0 and
         // meta sections; the segment's format comes from the descriptor.
@@ -819,7 +911,8 @@ void testSyntheticFloatModel(MetalBackend &backend, const std::filesystem::path 
     // weight_scale_2 and FP8 weight_scale, g of the tensor; compressed-tensors'
     // weight_global_scale, 1 / g, and its bf16 FP8 weight_scale, each row's g.
     const splash::model::SafetensorsCheckpoint safetensors(root / "target");
-    const std::vector<splash::model::gguf::Image> images = splash::model::safetensors::planImages(safetensors, target);
+    const std::vector<splash::model::gguf::Image> images = splash::model::safetensors::planImages(
+        safetensors, target, splash::model::safetensors::normStorage(safetensors, target));
     const auto rowsOf = [&](const std::string &module) {
         for (const splash::model::gguf::Image &image : images)
             for (const splash::model::gguf::Repack &repack : image.repacks)
@@ -865,8 +958,10 @@ void testSyntheticFloatMoeModel(MetalBackend &backend, const std::filesystem::pa
                 "a " + name + " MoE did not keep its experts' and its router's formats and an F32 shared-expert gate");
     }
     const splash::model::SafetensorsCheckpoint safetensors(root / "target");
+    const splash::model::safetensors::NormStorage norms =
+        splash::model::safetensors::normStorage(safetensors, target);
     uint32_t stacks = 0;
-    for (const splash::model::gguf::Image &image : splash::model::safetensors::planImages(safetensors, target))
+    for (const splash::model::gguf::Image &image : splash::model::safetensors::planImages(safetensors, target, norms))
         for (const splash::model::gguf::Repack &repack : image.repacks) {
             if (repack.sources.empty() || repack.sources.front().name.find(".experts.") == std::string::npos) continue;
             ++stacks;

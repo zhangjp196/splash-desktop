@@ -1,6 +1,7 @@
 import contextlib
 import dataclasses
 import io
+import json
 import math
 import re
 import shutil
@@ -49,6 +50,68 @@ class GgufMetadataTests(unittest.TestCase):
 
     def metadata(self, values):
         return gguf.Metadata(write_gguf(self.root / "model.gguf", values))
+
+    def test_inkling_loop_config_from_converter_header(self):
+        path = Path(__file__).resolve().parents[1] / "fixtures/model-configs/inkling-2-mini"
+        values = json.loads((path / "gguf-metadata.json").read_text())
+        metadata = self.metadata(values)
+        text = gguf.model_config(metadata)["text_config"]
+        expected = json.loads((path / "config.json").read_text())["text_config"]
+        for key in ("model_type", "hidden_size", "model_max_length", "num_hidden_layers",
+                    "vocab_size", "unpadded_vocab_size", "num_attention_heads",
+                    "num_key_value_heads", "head_dim", "local_layer_ids",
+                    "sliding_window_size", "num_experts_per_tok", "intermediate_size",
+                    "loop_config"):
+            with self.subTest(key=key):
+                self.assertEqual(text[key], expected[key])
+
+    def test_inkling_loop_rejects_invalid_head_arrays(self):
+        path = Path(__file__).resolve().parents[1] / "fixtures/model-configs/inkling-2-mini/gguf-metadata.json"
+        original = json.loads(path.read_text())
+        for name in ("head_count", "head_count_kv"):
+            key = "inkling2_loop.attention." + name
+            valid = original[key]
+            for value in (valid[0], [], valid[:-1], valid + [valid[0]],
+                          [valid[0] + 1] + valid[1:], [0] * len(valid),
+                          [True] * len(valid)):
+                with self.subTest(key=key, value=value):
+                    metadata = self.metadata(original)
+                    metadata.values[key] = value
+                    with self.assertRaisesRegex(models.ModelError, re.escape(key)):
+                        gguf.model_config(metadata)
+
+    def test_inkling_tensor_screen_rejects_missing_and_wrong_types(self):
+        path = Path(__file__).resolve().parents[1] / "fixtures/model-configs/inkling-2-mini/gguf-metadata.json"
+        metadata = self.metadata(json.loads(path.read_text()))
+        # Initially select the separate expert representation, then construct a
+        # valid header from the required names and accepted types.
+        required = gguf.loaded_tensors(metadata)
+        kinds = {name: code for code, name in gguf.TENSOR_TYPES.items()}
+        for name, types in required.items():
+            kind = "Q8_0" if "Q8_0" in types else "F32"
+            metadata.tensors[name] = kinds[kind]
+        gguf.require_loadable(metadata)
+        for name in ("blk.6.loop_msg_query.weight", "blk.5.attn_k_conv_proj.weight",
+                     "blk.0.ffn_gate_exps.weight", "token_embd_norm.weight"):
+            with self.subTest(name=name):
+                saved = metadata.tensors.pop(name)
+                with self.assertRaisesRegex(models.ModelError, "missing"):
+                    gguf.require_loadable(metadata)
+                metadata.tensors[name] = 999
+                with self.assertRaises(models.ModelError):
+                    gguf.require_loadable(metadata)
+                metadata.tensors[name] = saved
+
+    def test_inkling_screen_rejects_wrong_layer_arrays(self):
+        path = Path(__file__).resolve().parents[1] / "fixtures/model-configs/inkling-2-mini/gguf-metadata.json"
+        metadata = self.metadata(json.loads(path.read_text()))
+        for suffix in ("head_count", "head_count_kv", "sliding_window_pattern"):
+            key = "inkling2_loop.attention." + suffix
+            saved = metadata.values[key]
+            metadata.values[key] = saved[:-1]
+            with self.subTest(key=key), self.assertRaisesRegex(models.ModelError, suffix):
+                gguf.require_arrays(metadata)
+            metadata.values[key] = saved
 
     def test_reader_stops_before_weights_and_checks_bounds(self):
         path = write_gguf(self.root / "small.gguf", {"key": "value"})
@@ -817,6 +880,30 @@ class GgufMetadataTests(unittest.TestCase):
             return assembly.derived_metadata(
                 models_root, {"target/m.gguf": path}, {path: assembly.file_record(path)}
             )
+
+    def test_inkling2_vision_config_and_processor_are_architecture_specific(self):
+        values = {
+            "general.architecture": "clip",
+            "clip.vision.projector_type": "inkling2v",
+            "clip.vision.image_size": 640,
+            "clip.vision.patch_size": 20,
+            "clip.vision.embedding_length": 1024,
+            "clip.vision.block_count": 23,
+            "clip.vision.attention.head_count": 16,
+            "clip.vision.feed_forward_length": 4096,
+            "clip.vision.projection_dim": 2304,
+            "clip.vision.spatial_merge_size": 2,
+            "clip.vision.image_mean": [0.5, 0.5, 0.5],
+            "clip.vision.image_std": [0.5, 0.5, 0.5],
+        }
+        metadata = self.metadata(values)
+        config = gguf.vision_config(metadata)
+        self.assertEqual(config["model_type"], "inkling2_vision")
+        self.assertEqual(config["posemb_grid_size"], 32)
+        self.assertEqual(gguf.processor_config(metadata)["merge_size"], 2)
+        values["clip.vision.patch_size"] = 16
+        with self.assertRaisesRegex(models.ModelError, "unsupported GGUF Inkling2 vision metadata"):
+            gguf.vision_config(self.metadata(values))
 
     def test_vision_projector_is_chosen_by_its_header(self):
         tensors = (

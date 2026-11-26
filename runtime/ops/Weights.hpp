@@ -7,6 +7,8 @@
 #include <cmath>
 #include <compare>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -174,6 +176,14 @@ public:
   // a view, on kernel instances of their own (Linear::add).
   [[nodiscard]] uint32_t planeInputs() const noexcept { return planeInputs_; }
   [[nodiscard]] uint32_t planeInputSize() const noexcept { return planeInputs_ ? planeInputs_ : inputSize; }
+  // The output columns this projection is planned for when several tensors
+  // are held side by side (Projection::sideBySide, Splash 1.7.2); 0 for its
+  // own. The Inkling-2 family fuses its key and value projections this way.
+  [[nodiscard]] uint32_t planOutputs() const noexcept { return planOutputs_; }
+  // Fuse two or three same-shaped projections of tensors held side by side
+  // into one whose columns are theirs in order; nullopt when their formats or
+  // layouts differ so no single kernel can read them together.
+  [[nodiscard]] static std::optional<Projection> sideBySide(std::span<const Projection *const> projections);
 
   uint32_t outputSize = 0;
   uint32_t inputSize = 0;
@@ -185,6 +195,7 @@ public:
 private:
   BlockWeights weights_;
   uint32_t planeInputs_ = 0;
+  uint32_t planOutputs_ = 0;
 };
 
 // A token table's rows as stored, gathered, never multiplied (Embedding.cpp):

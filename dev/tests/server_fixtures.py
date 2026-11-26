@@ -274,7 +274,7 @@ class ImagePadTokenizer(FakeTokenizer):
 
 
 class PassthroughStreamer:
-    def __init__(self, tokenizer, callback, *args):
+    def __init__(self, tokenizer, callback, *args, **kwargs):
         self.tokenizer = tokenizer
         self.callback = callback
         self.stop_sequence = None
@@ -830,6 +830,7 @@ def main_args(**overrides):
             "decode_share": None,
             "disable_ane": False,
             "disable_ane_mixer": False,
+            "recalibrate_ane": False,
             "verify_rows": "auto",
             "max_image_pixels": images.MAX_PIXELS,
             "request_timeout": None,
@@ -840,6 +841,8 @@ def main_args(**overrides):
             "api_key": None,
             "allow_idle_sleep": False,
             "no_webui": False,
+            "max_concurrent_requests": serve_options.DEFAULT_CONCURRENT_REQUESTS,
+            "sampling_default": [],
             "max_request_size": serve_options.DEFAULT_MAX_REQUEST_BYTES,
             "port": 0,
             "binary": "splash",

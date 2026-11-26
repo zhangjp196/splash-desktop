@@ -16,6 +16,7 @@ needs `hdiutil` and `iconutil`, both of macOS.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import shutil
 import struct
@@ -300,6 +301,12 @@ def resolve_runtime(args) -> tuple[Path, tempfile.TemporaryDirectory | None]:
     return roots[0], temporary
 
 
+def sign_app(app: Path) -> None:
+    """Ad hoc sign the complete bundle and verify its sealed resources."""
+    run(["codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", app])
+    run(["codesign", "--verify", "--deep", "--strict", app])
+
+
 def create_dmg(app: Path, version: str, destination: Path) -> Path:
     dmg = destination / f"Splash-Desktop-{version}.dmg"
     dmg.unlink(missing_ok=True)
@@ -321,6 +328,13 @@ def create_dmg(app: Path, version: str, destination: Path) -> Path:
                 dmg,
             ]
         )
+    digest = hashlib.sha256()
+    with dmg.open("rb") as image:
+        for block in iter(lambda: image.read(1024 * 1024), b""):
+            digest.update(block)
+    (destination / f"{dmg.name}.sha256").write_text(
+        f"{digest.hexdigest()}  {dmg.name}\n"
+    )
     return dmg
 
 
@@ -364,6 +378,7 @@ def main(argv=None):
         if not binary.is_file():
             raise SystemExit(f"missing {binary}; build the app first")
         app = build_app(runtime, args.version, args.dist, binary)
+        sign_app(app)
         print(f"Built {app}")
         if not args.app_only:
             dmg = create_dmg(app, args.version, args.dist)

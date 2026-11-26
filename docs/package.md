@@ -45,11 +45,11 @@ make package-dmg RELEASE_VERSION=$VERSION
 ```
 
 Create a GitHub Release tagged `<version>` with the runtime archive, its
-`.sha256` file, the disk image and its `.sha256` file. The disk image is ad hoc
-signed and not notarized: a downloaded copy opens with Open Anyway in System
-Settings › Privacy & Security. `dev/tools/package_dmg.py` writes the image but
-not its checksum, so write that beside it with `shasum -a 256` (a bare file
-name, so `shasum -c` works from the download directory).
+`.sha256` file, the disk image and its `.sha256` file. The app bundle is ad hoc
+signed and strictly verified; the DMG is not notarized. A downloaded app may
+require **Open Anyway** in System Settings › Privacy & Security. The packager
+writes a SHA-256 checksum beside the DMG as `<image>.sha256`; verify it from
+the download directory with `shasum -c Splash-Desktop-<version>.dmg.sha256`.
 
 Open a pull request in `incoai/homebrew-tap` replacing `Formula/splash.rb` with
 `dist/splash.rb`; its URLs must point to the published release assets. After the
@@ -135,12 +135,11 @@ and admission waits), and keeps a menu bar item to start and stop it. The
 window opens on the live panel, with control and the log behind it in the tab
 band under the header; the header itself carries only the state and the
 actions. Its thermal page holds the [heat-and-noise control](api.md#heat-and-noise) of
-the Mac itself rather than of a model, in three modes — the system default,
-which passes nothing; `fixed`, whose balanced, moderate or quiet levels are
-the ladder's rungs and pass `--thermal-policy` to a server it starts; and
-`smart`, the app's own pacer, computing a duty from the fans and temperatures
-it reads each second, with a high, medium or low level that sets how hard the
-fans may work before prefill gives way. The choice is remembered in
+the Mac itself rather than of a model, in three modes — Smart 1 and Smart 2,
+the app's own pacers that adapt the prefill duty each second from the fans,
+temperatures and macOS thermal pressure (Smart 1 stays quiet and efficient,
+Smart 2 favours performance), and System default, which leaves pacing to macOS.
+The old fixed ladder is gone from the app. The choice is remembered in
 `UserDefaults` (as the interface language is) and reaches a running engine at
 once through `POST /v1/thermal`. Beside it
 the page shows the fans and the CPU, GPU, IO and disk temperatures the engine
