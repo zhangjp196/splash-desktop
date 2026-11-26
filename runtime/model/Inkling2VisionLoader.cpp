@@ -24,47 +24,111 @@ struct Entry {
   bool patchHwcToChw = false;
 };
 
+// One image section, named as the mmproj names it, and the shape the source
+// gives it. The checkpoint's own name for it depends on who wrote the
+// checkpoint (checkpointName).
 struct SafetensorsSpec {
-  std::string imageName, sourceName;
+  std::string imageName;
   std::vector<uint64_t> shape;
   bool patchHwcToChw = false;
 };
 
 std::vector<SafetensorsSpec> safetensorsSpecs(const Inkling2VisionLayout &l) {
   std::vector<SafetensorsSpec> specs;
-  const auto add = [&](std::string imageName, std::string sourceName, std::vector<uint64_t> shape,
-                       bool patchHwcToChw = false) {
-    specs.push_back({std::move(imageName), std::move(sourceName), std::move(shape), patchHwcToChw});
+  const auto add = [&](std::string imageName, std::vector<uint64_t> shape, bool patchHwcToChw = false) {
+    specs.push_back({std::move(imageName), std::move(shape), patchHwcToChw});
   };
-  const auto affine = [&](const std::string &imageStem, const std::string &sourceStem,
-                          std::vector<uint64_t> weightShape, uint64_t biasSize) {
-    add(imageStem + ".weight", sourceStem + ".weight", std::move(weightShape));
-    if (biasSize) add(imageStem + ".bias", sourceStem + ".bias", {biasSize});
+  const auto affine = [&](const std::string &imageStem, std::vector<uint64_t> weightShape,
+                          uint64_t biasSize) {
+    add(imageStem + ".weight", std::move(weightShape));
+    if (biasSize) add(imageStem + ".bias", {biasSize});
   };
-  add("v.patch_embd.weight", "vision_tower.backbone.embeddings.patch_embedding.weight",
-      {l.hidden, uint64_t{l.patch} * l.patch * 3}, true);
-  add("v.class_embd", "vision_tower.backbone.embeddings.class_embedding", {l.hidden});
-  add("v.class_position_embd.weight", "vision_tower.backbone.embeddings.cls_position_embedding", {l.hidden});
-  add("v.position_embd.weight", "vision_tower.backbone.embeddings.position_embedding",
-      {uint64_t{l.positionSide} * l.positionSide, l.hidden});
-  affine("v.pre_ln", "vision_tower.backbone.ln_pre", {l.hidden}, l.hidden);
+  add("v.patch_embd.weight", {l.hidden, uint64_t{l.patch} * l.patch * 3}, true);
+  add("v.class_embd", {l.hidden});
+  add("v.class_position_embd.weight", {l.hidden});
+  add("v.position_embd.weight", {uint64_t{l.positionSide} * l.positionSide, l.hidden});
+  affine("v.pre_ln", {l.hidden}, l.hidden);
   for (uint32_t i = 0; i < l.layers; ++i) {
     const std::string image = "v.blk." + std::to_string(i) + ".";
-    const std::string source = "vision_tower.backbone.layers." + std::to_string(i) + ".";
-    affine(image + "ln1", source + "ln_1", {l.hidden}, l.hidden);
-    affine(image + "attn_q", source + "self_attn.q_proj", {l.hidden, l.hidden}, l.hidden);
-    affine(image + "attn_k", source + "self_attn.k_proj", {l.hidden, l.hidden}, l.hidden);
-    affine(image + "attn_v", source + "self_attn.v_proj", {l.hidden, l.hidden}, l.hidden);
-    affine(image + "attn_out", source + "self_attn.out_proj", {l.hidden, l.hidden}, l.hidden);
-    affine(image + "ln2", source + "ln_2", {l.hidden}, l.hidden);
-    affine(image + "ffn_up", source + "mlp.c_fc", {l.intermediate, l.hidden}, l.intermediate);
-    affine(image + "ffn_down", source + "mlp.c_proj", {l.hidden, l.intermediate}, l.hidden);
-    add(image + "ls1.weight", source + "ls_1.gamma", {l.hidden});
-    add(image + "ls2.weight", source + "ls_2.gamma", {l.hidden});
+    affine(image + "ln1", {l.hidden}, l.hidden);
+    affine(image + "attn_q", {l.hidden, l.hidden}, l.hidden);
+    affine(image + "attn_k", {l.hidden, l.hidden}, l.hidden);
+    affine(image + "attn_v", {l.hidden, l.hidden}, l.hidden);
+    affine(image + "attn_out", {l.hidden, l.hidden}, l.hidden);
+    affine(image + "ln2", {l.hidden}, l.hidden);
+    affine(image + "ffn_up", {l.intermediate, l.hidden}, l.intermediate);
+    affine(image + "ffn_down", {l.hidden, l.intermediate}, l.hidden);
+    add(image + "ls1.weight", {l.hidden});
+    add(image + "ls2.weight", {l.hidden});
   }
-  affine("mm.1", "vision_tower.proj_in", {l.intermediate, uint64_t{4} * l.hidden}, 0);
-  affine("mm.2", "vision_tower.proj_out", {l.output, l.intermediate}, 0);
+  affine("mm.1", {l.intermediate, uint64_t{4} * l.hidden}, 0);
+  affine("mm.2", {l.output, l.intermediate}, 0);
   return specs;
+}
+
+// How a checkpoint names the tower's tensors. A release's own names put the
+// backbone under `backbone.` and its blocks use ln_1, ls_1.gamma and
+// mlp.c_fc; a transformers checkpoint (what an MLX conversion keeps) drops
+// `backbone.` and uses layernorm_before, lambda_1 and mlp.fc1; either prefix
+// may be vision_tower. or model.vision_tower., or model.visual. beside the
+// release's projector. `projector` is empty where the projector is the
+// tower's merger.
+struct CheckpointNames {
+  std::string tower;     // the backbone's prefix, up to `embeddings.`
+  std::string projector; // proj_in's and proj_out's prefix, or empty for the merger's
+  bool release;          // the release's block names
+  bool positionWeight;   // position_embedding.weight, not position_embedding
+};
+
+constexpr CheckpointNames kCheckpointNames[] = {
+    {"vision_tower.", "vision_tower.", false, false},
+    {"vision_tower.backbone.", "vision_tower.", true, false},
+    {"model.vision_tower.", "model.vision_tower.", false, true},
+    {"model.visual.backbone.", "model.visual.", true, false},
+    {"model.visual.", "model.visual.", false, false},
+};
+
+// The names of the checkpoint's tower: those whose patch embedding it holds,
+// else the first, whose missing tensor a refusal then names.
+const CheckpointNames &checkpointNames(const SafetensorsCheckpoint &checkpoint) {
+  for (const CheckpointNames &names : kCheckpointNames)
+    if (checkpoint.find(names.tower + "embeddings.patch_embedding.weight")) return names;
+  return kCheckpointNames[0];
+}
+
+// The name the checkpoint gives the section the mmproj names `imageName`.
+std::string checkpointName(const std::string &imageName, const CheckpointNames &names) {
+  const std::string &tower = names.tower, &projector = names.projector;
+  const bool release = names.release;
+  const std::string embeddings = tower + "embeddings.";
+  if (imageName == "v.patch_embd.weight") return embeddings + "patch_embedding.weight";
+  if (imageName == "v.class_embd") return embeddings + "class_embedding";
+  if (imageName == "v.class_position_embd.weight") return embeddings + "cls_position_embedding";
+  if (imageName == "v.position_embd.weight")
+    return embeddings + (names.positionWeight ? "position_embedding.weight" : "position_embedding");
+  if (imageName == "mm.1.weight")
+    return projector.empty() ? tower + "merger.linear_1.weight" : projector + "proj_in.weight";
+  if (imageName == "mm.2.weight")
+    return projector.empty() ? tower + "merger.linear_2.weight" : projector + "proj_out.weight";
+  const auto dot = imageName.rfind('.');
+  const std::string suffix = imageName.substr(dot), stem = imageName.substr(0, dot);
+  if (stem == "v.pre_ln") return tower + (release ? "ln_pre" : "pre_layernorm") + suffix;
+  const std::string blockPrefix = "v.blk.";
+  if (stem.rfind(blockPrefix, 0) != 0) throw WeightStoreError("unknown Inkling2 vision tensor: " + imageName);
+  const auto end = stem.find('.', blockPrefix.size());
+  const std::string layer = tower + "layers." + stem.substr(blockPrefix.size(), end - blockPrefix.size()) + ".";
+  const std::string part = stem.substr(end + 1);
+  if (part == "ln1") return layer + (release ? "ln_1" : "layernorm_before") + suffix;
+  if (part == "ln2") return layer + (release ? "ln_2" : "layernorm_after") + suffix;
+  if (part == "attn_q" || part == "attn_k" || part == "attn_v")
+    return layer + "self_attn." + part.substr(5) + "_proj" + suffix;
+  if (part == "attn_out") return layer + "self_attn.out_proj" + suffix;
+  if (part == "ffn_up") return layer + (release ? "mlp.c_fc" : "mlp.fc1") + suffix;
+  if (part == "ffn_down") return layer + (release ? "mlp.c_proj" : "mlp.fc2") + suffix;
+  // A LayerScale is a vector of its own, with no suffix to keep.
+  if (part == "ls1") return layer + (release ? "ls_1.gamma" : "lambda_1");
+  if (part == "ls2") return layer + (release ? "ls_2.gamma" : "lambda_2");
+  throw WeightStoreError("unknown Inkling2 vision tensor: " + imageName);
 }
 
 void addName(std::set<std::string, std::less<>> &names, const std::string &stem, bool bias) {
@@ -209,18 +273,23 @@ Inkling2VisionLoader::Inkling2VisionLoader(const std::filesystem::path &path, In
               [](const SafetensorsSpec &a, const SafetensorsSpec &b) { return a.imageName < b.imageName; });
     if (specs.size() != tensorCount())
       throw WeightStoreError("Inkling2 Safetensors vision inventory must contain exactly 422 tensors");
+    // The checkpoint's own names: a release's, an MLX conversion's (which keeps
+    // transformers' layernorm_before/lambda_1/mlp.fc1 and drops `backbone.`),
+    // or either under another prefix (checkpointName).
+    const CheckpointNames &names = checkpointNames(*p->safetensors);
     for (const auto &spec : specs) {
-      const auto &tensor = p->safetensors->require(spec.sourceName);
+      const std::string sourceName = checkpointName(spec.imageName, names);
+      const auto &tensor = p->safetensors->require(sourceName);
       if (tensor.dtype != "BF16" || tensor.shape != spec.shape)
-        throw WeightStoreError("Inkling2 Safetensors tensor has an unsupported dtype or shape: " + spec.sourceName);
+        throw WeightStoreError("Inkling2 Safetensors tensor has an unsupported dtype or shape: " + sourceName);
       uint64_t elements = 1;
       for (uint64_t extent : tensor.shape) {
         if (!extent || elements > UINT64_MAX / extent)
-          throw WeightStoreError("Inkling2 Safetensors tensor size overflow: " + spec.sourceName);
+          throw WeightStoreError("Inkling2 Safetensors tensor size overflow: " + sourceName);
         elements *= extent;
       }
       if (elements > UINT64_MAX / kBf16Bytes || tensor.bytes != elements * kBf16Bytes)
-        throw WeightStoreError("Inkling2 Safetensors tensor byte size mismatch: " + spec.sourceName);
+        throw WeightStoreError("Inkling2 Safetensors tensor byte size mismatch: " + sourceName);
       const uint64_t bytes = tensor.bytes;
       at = alignWeightOffset(at);
       p->entries.push_back({spec.imageName, nullptr, &tensor, at, bytes, spec.patchHwcToChw});

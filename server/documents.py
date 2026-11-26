@@ -192,10 +192,18 @@ def _cache_pages(key, pages):
         _cache.put(key, pages, size)
 
 
+def _decode_base64(encoded):
+    compact = "".join(encoded.split()).replace("-", "+").replace("_", "/")
+    if len(compact) % 4 == 1:
+        raise ValueError("invalid base64 length")
+    compact += "=" * (-len(compact) % 4)
+    return base64.b64decode(compact, validate=True)
+
+
 def _pages(encoded, budget):
     budget.remaining_time()
     try:
-        payload = base64.b64decode(encoded, validate=True)
+        payload = _decode_base64(encoded)
     except ValueError as error:
         raise APIError(400, "PDF data is not valid base64") from error
     if len(payload) > MAX_PDF_BYTES:
@@ -255,7 +263,7 @@ def document_parts(block):
 
 def pdf_content(encoded, *, budget):
     """Render an inline PDF through the shared bounded document pipeline."""
-    if len(encoded) > 4 * ((MAX_PDF_BYTES + 2) // 3):
+    if len("".join(encoded.split())) > 4 * ((MAX_PDF_BYTES + 2) // 3):
         raise APIError(400, "PDF document exceeds the size limit")
     parts = []
     for page in _pages(encoded, budget):

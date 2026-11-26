@@ -287,7 +287,12 @@ def main():
         thinking_end = thinking_end_tokens(
             tokenizer, args.thinking_end_text, family.chat_format
         )
-        chat_templates = ChatTemplates(tokenizer)
+        # A format whose model opens its own message (Inkling 2's) appends no
+        # generation prompt of its own, so the probe must know it: without
+        # this, its empty prompt reads as one the probe never found.
+        chat_templates = ChatTemplates(
+            tokenizer, opens_own_message=family.chat_format.opens_own_message
+        )
         print_status(f"Chat template · {chat_templates.describe()}")
         runtime = engine_runtime.MultiplexedRuntime(
             _native_command(args, model_root),

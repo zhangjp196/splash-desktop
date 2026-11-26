@@ -58,10 +58,16 @@ def decode_data_url(url) -> bytes:
     header, _, encoded = url.partition(",")
     if ";base64" not in header:
         raise ImageError("image data URLs must be base64-encoded")
-    if len(encoded) > MAX_IMAGE_BYTES * 4 // 3 + 4:
-        raise ImageError("image exceeds the size limit")
     try:
-        raw = base64.b64decode(encoded, validate=True)
+        compact = "".join(encoded.split()).replace("-", "+").replace("_", "/")
+        if len(compact) > MAX_IMAGE_BYTES * 4 // 3 + 4:
+            raise ImageError("image exceeds the size limit")
+        if len(compact) % 4 == 1:
+            raise ValueError("invalid base64 length")
+        compact += "=" * (-len(compact) % 4)
+        raw = base64.b64decode(compact, validate=True)
+    except ImageError:
+        raise
     except (ValueError, TypeError) as error:
         raise ImageError("image data URL is not valid base64") from error
     if len(raw) > MAX_IMAGE_BYTES:
