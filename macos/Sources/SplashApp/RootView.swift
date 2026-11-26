@@ -147,6 +147,10 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showCommandPalette)) { _ in
             showPalette = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showAboutAndCheckUpdates)) { _ in
+            selectionRaw = Section.about.rawValue
+            updateChecker.checkManually()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .splashToast)) { note in
             showToast(note.object as? String)
         }

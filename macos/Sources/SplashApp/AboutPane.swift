@@ -3,6 +3,9 @@ import SwiftUI
 /// The About pane: what the app is, the version it runs, and the two GitHub
 /// projects behind it — the desktop app and the inference engine it drives.
 struct AboutPane: View {
+    @AppStorage("updates.automatic") private var automaticUpdates = true
+    @StateObject private var updateChecker = UpdateChecker.shared
+
     private static let appURL = URL(string: "https://github.com/zhangjp196/splash-desktop")!
     private static let engineURL = URL(string: "https://github.com/incoai/splash")!
 
@@ -10,6 +13,7 @@ struct AboutPane: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 hero
+                updateCard
                 VStack(alignment: .leading, spacing: 10) {
                     SectionLabel(
                         title: L10n.string("about.links"),
@@ -35,6 +39,65 @@ struct AboutPane: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .background(Color.clear)
+        .onAppear { updateChecker.checkIfDue(enabled: automaticUpdates) }
+        .onChange(of: automaticUpdates) { _, enabled in
+            if enabled { updateChecker.checkIfDue(enabled: true) }
+        }
+    }
+
+    private var updateCard: some View {
+        EditorCard(
+            title: L10n.string("update.title"),
+            systemImage: "arrow.down.circle",
+            tint: SplashPalette.mint
+        ) {
+            SettingRow(
+                title: L10n.string("update.automatic"),
+                help: L10n.string("update.automatic.help"),
+                controlWidth: 300
+            ) {
+                Toggle("", isOn: $automaticUpdates)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(SplashPalette.mint)
+            }
+            Rectangle()
+                .fill(SplashPalette.hairline.opacity(0.55))
+                .frame(height: 0.6)
+            SettingRow(
+                title: L10n.string("update.check"),
+                help: updateStatus,
+                controlWidth: 300
+            ) {
+                HStack(spacing: 10) {
+                    Button {
+                        updateChecker.checkManually()
+                    } label: {
+                        if updateChecker.isChecking {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text(L10n.string("update.check"))
+                        }
+                    }
+                    .disabled(updateChecker.isChecking)
+                    if updateChecker.statusKey == "update.status.available" {
+                        Link(L10n.string("update.open_release"), destination: UpdateChecker.releaseURL)
+                    }
+                }
+            }
+        }
+    }
+
+    private var updateStatus: String {
+        switch updateChecker.statusKey {
+        case "update.status.available":
+            return L10n.format(updateChecker.statusKey, updateChecker.latestVersion ?? "")
+        case "update.status.current":
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+            return L10n.format(updateChecker.statusKey, version)
+        default:
+            return L10n.string(updateChecker.statusKey)
+        }
     }
 
     private var hero: some View {

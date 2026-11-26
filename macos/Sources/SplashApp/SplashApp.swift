@@ -327,6 +327,11 @@ struct SplashApp: App {
             // The sidebar is the app's navigation and stays put; the standard
             // Hide/Show Sidebar commands would leave an empty window.
             CommandGroup(replacing: .sidebar) {}
+            CommandGroup(after: .appInfo) {
+                Button(L10n.string("update.menu")) {
+                    NotificationCenter.default.post(name: .showAboutAndCheckUpdates, object: nil)
+                }
+            }
             CommandGroup(after: .sidebar) {
                 Divider()
                 Button(L10n.string("palette.shortcut")) {

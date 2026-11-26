@@ -576,10 +576,11 @@
 "update.automatic" = "Check automatically";
 "update.automatic.help" = "Check GitHub Releases at most once every 24 hours.";
 "update.check" = "Check for updates";
+"update.menu" = "Check for Updates…";
 "update.open_release" = "Open release page";
 "update.status.idle" = "Check for the latest stable version on GitHub.";
 "update.status.checking" = "Checking GitHub Releases…";
-"update.status.current" = "You’re using the latest version.";
+"update.status.current" = "You’re using the latest version (%@).";
 "update.status.available" = "A newer version (%@) is available.";
 "update.status.failed" = "Could not check for updates. Try again later.";
 "update.status.unavailable" = "Could not read the app or release version.";

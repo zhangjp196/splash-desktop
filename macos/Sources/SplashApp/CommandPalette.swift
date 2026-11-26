@@ -14,6 +14,7 @@ extension Notification.Name {
     /// The app menu's ⌘K, which reaches the window whichever view owns the
     /// keyboard — including the embedded chat page.
     static let showCommandPalette = Notification.Name("splash.show-command-palette")
+    static let showAboutAndCheckUpdates = Notification.Name("splash.show-about-and-check-updates")
     /// A short confirmation shown at the bottom of the window, such as a
     /// copied API address. The object is the already-localized message.
     static let splashToast = Notification.Name("splash.toast")

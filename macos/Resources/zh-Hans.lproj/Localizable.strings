@@ -573,10 +573,11 @@
 "update.automatic" = "自动检查更新";
 "update.automatic.help" = "每 24 小时至多检查一次 GitHub Releases。";
 "update.check" = "检查更新";
+"update.menu" = "检查更新…";
 "update.open_release" = "打开发布页面";
 "update.status.idle" = "检查 GitHub 上最新的稳定版本。";
 "update.status.checking" = "正在检查 GitHub Releases…";
-"update.status.current" = "当前已是最新版本。";
+"update.status.current" = "当前已是最新版本（%@）。";
 "update.status.available" = "发现新版本（%@）。";
 "update.status.failed" = "无法检查更新，请稍后重试。";
 "update.status.unavailable" = "无法读取应用或发布版本号。";
