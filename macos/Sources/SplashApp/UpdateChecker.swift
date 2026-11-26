@@ -4,7 +4,6 @@ import Foundation
 final class UpdateChecker: ObservableObject {
     static let shared = UpdateChecker()
     static let releaseURL = URL(string: "https://github.com/zhangjp196/splash-desktop/releases/latest")!
-    private static let apiURL = URL(string: "https://api.github.com/repos/zhangjp196/splash-desktop/releases/latest")!
     private static let interval: TimeInterval = 24 * 60 * 60
     private let defaults = UserDefaults.standard
     private var task: Task<Void, Never>?
@@ -33,28 +32,41 @@ final class UpdateChecker: ObservableObject {
         task = Task {
             defer { isChecking = false }
             do {
-                var request = URLRequest(url: Self.apiURL)
-                request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+                var request = URLRequest(url: Self.releaseURL)
                 request.setValue("SplashDesktop", forHTTPHeaderField: "User-Agent")
                 request.timeoutInterval = 15
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
-                    throw URLError(.badServerResponse)
-                }
-                let release = try JSONDecoder().decode(Release.self, from: data)
-                guard !release.draft, !release.prerelease,
+                let (_, response) = try await URLSession.shared.data(for: request)
+                guard let response = response as? HTTPURLResponse,
+                      (200..<300).contains(response.statusCode),
+                      let finalURL = response.url,
+                      let tag = Self.latestTag(from: finalURL),
                       let current = Self.versionComponents(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String),
-                      let latest = Self.versionComponents(release.tagName) else {
+                      let latest = Self.versionComponents(tag) else {
                     statusKey = "update.status.unavailable"
                     return
                 }
-                latestVersion = release.tagName
+                latestVersion = tag
                 statusKey = latest.lexicographicallyPrecedes(current) || latest == current
                     ? "update.status.current" : "update.status.available"
             } catch {
                 statusKey = "update.status.failed"
             }
         }
+    }
+
+    private static func latestTag(from url: URL) -> String? {
+        guard url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "github.com",
+              url.user == nil,
+              url.password == nil,
+              url.port == nil else { return nil }
+        let components = url.pathComponents
+        guard components.count == 6,
+              components[1] == "zhangjp196",
+              components[2] == "splash-desktop",
+              components[3] == "releases",
+              components[4] == "tag" else { return nil }
+        return components[5]
     }
 
     private static func versionComponents(_ value: String?) -> [Int]? {
@@ -64,22 +76,12 @@ final class UpdateChecker: ObservableObject {
         guard !parts.isEmpty else { return nil }
         var numbers: [Int] = []
         for part in parts {
-            guard let number = Int(part) else { return nil }
+            guard !part.isEmpty,
+                  part.utf8.allSatisfy({ (48...57).contains($0) }),
+                  let number = Int(part) else { return nil }
             numbers.append(number)
         }
         while numbers.last == 0 && numbers.count > 1 { numbers.removeLast() }
         return numbers
-    }
-
-    private struct Release: Decodable {
-        let tagName: String
-        let draft: Bool
-        let prerelease: Bool
-
-        enum CodingKeys: String, CodingKey {
-            case tagName = "tag_name"
-            case draft
-            case prerelease
-        }
     }
 }
