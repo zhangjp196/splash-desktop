@@ -1,14 +1,28 @@
 import SwiftUI
 
 /// The models pane: the configurations the app can serve, added and edited
-/// here.
+/// here, listed by the kind of weights they load.
 struct ModelsPane: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openChat) private var openChat
     @State private var editing: EditingConfig?
     @State private var pendingRemoval: ModelConfig?
     @State private var downloading = false
+    @State private var kind = ConfigKind.gguf
     @StateObject private var downloader = Downloader()
+
+    /// The configurations the pane lists under the chosen kind. An online
+    /// target has no local weights, so it is filed under neither and the pane
+    /// shows it under its own heading.
+    private var shown: [ModelConfig] {
+        model.configs.filter { ConfigKind(of: $0) == kind }
+    }
+
+    private var counts: [ConfigKind: Int] {
+        model.configs.reduce(into: [:]) { totals, config in
+            totals[ConfigKind(of: config), default: 0] += 1
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -39,18 +53,18 @@ struct ModelsPane: View {
                 if model.configs.isEmpty {
                     EmptyView()
                 } else {
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 164, maximum: 196),
-                                           spacing: 16, alignment: .top)],
-                        alignment: .leading,
-                        spacing: 20
-                    ) {
-                        ForEach(model.configs) { config in
-                            ConfigTile(
-                                config: config,
-                                onEdit: { editing = EditingConfig(config: config, isNew: false) },
-                                onRemove: { pendingRemoval = config }
-                            )
+                    kindPicker
+                    if shown.isEmpty {
+                        emptyKind
+                    } else {
+                        VStack(spacing: 6) {
+                            ForEach(shown) { config in
+                                ConfigRow(
+                                    config: config,
+                                    onEdit: { editing = EditingConfig(config: config, isNew: false) },
+                                    onRemove: { pendingRemoval = config }
+                                )
+                            }
                         }
                     }
                 }
@@ -91,6 +105,37 @@ struct ModelsPane: View {
             Button(L10n.string("config.cancel"), role: .cancel) { pendingRemoval = nil }
             Button(L10n.string("models.remove"), role: .destructive) { model.removeConfig(config) }
         }
+    }
+
+    /// GGUF or MLX, with each kind's count, and no third tab: a configuration
+    /// loads one of the two.
+    private var kindPicker: some View {
+        Picker("", selection: $kind) {
+            ForEach(ConfigKind.allCases) { option in
+                Text(verbatim: counts[option].map { "\(option.title) \($0)" } ?? option.title)
+                    .tag(option)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    /// The chosen kind with nothing filed under it: the tab is not empty, the
+    /// pane has simply not added one yet.
+    private var emptyKind: some View {
+        HStack(spacing: 8) {
+            Image(systemName: kind.icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(SplashPalette.muted)
+            Text(L10n.format("models.kind.empty", kind.title))
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 16)
+        .background(SplashPalette.surface.opacity(0.34),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     /// What is being served right now, above the configurations: the one
@@ -177,12 +222,30 @@ struct ModelsPane: View {
 
 }
 
-/// A saved configuration, as a rectangle: the icon and the kind inside, the
-/// name and the state outside it, so a row of several reads across the desk.
-/// Clicking the tile starts it — applying the configuration and starting the
-/// server is the one way to make it the configuration the server runs — and
-/// the menu holds edit and remove.
-private struct ConfigTile: View {
+/// The kind of weights a configuration loads, which the pane lists them by.
+enum ConfigKind: String, CaseIterable, Identifiable {
+    case gguf
+    case mlx
+
+    init(of config: ModelConfig) {
+        // An online target has no local weights; it is listed under the kind
+        // its saved settings last had, so it never disappears from the pane.
+        self = config.settings.localKind == "mlx" ? .mlx : .gguf
+    }
+
+    var id: String { rawValue }
+
+    /// The name the model settings use for it.
+    var title: String {
+        L10n.string(rawValue == "gguf" ? "models.kind.gguf" : "models.kind.mlx")
+    }
+
+    var icon: String {
+        rawValue == "mlx" ? "cube.fill" : "doc.fill"
+    }
+}
+
+private struct ConfigRow: View {
     @EnvironmentObject private var model: AppModel
     let config: ModelConfig
     var onEdit: () -> Void
@@ -201,11 +264,37 @@ private struct ConfigTile: View {
     }
 
     var body: some View {
-        VStack(spacing: 7) {
-            block
-            label
+        HStack(spacing: 11) {
+            kindBadge
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(config.displayName)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(isServing ? SplashPalette.mint : Color.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if isServing {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(SplashPalette.mint)
+                    }
+                }
+                chipsLine
+            }
+            Spacer(minLength: 10)
+            actions
         }
-        .frame(width: 172)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(fill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    isServing ? SplashPalette.mint.opacity(0.5)
+                              : SplashPalette.border.opacity(hovering ? 0.6 : 0.3),
+                    lineWidth: isServing ? 1.1 : 0.8
+                )
+        )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { if canStart { start() } }
@@ -217,84 +306,63 @@ private struct ConfigTile: View {
         }
     }
 
-    /// The rectangle itself: an icon, the kind, the serving mark, and — on a
-    /// tile that can start — the play affordance the click means.
-    private var block: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(fill)
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(
-                    isServing ? SplashPalette.mint.opacity(0.55) : SplashPalette.border.opacity(hovering ? 0.75 : 0.5),
-                    lineWidth: isServing ? 1.2 : 0.8
-                )
+    /// The row's leading square: which kind of weights it loads.
+    private var kindBadge: some View {
+        Image(systemName: icon)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(isServing ? SplashPalette.mint : SplashPalette.cyan)
+            .frame(width: 30, height: 30)
+            .background(
+                (isServing ? SplashPalette.mint : SplashPalette.cyan).opacity(0.12),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+    }
 
-            VStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 25, weight: .semibold))
-                    .foregroundStyle(isServing ? SplashPalette.mint : SplashPalette.cyan)
-                Pill(text: kindTag, tint: kindTint)
+    /// The characteristics, one capsule each, so a row reads across rather
+    /// than as a run-on subtitle.
+    private var chipsLine: some View {
+        HStack(spacing: 4) {
+            if config.missingFiles {
+                Pill(text: L10n.string("models.files_missing"), tint: SplashPalette.rose)
+            } else {
+                ForEach(Array(chips.prefix(4).enumerated()), id: \.offset) { _, chip in
+                    Pill(text: chip)
+                }
             }
+        }
+        .lineLimit(1)
+    }
 
-            if canStart && hovering {
-                VStack {
-                    Spacer(minLength: 0)
+    /// Start, edit and remove, shown on the row the pointer is over.
+    private var actions: some View {
+        HStack(spacing: 6) {
+            if hovering || isServing {
+                Button(action: start) {
                     Label(L10n.string("models.start"), systemImage: "play.fill")
                         .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
+                        .padding(.horizontal, 9)
                         .padding(.vertical, 4)
-                        .background(SplashPalette.blue, in: Capsule())
+                        .background(
+                            canStart ? SplashPalette.blue : SplashPalette.muted.opacity(0.6),
+                            in: Capsule()
+                        )
                 }
-                .padding(.bottom, 8)
-                .transition(.opacity)
+                .buttonStyle(.plain)
+                .disabled(!canStart)
             }
-
-            VStack {
-                HStack {
-                    Spacer(minLength: 0)
-                    if isServing {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(SplashPalette.mint)
-                    } else if hovering {
-                        Button(action: onEdit) {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(SplashPalette.muted)
-                                .frame(width: 20, height: 18)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
+            if hovering {
+                Button(action: onEdit) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(SplashPalette.muted)
+                        .frame(width: 24, height: 22)
+                        .contentShape(Rectangle())
                 }
-                Spacer(minLength: 0)
+                .buttonStyle(.plain)
+                .help(L10n.string("models.edit"))
             }
-            .padding(8)
         }
-        .frame(height: 104)
-    }
-
-    /// Outside the rectangle: the name, and what the tile is serving with.
-    private var label: some View {
-        VStack(spacing: 3) {
-            Text(config.displayName)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(isServing ? SplashPalette.mint : Color.primary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            HStack(spacing: 4) {
-                if config.missingFiles {
-                    Pill(text: L10n.string("models.files_missing"), tint: SplashPalette.rose)
-                } else {
-                    ForEach(chips.prefix(2), id: \.self) { chip in
-                        Pill(text: chip)
-                    }
-                }
-            }
-            .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
     }
 
     private var fill: AnyShapeStyle {
@@ -302,9 +370,9 @@ private struct ConfigTile: View {
             // A flat tint wash rather than a gradient: the serving mark is a
             // two-state fill, and a gradient would blend an extra layer for
             // it.
-            return AnyShapeStyle(SplashPalette.mint.opacity(0.14))
+            return AnyShapeStyle(SplashPalette.mint.opacity(0.13))
         }
-        return AnyShapeStyle(SplashPalette.surface.opacity(hovering ? 0.62 : 0.42))
+        return AnyShapeStyle(SplashPalette.surface.opacity(hovering ? 0.6 : 0.4))
     }
 
     private var icon: String {
@@ -312,17 +380,6 @@ private struct ConfigTile: View {
         case .upstream: return "shippingbox.fill"
         case .local: return config.settings.localKind == "mlx" ? "cube.fill" : "doc.fill"
         }
-    }
-
-    private var kindTag: String {
-        switch config.settings.modelMode {
-        case .upstream: return L10n.string("models.kind.hub")
-        case .local: return L10n.string(config.settings.localKind == "mlx" ? "models.kind.mlx" : "models.kind.gguf")
-        }
-    }
-
-    private var kindTint: Color {
-        config.settings.modelMode == .upstream ? SplashPalette.violet : SplashPalette.cyan
     }
 
     private func start() {

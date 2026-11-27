@@ -220,8 +220,6 @@ final class AppModel: ObservableObject {
     /// the menu bar reads a walking pace of changes instead of every one.
     private var menuBarSubscription: AnyCancellable?
 
-    let catalogIDs = Runtime.catalog
-
     init() {
         liveEngine.attach(to: self)
         liveEngineSubscription = liveEngine.objectWillChange.sink { [weak self] _ in

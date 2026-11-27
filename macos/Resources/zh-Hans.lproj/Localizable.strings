@@ -211,6 +211,8 @@
 "download.base" = "下载目录";
 "download.endpoint" = "Hub 地址";
 "download.source.help" = "应用级设置：所有配置都从这里下载、走这个地址。留空则用 Hugging Face 默认值；可填镜像或代理地址。";
+"download.model.memory" = "%d GB 内存";
+"download.model.size" = "%d GB 下载";
 "download.start" = "查找";
 "download.stop" = "停止";
 "download.done" = "找到已准备的模型";
@@ -221,6 +223,7 @@
 "models.remove.title" = "移除配置？";
 "models.remove.message" = "「%@」会从 App 中移除；磁盘上的模型文件不会被删除。";
 "models.empty.configs" = "还没有配置。添加一个来选模型。";
+"models.kind.empty" = "还没有 %@ 配置。添加一个，或切到另一个标签。";
 "models.text_only" = "仅文本";
 "models.ane_off" = "ANE 关";
 "models.disk_cache_off" = "无磁盘缓存";

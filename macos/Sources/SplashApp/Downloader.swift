@@ -87,12 +87,18 @@ final class Downloader: ObservableObject {
 
 }
 
-/// Finds a model that has already been prepared on this Mac.
+/// Finds a model that has already been prepared on this Mac: the suggested
+/// ones as a list, GGUF and MLX apart, or an ID typed by hand.
 struct DownloadSheet: View {
     @ObservedObject var downloader: Downloader
     var onClose: () -> Void
 
     @State private var identifier = ""
+    @State private var kind = SuggestedModel.ModelKind.gguf
+
+    private var suggested: [SuggestedModel] {
+        Runtime.catalog.filter { $0.kind == kind }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -105,6 +111,19 @@ struct DownloadSheet: View {
                         .font(.system(size: 15, weight: .semibold))
                 }
                 Spacer()
+            }
+
+            if !Runtime.catalog.isEmpty {
+                Picker("", selection: $kind) {
+                    ForEach(SuggestedModel.ModelKind.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(downloader.isRunning)
+
+                modelList
             }
 
             requestCard
@@ -139,6 +158,32 @@ struct DownloadSheet: View {
         .frame(width: 620)
     }
 
+    /// The suggested models of the chosen kind, one row each: what choosing it
+    /// downloads, and what it needs.
+    private var modelList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(suggested.enumerated()), id: \.element.id) { index, model in
+                    if index > 0 {
+                        Divider().opacity(0.5)
+                    }
+                    ModelRow(
+                        model: model,
+                        selected: identifier == model.id,
+                        onChoose: { identifier = model.id }
+                    )
+                }
+            }
+        }
+        .frame(height: 208)
+        .background(SplashPalette.surface.opacity(0.4),
+                    in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(SplashPalette.surfaceRaised.opacity(0.6), lineWidth: 1)
+        )
+    }
+
     private var requestCard: some View {
         HStack(spacing: 8) {
             Text(L10n.string("field.model_id"))
@@ -146,25 +191,6 @@ struct DownloadSheet: View {
                 .frame(width: 96, alignment: .leading)
             EditorField(text: $identifier, prompt: "owner/repo[:variant]", monospaced: true)
                 .disabled(downloader.isRunning)
-            if !Runtime.catalog.isEmpty {
-                Menu {
-                    ForEach(Runtime.catalog, id: \.self) { known in
-                        Button(known) { identifier = known }
-                    }
-                } label: {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(SplashPalette.cyan)
-                        .frame(width: 28, height: 28)
-                        .background(
-                            SplashPalette.cyan.opacity(0.13),
-                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        )
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-            }
         }
     }
 
@@ -208,5 +234,73 @@ struct DownloadSheet: View {
                 .disabled(identifier.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
+    }
+}
+
+/// One suggested model in the sheet's list: its name and variant, what
+/// choosing it needs, and a few words for choosing it.
+private struct ModelRow: View {
+    let model: SuggestedModel
+    let selected: Bool
+    var onChoose: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onChoose) {
+            HStack(spacing: 10) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(selected ? SplashPalette.blue : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(verbatim: model.name)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .lineLimit(1)
+                        if !model.variant.isEmpty {
+                            Text(verbatim: model.variant)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(
+                                    SplashPalette.surfaceRaised.opacity(0.7),
+                                    in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                )
+                        }
+                    }
+                    if !model.about.isEmpty {
+                        Text(verbatim: model.about)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                Text(verbatim: summary)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+            .background(
+                (selected || hovering) ? SplashPalette.blue.opacity(0.09) : .clear
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(model.id)
+    }
+
+    private var summary: String {
+        var parts: [String] = []
+        if model.memoryGB > 0 {
+            parts.append(L10n.format("download.model.memory", model.memoryGB))
+        }
+        if model.sizeGB > 0 {
+            parts.append(L10n.format("download.model.size", model.sizeGB))
+        }
+        return parts.joined(separator: " · ")
     }
 }

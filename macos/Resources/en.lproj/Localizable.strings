@@ -211,6 +211,8 @@
 "download.base" = "Base folder";
 "download.endpoint" = "Hub address";
 "download.source.help" = "App-wide: every configuration downloads here and asks this address. Empty leaves the Hugging Face defaults. A mirror or a proxy URL works.";
+"download.model.memory" = "%d GB RAM";
+"download.model.size" = "%d GB download";
 "download.start" = "Find";
 "download.stop" = "Stop";
 "download.done" = "Prepared model found";
@@ -221,6 +223,7 @@
 "models.remove.title" = "Remove configuration?";
 "models.remove.message" = "“%@” will be removed from the app. Model files on disk are not deleted.";
 "models.empty.configs" = "No configurations yet. Add one to choose a model.";
+"models.kind.empty" = "No %@ configuration yet. Add one, or switch to the other tab.";
 "models.text_only" = "text only";
 "models.ane_off" = "ANE off";
 "models.disk_cache_off" = "disk cache off";
