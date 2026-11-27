@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f7f2">
+  <title>运行概览 · Splash</title>
+  <link rel="stylesheet" href="ui.css">
+  <script src="ui.js" defer></script>
+</head>
+<body>
+  <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-brand" viewBox="0 0 24 24"><path d="M3 15.5 9.3 5l2.5 4.3-3.7 6.2H3Zm6.7 3.5 6.4-10.7 4.9 8.3-1.4 2.4H9.7Z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.1"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.1"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20.5 11.5a7.5 7.5 0 0 1-7.5 7.5H4l1.6-3.2A7.5 7.5 0 0 1 12.5 4h.5a7.5 7.5 0 0 1 7.5 7.5Z"/><path d="M9 11.5h7"/></symbol>
+    <symbol id="i-model" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9.5 9 5 9-5M3 17l9 5 9-5"/></symbol>
+    <symbol id="i-thermal" viewBox="0 0 24 24"><path d="M9 14.5V6a3 3 0 0 1 6 0v8.5a5 5 0 1 1-6 0Z"/><path d="M12 9v8"/><circle cx="12" cy="18" r="1" fill="currentColor"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7.5 9 3 3-3 3m5.5 0h3.5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="var(--control-bg,white)"/><circle cx="15" cy="17" r="2.5" fill="var(--control-bg,white)"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="2"/><path d="M15 4H7a3 3 0 0 0-3 3v9"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="m13 2-8 12h6l-1 8 9-12h-6l1-8Z"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+    <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx=".5"/><path d="M9 3v3m6-3v3M9 18v3m6-3v3M3 9h3m-3 6h3m12-6h3m-3 6h3"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-5.5 4 11 2.5-5.5H21"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+  </svg>
+
+  <aside id="sidebar" class="sidebar">
+    <div class="brand">
+      <span class="brand-mark"><svg class="icon"><use href="#i-brand"/></svg></span>
+      <div><strong>Splash<span>.</span></strong><small>本地推理工作台</small></div>
+      <button type="button" class="menu-close" data-action="menu-close" aria-label="关闭导航">×</button>
+    </div>
+    <nav aria-label="主导航" class="nav">
+      <div class="nav-group">
+        <p>工作台</p>
+        <button type="button" data-view="overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>运行概览</button>
+        <button type="button" data-view="chat"><svg class="icon"><use href="#i-chat"/></svg>对话</button>
+        <button type="button" data-view="models"><svg class="icon"><use href="#i-model"/></svg>模型库</button>
+      </div>
+      <div class="nav-group">
+        <p>系统</p>
+        <button type="button" data-view="thermal"><svg class="icon"><use href="#i-thermal"/></svg>温度管理</button>
+        <button type="button" data-view="logs"><svg class="icon"><use href="#i-terminal"/></svg>运行日志</button>
+        <button type="button" data-view="settings"><svg class="icon"><use href="#i-settings"/></svg>设置</button>
+        <button type="button" data-view="about"><svg class="icon"><use href="#i-info"/></svg>关于 Splash</button>
+      </div>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="device-icon"><svg class="icon"><use href="#i-chip"/></svg></div>
+      <div><strong>本机工作区</strong><small>Apple Silicon</small></div>
+      <span class="device-dot" aria-hidden="true"></span>
+    </div>
+  </aside>
+  <div id="nav-scrim" class="nav-scrim" aria-hidden="true"></div>
+
+  <div class="workspace">
+    <header class="topbar">
+      <div class="breadcrumbs">
+        <button type="button" class="icon-button menu-button" data-action="menu" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false"><svg class="icon"><use href="#i-menu"/></svg></button>
+        <span class="crumb-root">工作台</span><svg class="icon crumb-chevron"><use href="#i-chevron"/></svg><strong id="current-view">运行概览</strong>
+      </div>
+      <div class="topbar-right">
+        <span class="preview-badge">设计预览</span>
+        <span class="status-pill" data-server-status data-state="online"><i aria-hidden="true"></i><span data-status-label>服务在线</span></span>
+      </div>
+    </header>
+
+    <main class="content" id="main-content">
+      <section class="view" data-panel="overview" aria-labelledby="overview-title">
+        <div class="page-header">
+          <div><h1 id="overview-title">运行概览</h1><p>查看本地模型的运行状态、性能与资源占用。</p></div>
+          <button type="button" class="button outline" data-action="copy-endpoint"><svg class="icon"><use href="#i-copy"/></svg>复制 API 地址</button>
+        </div>
+
+        <section class="engine" aria-labelledby="engine-title">
+          <div class="engine-art" aria-hidden="true"><div class="engine-orbit"></div><div class="engine-core"></div><div class="engine-axis"></div></div>
+          <div class="engine-main">
+            <div class="engine-label"><span class="engine-dot" aria-hidden="true"></span>推理服务</div>
+            <h2 id="engine-title">本地推理引擎</h2>
+            <div class="engine-meta"><span data-active-model>Qwen3.8 27B</span><span class="meta-dot" aria-hidden="true"></span><code data-endpoint>127.0.0.1:8000</code></div>
+          </div>
+          <button type="button" class="button dark" data-action="server-toggle"><i class="stop-icon" aria-hidden="true"></i><span data-server-action-label>停止服务</span></button>
+        </section>
+
+        <div class="metrics" aria-label="关键指标">
+          <article class="metric"><div class="metric-heading"><span class="metric-icon"><svg class="icon"><use href="#i-bolt"/></svg></span><h2>解码速度</h2></div><p class="metric-value"><span data-if-online="62.4">62.4</span><small> tok/s</small></p><p class="metric-note">生成速度</p></article>
+          <article class="metric"><div class="metric-heading"><span class="metric-icon"><svg class="icon"><use href="#i-clock"/></svg></span><h2>首字延迟</h2></div><p class="metric-value"><span data-if-online="284">284</span><small> ms</small></p><p class="metric-note">最近 5 分钟 · P50</p></article>
+          <article class="metric"><div class="metric-heading"><span class="metric-icon"><svg class="icon"><use href="#i-chip"/></svg></span><h2>统一内存</h2></div><p class="metric-value"><span data-if-online="18.6">18.6</span><small> GB</small></p><p class="metric-note">48 GB 内存预算</p></article>
+          <article class="metric"><div class="metric-heading"><span class="metric-icon"><svg class="icon"><use href="#i-pulse"/></svg></span><h2>已处理请求</h2></div><p class="metric-value"><span data-if-online="128">128</span></p><p class="metric-note">本次会话累计</p></article>
+        </div>
+
+        <div class="overview-details">
+          <section class="panel performance" aria-labelledby="performance-title">
+            <div class="panel-header">
+              <div><h2 id="performance-title">解码吞吐</h2><p id="range-description">最近 5 分钟 · tok/s</p></div>
+              <div class="segmented" role="group" aria-label="吞吐图时间范围">
+                <button type="button" data-range="1" aria-pressed="false">1 分钟</button><button type="button" data-range="5" aria-pressed="true">5 分钟</button><button type="button" data-range="15" aria-pressed="false">15 分钟</button>
+              </div>
+            </div>
+            <div class="chart-box"><canvas id="throughput-chart" role="img" aria-label="最近五分钟的解码速度示例曲线">解码速度示例曲线，当前 62.4 tok/s。</canvas></div>
+          </section>
+          <section class="panel environment" aria-labelledby="environment-title">
+            <div class="panel-header"><div><h2 id="environment-title">运行环境</h2><p>当前模型与硬件配置</p></div><span class="subtle-icon"><svg class="icon"><use href="#i-chip"/></svg></span></div>
+            <dl class="env-list">
+              <div><dt>模型</dt><dd data-active-model>Qwen3.8 27B</dd></div>
+              <div><dt>加速后端</dt><dd>Apple Metal</dd></div>
+              <div><dt>推测解码</dt><dd>DFlash 2</dd></div>
+            </dl>
+            <button type="button" class="text-button" data-view="models">查看模型库<svg class="icon"><use href="#i-arrow"/></svg></button>
+          </section>
+        </div>
+
+        <section class="panel activities" aria-labelledby="activities-title">
+          <div class="panel-header"><div><h2 id="activities-title">近期活动</h2></div><button type="button" class="text-button" data-view="logs">查看日志<svg class="icon"><use href="#i-arrow"/></svg></button></div>
+          <ul class="activity-list">
+            <li><span class="activity-dot"></span><strong>推理请求已完成</strong><span class="activity-detail">512 tokens</span><time>10:39:12</time></li>
+            <li><span class="activity-dot muted-dot"></span><strong>模型载入完成</strong><span class="activity-detail">Qwen3.8 27B</span><time>10:34:08</time></li>
+          </ul>
+        </section>
+      </section>
+
+      <section class="view" data-panel="chat" hidden aria-labelledby="chat-title">
+        <div class="page-header"><div><h1 id="chat-title">对话</h1><p>在本机与当前模型对话。</p></div><button type="button" class="button outline" data-action="new-chat"><svg class="icon"><use href="#i-plus"/></svg>新建对话</button></div>
+        <div class="chat-layout">
+          <aside class="panel chat-history" aria-labelledby="history-title">
+            <div class="panel-header"><h2 id="history-title">最近会话</h2><button type="button" class="icon-button history-new" data-action="new-chat" aria-label="新建对话"><svg class="icon"><use href="#i-plus"/></svg></button></div>
+            <nav class="history-list" aria-label="最近会话">
+              <button type="button" class="history-item" data-session="0" aria-current="true"><strong>本地模型性能对比</strong><span>3 轮对话 · 10:41</span><svg class="icon"><use href="#i-chevron"/></svg></button>
+              <button type="button" class="history-item" data-session="1"><strong>DFlash 2 推测解码</strong><span>8 轮对话 · 09:52</span><svg class="icon"><use href="#i-chevron"/></svg></button>
+              <button type="button" class="history-item" data-session="2"><strong>Q4 量化内存估算</strong><span>5 轮对话 · 昨天</span><svg class="icon"><use href="#i-chevron"/></svg></button>
+              <button type="button" class="history-item" data-session="3"><strong>温度策略建议</strong><span>2 轮对话 · 昨天</span><svg class="icon"><use href="#i-chevron"/></svg></button>
+            </nav>
+          </aside>
+          <section class="panel chat-panel" aria-label="对话预览">
+            <div class="chat-model"><span class="metric-icon"><svg class="icon"><use href="#i-model"/></svg></span><strong data-active-model>Qwen3.8 27B</strong><button type="button" class="text-button chat-model-switch" data-view="models">切换<svg class="icon"><use href="#i-chevron"/></svg></button></div>
+          <div id="demo-chat-messages" class="chat-messages" role="log" aria-live="polite"><div data-chat-intro class="chat-intro"><span class="brand-mark"><svg class="icon"><use href="#i-brand"/></svg></span><h2>今天想聊点什么？</h2><p>输入一条消息，体验对话界面。</p></div></div>
+            <form id="demo-chat-form" class="chat-form"><textarea id="demo-chat-input" rows="2" aria-label="消息内容" placeholder="发消息给 Splash…" required></textarea><button type="submit" class="button dark" aria-label="发送消息"><svg class="icon"><use href="#i-send"/></svg></button></form>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" data-panel="models" hidden aria-labelledby="models-title">
+        <div class="page-header"><div><h1 id="models-title">模型库</h1><p>切换推理工作台使用的模型。</p></div></div>
+        <section class="panel models-panel" aria-label="可用模型">
+          <article class="model-row" data-model-row="0"><span class="metric-icon"><svg class="icon"><use href="#i-model"/></svg></span><div><h2>Qwen3.8 27B</h2><p>GGUF · UD-Q4_K_M</p></div><span class="model-badge" data-model-badge>当前模型</span><button type="button" class="button outline" data-model-index="0" data-model-name="Qwen3.8 27B" aria-pressed="true">选择</button></article>
+          <article class="model-row" data-model-row="1"><span class="metric-icon"><svg class="icon"><use href="#i-model"/></svg></span><div><h2>Qwen3.5 9B</h2><p>GGUF · Q4_K_M</p></div><span class="model-badge" data-model-badge hidden></span><button type="button" class="button outline" data-model-index="1" data-model-name="Qwen3.5 9B" aria-pressed="false">选择</button></article>
+          <article class="model-row" data-model-row="2"><span class="metric-icon"><svg class="icon"><use href="#i-model"/></svg></span><div><h2>Qwen3.5 4B</h2><p>GGUF · Q4_K_M</p></div><span class="model-badge" data-model-badge hidden></span><button type="button" class="button outline" data-model-index="2" data-model-name="Qwen3.5 4B" aria-pressed="false">选择</button></article>
+        </section>
+      </section>
+
+      <section class="view" data-panel="thermal" hidden aria-labelledby="thermal-title">
+        <div class="page-header"><div><h1 id="thermal-title">温度管理</h1><p>按需调整性能与风扇噪音。</p></div></div>
+        <section class="panel settings-panel">
+          <div class="panel-header"><div><h2>温控模式</h2><p>当前模式 · <span id="thermal-mode-label">智能</span></p></div><span class="subtle-icon"><svg class="icon"><use href="#i-thermal"/></svg></span></div>
+          <div class="segmented light-segmented" role="group" aria-label="温控模式"><button type="button" data-thermal-mode="auto" aria-pressed="true">智能</button><button type="button" data-thermal-mode="balanced" aria-pressed="false">均衡</button><button type="button" data-thermal-mode="quiet" aria-pressed="false">静音</button></div>
+        </section>
+        <div class="metrics thermal-metrics">
+          <article class="metric"><div class="metric-heading"><span class="metric-icon"><svg class="icon"><use href="#i-thermal"/></svg></span><h2>CPU 温度</h2></div><p class="metric-value">54<small> °C</small></p></article>
+          <article class="metric"><div class="metric-heading"><span class="metric-icon"><svg class="icon"><use href="#i-thermal"/></svg></span><h2>GPU 温度</h2></div><p class="metric-value">57<small> °C</small></p></article>
+          <article class="metric"><div class="metric-heading"><span class="metric-icon"><svg class="icon"><use href="#i-pulse"/></svg></span><h2>风扇转速</h2></div><p class="metric-value">1,250<small> rpm</small></p></article>
+        </div>
+      </section>
+
+      <section class="view" data-panel="logs" hidden aria-labelledby="logs-title">
+        <div class="page-header"><div><h1 id="logs-title">运行日志</h1><p>查看推理服务的近期事件。</p></div><button type="button" class="button outline" data-action="clear-logs">清空列表</button></div>
+        <section class="panel settings-panel">
+          <div class="panel-header"><h2>服务事件</h2><div class="segmented light-segmented" role="group" aria-label="日志级别"><button type="button" data-log-filter="all" aria-pressed="true">全部</button><button type="button" data-log-filter="info" aria-pressed="false">信息</button><button type="button" data-log-filter="warn" aria-pressed="false">警告</button></div></div>
+          <ul class="activity-list demo-log-list" id="demo-log-list"><li data-log-level="info"><time>10:39:12</time><span class="log-level">信息</span><strong>推理请求已完成</strong><span class="activity-detail">512 tokens</span></li><li data-log-level="warn"><time>10:36:04</time><span class="log-level">警告</span><strong>请求进入等待队列</strong><span class="activity-detail">1 个请求</span></li><li data-log-level="info"><time>10:34:08</time><span class="log-level">信息</span><strong>模型载入完成</strong><span class="activity-detail">Qwen3.8 27B</span></li><li data-log-level="info"><time>10:33:46</time><span class="log-level">信息</span><strong>服务已启动</strong><span class="activity-detail" data-endpoint>127.0.0.1:8000</span></li></ul>
+        </section>
+      </section>
+
+      <section class="view" data-panel="settings" hidden aria-labelledby="settings-title">
+        <div class="page-header"><div><h1 id="settings-title">设置</h1><p>更改预览中的本地服务配置。</p></div></div>
+        <form class="panel settings-panel" id="demo-settings-form">
+          <div class="panel-header"><div><h2>服务地址</h2><p>当前地址 · <code data-endpoint="api">http://127.0.0.1:8000/v1</code></p></div></div>
+          <label class="setting-field" for="demo-port"><span><strong>监听端口</strong><small>设置会保存在当前浏览器。</small></span><input id="demo-port" name="port" type="number" min="1" max="65535" value="8000" required></label>
+          <div class="settings-actions"><button type="submit" class="button dark">保存设置</button></div>
+        </form>
+      </section>
+
+      <section class="view" data-panel="about" hidden aria-labelledby="about-title">
+        <div class="page-header"><div><h1 id="about-title">关于 Splash</h1><p>面向 Apple Silicon 的本地推理工作台。</p></div></div>
+        <article class="panel about-panel"><span class="brand-mark"><svg class="icon"><use href="#i-brand"/></svg></span><div><h2>Splash</h2><p>在 Mac 上运行模型、体验对话，并观察推理性能。</p><p>本页面使用示例数据展示界面与交互。</p></div></article>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

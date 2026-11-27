@@ -84,7 +84,7 @@ struct ChatPane: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                history
+                conversationTitle
                 if bridge.running {
                     ProgressView()
                         .controlSize(.mini)
@@ -146,9 +146,14 @@ struct ChatPane: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            content
+            HStack(spacing: 0) {
+                historyColumn
+                    .frame(width: 230)
+                Rectangle().fill(SplashPalette.border.opacity(0.65)).frame(width: 1)
+                content
+            }
         }
-        .background(Color.clear)
+        .background(SplashPalette.canvas)
         .animation(.easeOut(duration: 0.16), value: undoVisible)
         .onChange(of: model.phase) { _, phase in
             if phase == .ready {
@@ -167,48 +172,60 @@ struct ChatPane: View {
         }
     }
 
-    /// The saved conversations, newest first, and the same clear action the
-    /// header's trash button offers.
-    private var history: some View {
-        Menu {
-            if bridge.recents.isEmpty {
-                Text(L10n.string("chat.no_history"))
-            } else {
-                ForEach(bridge.recents) { chat in
-                    Button(chat.title) { bridge.open(chat.id) }
-                        .disabled(bridge.running)
-                }
-                Divider()
-                Button(L10n.string("chat.clear"), role: .destructive) {
-                    bridge.clearHistory()
-                }
-                .disabled(bridge.running)
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text(bridge.title.isEmpty ? L10n.string("chat.new") : bridge.title)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(SplashPalette.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(SplashPalette.border.opacity(0.45), lineWidth: 0.7)
-            )
-            .contentShape(Rectangle())
+    /// The selected conversation title; switching sessions happens in the
+    /// persistent history column below.
+    private var conversationTitle: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(SplashPalette.mint)
+            Text(bridge.title.isEmpty ? L10n.string("chat.new") : bridge.title)
+                .font(.system(size: 12.5, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .disabled(model.phase != .ready)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .frame(maxWidth: 310, alignment: .leading)
+    }
+
+    private var historyColumn: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(L10n.string("chat.history")).font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button { bridge.newChat() } label: { Image(systemName: "plus") }.buttonStyle(.borderless).disabled(model.phase != .ready || bridge.running)
+            }
+            if bridge.recents.isEmpty {
+                Text(L10n.string("chat.no_history")).font(.system(size: 11)).foregroundStyle(SplashPalette.muted).padding(.top, 8)
+                Spacer()
+            } else {
+                ScrollView {
+                    VStack(spacing: 4) {
+                        ForEach(bridge.recents) { chat in
+                            Button { bridge.open(chat.id) } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "bubble.left").foregroundStyle(SplashPalette.mint)
+                                    Text(chat.title).font(.system(size: 11, weight: .medium)).lineLimit(2).multilineTextAlignment(.leading)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(9).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(bridge.activeID == chat.id ? SplashPalette.mint.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                            }.buttonStyle(.plain).disabled(bridge.running)
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            Divider()
+            Button(role: .destructive) { bridge.clearHistory() } label: { Label(L10n.string("chat.clear"), systemImage: "trash") }
+                .buttonStyle(.borderless).disabled(bridge.recents.isEmpty || bridge.running)
+            if undoVisible {
+                Button(L10n.string("chat.undo")) { bridge.undoClear(); undoVisible = false }
+                    .buttonStyle(.borderless)
+            }
+        }
+        .padding(12).frame(maxHeight: .infinity, alignment: .topLeading).background(SplashPalette.surface.opacity(0.7))
     }
 
     private var undoBar: some View {

@@ -3,8 +3,8 @@ import SwiftUI
 /// The server's log, in the window rather than a terminal: monospaced, live,
 /// and scrolled to the end as it grows. Lines render as one `Text` each in a
 /// `LazyVStack`, so a burst of output lays out the rows that appeared, not
-/// the whole transcript again. The console keeps its own dark glass whatever
-/// the window appearance, so long output is easy on the eyes.
+/// the whole transcript again. Its surface follows the app theme and keeps
+/// the text high contrast.
 struct LogPane: View {
     @EnvironmentObject private var model: AppModel
     /// True while the view follows the transcript's tail: new lines then
@@ -81,18 +81,18 @@ struct LogPane: View {
                 Spacer()
                 Text(verbatim: "splash — live output")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.32))
+                    .foregroundStyle(SplashPalette.muted)
                 Spacer()
                 Text(verbatim: "\(model.logCharacterCount.formatted()) chars")
                     .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.25))
+                    .foregroundStyle(SplashPalette.faint)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
-            .background(Color.white.opacity(0.025))
+            .background(SplashPalette.canvas.opacity(0.55))
 
             Rectangle()
-                .fill(Color.white.opacity(0.06))
+                .fill(SplashPalette.border.opacity(0.65))
                 .frame(height: 1)
 
             ScrollViewReader { proxy in
@@ -101,7 +101,7 @@ struct LogPane: View {
                         if logIsEmpty {
                             Text(L10n.string("log.empty"))
                                 .font(.system(size: 11.5, design: .monospaced))
-                                .foregroundStyle(Color.white.opacity(0.35))
+                                .foregroundStyle(SplashPalette.muted)
                         } else {
                             ForEach(model.logLines.indices, id: \.self) { index in
                                 logRow(model.logLines[index])
@@ -154,10 +154,7 @@ struct LogPane: View {
             RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                 .fill(
                     LinearGradient(
-                        colors: [
-                            Color(red: 0.035, green: 0.052, blue: 0.075),
-                            Color(red: 0.025, green: 0.035, blue: 0.055),
-                        ],
+                        colors: [SplashPalette.surfaceRaised, SplashPalette.surface],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -167,7 +164,7 @@ struct LogPane: View {
             RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                 .strokeBorder(
                     LinearGradient(
-                        colors: [Color.white.opacity(0.16), Color.white.opacity(0.03)],
+                        colors: [SplashPalette.border.opacity(0.8), SplashPalette.hairline.opacity(0.45)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
@@ -187,7 +184,7 @@ struct LogPane: View {
     private func logRow(_ line: String) -> some View {
         Text(verbatim: line)
             .font(.system(size: 11.5, design: .monospaced))
-            .foregroundStyle(Color(red: 0.78, green: 0.94, blue: 0.88))
+            .foregroundStyle(SplashPalette.ink)
             .textSelection(.enabled)
             .lineSpacing(3)
             .fixedSize(horizontal: false, vertical: true)

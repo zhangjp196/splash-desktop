@@ -20,97 +20,53 @@ enum Theme {
     static let chatDefaultFraction: Double = 0.42
 }
 
-/// The palette: a deep, blue-black canvas lit by electric blue, cyan and mint.
-/// Every colour adapts to the appearance, so the same views read well in the
-/// dark dashboard and in a daylight window.
+/// A clear blue palette shared by every pane.
 enum SplashPalette {
-    static let blue = Color.adaptive(light: (0.13, 0.36, 0.90), dark: (0.28, 0.47, 0.98))
-    static let cyan = Color.adaptive(light: (0.02, 0.52, 0.66), dark: (0.13, 0.78, 0.90))
-    static let mint = Color.adaptive(light: (0.02, 0.55, 0.39), dark: (0.20, 0.84, 0.62))
-    static let violet = Color.adaptive(light: (0.43, 0.25, 0.86), dark: (0.62, 0.48, 0.98))
-    static let amber = Color.adaptive(light: (0.78, 0.44, 0.02), dark: (0.98, 0.68, 0.20))
-    static let rose = Color.adaptive(light: (0.82, 0.15, 0.23), dark: (0.96, 0.38, 0.44))
+    static let blue = Color.adaptive(light: (0.145, 0.388, 0.922), dark: (0.38, 0.62, 1.0))
+    static let cyan = Color.adaptive(light: (0.02, 0.58, 0.88), dark: (0.27, 0.76, 1.0))
+    static let mint = Color.adaptive(light: (0.23, 0.51, 0.94), dark: (0.49, 0.72, 1.0))
+    static let violet = Color.adaptive(light: (0.34, 0.39, 0.82), dark: (0.62, 0.66, 1.0))
+    static let amber = Color.adaptive(light: (0.72, 0.42, 0.06), dark: (0.98, 0.72, 0.28))
+    static let rose = Color.adaptive(light: (0.76, 0.20, 0.25), dark: (0.98, 0.42, 0.47))
 
-    static let gradient = LinearGradient(
-        colors: [blue, cyan, mint],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    static let gradient = LinearGradient(colors: [blue, cyan, mint], startPoint: .topLeading, endPoint: .bottomTrailing)
+    static let accentFill = LinearGradient(colors: [blue, cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
 
-    static let accentFill = LinearGradient(
-        colors: [blue, cyan],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    static let canvas = Color.adaptive(light: (0.953, 0.965, 0.984), dark: (0.047, 0.067, 0.11))
+    static let surface = Color.adaptive(light: (1, 1, 1), dark: (0.085, 0.11, 0.16))
+    static let surfaceRaised = Color.adaptive(light: (1, 1, 1), dark: (0.11, 0.145, 0.21))
+    static let border = Color.adaptive(light: (0.79, 0.83, 0.90), dark: (0.24, 0.31, 0.43))
+    static let hairline = Color.adaptive(light: (0.86, 0.89, 0.94), dark: (0.18, 0.24, 0.34))
+    static let ink = Color.adaptive(light: (0.055, 0.075, 0.12), dark: (0.92, 0.95, 1.0))
+    static let muted = Color.adaptive(light: (0.36, 0.41, 0.51), dark: (0.66, 0.72, 0.83))
+    static let faint = Color.adaptive(light: (0.50, 0.55, 0.64), dark: (0.49, 0.57, 0.70))
+    static let sheen = Color.adaptive(light: (0.68, 0.75, 0.88), dark: (0.86, 0.92, 1.0))
 
-    static let canvas = Color.adaptive(
-        light: (0.955, 0.965, 0.99),
-        dark: (0.035, 0.047, 0.078)
-    )
-
-    static let surface = Color.adaptive(
-        light: (1.0, 1.0, 1.0),
-        dark: (0.075, 0.09, 0.14)
-    )
-
-    static let surfaceRaised = Color.adaptive(
-        light: (0.985, 0.99, 1.0),
-        dark: (0.10, 0.12, 0.18)
-    )
-
-    static let border = Color.adaptive(
-        light: (0.80, 0.83, 0.90),
-        dark: (0.24, 0.28, 0.38)
-    )
-
-    static let hairline = Color.adaptive(
-        light: (0.86, 0.88, 0.93),
-        dark: (0.18, 0.22, 0.30)
-    )
-
-    static let muted = Color.adaptive(
-        light: (0.42, 0.45, 0.53),
-        dark: (0.58, 0.63, 0.72)
-    )
-
-    static let faint = Color.adaptive(
-        light: (0.60, 0.63, 0.70),
-        dark: (0.40, 0.45, 0.54)
-    )
-
-    /// The faint top light on a glass card: a white sheen in the dark, a cool
-    /// tint in the light.
-    static let sheen = Color.adaptive(
-        light: (0.55, 0.62, 0.80),
-        dark: (1.0, 1.0, 1.0)
-    )
+    // The navigation rail stays deep navy in both appearance modes.
+    static let sidebar = Color(red: 0.055, green: 0.085, blue: 0.16)
+    static let sidebarSurface = Color(red: 0.105, green: 0.22, blue: 0.46)
+    static let sidebarText = Color(red: 0.94, green: 0.96, blue: 1.0)
+    static let sidebarMuted = Color(red: 0.69, green: 0.76, blue: 0.89)
+    static let sidebarMint = Color(red: 0.70, green: 0.84, blue: 1.0)
 }
 
 extension Color {
     /// A colour that follows the window's appearance through AppKit, so plain
     /// `Color` views animate with a theme switch like the system ones do.
-    static func adaptive(
-        light: (Double, Double, Double),
-        dark: (Double, Double, Double)
-    ) -> Color {
+    static func adaptive(light: (Double, Double, Double), dark: (Double, Double, Double)) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let value = isDark ? dark : light
-            return NSColor(
-                srgbRed: value.0, green: value.1, blue: value.2, alpha: 1
-            )
+            return NSColor(srgbRed: value.0, green: value.1, blue: value.2, alpha: 1)
         })
     }
 }
 
-/// The window's appearance, the app's own choice rather than only the system's:
-/// the dashboard is designed dark first, and a daylight window is there for
-/// anyone who prefers it.
+/// The window's appearance, the app's own choice rather than only the system's.
 enum AppAppearance: String, CaseIterable, Identifiable {
     case system, dark, light
 
     var id: String { rawValue }
-
     var title: String { L10n.string("appearance." + rawValue) }
 
     var systemImage: String {
@@ -130,169 +86,46 @@ enum AppAppearance: String, CaseIterable, Identifiable {
     }
 }
 
-/// The window's backdrop: the canvas, four aurora blooms, and a fine grid. It
-/// sits under every pane, so switching pages never changes the atmosphere;
-/// only the content on top moves. The blooms hold still and carry no blur —
-/// the radial gradient already fades smoothly — so the backdrop renders once
-/// and the glass panels above it never re-sample a moving scene.
+/// A quiet, flat canvas behind the native panes.
 struct AuroraBackground: View {
     var tint: Color = SplashPalette.blue
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        ZStack {
-            SplashPalette.canvas
-
-            bloom(SplashPalette.blue, size: 620, x: -180, y: -300, opacity: 0.22)
-            bloom(SplashPalette.cyan, size: 520, x: 320, y: 360, opacity: 0.14)
-            bloom(SplashPalette.violet, size: 460, x: 520, y: -80, opacity: 0.12)
-            bloom(tint, size: 500, x: 330, y: -300, opacity: 0.10)
-
-            grid
-                .opacity(scheme == .dark ? 0.05 : 0.035)
-        }
-        // No crossfade on the tint: the stage colour changes every second or
-        // two while the engine serves, and an animated gradient would keep
-        // the whole backdrop re-rendering for a shade nobody tracks.
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-    }
-
-    private func bloom(
-        _ color: Color, size: CGFloat, x: CGFloat, y: CGFloat, opacity: Double
-    ) -> some View {
-        Circle()
-            .fill(
-                RadialGradient(
-                    colors: [color.opacity(opacity), color.opacity(0)],
-                    center: .center,
-                    startRadius: 0,
-                    endRadius: size / 2
-                )
-            )
-            .frame(width: size, height: size)
-            .offset(x: x, y: y)
-    }
-
-    private var grid: some View {
-        Canvas { context, size in
-            var path = Path()
-            let step: CGFloat = 38
-            var x: CGFloat = 0
-            while x <= size.width {
-                path.move(to: CGPoint(x: x, y: 0))
-                path.addLine(to: CGPoint(x: x, y: size.height))
-                x += step
-            }
-            var y: CGFloat = 0
-            while y <= size.height {
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: size.width, y: y))
-                y += step
-            }
-            context.stroke(path, with: .color(.white), lineWidth: 0.5)
-        }
+        SplashPalette.canvas
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
     }
 }
 
-/// The shared glass surface: a translucent card with a fine gradient edge, a
-/// top sheen, and a soft shadow. Panes pass a tint when the card belongs to
-/// one reading, so the board reads in colour rather than in boxes.
-///
-/// The fill is a plain translucent colour, not a `Material`: a backdrop blur
-/// re-samples the scene under every card on every frame, and the live board
-/// stacks two dozen of them, which is the heaviest thing the window did. The
-/// aurora behind the panes already carries the atmosphere, so the cards read
-/// as glass with the tint, the sheen and the border alone.
+/// Shared solid card surface with a restrained edge.
 struct GlassPanel: ViewModifier {
     var radius: CGFloat = Theme.cardRadius
     var tint: Color?
     var raised = false
     @Environment(\.colorScheme) private var scheme
 
-    private var isDark: Bool { scheme == .dark }
-
     func body(content: Content) -> some View {
-        let card = content
+        content
             .background {
-                ZStack {
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(
-                            SplashPalette.surface.opacity(
-                                isDark ? (raised ? 0.80 : 0.62) : (raised ? 0.94 : 0.80)
-                            )
-                        )
-                    if let tint {
-                        RoundedRectangle(cornerRadius: radius, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        tint.opacity(isDark ? 0.14 : 0.06),
-                                        tint.opacity(isDark ? 0.02 : 0.01),
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(SplashPalette.surfaceRaised)
+                    .overlay {
+                        if let tint {
+                            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                                .fill(tint.opacity(scheme == .dark ? 0.07 : 0.035))
+                        }
                     }
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    isDark
-                                        ? SplashPalette.sheen.opacity(0.10)
-                                        : Color.white.opacity(0.42),
-                                    .clear,
-                                ],
-                                startPoint: .top,
-                                endPoint: .center
-                            )
-                        )
-                }
             }
             .overlay {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: isDark
-                                ? [
-                                    SplashPalette.sheen.opacity(0.22),
-                                    SplashPalette.border.opacity(0.35),
-                                    SplashPalette.sheen.opacity(0.04),
-                                ]
-                                : [
-                                    Color.white.opacity(0.95),
-                                    SplashPalette.border.opacity(0.55),
-                                    Color.white.opacity(0.55),
-                                ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.9
-                    )
+                    .strokeBorder(SplashPalette.border.opacity(0.8), lineWidth: 0.8)
             }
-        // One shadow per card, and only where the card floats over others:
-        // a shadow is an offscreen pass, so the flat tiles keep their edge
-        // from the border alone.
-        if raised {
-            card.shadow(
-                color: .black.opacity(isDark ? 0.24 : 0.08),
-                radius: 14,
-                x: 0,
-                y: 7
-            )
-        } else {
-            card
-        }
+            .shadow(color: .black.opacity(raised ? 0.07 : 0), radius: 10, x: 0, y: 4)
     }
 }
 
 extension View {
-    func glassPanel(
-        radius: CGFloat = Theme.cardRadius,
-        tint: Color? = nil,
-        raised: Bool = false
-    ) -> some View {
+    func glassPanel(radius: CGFloat = Theme.cardRadius, tint: Color? = nil, raised: Bool = false) -> some View {
         modifier(GlassPanel(radius: radius, tint: tint, raised: raised))
     }
 }
@@ -306,8 +139,8 @@ struct PaneHeader<Trailing: View>: View {
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(title)
-                    .font(.system(size: 27, weight: .bold, design: .rounded))
-                    .tracking(-0.4)
+                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                    .tracking(-0.8)
             }
             Spacer(minLength: 12)
             trailing()
@@ -317,10 +150,7 @@ struct PaneHeader<Trailing: View>: View {
 
 extension PaneHeader where Trailing == EmptyView {
     init(title: String) {
-        self.init(
-            title: title,
-            trailing: { EmptyView() }
-        )
+        self.init(title: title, trailing: { EmptyView() })
     }
 }
 
@@ -350,8 +180,7 @@ struct SectionLabel: View {
     }
 }
 
-/// An empty page, with the same shape everywhere: an icon, a title, and an
-/// optional action.
+/// An empty page, with the same shape everywhere: an icon, a title, and an optional action.
 struct PaneEmpty: View {
     let title: String
     var systemImage: String
@@ -362,16 +191,7 @@ struct PaneEmpty: View {
         VStack(spacing: 14) {
             ZStack {
                 Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                SplashPalette.blue.opacity(0.22),
-                                SplashPalette.cyan.opacity(0.08),
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                    .fill(SplashPalette.mint.opacity(0.12))
                     .frame(width: 76, height: 76)
                 Image(systemName: systemImage)
                     .font(.system(size: 29, weight: .light))
@@ -411,15 +231,11 @@ struct Pill: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background((tint ?? SplashPalette.muted).opacity(0.13), in: Capsule())
-            .overlay(
-                Capsule().strokeBorder((tint ?? SplashPalette.muted).opacity(0.22), lineWidth: 0.7)
-            )
+            .overlay(Capsule().strokeBorder((tint ?? SplashPalette.muted).opacity(0.22), lineWidth: 0.7))
     }
 }
 
-/// A beacon for a live state: a quiet halo dot while the server is up. The
-/// halo is a flat ring — no glow shadow, which would cost an offscreen pass
-/// for a two-pixel effect.
+/// A beacon for a live state.
 struct StatusBeacon: View {
     var color: Color
     var active = true
@@ -427,20 +243,15 @@ struct StatusBeacon: View {
     var body: some View {
         ZStack {
             if active {
-                Circle()
-                    .fill(color.opacity(0.22))
-                    .frame(width: 14, height: 14)
+                Circle().fill(color.opacity(0.22)).frame(width: 14, height: 14)
             }
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
+            Circle().fill(color).frame(width: 7, height: 7)
         }
         .frame(width: 16, height: 16)
     }
 }
 
-/// Lets a pane send the window to the conversation without knowing how the
-/// sidebar keeps its selection.
+/// Lets a pane send the window to the conversation without knowing how the sidebar keeps its selection.
 private struct OpenChatKey: EnvironmentKey {
     static let defaultValue: () -> Void = {}
 }

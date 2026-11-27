@@ -16,17 +16,17 @@ struct Sidebar: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
+                    groupLabel("navigation.workspace")
+                    row(.overview)
                     row(.chat)
-                    groupLabel("sidebar.serve")
                     row(.models)
-                    groupLabel("sidebar.monitor")
-                    row(.live)
+                    groupLabel("navigation.system")
                     row(.thermal)
                     row(.log)
-                    groupLabel("sidebar.app")
                     row(.settings)
-                    groupLabel("sidebar.about")
                     row(.about)
+                    groupLabel("navigation.diagnostics")
+                    row(.live)
                 }
                 .padding(.horizontal, 10)
                 .padding(.top, 4)
@@ -35,27 +35,11 @@ struct Sidebar: View {
 
             ServerControls()
         }
-        .background {
-            // A flat translucent wash, not a Material: the sidebar sits over
-            // the aurora for the whole app's life, and a backdrop blur under
-            // it would re-sample the scene every frame for a shade the panes
-            // already carry.
-            ZStack {
-                Rectangle().fill(SplashPalette.surface.opacity(0.55))
-                LinearGradient(
-                    colors: [
-                        SplashPalette.blue.opacity(0.10),
-                        SplashPalette.canvas.opacity(0.22),
-                        SplashPalette.cyan.opacity(0.05),
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            }
-        }
+        .background(SplashPalette.sidebar)
+        .foregroundStyle(SplashPalette.sidebarText)
         .overlay(alignment: .trailing) {
             Rectangle()
-                .fill(SplashPalette.border.opacity(0.35))
+                .fill(Color.white.opacity(0.08))
                 .frame(width: 1)
         }
     }
@@ -72,7 +56,7 @@ struct Sidebar: View {
                      ?? model.live.modelID
                      ?? L10n.string("models.none"))
                     .font(.system(size: 9.5, weight: .medium))
-                    .foregroundStyle(SplashPalette.faint)
+                    .foregroundStyle(SplashPalette.sidebarMuted)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -105,17 +89,17 @@ struct Sidebar: View {
                 Image(systemName: section.systemImage)
                     .font(.system(size: 11.5, weight: .semibold))
                     .frame(width: 18)
-                    .foregroundStyle(active ? section.tint : SplashPalette.muted)
+                    .foregroundStyle(active ? SplashPalette.sidebarMint : SplashPalette.sidebarMuted)
                 Text(section.title)
                     .font(.system(size: 12.5, weight: active ? .semibold : .regular))
-                    .foregroundStyle(active ? Color.primary : SplashPalette.muted)
+                    .foregroundStyle(active ? SplashPalette.sidebarMint : SplashPalette.sidebarMuted)
                 Spacer(minLength: 0)
                 if section == .live, model.phase == .ready {
                     StatusBeacon(color: stageColor(model.stage), active: true)
                         .scaleEffect(0.85)
                 } else if active {
                     Circle()
-                        .fill(section.tint)
+                        .fill(SplashPalette.sidebarMint)
                         .frame(width: 4, height: 4)
                 }
             }
@@ -124,26 +108,16 @@ struct Sidebar: View {
             .background {
                 if active {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [section.tint.opacity(0.20), section.tint.opacity(0.05)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .strokeBorder(section.tint.opacity(0.25), lineWidth: 0.8)
-                        )
+                        .fill(SplashPalette.sidebarSurface)
                 } else if hovered == section {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(SplashPalette.sheen.opacity(0.05))
+                        .fill(Color.white.opacity(0.045))
                 }
             }
             .overlay(alignment: .leading) {
                 if active {
                     Capsule()
-                        .fill(section.tint)
+                        .fill(SplashPalette.sidebarMint)
                         .frame(width: 2.5, height: 14)
                         .offset(x: 2)
                 }
@@ -164,7 +138,7 @@ struct Sidebar: View {
         Text(L10n.string(key).uppercased())
             .font(.system(size: 9, weight: .bold))
             .tracking(1.4)
-            .foregroundStyle(SplashPalette.faint.opacity(0.8))
+            .foregroundStyle(SplashPalette.sidebarMuted.opacity(0.78))
             .padding(.horizontal, 10)
             .padding(.top, 14)
             .padding(.bottom, 4)
@@ -203,30 +177,27 @@ private struct ServerControls: View {
                         }
                     }
                     .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(SplashPalette.faint)
+                    .foregroundStyle(SplashPalette.sidebarMuted)
                     .lineLimit(1)
                 }
                 Spacer(minLength: 4)
             }
 
-            if model.isRunning {
-                HStack(spacing: 0) {
-                    rateCell(L10n.string("live.decode"), model.live.decodeTokensPerSecond, SplashPalette.mint)
-                    Rectangle()
-                        .fill(SplashPalette.hairline)
-                        .frame(width: 1, height: 22)
-                    rateCell(L10n.string("live.prefill"), model.live.prefillTokensPerSecond, SplashPalette.cyan)
-                }
-                .padding(.vertical, 4)
-                .background(SplashPalette.surface.opacity(0.42), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-
-                if model.phase == .ready {
-                    Sparkline(values: model.decodeHistory, tint: SplashPalette.mint)
-                        .frame(height: 14)
-                        .padding(.horizontal, 1)
-                        .opacity(0.9)
-                }
+            HStack(spacing: 0) {
+                rateCell(
+                    L10n.string("sidebar.input_speed"),
+                    model.phase == .ready && model.live.updated ? model.live.prefillTokensPerSecond : nil,
+                    SplashPalette.cyan
+                )
+                Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1, height: 28)
+                rateCell(
+                    L10n.string("sidebar.output_speed"),
+                    model.phase == .ready && model.live.updated ? model.live.decodeTokensPerSecond : nil,
+                    SplashPalette.blue
+                )
             }
+            .padding(.vertical, 6)
+            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
 
             if model.isRunning {
                 Button(role: .destructive) {
@@ -273,14 +244,15 @@ private struct ServerControls: View {
     }
 
     private func rateCell(_ title: String, _ value: Double?, _ tint: Color) -> some View {
-        VStack(spacing: 1) {
+        VStack(spacing: 3) {
             Text(title.uppercased())
                 .font(.system(size: 7.5, weight: .bold))
-                .tracking(0.5)
-                .foregroundStyle(SplashPalette.faint)
+                .tracking(0.4)
+                .foregroundStyle(SplashPalette.sidebarMuted)
                 .lineLimit(1)
-            Text(value.map { String(format: "%.0f", $0) } ?? "—")
-                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .minimumScaleFactor(0.8)
+            Text(value.map { String(format: "%.1f", $0) } ?? "—")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(tint)
                 .lineLimit(1)

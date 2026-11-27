@@ -90,10 +90,16 @@ protected:
 private:
   [[nodiscard]] WeightFile open(size_t index) {
     const gguf::Image &plan = (*images_)[index];
+    // WeightImages retains this writer after the stack-local loader in
+    // ModelFactory::loadModel has been destroyed. Copy the callbacks, whose
+    // captures own the planned source state, instead of retaining this.
+    auto write = write_;
+    auto checkUnchanged = checkUnchanged_;
     return weightImages_->load({"target/" + plan.name, plan.magic, plan.layer, plan.type, plan.bytes,
-                               [this, index](std::span<uint8_t>, const metal::MetalBuffer &buffer) {
-                                 write_(buffer, index);
-                                 checkUnchanged_();
+                               [write = std::move(write), checkUnchanged = std::move(checkUnchanged), index](
+                                   std::span<uint8_t>, const metal::MetalBuffer &buffer) {
+                                 write(buffer, index);
+                                 checkUnchanged();
                                },
                                plan.residentBytes});
   }

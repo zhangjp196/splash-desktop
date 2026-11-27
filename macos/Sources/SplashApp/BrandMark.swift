@@ -15,7 +15,7 @@ struct BrandMark: View {
                             Color(red: 0.024, green: 0.086, blue: 0.192),
                             Color(red: 0.055, green: 0.271, blue: 0.682),
                             Color(red: 0.043, green: 0.604, blue: 0.847),
-                            Color(red: 0.169, green: 0.851, blue: 0.784),
+                            Color(red: 0.10, green: 0.72, blue: 0.96),
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing

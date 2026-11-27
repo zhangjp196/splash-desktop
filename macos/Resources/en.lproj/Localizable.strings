@@ -187,6 +187,41 @@
 "sidebar.serve" = "Serve";
 "sidebar.monitor" = "Monitor";
 "sidebar.about" = "About";
+"navigation.workspace" = "Workspace";
+"navigation.system" = "System";
+"navigation.diagnostics" = "Diagnostics";
+"sidebar.input_speed" = "Input · tok/s";
+"sidebar.output_speed" = "Output · tok/s";
+
+// The overview: the live engine at a glance.
+"view.overview" = "Overview";
+"overview.description" = "See local model status, performance, and resource use.";
+"overview.copy_api" = "Copy API URL";
+"overview.metric.decode" = "Decode speed";
+"overview.metric.ttft" = "Time to first token";
+"overview.metric.memory" = "Physical memory";
+"overview.metric.completed" = "Completed requests";
+"overview.chart.title" = "Decode throughput";
+"overview.chart.caption" = "Live samples · tokens/s";
+"overview.chart.details" = "Detailed monitor →";
+"overview.chart.empty.title" = "No throughput data";
+"overview.chart.empty.description" = "Real samples appear after the server starts processing requests.";
+"overview.chart.sample" = "Sample";
+"overview.server" = "Inference service · %@";
+"overview.start" = "Start service";
+"overview.stop" = "Stop service";
+"overview.environment" = "Runtime environment";
+"overview.model" = "Model";
+"overview.backend" = "Acceleration";
+"overview.backend.metal" = "Apple Metal";
+"overview.speculation" = "Speculative decoding";
+"overview.view_models" = "View models →";
+"overview.recent_activity" = "Recent activity";
+"overview.view_log" = "View log →";
+"overview.no_activity" = "No recent request activity";
+"overview.request.completed" = "Inference request completed";
+"overview.request.failed" = "Inference request failed";
+"overview.request.cancelled" = "Request cancelled";
 
 // The models pane: configurations and managed directories.
 "view.models" = "Models";

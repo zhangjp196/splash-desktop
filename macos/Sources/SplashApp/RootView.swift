@@ -7,8 +7,9 @@ import SwiftUI
 /// moves are a glance apart.
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
-    @AppStorage("sidebar.selection") private var selectionRaw = Section.models.rawValue
-    @AppStorage("appearance") private var appearanceRaw = AppAppearance.dark.rawValue
+    @AppStorage("sidebar.selection") private var selectionRaw = Section.overview.rawValue
+    @AppStorage("appearance") private var appearanceRaw = AppAppearance.light.rawValue
+    @AppStorage("ui.overview.migrated") private var didMigrateOverview = false
     @State private var showPalette = false
     @State private var showTerminal = false
     @State private var toast: String?
@@ -16,10 +17,17 @@ struct RootView: View {
     @AppStorage("updates.automatic") private var automaticUpdates = true
     @StateObject private var updateChecker = UpdateChecker.shared
 
-    private var section: Section { Section(rawValue: selectionRaw) ?? .models }
+    private var section: Section { Section(rawValue: selectionRaw) ?? .overview }
+    private var sectionGroupTitleKey: String {
+        switch section {
+        case .overview, .chat, .models: return "navigation.workspace"
+        case .live: return "navigation.diagnostics"
+        case .thermal, .log, .settings, .about: return "navigation.system"
+        }
+    }
     private var selection: Binding<Section> {
         Binding(
-            get: { Section(rawValue: selectionRaw) ?? .models },
+            get: { Section(rawValue: selectionRaw) ?? .overview },
             set: { selectionRaw = $0.rawValue }
         )
     }
@@ -28,12 +36,13 @@ struct RootView: View {
     }
 
     enum Section: String, CaseIterable, Identifiable {
-        case chat, models, live, thermal, log, settings, about
+        case overview, chat, models, live, thermal, log, settings, about
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
+            case .overview: return L10n.string("view.overview")
             case .chat: return L10n.string("view.chat")
             case .models: return L10n.string("view.models")
             case .live: return L10n.string("view.live")
@@ -46,6 +55,7 @@ struct RootView: View {
 
         var systemImage: String {
             switch self {
+            case .overview: return "square.grid.2x2.fill"
             case .chat: return "bubble.left.and.bubble.right.fill"
             case .models: return "square.stack.3d.up.fill"
             case .live: return "waveform.path.ecg"
@@ -58,6 +68,7 @@ struct RootView: View {
 
         var tint: Color {
             switch self {
+            case .overview: return SplashPalette.mint
             case .chat: return SplashPalette.cyan
             case .models: return SplashPalette.blue
             case .live: return SplashPalette.mint
@@ -68,16 +79,17 @@ struct RootView: View {
             }
         }
 
-        /// ⌘1 through ⌘7, in the sidebar's order, for moving without the mouse.
+        /// ⌘1 through ⌘8, in the sidebar's order, for moving without the mouse.
         var shortcut: KeyEquivalent {
             switch self {
-            case .chat: return "1"
-            case .models: return "2"
-            case .live: return "3"
-            case .thermal: return "4"
-            case .log: return "5"
-            case .settings: return "6"
-            case .about: return "7"
+            case .overview: return "1"
+            case .chat: return "2"
+            case .models: return "3"
+            case .live: return "4"
+            case .thermal: return "5"
+            case .log: return "6"
+            case .settings: return "7"
+            case .about: return "8"
             }
         }
     }
@@ -97,7 +109,7 @@ struct RootView: View {
                     .frame(width: Theme.sidebarWidth)
 
                 Rectangle()
-                    .fill(SplashPalette.border.opacity(0.35))
+                    .fill(Color.white.opacity(0.08))
                     .frame(width: 1)
 
                 ZStack {
@@ -139,7 +151,12 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(appearance.colorScheme)
+        .foregroundStyle(SplashPalette.ink)
         .onAppear {
+            if !didMigrateOverview {
+                selectionRaw = Section.overview.rawValue
+                didMigrateOverview = true
+            }
             applyAppearance()
             updateChecker.checkIfDue(enabled: automaticUpdates)
         }
@@ -217,6 +234,7 @@ struct RootView: View {
     @ViewBuilder private var pane: some View {
         Group {
             switch section {
+            case .overview: OverviewPane(selection: selection)
             case .chat: Color.clear
             case .models: ModelsPane()
             case .live: LivePane()
@@ -242,6 +260,16 @@ struct RootView: View {
     /// The detail's toolbar: the search palette, the appearance, the language,
     /// and the way to a browser tab.
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            HStack(spacing: 8) {
+                Text(L10n.string(sectionGroupTitleKey))
+                    .foregroundStyle(SplashPalette.muted)
+                Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold)).foregroundStyle(SplashPalette.faint)
+                Text(section.title).fontWeight(.semibold)
+                StatusBeacon(color: model.isRunning ? SplashPalette.mint : SplashPalette.muted, active: model.isRunning)
+                Text(model.statusText).font(.system(size: 10, weight: .medium)).foregroundStyle(SplashPalette.muted).lineLimit(1)
+            }.font(.system(size: 11))
+        }
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
                 showPalette = true

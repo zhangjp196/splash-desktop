@@ -187,6 +187,41 @@
 "sidebar.serve" = "服务";
 "sidebar.monitor" = "监控";
 "sidebar.about" = "关于";
+"navigation.workspace" = "工作台";
+"navigation.system" = "系统";
+"navigation.diagnostics" = "诊断";
+"sidebar.input_speed" = "输入 · token/秒";
+"sidebar.output_speed" = "输出 · token/秒";
+
+// 概览：查看实时推理状态。
+"view.overview" = "运行概览";
+"overview.description" = "查看本地模型状态、性能和资源占用。";
+"overview.copy_api" = "复制 API 地址";
+"overview.metric.decode" = "解码速度";
+"overview.metric.ttft" = "首字延迟";
+"overview.metric.memory" = "实际内存";
+"overview.metric.completed" = "已完成请求";
+"overview.chart.title" = "解码吞吐";
+"overview.chart.caption" = "实时采样 · token/秒";
+"overview.chart.details" = "详细监控 →";
+"overview.chart.empty.title" = "暂无吞吐数据";
+"overview.chart.empty.description" = "服务启动并处理请求后会显示真实采样。";
+"overview.chart.sample" = "采样";
+"overview.server" = "推理服务 · %@";
+"overview.start" = "启动服务";
+"overview.stop" = "停止服务";
+"overview.environment" = "运行环境";
+"overview.model" = "模型";
+"overview.backend" = "加速后端";
+"overview.backend.metal" = "Apple Metal";
+"overview.speculation" = "推测解码";
+"overview.view_models" = "查看模型库 →";
+"overview.recent_activity" = "近期活动";
+"overview.view_log" = "查看日志 →";
+"overview.no_activity" = "暂无近期请求活动";
+"overview.request.completed" = "推理请求已完成";
+"overview.request.failed" = "推理请求失败";
+"overview.request.cancelled" = "请求已取消";
 
 // 模型面板：配置与目录管理。
 "view.models" = "模型";
