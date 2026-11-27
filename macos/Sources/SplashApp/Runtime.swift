@@ -97,8 +97,9 @@ struct SuggestedModel: Identifiable, Hashable {
     }
 
     enum ModelKind: String, CaseIterable, Identifiable {
-        case gguf
+        // MLX first, as the models pane lists its kinds.
         case mlx
+        case gguf
 
         var id: String { rawValue }
 

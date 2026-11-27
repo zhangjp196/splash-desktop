@@ -94,7 +94,7 @@ struct DownloadSheet: View {
     var onClose: () -> Void
 
     @State private var identifier = ""
-    @State private var kind = SuggestedModel.ModelKind.gguf
+    @State private var kind = SuggestedModel.ModelKind.mlx
 
     private var suggested: [SuggestedModel] {
         Runtime.catalog.filter { $0.kind == kind }

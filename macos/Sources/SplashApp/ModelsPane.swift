@@ -8,7 +8,7 @@ struct ModelsPane: View {
     @State private var editing: EditingConfig?
     @State private var pendingRemoval: ModelConfig?
     @State private var downloading = false
-    @State private var kind = ConfigKind.gguf
+    @State private var kind = ConfigKind.mlx
     @StateObject private var downloader = Downloader()
 
     /// The configurations the pane lists under the chosen kind. An online
@@ -224,8 +224,9 @@ struct ModelsPane: View {
 
 /// The kind of weights a configuration loads, which the pane lists them by.
 enum ConfigKind: String, CaseIterable, Identifiable {
-    case gguf
+    // MLX first: the pane opens on the kind most Macs serve fastest.
     case mlx
+    case gguf
 
     init(of config: ModelConfig) {
         // An online target has no local weights; it is listed under the kind
