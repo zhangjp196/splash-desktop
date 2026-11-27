@@ -217,7 +217,10 @@ class ChatTemplateProbeTests(unittest.TestCase):
                 chosen = templates.select(None)
                 self.assertEqual(chosen.original, ORIGINAL[name])
                 self.assertEqual(chosen.later_system, PATCHED)
-                self.assertEqual(templates.status(), {"later_system": PATCHED})
+                self.assertEqual(
+                    templates.status(),
+                    {"later_system": PATCHED, "late_tools": chosen.late_tools},
+                )
                 # This tokenizer reads any text as one token.
                 self.assertEqual(
                     templates.describe(),
@@ -504,7 +507,13 @@ class ChatTemplateProbeTests(unittest.TestCase):
         self.assertEqual(templates.select(TOOLS).later_system, PATCHED)
         self.assertEqual(
             templates.status(),
-            {"later_system": {"default": NATIVE, "tool_use": PATCHED}},
+            {
+                "later_system": {"default": NATIVE, "tool_use": PATCHED},
+                "late_tools": {
+                    "default": templates.select(None).late_tools,
+                    "tool_use": templates.select(TOOLS).late_tools,
+                },
+            },
         )
         self.assertEqual(
             templates.describe(),
@@ -550,7 +559,8 @@ class ChatTemplateFrontendTests(unittest.TestCase):
         chosen = harness.app.chat_templates.select(None)
         status, _, payload = harness.request("GET", "/status")
         self.assertEqual(
-            json.loads(payload)["chat_template"], {"later_system": PATCHED}
+            json.loads(payload)["chat_template"],
+            {"later_system": PATCHED, "late_tools": chosen.late_tools},
         )
         messages = [
             {"role": "user", "content": "Hi"},
@@ -1130,6 +1140,60 @@ class LeadingSystemMergeTests(unittest.TestCase):
                         {"role": "user", "content": "Ask"},
                     ],
                 )
+
+    def test_a_system_message_s_tools_are_kept(self):
+        # A harness declares tools mid-session; the leading message's join the
+        # request's tools, and a later one's render where it occurs
+        # (LateDeclarationTests).
+        weather = {"type": "function", "function": {"name": "weather"}}
+        clock = {"type": "function", "function": {"name": "clock"}}
+        merged = chat_messages.normalize_messages(
+            [
+                {"role": "system", "content": "Base", "tools": [weather]},
+                {"role": "user", "content": "Hi"},
+                {"role": "system", "tools": [clock]},
+                {"role": "user", "content": "Weather?"},
+            ],
+            vision=True,
+            deadline=fixtures.FOREVER,
+            without_slot=nullcontext,
+        )
+        self.assertEqual(
+            merged,
+            [
+                {"role": "system", "content": "Base", "tools": [weather]},
+                {"role": "user", "content": "Hi"},
+                {"role": "system", "content": "", "tools": [clock]},
+                {"role": "user", "content": "Weather?"},
+            ],
+        )
+        # A later one is what a request's policy adds to its head's.
+        self.assertEqual(chat_messages.declared_tools(merged), [clock])
+        with self.assertRaisesRegex(Exception, "tools must be an array"):
+            chat_messages.normalize_messages(
+                [
+                    {"role": "user", "content": "Hi"},
+                    {"role": "system", "tools": "weather"},
+                ],
+                vision=True,
+                deadline=fixtures.FOREVER,
+                without_slot=nullcontext,
+            )
+
+    def test_merge_tools_replaces_only_across_the_two_lists(self):
+        # A repeated name within one list stays for the request's checks to
+        # refuse; across the head and a later declaration it replaces.
+        weather = {"type": "function", "function": {"name": "weather"}}
+        later = {
+            "type": "function",
+            "function": {"name": "weather", "description": "New"},
+        }
+        self.assertEqual(chat_messages.merge_tools([weather], [later]), [later])
+        self.assertEqual(
+            chat_messages.merge_tools([weather, weather], None),
+            [weather, weather],
+        )
+        self.assertIsNone(chat_messages.merge_tools(None, None))
 
 
 if __name__ == "__main__":

@@ -533,6 +533,35 @@ A Chat tool or named `tool_choice` that gives no `type` is a function. A
 Responses `namespace` function goes by `namespace__name`. Hosted search is
 unsupported; configure client-owned tools such as MCP.
 
+### Tools declared mid-conversation
+
+A system message after the first may declare tools, for a harness that loads
+them mid-session without rewriting the prompt's head:
+
+```json
+{"role": "system", "tools": [{"type": "function", "function": {"name": "weather"}}]}
+```
+
+Its tools are offered by the request's policy, beside the `tools` field's and
+the leading system message's, and the declaration is rendered where the message
+stands. The tokens before it are then the ones an earlier turn rendered, so the
+engine reuses that prefix's KV and states instead of re-prefilling the
+conversation. A message that declares tools and has no content leaves no empty
+system block: the declaration takes its place. A later message with both keeps
+its own block after the declaration.
+
+Declaring tools this way needs a chat template that writes its tool list as a
+block of its own, which Inkling 2's, Flint's and the Qwen 3.6 templates do.
+Where a template writes the list inside a leading system message instead, as
+the Qwen 3.8 templates do beside their reasoning instructions, a later
+declaration returns 400 (`chat_template.late_tools` on `/status`) rather than
+losing the tools. Declaring them in the request's `tools` field always works,
+at the cost of the prefix.
+
+A Messages request's `tool_addition` blocks are different: they change the
+request's tool list, which a template declares once at the head, so they keep
+rendering there.
+
 ## Structured output
 
 Chat's `response_format` takes `{"type": "json_object"}` or
@@ -787,6 +816,7 @@ Proxy consumers can use these fields; additional fields may be added:
 | `speculation` | The installed plan `/status` reports: `provider` (`none`, `dflash2`), `proposal_rows`, `draft_weights_bytes`, and `fallback_reason` when a requested provider fell back |
 | `reasoning_switch` | Whether a request's reasoning effort or `enable_thinking` turns the model's reasoning on and off ([default reasoning effort](server.md#default-reasoning-effort)): `true` for the Qwen families, `false` for Flint, whose model decides each turn |
 | `chat_template.later_system` | `native`, `patched` or `unsupported`: how system messages after the first render (per name for named templates) |
+| `chat_template.late_tools` | Whether a system message after the first may declare tools where it occurs ([tools declared mid-conversation](#tools-declared-mid-conversation)); `false` where the template writes its tool list inside a leading system message, and a later declaration returns 400 |
 | `transport.recovering`, `transport.stopped`, `transport.error` | The engine is restarting, or Splash stopped restarting it after repeated failures; `error` names its failure, the last failed restart, or why restarts stopped |
 
 `GET /ready` is 200 while the engine's own `ready` is true. While the engine

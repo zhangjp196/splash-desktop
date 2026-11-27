@@ -90,13 +90,17 @@ def _image_pad(frontend):
     return frontend.chat_format.image_pad or IMAGE_PAD_TOKEN
 
 
-def render_image_tokens(frontend, messages, template):
+def render_image_tokens(frontend, messages, template, transform=None):
     """Track placeholders emitted by the template, not quoted in input text.
 
     A temporary render marker is removed before tokenization, so the pinned
     template's final text and token IDs remain unchanged. Token offsets tie
     each real image to its placeholder even when a coding agent has read
     documentation or source containing literal vision tokens.
+
+    `transform` reads the rendered text while its images are still markers and
+    returns the text to tokenize, so offsets are read from what it changed;
+    None where it could not place what it adds.
     """
     pad = _image_pad(frontend)
     rendered = frontend._apply_chat_template(
@@ -104,9 +108,15 @@ def render_image_tokens(frontend, messages, template):
         {
             **template,
             "tokenize": False,
-            "chat_template": template["chat_template"].replace(pad, IMAGE_RENDER_MARKER),
+            "chat_template": template["chat_template"].replace(
+                pad, IMAGE_RENDER_MARKER
+            ),
         },
     )
+    if transform is not None:
+        rendered = transform(rendered)
+        if rendered is None:
+            return None
     parts = rendered.split(IMAGE_RENDER_MARKER)
     image_offsets = set()
     offset = 0
@@ -160,7 +170,9 @@ def expand_image_pads(frontend, prompt_tokens, prepared, positions):
                 image.grid_width,
                 image.digest_lo,
                 image.digest_hi,
-                wire.ImageProcessor.INKLING if getattr(image, "processor", "qwen") == "inkling2" else wire.ImageProcessor.QWEN,
+                wire.ImageProcessor.INKLING
+                if getattr(image, "processor", "qwen") == "inkling2"
+                else wire.ImageProcessor.QWEN,
             )
         )
         expanded.extend([pad_id] * image.tokens)

@@ -202,9 +202,7 @@ def inkling2_format(tokenizer):
     return replace(
         INKLING2,
         vocabulary=len(tokenizer),
-        stop_tokens=tuple(
-            (text, ids(text)) for text in INKLING2.stop_tokens
-        ),
+        stop_tokens=tuple((text, ids(text)) for text in INKLING2.stop_tokens),
         think_end_id=ids(END),
         think_start_ids=(ids(MODEL), ids(THINKING)),
         call_open_id=ids(MODEL),
@@ -1485,6 +1483,159 @@ class InklingPromptTests(unittest.TestCase):
                 tokenizer(text, add_special_tokens=False)["input_ids"],
             )
         self.assertEqual(cache.stats()["hits"], 1)
+
+
+class LateDeclarationTests(unittest.TestCase):
+    """A system message after the first may declare tools (`{"role":
+    "system", "tools": [...]}`), as harnesses that load tools mid-session
+    send them. The declaration renders where the message occurs, so the
+    prompt before it stays the prefix an earlier turn cached, and its tools
+    are offered by the request's policy."""
+
+    TOOL = {
+        "type": "function",
+        "function": {"name": "weather", "parameters": {"type": "object"}},
+    }
+    TURNS = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello."},
+    ]
+
+    def frontend(self):
+        tokenizer = inkling2_tokenizer()
+        return fixtures.make_frontend(
+            tokenizer,
+            None,
+            "test-model",
+            4096,
+            10,
+            2,
+            vision=False,
+            chat_format=inkling2_format(tokenizer),
+        )
+
+    def body(self):
+        return fixtures.chat_body(
+            messages=[
+                *self.TURNS,
+                {"role": "system", "tools": [self.TOOL]},
+                {"role": "user", "content": "Weather in Austin?"},
+            ]
+        )
+
+    def render(self, frontend, body):
+        return frontend.apply_template(body, deadline=fixtures.FOREVER)
+
+    def test_the_declaration_renders_where_the_message_occurs(self):
+        # The expectations of incoai/splash#880: the prefix through the last
+        # assistant turn is unchanged, the tool is declared in place, and no
+        # empty system block is left behind.
+        frontend = self.frontend()
+        body = self.body()
+        rendered = self.render(frontend, body)
+        hello = "<|message_model|>" + TEXT + "Hello." + END
+        self.assertEqual(
+            rendered[: rendered.index(hello) + len(hello)],
+            "<|message_system|>"
+            + TEXT
+            + "Thinking effort level: 0.9"
+            + END
+            + "<|message_user|>"
+            + TEXT
+            + "Hi"
+            + END
+            + hello,
+        )
+        self.assertIn(
+            '<|message_system|>tool_declare<|content_xml|>[{"description"', rendered
+        )
+        self.assertIn('"name":"weather"', rendered)
+        # The declaration stands before the next turn, and the message that
+        # carried it leaves no empty block.
+        self.assertLess(
+            rendered.index("tool_declare"), rendered.index("Weather in Austin?")
+        )
+        self.assertNotIn("<|message_system|>" + TEXT + END, rendered)
+
+    def test_its_tools_are_offered_by_the_policy(self):
+        frontend = self.frontend()
+        job = frontend.prepare(self.body(), deadline=fixtures.FOREVER)
+        self.assertTrue(job.may_call_tools)
+        self.assertEqual(set(job.tool_policy.schemas), {"weather"})
+
+    def test_the_prompt_before_it_is_the_one_the_earlier_turn_cached(self):
+        # The request that declares no tools renders the same tokens, so the
+        # engine reuses the prefix instead of re-prefilling the conversation.
+        frontend = self.frontend()
+        earlier = {"model": "test-model", "temperature": 0, "messages": self.TURNS}
+        later = self.body()
+        first = frontend.prepare(earlier, deadline=fixtures.FOREVER)
+        second = frontend.prepare(later, deadline=fixtures.FOREVER)
+        self.assertEqual(
+            second.prompt_tokens[: len(first.prompt_tokens)], first.prompt_tokens
+        )
+        self.assertGreater(len(second.prompt_tokens), len(first.prompt_tokens))
+
+    def test_a_declaration_with_content_keeps_its_block(self):
+        frontend = self.frontend()
+        body = self.body() | {
+            "messages": [
+                *self.TURNS,
+                {
+                    "role": "system",
+                    "content": "Now you can check weather.",
+                    "tools": [self.TOOL],
+                },
+                {"role": "user", "content": "Weather in Austin?"},
+            ]
+        }
+        rendered = self.render(frontend, body)
+        self.assertIn("tool_declare", rendered)
+        self.assertIn("Now you can check weather.", rendered)
+        self.assertLess(
+            rendered.index("tool_declare"), rendered.index("Now you can check")
+        )
+
+    def test_an_empty_system_message_without_tools_renders_nothing(self):
+        # It would otherwise write an empty block where it stands.
+        frontend = self.frontend()
+        body = self.body() | {
+            "messages": [
+                *self.TURNS,
+                {"role": "system", "content": ""},
+                {"role": "user", "content": "Weather in Austin?"},
+            ]
+        }
+        self.assertNotIn("<|message_system|>" + TEXT + END, self.render(frontend, body))
+
+    def test_a_template_that_cannot_declare_in_place_refuses_it(self):
+        # Qwen 3.8 writes its tools inside a leading system message beside the
+        # reasoning instructions, so a later declaration has no block of its
+        # own: the request is refused rather than losing the tools.
+        from dev.tests.server.test_chat_templates import chat_tokenizer, source
+
+        tokenizer = chat_tokenizer(
+            source("qwen38_gguf"), "<|im_start|>", "<|im_end|>", "<|im_SEP|>"
+        )
+        frontend = fixtures.make_frontend(
+            tokenizer, None, "test-model", 4096, 10, 2, vision=False
+        )
+        self.assertFalse(frontend.chat_templates.select(None).late_tools)
+        with self.assertRaisesRegex(
+            Exception, "cannot declare tools after the first message"
+        ):
+            frontend.prepare(
+                {
+                    "model": "test-model",
+                    "messages": [
+                        *self.TURNS,
+                        {"role": "system", "tools": [self.TOOL]},
+                        {"role": "user", "content": "Weather?"},
+                    ],
+                },
+                deadline=fixtures.FOREVER,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

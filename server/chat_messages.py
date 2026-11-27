@@ -115,6 +115,36 @@ def _call_arguments(arguments):
     return arguments if isinstance(arguments, dict) else json_codec.dumps(arguments)
 
 
+def _tool_list(value):
+    """A system message's tools as sent: an array of tools, or None where it
+    declares none. Checked in shape only; request preparation checks the tools
+    themselves."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise APIError(400, "a system message's tools must be an array")
+    return value or None
+
+
+def merge_tools(first, second):
+    """Two tool lists as one, in order, a tool of a repeated name taken from
+    the later list.
+
+    A repeated name is a replacement only across the two lists' own kinds: a
+    system message declares a tool the request's tools field, or an earlier
+    message, already declared. Within one list a repeated name stays, for the
+    request's checks (normalize_tools) to refuse."""
+    if first and second:
+        names = {_tool_name(tool) for tool in second}
+        first = [tool for tool in first if _tool_name(tool) not in names]
+    return [*(first or []), *(second or [])] or None
+
+
+def _tool_name(tool):
+    function = tool.get("function") if isinstance(tool, dict) else None
+    return function.get("name") if isinstance(function, dict) else None
+
+
 def normalize_messages(messages, *, vision, deadline, without_slot):
     """`messages` checked and in canonical form, each PDF rendered to its
     pages under `without_slot`, which gives a request in preparation its
@@ -129,15 +159,32 @@ def normalize_messages(messages, *, vision, deadline, without_slot):
             raise APIError(400, "each message must be an object")
         role = message.get("role")
         if role in ("system", "developer"):
+            tools = _tool_list(message.get("tools"))
             text = _text_content(message.get("content"))
-            if len(normalized) == 1 and normalized[0]["role"] == "system":
+            leading = len(normalized) == 1 and normalized[0]["role"] == "system"
+            if not leading and not text and tools is None:
+                # A system message with neither content nor tools renders
+                # nothing; a template that places it would write an empty
+                # block, so it is left out.
+                continue
+            if leading:
                 # Responses instructions and developer items, or an Anthropic
                 # system and a system message, lead as one system message.
                 normalized[0]["content"] = "\n\n".join(
                     part for part in (normalized[0]["content"], text) if part
                 )
+                if tools is not None:
+                    normalized[0]["tools"] = merge_tools(
+                        normalized[0].get("tools"), tools
+                    )
             else:
-                normalized.append({"role": "system", "content": text})
+                item = {"role": "system", "content": text}
+                # A system message may declare tools mid-conversation, which
+                # the template renders where it occurs so the prefix before it
+                # stays cacheable (_declare_tools).
+                if tools is not None:
+                    item["tools"] = tools
+                normalized.append(item)
             continue
         if role not in ("user", "assistant", "tool"):
             raise APIError(400, f"unsupported message role: {role}")
@@ -190,6 +237,22 @@ def normalize_messages(messages, *, vision, deadline, without_slot):
     if not has_user:
         raise APIError(400, "messages must include a user message")
     return normalized
+
+
+def declared_tools(messages):
+    """The tools the system messages after the first declare between them, in
+    order, a tool of a repeated name taken from the later one. None where none
+    declares tools.
+
+    A chat template renders one tool list, at the prompt's head. A declaration
+    that comes later is rendered where it occurs instead
+    (chat_templates.splice_declarations), so the tokens before it stay a
+    cacheable prefix."""
+    tools = None
+    for message in messages[1:]:
+        if message.get("role") == "system":
+            tools = merge_tools(tools, message.get("tools"))
+    return tools
 
 
 def template_messages(messages):

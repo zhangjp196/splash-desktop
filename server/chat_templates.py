@@ -197,6 +197,16 @@ class ChatTemplate:
     # Whether it reads reasoning_effort, which a request can set through its
     # chat_template_kwargs.
     reads_effort: bool = False
+    # The template's system block: what it writes around a system message's
+    # content (prefix, suffix); None where it writes none.
+    system_block: tuple | None = None
+    # The text that declares tools where a system message renders, under given
+    # template options (`declaration(tools, options)`); None where the
+    # template's declaration cannot be isolated.
+    declaration: Callable | None = None
+    # Whether a later system message's tools render where it occurs, proven by
+    # the startup canary.
+    late_tools: bool = False
 
     def accepts(self, messages):
         """Whether requests with these normalized messages are served: a
@@ -250,11 +260,17 @@ class ChatTemplates:
 
     def status(self):
         if None in self.templates:
-            return {"later_system": self.templates[None].later_system}
+            return {
+                "later_system": self.templates[None].later_system,
+                "late_tools": self.templates[None].late_tools,
+            }
         return {
             "later_system": {
                 name: template.later_system for name, template in self.templates.items()
-            }
+            },
+            "late_tools": {
+                name: template.late_tools for name, template in self.templates.items()
+            },
         }
 
     def describe(self):
@@ -333,6 +349,13 @@ def _prepare(render, encode, source, opens_own_message):
 
         return memoized(probed, lock, key, generation_prompt)
 
+    # A later system message may declare tools, which the template renders
+    # where it occurs, so the prefix before it stays cacheable. That needs the
+    # template's own declaration as a block of its own, and a canary proving
+    # it lands where the message stood.
+    block = _system_block(render, source) if later_system != UNSUPPORTED else None
+    declaration = _declaration_reader(render, source, block) if block else None
+
     return ChatTemplate(
         source,
         later_system,
@@ -342,6 +365,10 @@ def _prepare(render, encode, source, opens_own_message):
         *_reasoning(render, source),
         _thinking_end(render, source),
         _reads_effort(source),
+        system_block=block,
+        declaration=declaration,
+        late_tools=declaration is not None
+        and _declares_in_place(render, source, block, declaration),
     )
 
 
@@ -659,6 +686,164 @@ def _system_block(render, source):
     if block.count(_MARKER) != 1:
         return None
     return block.split(_MARKER)
+
+
+LATE_TOOLS_UNSUPPORTED = (
+    "this model's chat template cannot declare tools after the first message"
+)
+
+# The tool a startup canary declares, to prove a declaration renders in place.
+_DECL_TOOL = {
+    "type": "function",
+    "function": {"name": "declared_tool", "parameters": {"type": "object"}},
+}
+
+
+def _declaration_sentinels(index):
+    """The two sentinels placed around the content of the system message that
+    declares tools, which locate it in the rendered prompt. They are letters
+    and digits, so that no template's text handling changes or escapes them."""
+    return f"SplashDeclareA{index:02d}5c7e", f"SplashDeclareB{index:02d}5c7e"
+
+
+def _declared_block(with_tools, without, block):
+    """The text `with_tools` writes before the conversation `without` renders,
+    where it is one declaration block of the template's own: None where the
+    template writes its tools into a message instead, as the Qwen 3.8
+    templates write them inside a leading system message beside the reasoning
+    instructions."""
+    if not with_tools.endswith(without):
+        return None
+    added = with_tools[: len(with_tools) - len(without)]
+    _prefix, suffix = block
+    # A block of the template's own closes as its system messages do, and is
+    # all the template writes ahead of the conversation; text it merges into a
+    # leading system message does neither.
+    if not added.strip() or not added.endswith(suffix):
+        return None
+    return added
+
+
+def _declaration_reader(render, source, block):
+    """A reader of the text that declares tools where a system message
+    renders, in the request's template options; None where the template
+    writes no such block."""
+    cache = LRUCache(_PROBED_OPTIONS_BYTES, _PROBED_OPTIONS)
+    lock = threading.Lock()
+
+    def reader(tools, options):
+        if not tools:
+            return None
+        base = {
+            name: value
+            for name, value in options.items()
+            if name
+            not in ("add_generation_prompt", "tools", "chat_template", "tokenize")
+        }
+        key = json.dumps({"tools": tools, "options": base}, sort_keys=True, default=str)
+
+        def compute():
+            try:
+                with_tools = render(
+                    source,
+                    [_ASK],
+                    {**base, "tools": tools, "add_generation_prompt": False},
+                )
+                without = render(
+                    source, [_ASK], {**base, "add_generation_prompt": False}
+                )
+            except Exception:  # templates reject some options themselves
+                return None, len(key)
+            found = _declared_block(with_tools, without, block)
+            return found, len(key) + (len(found) if found else 0)
+
+        return memoized(cache, lock, key, compute)
+
+    return reader
+
+
+def place_declarations(messages, chat_template, options):
+    """`messages` with a sentinel pair around the content of each system
+    message that declares tools after the first, and the placements
+    splice_declarations reads. (None, None) where the template cannot declare
+    the tools of one of them."""
+    decorated, placements, count = [], [], 0
+    for index, message in enumerate(messages):
+        tools = message.get("tools") if message.get("role") == "system" else None
+        if not tools or index == 0:
+            decorated.append(message)
+            continue
+        declaration = chat_template.declaration(tools, options)
+        if declaration is None or chat_template.system_block is None:
+            return None, None
+        before, after = _declaration_sentinels(count)
+        count += 1
+        content = message.get("content") or ""
+        decorated.append({**message, "content": f"{before}{content}{after}"})
+        placements.append(
+            (before, after, chat_template.system_block, declaration, not content)
+        )
+    return decorated, placements
+
+
+def splice_declarations(text, placements):
+    """`text`, rendered with each placement's sentinels around the content of
+    a system message that declares tools, with the declaration in that
+    message's place where it has no content and ahead of it where it has, its
+    own block kept. None where a sentinel or the block around it is not found
+    where it was written."""
+    for before, after, (prefix, suffix), declaration, empty in reversed(placements):
+        if text.count(before) != 1 or text.count(after) != 1:
+            return None
+        starts = text.find(before)
+        ends = text.find(after)
+        if ends < starts:
+            return None
+        block = starts - len(prefix)
+        if block < 0 or text[block:starts] != prefix:
+            return None
+        content = ends + len(after)
+        if text[content : content + len(suffix)] != suffix:
+            return None
+        if empty:
+            text = text[:block] + declaration + text[content + len(suffix) :]
+        else:
+            text = (
+                text[:block]
+                + declaration
+                + text[block:starts]
+                + text[starts + len(before) : ends]
+                + text[content:]
+            )
+    return text
+
+
+def _declares_in_place(render, source, block, declaration):
+    """Whether a later system message that declares tools and has no content
+    renders as the conversation without it, with the declaration in its place:
+    the canary's declaration renders once, exactly where the message stood."""
+    options = template_options(
+        reasoning_effort=None,
+        preserve_thinking=None,
+        tools=None,
+        add_generation_prompt=False,
+    )
+    before, after = _declaration_sentinels(0)
+    message = {"role": "system", "content": f"{before}{after}", "tools": [_DECL_TOOL]}
+    try:
+        text = render(source, [_ASK, _ANSWER, message, _NEXT], options)
+        plain = render(source, [_ASK, _ANSWER, _NEXT], options)
+    except Exception:
+        return False
+    found = declaration([_DECL_TOOL], options)
+    if not found:
+        return False
+    spliced = splice_declarations(text, [(before, after, block, found, True)])
+    return (
+        spliced is not None
+        and spliced.count(found) == 1
+        and spliced.replace(found, "", 1) == plain
+    )
 
 
 def _literal(text):

@@ -17,13 +17,18 @@ from . import protocol as wire
 from .backend import Job, remaining_request_time
 from .chat_format import TOOL_CALL_OPEN
 from .chat_messages import (
+    declared_tools,
+    merge_tools,
     normalize_messages,
     template_messages,
 )
 from .chat_templates import (
+    LATE_TOOLS_UNSUPPORTED,
     LATER_SYSTEM_UNSUPPORTED,
     RESERVED_TEMPLATE_KWARGS,
+    place_declarations,
     render_chat_template,
+    splice_declarations,
     template_options,
 )
 from .constraints import grammar_for_source
@@ -81,6 +86,8 @@ def _generation_prompt(probed, rendered, tokens, chat_format):
 @dataclass
 class Prompt:
     messages: list
+    # Every tool the conversation declares, at its head or by a later system
+    # message, which the request's policy offers.
     tools: list | None
     tool_policy: ToolPolicy | None
     reasoning_effort: str | None
@@ -94,6 +101,11 @@ class Prompt:
     template_kwargs: dict = field(default_factory=dict)
     # The reasoning effort the request sent; None where it sent none.
     sent_effort: str | None = None
+    # The tools the template declares at the prompt's head: those of the
+    # request's tools field and of its leading system message. A later system
+    # message's tools are rendered where it occurs instead, so the prompt
+    # before it stays a cacheable prefix.
+    head_tools: list | None = None
 
 
 def _head_tokens(messages, tools, tokens, openings):
@@ -174,7 +186,9 @@ class Frontend:
         self.prompt_tokenizer = PromptTokenizer(tokenizer, chat_format.message_boundary)
         # The tokens of each of its turn openings, where a prompt's head ends.
         self.turn_openings = tuple(
-            tuple(self.tokenizer(tokenizable(text), add_special_tokens=False)["input_ids"])
+            tuple(
+                self.tokenizer(tokenizable(text), add_special_tokens=False)["input_ids"]
+            )
             for text in chat_format.turn_openings
         )
         self.backend = backend
@@ -330,8 +344,10 @@ class Frontend:
             image_tokens_only=image_tokens_only,
         )
 
-    def _render_image_tokens(self, messages, template):
-        return image_prompts.render_image_tokens(self, messages, template)
+    def _render_image_tokens(self, messages, template, transform=None):
+        return image_prompts.render_image_tokens(
+            self, messages, template, transform=transform
+        )
 
     def _image_token_count(self, prompt_tokens, prepared, positions):
         return image_prompts.image_token_count(self, prompt_tokens, prepared, positions)
@@ -647,12 +663,29 @@ class Frontend:
                 without_slot=without_slot,
             )
         )
+        # A system message may declare tools: the leading one's join the
+        # request's tools at the prompt's head, and a later one's are rendered
+        # where it occurs. One pass over the whole list keeps its checks,
+        # such as a repeated name's, whole.
+        leading = messages[0].get("tools") if messages[0]["role"] == "system" else None
+        late = declared_tools(messages)
         tools, tool_policy = normalize_tools(
-            body.get("tools"),
+            merge_tools(merge_tools(body.get("tools"), leading), late),
             body.get("tool_choice"),
             body.get("parallel_tool_calls", True),
             tool_namespaces,
         )
+        # What the template declares at the head: the request's tools and its
+        # leading system message's, in the order `tools` keeps them.
+        head_tools = tools
+        if late:
+            names = {
+                tool["function"]["name"]
+                for tool in merge_tools(body.get("tools"), leading) or []
+            }
+            head_tools = [
+                tool for tool in tools if tool["function"]["name"] in names
+            ] or None
         response_schema, response_validator = normalize_response_format(
             body.get("response_format")
         )
@@ -667,6 +700,7 @@ class Frontend:
             enable_thinking,
             template_kwargs,
             body.get("reasoning_effort"),
+            head_tools=head_tools,
         )
 
     def _tokenize(self, text, **options):
@@ -690,12 +724,30 @@ class Frontend:
             **template_options(
                 reasoning_effort=prompt.reasoning_effort,
                 preserve_thinking=prompt.preserve_thinking,
-                tools=prompt.tools,
+                tools=prompt.head_tools,
                 add_generation_prompt=add_generation_prompt,
                 enable_thinking=prompt.enable_thinking,
             ),
             **prompt.template_kwargs,
         }
+        # A later system message's tools are rendered where it occurs, so the
+        # prefix before it is the one a client's earlier turn cached.
+        messages, placements = prompt.messages, None
+        if prompt.tools and prompt.head_tools is not prompt.tools:
+            if chat_template.declaration is None or not chat_template.late_tools:
+                raise APIError(400, LATE_TOOLS_UNSUPPORTED)
+            messages, placements = place_declarations(
+                prompt.messages, chat_template, template
+            )
+            if messages is None:
+                raise APIError(400, LATE_TOOLS_UNSUPPORTED)
+        attempts = [(messages, template, placements)]
+        if placements:
+            # A declaration that cannot be placed falls back to the whole tool
+            # list at the head: it costs the cache, never the tools.
+            attempts.append(
+                (prompt.messages, {**template, "tools": prompt.tools}, None)
+            )
         with self.latencies.measure("images"):
             images = self._prepare_images(
                 prompt.messages, deadline, check_context=check_context
@@ -704,16 +756,37 @@ class Frontend:
         pad = image_prompts._image_pad(self)
         if images and self.tokenizer.convert_tokens_to_ids(pad) is None:
             raise APIError(400, "the tokenizer does not define the image pad token")
-        positions = []
+        positions, rendered, tokens = [], None, None
         try:
-            if images:
-                tokens, positions, rendered = self._render_image_tokens(
-                    prompt.messages, template
-                )
-            else:
-                rendered = self._apply_chat_template(prompt.messages, template)
-                with self.latencies.measure("tokenization"):
-                    tokens = self.prompt_tokenizer.encode(rendered)
+            for attempt_messages, attempt_template, attempt_placements in attempts:
+                positions = []
+                if images:
+                    found = self._render_image_tokens(
+                        attempt_messages,
+                        attempt_template,
+                        transform=(
+                            None
+                            if attempt_placements is None
+                            else lambda text, p=attempt_placements: splice_declarations(
+                                text, p
+                            )
+                        ),
+                    )
+                    if found is None:
+                        continue
+                    tokens, positions, rendered = found
+                else:
+                    rendered = self._apply_chat_template(
+                        attempt_messages, attempt_template
+                    )
+                    if attempt_placements is not None:
+                        spliced = splice_declarations(rendered, attempt_placements)
+                        if spliced is None:
+                            continue
+                        rendered = spliced
+                    with self.latencies.measure("tokenization"):
+                        tokens = self.prompt_tokenizer.encode(rendered)
+                break
         except APIError:
             raise
         except Exception as error:
@@ -736,6 +809,10 @@ class Frontend:
             # the log keeps no request content.
             reason = f": {error}" if isinstance(error, TemplateError) else ""
             raise APIError(400, f"messages could not be rendered{reason}") from error
+        if rendered is None:
+            # Neither a declaration in place nor the whole tool list at the
+            # head could be placed: the request keeps its tools and refuses.
+            raise APIError(400, LATE_TOOLS_UNSUPPORTED)
         remaining_request_time(deadline)
         thinking, generation_prompt_tokens = False, 0
         if add_generation_prompt:
@@ -746,7 +823,7 @@ class Frontend:
                 self.chat_format,
             )
         head_tokens = _head_tokens(
-            prompt.messages, prompt.tools, tokens, self.turn_openings
+            prompt.messages, prompt.head_tools, tokens, self.turn_openings
         )
         return RenderedPrompt(
             rendered,
